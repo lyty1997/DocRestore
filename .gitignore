@@ -1,0 +1,36 @@
+# 虚拟环境
+.venv/
+
+# vendor 第三方模型代码
+vendor/
+
+# 模型权重
+models/
+
+# 测试输出目录
+output/
+
+# 下载缓存（vllm whl 等）
+.cache/
+
+# llm环境
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# 工具缓存
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# claude环境
+.claude/
+CLAUDE.md
+
+# 项目进度
+docs/progress.md
