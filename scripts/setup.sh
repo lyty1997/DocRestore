@@ -89,7 +89,7 @@ if [[ "$INSTALL_OCR" -eq 1 ]]; then
     TORCH_INDEX="https://download.pytorch.org/whl/${CUDA_TAG}"
 
     echo "安装 torch==2.6.0 + torchvision==0.21.0 (${CUDA_TAG})..."
-    pip install torch==2.6.0 torchvision==0.21.0 --index-url "$TORCH_INDEX"
+    pip install torch==2.6.0 torchvision==0.21.0 --extra-index-url "$TORCH_INDEX"
 
     # vllm 0.8.5 cu118 whl（PyPI 上没有，需从 GitHub releases 下载）
     VLLM_WHL_NAME="vllm-0.8.5+${CUDA_TAG}-cp38-abi3-manylinux1_x86_64.whl"
