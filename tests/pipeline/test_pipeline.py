@@ -35,7 +35,7 @@ from docrestore.pipeline.task_manager import (
 
 from ..support.ocr_engine import FixtureOCREngine
 
-from ..conftest import TEST_STEMS
+from ..conftest import TEST_STEMS, get_test_image_path
 
 _GLM_API_KEY = os.environ.get("GLM_API_KEY", "")
 
@@ -57,10 +57,13 @@ def work_dir(
 
     stems = TEST_STEMS[:4]
     for stem in stems:
-        (input_dir / f"{stem}.JPG").write_bytes(b"fake")
         src = require_ocr_data / f"{stem}_OCR"
         if src.exists():
             shutil.copytree(src, output_dir / f"{stem}_OCR")
+
+        # 让 Pipeline.process() 能在 input_dir 下找到真实图片文件（后缀大小写都兼容）
+        real_img = get_test_image_path(require_ocr_data, stem)
+        shutil.copy2(real_img, input_dir / real_img.name)
 
     return tmp_path
 
@@ -96,7 +99,22 @@ class TestPipelineE2E:
 
         assert result.output_path.exists()
         assert result.markdown != ""
-        assert "TH1520" in result.markdown
+
+        # 断言输出包含 OCR 原始文本中的关键内容，避免对特定数据集强绑定。
+        first_stem = TEST_STEMS[0]
+        raw_text = (
+            output_dir / f"{first_stem}_OCR" / "result.mmd"
+        ).read_text(encoding="utf-8")
+        keyword = next(
+            (
+                line.strip()
+                for line in raw_text.splitlines()
+                if line.strip()
+            ),
+            "",
+        )
+        assert keyword, "OCR 原始文本为空，无法提取关键字"
+        assert keyword in result.markdown
 
         assert "ocr" in progress_stages
         assert "clean" in progress_stages

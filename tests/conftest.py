@@ -23,23 +23,65 @@ import pytest
 # 测试数据根目录
 TEST_IMAGES_ROOT = Path(__file__).parent.parent / "test_images"
 
-# 支持的图片后缀
+# 支持的图片后缀（大小写不敏感）
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 
 
+def get_test_image_path(directory: Path, stem: str) -> Path:
+    """根据 stem 找到实际存在的图片路径。
+
+    说明：Linux/macOS（默认）文件系统大小写敏感，`1.jpg` 与 `1.JPG`
+    是两个不同的文件名。历史测试用例里大量使用 `.JPG`，因此这里做
+    一层兼容：按常见后缀顺序尝试，返回第一个存在的文件。
+    """
+    candidates = [
+        directory / f"{stem}.JPG",
+        directory / f"{stem}.jpg",
+        directory / f"{stem}.jpeg",
+        directory / f"{stem}.png",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+
+    raise FileNotFoundError(
+        f"测试图片不存在：stem={stem!r}, directory={directory}"
+    )
+
+
 def _find_test_image_dir() -> Path | None:
-    """找到 test_images/ 下第一个含图片的子目录"""
+    """找到 test_images/ 下第一个含图片的目录。
+
+    兼容两种布局：
+    1) test_images/<子目录>/*.jpg
+    2) test_images/*.jpg（根目录直接放图片）
+
+    说明：为保持历史行为，优先选择“子目录”中的第一组图片；
+    若子目录均无图片，再回退到根目录。
+    """
     if not TEST_IMAGES_ROOT.exists():
         return None
+
+    # 优先：test_images/ 下的子目录
     for sub in sorted(TEST_IMAGES_ROOT.iterdir()):
         if sub.is_dir():
             images = [
                 p
                 for p in sub.iterdir()
-                if p.suffix.lower() in _IMAGE_SUFFIXES
+                if p.is_file() and p.suffix.lower() in _IMAGE_SUFFIXES
             ]
             if images:
                 return sub
+
+    # 回退：test_images/ 根目录直接放图片
+    root_images = [
+        p
+        for p in TEST_IMAGES_ROOT.iterdir()
+        if p.is_file() and p.suffix.lower() in _IMAGE_SUFFIXES
+    ]
+    if root_images:
+        return TEST_IMAGES_ROOT
+
     return None
 
 

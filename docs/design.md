@@ -131,7 +131,7 @@ class MergedDocument:
 @dataclass
 class Gap:
     """内容缺口，需要重新 OCR"""
-    after_image: str          # 缺口出现在哪张照片之后（文件名，如 DSC04657.jpg）
+    after_image: str          # 缺口出现在哪张照片之后（文件名，如 page57.jpg）
     context_before: str       # 缺口前的上下文
     context_after: str        # 缺口后的上下文
 
@@ -515,7 +515,7 @@ class PipelineConfig:
 
 但实际实现中，由于 26 张照片的文本量不大（估计总共 ~50KB 文本），
 全部 OCR 完再合并也完全可行。滚动合并的主要价值在于**动态保存中间结果**
-（如 DSC04657.md + DSC04658.md → temp.md），便于调试和检查。
+（如 page57.md + page58.md → temp.md），便于调试和检查。
 
 **结论**：采用滚动合并，但不是为了省内存，而是为了中间产物可检查。
 

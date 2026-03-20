@@ -74,14 +74,14 @@ class TestParseGaps:
         """正常 GAP 标记解析"""
         md = (
             "一些文本\n"
-            "<!-- GAP: after_image=DSC04657.jpg, "
+            "<!-- GAP: after_image=page57.jpg, "
             'context_before="前文最后", '
             'context_after="后文开头" -->\n'
             "更多文本"
         )
         cleaned, gaps = parse_gaps(md)
         assert len(gaps) == 1
-        assert gaps[0].after_image == "DSC04657.jpg"
+        assert gaps[0].after_image == "page57.jpg"
         assert gaps[0].context_before == "前文最后"
         assert gaps[0].context_after == "后文开头"
         # GAP 标记已从 markdown 中移除

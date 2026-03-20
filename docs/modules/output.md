@@ -41,13 +41,13 @@ class Renderer:
     ) -> Path:
         """
         渲染流程：
-        1. 扫描 markdown 中的图片引用 ![](DSC04654_OCR/images/0.jpg)
+        1. 扫描 markdown 中的图片引用 ![](page1_OCR/images/0.jpg)
            （去重合并阶段已将引用重写为相对于 output_dir 的路径）
         2. 从各页 {stem}_OCR/images/ 复制插图到 output_dir/images/
            重命名为 {stem}_{region_index}.jpg 避免冲突
-           例：DSC04654_OCR/images/0.jpg → images/DSC04654_0.jpg
+           例：page1_OCR/images/0.jpg → images/page1_0.jpg
         3. 同步更新 markdown 中的图片引用
-           ![](DSC04654_OCR/images/0.jpg) → ![](images/DSC04654_0.jpg)
+           ![](page1_OCR/images/0.jpg) → ![](images/page1_0.jpg)
         4. 移除页边界标记 <!-- page: ... -->（最终输出不需要）
         5. 写入 output_dir/document.md
         6. 返回 document.md 的路径
@@ -75,8 +75,8 @@ class Renderer:
 {output_dir}/
 ├── document.md              # 最终 markdown
 └── images/                  # 汇总的插图
-    ├── DSC04654_0.jpg       # {image_stem}_{region_index}.jpg
-    ├── DSC04654_1.jpg
-    ├── DSC04657_0.jpg
+    ├── page1_0.jpg       # {image_stem}_{region_index}.jpg
+    ├── page1_1.jpg
+    ├── page2_0.jpg
     └── ...
 ```

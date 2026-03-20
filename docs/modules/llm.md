@@ -143,8 +143,8 @@ REFINE_SYSTEM_PROMPT = """你是一个文档格式修复助手。规则：
 1. 只修复格式，不改变原文内容含义
 2. 修复未闭合的代码块、错误的标题层级、损坏的列表和表格
 3. <!-- overlap-start/end --> 之间是照片衔接处，检查连贯性
-4. <!-- page: DSC04654.jpg --> 是页边界标记，标识该段文本来自哪张照片
-5. 发现内容跳跃则插入 <!-- GAP: after_image=DSC04657.jpg, context_before="前文最后一句", context_after="后文第一句" -->
+4. <!-- page: page1.jpg --> 是页边界标记，标识该段文本来自哪张照片
+5. 发现内容跳跃则插入 <!-- GAP: after_image=page57.jpg, context_before="前文最后一句", context_after="后文第一句" -->
    其中 after_image 取跳跃处前方最近的 <!-- page: ... --> 中的文件名
 6. 保留所有 <!-- page: ... --> 标记，不要删除
 7. 输出纯 markdown，不要添加解释"""

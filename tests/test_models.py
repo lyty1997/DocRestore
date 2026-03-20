@@ -66,12 +66,12 @@ class TestPageOCR:
         """全字段赋值"""
         region = Region(bbox=(0, 0, 100, 100), label="image")
         page = PageOCR(
-            image_path=Path("/img/DSC04654.JPG"),
+            image_path=Path("/img/page1.jpg"),
             image_size=(1603, 1720),
             raw_text="raw",
             cleaned_text="cleaned",
             regions=[region],
-            output_dir=Path("/out/DSC04654_OCR"),
+            output_dir=Path("/out/page1_OCR"),
             has_eos=False,
         )
         assert page.cleaned_text == "cleaned"
@@ -96,11 +96,11 @@ class TestGap:
     def test_fields(self) -> None:
         """字段赋值"""
         g = Gap(
-            after_image="DSC04657.jpg",
+            after_image="page57.jpg",
             context_before="前文最后一句",
             context_after="后文第一句",
         )
-        assert g.after_image == "DSC04657.jpg"
+        assert g.after_image == "page57.jpg"
         assert g.context_before == "前文最后一句"
 
 
@@ -116,7 +116,7 @@ class TestMergedDocument:
     def test_with_images_and_gaps(self) -> None:
         """带图片和缺口"""
         region = Region(bbox=(0, 0, 50, 50), label="fig")
-        gap = Gap("DSC04655.jpg", "before", "after")
+        gap = Gap("page55.jpg", "before", "after")
         doc = MergedDocument(
             markdown="# 文档", images=[region], gaps=[gap]
         )
@@ -161,7 +161,7 @@ class TestRefinedResult:
 
     def test_with_gaps(self) -> None:
         """带缺口"""
-        gap = Gap("DSC04660.jpg", "b", "a")
+        gap = Gap("page60.jpg", "b", "a")
         rr = RefinedResult(markdown="text", gaps=[gap])
         assert len(rr.gaps) == 1
 
@@ -175,7 +175,7 @@ class TestPipelineResult:
             output_path=Path("/out/document.md"),
             markdown="# 最终文档",
             images=[Region(bbox=(0, 0, 1, 1), label="img")],
-            gaps=[Gap("DSC04670.jpg", "x", "y")],
+            gaps=[Gap("page70.jpg", "x", "y")],
         )
         assert pr.output_path == Path("/out/document.md")
         assert pr.markdown == "# 最终文档"
