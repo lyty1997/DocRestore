@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""基于已有 OCR 输出目录的 Fixture 引擎（测试用）
+"""测试用 OCR 引擎（读取已有 *_OCR/ 输出目录）。
 
-读取 {output_dir}/{stem}_OCR/ 下已有的 result.mmd 和 images/，
-构造 PageOCR 返回，不做真实 OCR 推理。
+注意：该模块仅用于 tests/，不属于产品代码。
+
+目的：在没有 GPU 的环境中，也能通过“读取已生成的 OCR 结果”来复现
+Pipeline 的后续流程（clean/dedup/refine/render），使端到端测试可运行。
 """
 
 from __future__ import annotations
@@ -28,58 +30,42 @@ from docrestore.models import PageOCR, Region
 
 
 class FixtureOCREngine:
-    """基于已有 OCR 输出的 Fixture 引擎"""
+    """基于已有 OCR 输出的测试引擎。"""
 
     def __init__(self) -> None:
         self._ready = False
 
     async def initialize(self) -> None:
-        """无需加载模型"""
+        """测试引擎无需加载模型。"""
         self._ready = True
 
-    async def ocr(
-        self, image_path: Path, output_dir: Path
-    ) -> PageOCR:
-        """从已有 OCR 输出目录读取结果。
-
-        在 output_dir 下查找 {stem}_OCR/，与真实引擎行为一致。
-        测试时需先将样例数据拷贝到 output_dir。
-        """
+    async def ocr(self, image_path: Path, output_dir: Path) -> PageOCR:
+        """从 output_dir/{stem}_OCR/ 读取 result.mmd/images。"""
         stem = image_path.stem
         source_dir = output_dir / f"{stem}_OCR"
 
         if not source_dir.exists():
-            msg = f"Fixture OCR 目录不存在: {source_dir}"
+            msg = f"测试 OCR 目录不存在: {source_dir}"
             raise FileNotFoundError(msg)
 
-        # 读取 result.mmd
         mmd_path = source_dir / "result.mmd"
         raw_text = mmd_path.read_text(encoding="utf-8")
 
-        # 读取原始输出（含 grounding）
         ori_path = source_dir / "result_ori.mmd"
-        ori_text = (
-            ori_path.read_text(encoding="utf-8")
-            if ori_path.exists()
-            else raw_text
-        )
+        if ori_path.exists():
+            ori_text = ori_path.read_text(encoding="utf-8")
+        else:
+            ori_text = raw_text
 
-        # 扫描 images/ 目录构造 regions
         images_dir = source_dir / "images"
         regions: list[Region] = []
         if images_dir.exists():
             for img_file in sorted(images_dir.iterdir()):
-                if img_file.suffix.lower() in (
-                    ".jpg",
-                    ".jpeg",
-                    ".png",
-                ):
+                if img_file.suffix.lower() in (".jpg", ".jpeg", ".png"):
                     regions.append(
                         Region(
                             bbox=(0, 0, 0, 0),
-                            label=self._extract_label(
-                                ori_text, img_file.stem
-                            ),
+                            label=self._extract_label(ori_text, img_file.stem),
                             cropped_path=img_file,
                         )
                     )
@@ -110,21 +96,18 @@ class FixtureOCREngine:
         return results
 
     async def shutdown(self) -> None:
-        """无需释放资源"""
+        """测试引擎无需释放资源。"""
         self._ready = False
 
     @property
     def is_ready(self) -> bool:
-        """引擎是否就绪"""
+        """引擎是否就绪。"""
         return self._ready
 
     @staticmethod
     def _extract_label(ori_text: str, img_index: str) -> str:
         """从原始 grounding 文本中提取图片标签。"""
-        # 简单匹配 <|ref|>label<|/ref|> 模式
-        refs: list[str] = re.findall(
-            r"<\|ref\|>(\w+)<\|/ref\|>", ori_text
-        )
+        refs: list[str] = re.findall(r"<\|ref\|>(\w+)<\|/ref\|>", ori_text)
         idx = int(img_index) if img_index.isdigit() else 0
         if idx < len(refs):
             return refs[idx]

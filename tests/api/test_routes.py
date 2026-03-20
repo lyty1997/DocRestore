@@ -14,7 +14,7 @@
 
 """API 路由测试
 
-使用 httpx.AsyncClient + FixtureOCREngine，不依赖 GPU。
+使用 httpx.AsyncClient + 测试用 OCR 引擎，不依赖 GPU。
 手动初始化 Pipeline 和 TaskManager，绕过 ASGI lifespan。
 """
 
@@ -29,10 +29,11 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from docrestore.api.routes import router, set_task_manager
-from docrestore.ocr.mock import FixtureOCREngine
 from docrestore.pipeline.config import PipelineConfig
 from docrestore.pipeline.pipeline import Pipeline
 from docrestore.pipeline.task_manager import TaskManager
+
+from ..support.ocr_engine import FixtureOCREngine
 
 from ..conftest import TEST_STEMS
 

@@ -34,26 +34,20 @@ logger = logging.getLogger(__name__)
 def _create_ocr_engine(config: PipelineConfig) -> OCREngine:
     """根据配置创建 OCR 引擎。
 
-    engine == "deepseek-ocr-2" 时创建真实引擎（需要 GPU），
-    否则回退到 FixtureOCREngine（测试用）。
+    当前仅支持 engine == "deepseek-ocr-2"。
+
+    注意：不再提供测试用 OCR 引擎回退。若 DeepSeek-OCR-2 依赖缺失，
+    会直接抛出 ImportError，以便在启动时尽早失败。
+    （测试请在 tests/ 侧通过 pipeline.set_ocr_engine() 注入测试引擎。）
     """
-    if config.ocr.engine == "deepseek-ocr-2":
-        try:
-            from docrestore.ocr.deepseek_ocr2 import (
-                DeepSeekOCR2Engine,
-            )
+    if config.ocr.engine != "deepseek-ocr-2":
+        msg = f"不支持的 OCR 引擎: {config.ocr.engine}"
+        raise ValueError(msg)
 
-            logger.info("使用 DeepSeek-OCR-2 引擎")
-            return DeepSeekOCR2Engine(config.ocr)
-        except ImportError:
-            logger.warning(
-                "无法导入 DeepSeek-OCR-2 依赖，回退到 FixtureOCREngine"
-            )
+    from docrestore.ocr.deepseek_ocr2 import DeepSeekOCR2Engine
 
-    from docrestore.ocr.mock import FixtureOCREngine
-
-    logger.info("使用 FixtureOCREngine（测试模式）")
-    return FixtureOCREngine()
+    logger.info("使用 DeepSeek-OCR-2 引擎")
+    return DeepSeekOCR2Engine(config.ocr)
 
 
 def create_app(

@@ -14,7 +14,7 @@
 
 """Pipeline + TaskManager 端到端测试
 
-使用 FixtureOCREngine（无 GPU），不启用 LLM 精修。
+使用测试用 OCR 引擎（无 GPU），不启用 LLM 精修。
 测试前将样例 OCR 数据拷贝到 tmp_path 模拟真实引擎写入。
 """
 
@@ -26,13 +26,14 @@ from pathlib import Path
 
 import pytest
 
-from docrestore.ocr.mock import FixtureOCREngine
 from docrestore.pipeline.config import LLMConfig, PipelineConfig
 from docrestore.pipeline.pipeline import Pipeline
 from docrestore.pipeline.task_manager import (
     TaskManager,
     TaskStatus,
 )
+
+from ..support.ocr_engine import FixtureOCREngine
 
 from ..conftest import TEST_STEMS
 

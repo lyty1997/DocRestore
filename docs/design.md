@@ -427,7 +427,6 @@ docrestore/
 │       │   ├── __init__.py
 │       │   ├── base.py           # OCREngine Protocol
 │       │   ├── deepseek_ocr2.py  # DeepSeek-OCR-2 实现
-│       │   ├── mock.py           # FixtureOCREngine（基于已有 OCR 输出复现流程，测试用）
 │       │   ├── preprocessor.py   # 图片预处理（动态分辨率、tile 切分）
 │       │   └── ngram_filter.py   # NoRepeatNGram 处理器
 │       ├── processing/
@@ -445,7 +444,9 @@ docrestore/
 │       │   └── renderer.py       # Markdown 渲染输出
 │       └── models.py             # 数据对象（PageOCR, Region, Gap 等）
 ├── tests/
-│   └── ...
+│   ├── ...
+│   └── support/
+│       └── ocr_engine.py         # TestOnlyOCREngine（测试专用：读取 *_OCR/ 目录，无 GPU 也能跑端到端）
 └── docs/
     ├── design.md                 # 本文档
     └── progress.md               # 开发进度

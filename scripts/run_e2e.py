@@ -44,8 +44,8 @@ async def main() -> None:
     from docrestore.pipeline.pipeline import Pipeline
 
     # 输入输出路径
-    image_dir = PROJECT_ROOT / "test_images" / "development_guide"
-    output_dir = PROJECT_ROOT / "output" / "development_guide"
+    image_dir = PROJECT_ROOT / "test_images"
+    output_dir = PROJECT_ROOT / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 列出输入图片
