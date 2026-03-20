@@ -80,13 +80,13 @@ class TestMergeAllPages:
         """每页头部插入页边界标记"""
         pages = [
             PageOCR(
-                image_path=Path("/img/DSC04654.JPG"),
+                image_path=Path("/img/page1.jpg"),
                 image_size=(100, 100),
                 raw_text="",
                 cleaned_text="第一页内容",
             ),
             PageOCR(
-                image_path=Path("/img/DSC04655.JPG"),
+                image_path=Path("/img/page2.jpg"),
                 image_size=(100, 100),
                 raw_text="",
                 cleaned_text="第二页内容",
@@ -94,14 +94,14 @@ class TestMergeAllPages:
         ]
         dedup = _make_dedup()
         doc = dedup.merge_all_pages(pages)
-        assert "<!-- page: DSC04654.JPG -->" in doc.markdown
-        assert "<!-- page: DSC04655.JPG -->" in doc.markdown
+        assert "<!-- page: page1.jpg -->" in doc.markdown
+        assert "<!-- page: page2.jpg -->" in doc.markdown
 
     def test_image_reference_rewrite(self) -> None:
         """图片引用重写为 {stem}_OCR/images/N.jpg"""
         pages = [
             PageOCR(
-                image_path=Path("/img/DSC04654.JPG"),
+                image_path=Path("/img/page1.jpg"),
                 image_size=(100, 100),
                 raw_text="",
                 cleaned_text="文本\n![](images/0.jpg)\n更多文本",
@@ -109,7 +109,7 @@ class TestMergeAllPages:
         ]
         dedup = _make_dedup()
         doc = dedup.merge_all_pages(pages)
-        assert "![](DSC04654_OCR/images/0.jpg)" in doc.markdown
+        assert "![](page1_OCR/images/0.jpg)" in doc.markdown
         assert "![](images/0.jpg)" not in doc.markdown
 
     def test_regions_collected(self) -> None:
@@ -118,14 +118,14 @@ class TestMergeAllPages:
         r2 = Region(bbox=(20, 20, 30, 30), label="img2")
         pages = [
             PageOCR(
-                image_path=Path("/img/DSC04654.JPG"),
+                image_path=Path("/img/page1.jpg"),
                 image_size=(100, 100),
                 raw_text="",
                 cleaned_text="页1",
                 regions=[r1],
             ),
             PageOCR(
-                image_path=Path("/img/DSC04655.JPG"),
+                image_path=Path("/img/page2.jpg"),
                 image_size=(100, 100),
                 raw_text="",
                 cleaned_text="页2",
@@ -140,7 +140,7 @@ class TestMergeAllPages:
         """进度回调被调用"""
         pages = [
             PageOCR(
-                image_path=Path(f"/img/DSC{i}.JPG"),
+                image_path=Path(f"/img/page{i}.jpg"),
                 image_size=(100, 100),
                 raw_text="",
                 cleaned_text=f"页{i}内容各不相同第{i}段",
@@ -170,7 +170,7 @@ class TestMergeAllPages:
         """单页不做合并"""
         pages = [
             PageOCR(
-                image_path=Path("/img/DSC04654.JPG"),
+                image_path=Path("/img/page1.jpg"),
                 image_size=(100, 100),
                 raw_text="",
                 cleaned_text="唯一一页",
@@ -179,4 +179,4 @@ class TestMergeAllPages:
         dedup = _make_dedup()
         doc = dedup.merge_all_pages(pages)
         assert "唯一一页" in doc.markdown
-        assert "<!-- page: DSC04654.JPG -->" in doc.markdown
+        assert "<!-- page: page1.jpg -->" in doc.markdown

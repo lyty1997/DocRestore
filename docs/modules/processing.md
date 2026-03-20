@@ -74,12 +74,12 @@ class PageDeduplicator:
         同时收集所有页的 regions 汇总到 MergedDocument.images
 
         页边界标记：
-        - 每页文本头部插入 <!-- page: DSC04654.jpg --> 标记
+        - 每页文本头部插入 <!-- page: page1.jpg --> 标记
         - 供 LLM 精修时定位 gap 所在的照片
 
         图片引用重写：
         - OCR 产出的引用格式为 ![](images/0.jpg)（相对于 {stem}_OCR/ 目录）
-        - 合并时重写为 ![](DSC04654_OCR/images/0.jpg)（相对于 output_dir）
+        - 合并时重写为 ![](page1_OCR/images/0.jpg)（相对于 output_dir）
         - 确保 Renderer 能根据路径找到源文件
         """
 ```
@@ -146,7 +146,7 @@ PageOCR(raw_text, cleaned_text="清洗后文本")
     ▼ PageDeduplicator.merge_all_pages([page1, page2, ...])
 MergedDocument(markdown="合并去重后的完整文本", images=[...], gaps=[])
     markdown 中包含：
-    - <!-- page: DSC04654.jpg --> 页边界标记
-    - ![](DSC04654_OCR/images/0.jpg) 重写后的图片引用
+    - <!-- page: {image_filename} --> 页边界标记
+    - ![](page1_OCR/images/0.jpg) 重写后的图片引用
     - <!-- overlap-start/end --> 重叠区域标注
 ```

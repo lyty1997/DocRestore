@@ -79,7 +79,7 @@ class MergeResult:
 @dataclass
 class Gap:
     """内容缺口"""
-    after_image: str                   # 缺口出现在哪张照片之后（文件名，如 DSC04657.jpg）
+    after_image: str                   # 缺口出现在哪张照片之后（文件名，如 page57.jpg）
     context_before: str                # 缺口前的上下文（最后几行）
     context_after: str                 # 缺口后的上下文（开头几行）
 ```

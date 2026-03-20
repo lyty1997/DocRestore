@@ -34,7 +34,7 @@ from docrestore.pipeline.config import (
 from docrestore.processing.cleaner import OCRCleaner
 from docrestore.processing.dedup import PageDeduplicator
 
-from .conftest import TEST_IMAGE_DIR, TEST_STEMS
+from .conftest import TEST_IMAGE_DIR, TEST_STEMS, get_test_image_path
 
 _GLM_API_KEY = os.environ.get("GLM_API_KEY", "")
 
@@ -52,7 +52,7 @@ class TestMultiPagePipeline:
         pages: list[PageOCR] = []
         for stem in stems:
             page = PageOCR(
-                image_path=TEST_IMAGE_DIR / f"{stem}.JPG",
+                image_path=get_test_image_path(TEST_IMAGE_DIR, stem),
                 image_size=(1603, 1720),
                 raw_text="",
                 output_dir=TEST_IMAGE_DIR / f"{stem}_OCR",
@@ -85,7 +85,7 @@ class TestMultiPagePipeline:
         pages: list[PageOCR] = []
         for stem in stems:
             page = PageOCR(
-                image_path=TEST_IMAGE_DIR / f"{stem}.JPG",
+                image_path=get_test_image_path(TEST_IMAGE_DIR, stem),
                 image_size=(1603, 1720),
                 raw_text="",
                 output_dir=TEST_IMAGE_DIR / f"{stem}_OCR",
@@ -97,9 +97,15 @@ class TestMultiPagePipeline:
         doc = dedup.merge_all_pages(pages)
 
         assert doc.markdown != ""
-        # 验证页标记包含动态 stem
-        assert f"<!-- page: {stems[0]}.JPG -->" in doc.markdown
-        assert f"<!-- page: {stems[-1]}.JPG -->" in doc.markdown
+        # 验证页标记包含动态文件名（后缀大小写不强绑定）
+        first_name = get_test_image_path(
+            TEST_IMAGE_DIR, stems[0]
+        ).name
+        last_name = get_test_image_path(
+            TEST_IMAGE_DIR, stems[-1]
+        ).name
+        assert f"<!-- page: {first_name} -->" in doc.markdown
+        assert f"<!-- page: {last_name} -->" in doc.markdown
 
         print(f"\n合并后文档长度: {len(doc.markdown)} 字符")
         print(f"页标记数量: {doc.markdown.count('<!-- page:')}")
@@ -116,7 +122,7 @@ class TestMultiPagePipeline:
         pages: list[PageOCR] = []
         for stem in stems:
             page = PageOCR(
-                image_path=TEST_IMAGE_DIR / f"{stem}.JPG",
+                image_path=get_test_image_path(TEST_IMAGE_DIR, stem),
                 image_size=(1603, 1720),
                 raw_text="",
                 output_dir=TEST_IMAGE_DIR / f"{stem}_OCR",
@@ -157,7 +163,7 @@ class TestMultiPagePipeline:
         pages: list[PageOCR] = []
         for stem in stems:
             page = PageOCR(
-                image_path=TEST_IMAGE_DIR / f"{stem}.JPG",
+                image_path=get_test_image_path(TEST_IMAGE_DIR, stem),
                 image_size=(1603, 1720),
                 raw_text="",
                 output_dir=TEST_IMAGE_DIR / f"{stem}_OCR",

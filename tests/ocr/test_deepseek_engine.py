@@ -23,11 +23,16 @@ from pathlib import Path
 
 import pytest
 
+try:
+    import torch
+except ImportError:  # pragma: no cover
+    torch = None  # type: ignore[assignment]
+
 from ..conftest import (
     TEST_IMAGE_DIR,
     TEST_STEMS,
     _has_gpu,
-    _has_model,
+    get_test_image_path,
 )
 
 
@@ -35,7 +40,8 @@ from ..conftest import (
     not _has_gpu(), reason="无可用 GPU"
 )
 @pytest.mark.skipif(
-    not _has_model(), reason="vLLM 未安装"
+    torch is None,
+    reason="torch 未安装",
 )
 @pytest.mark.skipif(
     TEST_IMAGE_DIR is None or not TEST_STEMS,
@@ -55,12 +61,31 @@ class TestDeepSeekOCR2Engine:
         from docrestore.pipeline.config import OCRConfig
 
         assert TEST_IMAGE_DIR is not None
-        test_image = TEST_IMAGE_DIR / f"{TEST_STEMS[0]}.JPG"
+        test_image = get_test_image_path(
+            TEST_IMAGE_DIR, TEST_STEMS[0]
+        )
         stem = TEST_STEMS[0]
 
         config = OCRConfig()
         engine = DeepSeekOCR2Engine(config)
-        await engine.initialize()
+
+        try:
+            await engine.initialize()
+        except ImportError:
+            pytest.skip("torch 未安装")
+        except Exception as exc:
+            # 说明：在显存不足时，模型初始化可能直接 OOM；
+            # 该场景属于测试环境资源限制，跳过以避免整套测试失败。
+            oom_err = (
+                getattr(torch, "OutOfMemoryError", None)
+                if torch is not None
+                else None
+            )
+            if oom_err is not None and isinstance(exc, oom_err):
+                pytest.skip(
+                    "GPU 显存不足，跳过 DeepSeek-OCR-2 真机测试"
+                )
+            raise
 
         try:
             result = await engine.ocr(
@@ -95,11 +120,30 @@ class TestDeepSeekOCR2Engine:
         from docrestore.pipeline.config import OCRConfig
 
         assert TEST_IMAGE_DIR is not None
-        test_image = TEST_IMAGE_DIR / f"{TEST_STEMS[0]}.JPG"
+        test_image = get_test_image_path(
+            TEST_IMAGE_DIR, TEST_STEMS[0]
+        )
 
         config = OCRConfig()
         engine = DeepSeekOCR2Engine(config)
-        await engine.initialize()
+
+        try:
+            await engine.initialize()
+        except ImportError:
+            pytest.skip("torch 未安装")
+        except Exception as exc:
+            # 说明：在显存不足时，模型初始化可能直接 OOM；
+            # 该场景属于测试环境资源限制，跳过以避免整套测试失败。
+            oom_err = (
+                getattr(torch, "OutOfMemoryError", None)
+                if torch is not None
+                else None
+            )
+            if oom_err is not None and isinstance(exc, oom_err):
+                pytest.skip(
+                    "GPU 显存不足，跳过 DeepSeek-OCR-2 真机测试"
+                )
+            raise
 
         try:
             progress_calls: list[tuple[int, int]] = []
