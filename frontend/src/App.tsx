@@ -1,115 +1,80 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import './App.css'
+/**
+ * DocRestore 前端主页面：单页闭环
+ *
+ * 输入图片目录 → 创建任务 → 展示进度 → 预览结果 → 下载 zip
+ */
 
-function App() {
-  const [count, setCount] = useState(0)
+import { TaskForm } from "./components/TaskForm";
+import { TaskProgress } from "./components/TaskProgress";
+import { TaskResult } from "./components/TaskResult";
+import { useTaskRunner } from "./features/task/useTaskRunner";
+import "./App.css";
+
+function App(): React.JSX.Element {
+  const {
+    taskId,
+    status,
+    progress,
+    resultMarkdown,
+    error,
+    wsState,
+    pollingEnabled,
+    startTask,
+    reset,
+  } = useTaskRunner();
+
+  const isProcessing = status === "pending" || status === "processing";
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          className="counter"
-          onClick={() => {
-            setCount((count) => count + 1)
-          }}
-        >
-          Count is {count}
-        </button>
-      </section>
+    <div className="app">
+      <header className="app-header">
+        <h1>DocRestore</h1>
+        <p className="subtitle">文档照片还原为 Markdown</p>
+      </header>
 
-      <div className="ticks" />
+      <main className="app-main">
+        {/* 输入区 */}
+        <section className="section-form">
+          <TaskForm onSubmit={startTask} disabled={isProcessing} />
+        </section>
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon" />
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank" rel="noreferrer">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank" rel="noreferrer">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon" />
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a
-                href="https://github.com/vitejs/vite"
-                target="_blank"
-                rel="noreferrer"
-              >
-                <svg className="button-icon" role="presentation" aria-hidden="true">
-                  <use href="/icons.svg#github-icon" />
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank" rel="noreferrer">
-                <svg className="button-icon" role="presentation" aria-hidden="true">
-                  <use href="/icons.svg#discord-icon" />
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank" rel="noreferrer">
-                <svg className="button-icon" role="presentation" aria-hidden="true">
-                  <use href="/icons.svg#x-icon" />
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a
-                href="https://bsky.app/profile/vite.dev"
-                target="_blank"
-                rel="noreferrer"
-              >
-                <svg className="button-icon" role="presentation" aria-hidden="true">
-                  <use href="/icons.svg#bluesky-icon" />
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+        {/* 进度区 */}
+        {isProcessing && (
+          <section className="section-progress">
+            <TaskProgress
+              taskId={taskId}
+              progress={progress}
+              wsState={wsState}
+              pollingEnabled={pollingEnabled}
+            />
+          </section>
+        )}
 
-      <div className="ticks" />
-      <section id="spacer" />
-    </>
-  )
+        {/* 错误区 */}
+        {status === "failed" && (
+          <section className="section-error">
+            <div className="error-box">
+              <h2>处理失败</h2>
+              <p>{error ?? "未知错误"}</p>
+              <button type="button" onClick={reset}>
+                重新开始
+              </button>
+            </div>
+          </section>
+        )}
+
+        {/* 结果区 */}
+        {status === "completed" && taskId && resultMarkdown && (
+          <section className="section-result">
+            <TaskResult taskId={taskId} markdown={resultMarkdown} />
+            <button type="button" className="reset-btn" onClick={reset}>
+              处理新文档
+            </button>
+          </section>
+        )}
+      </main>
+    </div>
+  );
 }
 
-export default App
+export default App;
