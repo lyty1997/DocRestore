@@ -9,6 +9,7 @@ models/
 
 # 测试输出目录
 output/
+test_images/*_OCR
 
 # 下载缓存（vllm whl 等）
 .cache/
