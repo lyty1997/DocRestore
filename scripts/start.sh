@@ -24,10 +24,20 @@ NC='\033[0m'
 log() { echo -e "${CYAN}[DocRestore]${NC} $*"; }
 err() { echo -e "${RED}[错误]${NC} $*" >&2; }
 
+_CLEANING_UP=0
 cleanup() {
+    # 重入保护：防止 INT/TERM/EXIT 多次触发
+    if [ "$_CLEANING_UP" -eq 1 ]; then
+        return
+    fi
+    _CLEANING_UP=1
+
+    # 收到信号后先移除 trap，避免 kill 产生的后续信号再次进入
+    trap - EXIT INT TERM
+
     log "正在关闭服务..."
-    # 杀掉当前进程组下的所有子进程
-    kill 0 2>/dev/null || true
+    # 向子进程发送 TERM（不含自身）
+    jobs -p | xargs -r kill 2>/dev/null || true
     wait 2>/dev/null || true
     log "已关闭"
 }
