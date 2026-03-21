@@ -12,15 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""REST 路由定义"""
+"""REST/WS 路由定义"""
 
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
+import zipfile
+from contextlib import suppress
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, WebSocket
+from fastapi.responses import FileResponse, Response
+from starlette.websockets import WebSocketDisconnect
 
 from docrestore.api.schemas import (
     CreateTaskRequest,
@@ -28,6 +34,7 @@ from docrestore.api.schemas import (
     TaskResponse,
     TaskResultResponse,
 )
+from docrestore.models import TaskProgress
 
 if TYPE_CHECKING:
     from docrestore.pipeline.task_manager import TaskManager
@@ -40,8 +47,11 @@ router = APIRouter()
 _task_manager: TaskManager | None = None
 
 
-def set_task_manager(manager: TaskManager) -> None:
-    """注入 TaskManager 实例"""
+def set_task_manager(manager: TaskManager | None) -> None:
+    """注入 TaskManager 实例。
+
+    测试中允许传入 None 以清理全局状态。
+    """
     global _task_manager  # noqa: PLW0603
     _task_manager = manager
 
@@ -49,10 +59,131 @@ def set_task_manager(manager: TaskManager) -> None:
 def _get_manager() -> TaskManager:
     """获取 TaskManager，未初始化时报 500"""
     if _task_manager is None:
-        raise HTTPException(
-            status_code=500, detail="服务未初始化"
-        )
+        raise HTTPException(status_code=500, detail="服务未初始化")
     return _task_manager
+
+
+def _serialize_progress(progress: TaskProgress) -> dict[str, object]:
+    """将 TaskProgress 序列化为 JSON dict。"""
+    return {
+        "stage": progress.stage,
+        "current": progress.current,
+        "total": progress.total,
+        "percent": progress.percent,
+        "message": progress.message,
+    }
+
+
+def _validate_asset_path(asset_path: str) -> PurePosixPath | None:
+    """校验 assets 相对路径（MVP 仅允许 document.md 与 images/**）。"""
+    if not asset_path:
+        return None
+
+    p = PurePosixPath(asset_path)
+
+    # 禁止绝对路径与路径穿越
+    if p.is_absolute() or ".." in p.parts or "." in p.parts:
+        return None
+
+    # 白名单：document.md
+    if p == PurePosixPath("document.md"):
+        return p
+
+    # 白名单：images/**
+    if p.parts and p.parts[0] == "images":
+        return p
+
+    return None
+
+
+def _resolve_asset_path(output_dir: Path, rel_path: PurePosixPath) -> Path | None:
+    """将相对路径解析到 output_dir 下，并确保不越界（含软链接穿越防护）。"""
+    try:
+        root = output_dir.resolve(strict=False)
+        target = (output_dir / Path(*rel_path.parts)).resolve(strict=False)
+    except Exception:
+        return None
+
+    if not target.is_relative_to(root):
+        return None
+
+    return target
+
+
+def _build_result_zip_bytes(output_dir: Path) -> bytes:
+    """打包 output_dir 下的 document.md 与 images/ 为 zip 字节。"""
+    doc_path = output_dir / "document.md"
+    doc_bytes = doc_path.read_bytes()
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("document.md", doc_bytes)
+
+        images_dir = output_dir / "images"
+        if images_dir.exists():
+            for p in sorted(images_dir.rglob("*")):
+                if p.is_file():
+                    rel = p.relative_to(output_dir)
+                    zf.write(p, arcname=rel.as_posix())
+
+    return buf.getvalue()
+
+
+@router.websocket("/tasks/{task_id}/progress")
+async def ws_task_progress(task_id: str, websocket: WebSocket) -> None:
+    """WebSocket：实时推送任务进度（AGE-12）。"""
+    await websocket.accept()
+
+    try:
+        manager = _get_manager()
+    except HTTPException:
+        await websocket.close(code=1011)
+        return
+
+    task = manager.get_task(task_id)
+    if task is None:
+        await websocket.close(code=1008)
+        return
+
+    q = await manager.subscribe_progress(task_id)
+    if q is None:
+        await websocket.close(code=1008)
+        return
+
+    try:
+        if task.progress is not None:
+            await websocket.send_json(
+                _serialize_progress(task.progress)
+            )
+        else:
+            await websocket.send_json(
+                _serialize_progress(
+                    TaskProgress(stage="ocr", message="等待开始")
+                )
+            )
+
+        if task.status.value in ("completed", "failed"):
+            await websocket.close()
+            return
+
+        while True:
+            progress = await q.get()
+            await websocket.send_json(
+                _serialize_progress(progress)
+            )
+
+            current_task = manager.get_task(task_id)
+            if (
+                current_task is not None
+                and current_task.status.value in ("completed", "failed")
+            ):
+                await websocket.close()
+                return
+    except WebSocketDisconnect:
+        return
+    finally:
+        with suppress(Exception):
+            await manager.unsubscribe_progress(task_id, q)
 
 
 @router.post("/tasks", response_model=TaskResponse)
@@ -114,18 +245,13 @@ async def get_task(task_id: str) -> TaskResponse:
     )
 
 
-@router.get(
-    "/tasks/{task_id}/result",
-    response_model=TaskResultResponse,
-)
+@router.get("/tasks/{task_id}/result", response_model=TaskResultResponse)
 async def get_result(task_id: str) -> TaskResultResponse:
     """获取已完成任务的结果"""
     manager = _get_manager()
     task = manager.get_task(task_id)
     if task is None:
-        raise HTTPException(
-            status_code=404, detail="任务不存在"
-        )
+        raise HTTPException(status_code=404, detail="任务不存在")
 
     if task.result is None:
         raise HTTPException(
@@ -137,4 +263,49 @@ async def get_result(task_id: str) -> TaskResultResponse:
         task_id=task.task_id,
         output_path=str(task.result.output_path),
         markdown=task.result.markdown,
+    )
+
+
+@router.get("/tasks/{task_id}/assets/{asset_path:path}")
+async def get_task_asset(task_id: str, asset_path: str) -> FileResponse:
+    """受限访问任务输出资源（AGE-13）。"""
+    manager = _get_manager()
+    task = manager.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    rel = _validate_asset_path(asset_path)
+    if rel is None:
+        raise HTTPException(status_code=404, detail="资源不存在")
+
+    target = _resolve_asset_path(Path(task.output_dir), rel)
+    if target is None or not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="资源不存在")
+
+    # 输出目录内资源，无需额外 filename 处理
+    return FileResponse(path=target)
+
+
+@router.get("/tasks/{task_id}/download")
+async def download_task_result(task_id: str) -> Response:
+    """下载任务结果 zip（AGE-13）。"""
+    manager = _get_manager()
+    task = manager.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    output_dir = Path(task.output_dir)
+    doc_path = output_dir / "document.md"
+    if not doc_path.exists():
+        raise HTTPException(status_code=404, detail="任务尚未完成或已失败")
+
+    zip_bytes = _build_result_zip_bytes(output_dir)
+    filename = f"docrestore_{task_id}.zip"
+
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        },
     )

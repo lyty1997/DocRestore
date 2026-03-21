@@ -84,7 +84,7 @@ async def client() -> AsyncIterator[AsyncClient]:
         yield ac
 
     await pipeline.shutdown()
-    set_task_manager(None)  # type: ignore[arg-type]
+    set_task_manager(None)
 
 
 @pytest.mark.usefixtures("require_ocr_data")

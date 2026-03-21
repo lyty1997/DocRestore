@@ -135,7 +135,7 @@ async def get_result(task_id: str):
 - WebSocket 实时进度推送（`/api/v1/tasks/{task_id}/progress`）
 - MCP Server（AI agent 集成，如 Claude Desktop / RAG agent 自主调用）
 - CreateTaskRequest 配置覆盖（options 字段）
-- Web 前端
+- Web 前端（已在 `docs/frontend-design.md` 定义前端技术规格，待落地实现）
 - 认证/鉴权
 
 ## 7. 错误响应（MVP）

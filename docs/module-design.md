@@ -58,6 +58,9 @@ src/docrestore/
 | 输出层 | [output.md](modules/output.md) | `Renderer.render()` |
 | Pipeline 编排层 | [pipeline.md](modules/pipeline.md) | `Pipeline.process()`, `TaskManager` |
 | API 层 | [api.md](modules/api.md) | `POST/GET/DELETE /api/v1/tasks` |
+| WebSocket 进度（后续） | [ws_progress.md](modules/ws_progress.md) | `WS /api/v1/tasks/{task_id}/progress` |
+| 结果资源与下载（后续） | [result_delivery.md](modules/result_delivery.md) | assets/download（给前端预览与下载） |
+| 前端（后续） | [frontend.md](modules/frontend.md) | Web UI（创建任务/进度/预览/下载） |
 
 ## 3. 模块间对接 API 总览
 

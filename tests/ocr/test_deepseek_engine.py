@@ -164,7 +164,11 @@ class TestDeepSeekOCR2Engine:
 
     @pytest.mark.asyncio
     async def test_engine_lifecycle(self) -> None:
-        """引擎生命周期：初始化 → 就绪 → 关闭"""
+        """引擎生命周期：初始化 → 就绪 → 关闭
+
+        说明：真实引擎在部分 GPU 环境可能因显存不足而无法初始化；
+        该场景属于测试环境资源限制，跳过以避免整套测试失败。
+        """
         from docrestore.ocr.deepseek_ocr2 import (
             DeepSeekOCR2Engine,
         )
@@ -174,7 +178,21 @@ class TestDeepSeekOCR2Engine:
         engine = DeepSeekOCR2Engine(config)
 
         assert not engine.is_ready
-        await engine.initialize()
+
+        try:
+            await engine.initialize()
+        except ImportError:
+            pytest.skip("torch 未安装")
+        except Exception as exc:
+            oom_err = (
+                getattr(torch, "OutOfMemoryError", None)
+                if torch is not None
+                else None
+            )
+            if oom_err is not None and isinstance(exc, oom_err):
+                pytest.skip("GPU 显存不足，跳过 DeepSeek-OCR-2 真机测试")
+            raise
+
         assert engine.is_ready
         await engine.shutdown()
         assert not engine.is_ready
