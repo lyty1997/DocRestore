@@ -66,7 +66,7 @@ GEMINI_API_KEY=sk-xxx
 - `LLMConfig` — provider（cloud/local）、模型、API 地址、分段大小、截断检测
 - `OutputConfig` / `PIIConfig` / `QueueConfig` — 输出格式、PII 脱敏、任务并发
 
-字段说明详见 [docs/backend/data-models.md](docs/backend/data-models.md)。
+字段说明详见 [docs/backend/data-models.md](docs/zh/backend/data-models.md)。
 
 ## 使用
 
@@ -90,7 +90,7 @@ python scripts/run_e2e.py \
 
 ### REST API
 
-完整接口契约见 [docs/backend/api.md](docs/backend/api.md)，示例：
+完整接口契约见 [docs/backend/api.md](docs/zh/backend/api.md)，示例：
 
 ```bash
 # 创建任务
@@ -139,13 +139,14 @@ docrestore/
 └── docs/                 # 设计文档（架构 / 部署 / 后端 / 前端 / 进度）
 ```
 
-## 文档
+## 文档 / Documentation
 
-- [系统架构](docs/architecture.md)
-- [部署指南](docs/deployment.md)
-- [后端文档](docs/backend/README.md)
-- [前端文档](docs/frontend/README.md)
-- [开发进度](docs/progress.md)
+- [中文文档](docs/zh/README.md) | [English Docs](docs/en/README.md)
+- [系统架构](docs/zh/architecture.md) | [Architecture](docs/en/architecture.md)
+- [部署指南](docs/zh/deployment.md) | [Deployment](docs/en/deployment.md)
+- [后端文档](docs/zh/backend/README.md) | [Backend](docs/en/backend/README.md)
+- [前端文档](docs/zh/frontend/README.md) | [Frontend](docs/en/frontend/README.md)
+- [开发进度](docs/zh/progress.md)
 
 ## License
 
