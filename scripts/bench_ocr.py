@@ -76,8 +76,10 @@ if TYPE_CHECKING:
 # paddlex 只透传 YAML 中出现的键，不出现的仍用 PaddleOCR 默认（含
 # gpu-memory-utilization=0.85 / max-model-len=16384 / api-server-count=4 等）。
 # 这里只覆盖两引擎共有的 5 项优化。
+# 注意：vLLM CLI --block-size 仅接受 {1,8,16,32,64,128}，官方参考脚本的 256
+#       仅在 Python API 内部有效，CLI 路径要降到 128。
 PADDLE_OPTIMIZED_BACKEND_CONFIG: dict[str, object] = {
-    "block_size": 256,
+    "block_size": 128,
     "swap_space": 0,
     "enforce_eager": True,
     "disable_mm_preprocessor_cache": True,
@@ -171,13 +173,16 @@ def _build_deepseek_config(preset: str, gpu_id: str) -> OCRConfig:
         raise RuntimeError(msg)
 
     if preset == "optimized":
+        # block_size=128：与 PaddleOCR 预设保持一致（CLI 允许上限）。
+        # 官方 run_dpsk_ocr2_pdf.py 用 256，但那是 Python API 直构，
+        # 我们通过 AsyncEngineArgs(**kwargs) 走同一校验链路，取兼容值。
         return OCRConfig(
             model="deepseek/ocr-2",
             gpu_id=gpu_id,
             deepseek_python=deepseek_py,
             gpu_memory_utilization=0.9,
             vllm_enforce_eager=False,
-            vllm_block_size=256,
+            vllm_block_size=128,
             vllm_swap_space_gb=0.0,
             vllm_disable_mm_preprocessor_cache=True,
             vllm_disable_log_stats=True,
