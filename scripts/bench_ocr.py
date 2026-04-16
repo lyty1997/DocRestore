@@ -128,7 +128,7 @@ def _detect_conda_python(env_name: str) -> str:
 
 
 def _build_paddle_config(
-    preset: str, gpu_id: str, output_dir: Path,
+    preset: str, gpu_id: str, output_dir: Path, batch_size: int,
 ) -> OCRConfig:
     """为 PaddleOCR 构造 OCRConfig。optimized 预设写 YAML 经 paddlex 透传。"""
     from docrestore.pipeline.config import OCRConfig
@@ -158,10 +158,13 @@ def _build_paddle_config(
         paddle_server_python=paddle_server_py,
         paddle_python=paddle_client_py,
         paddle_server_backend_config=backend_config_path,
+        ocr_batch_size=batch_size,
     )
 
 
-def _build_deepseek_config(preset: str, gpu_id: str) -> OCRConfig:
+def _build_deepseek_config(
+    preset: str, gpu_id: str, batch_size: int,
+) -> OCRConfig:
     """为 DeepSeek-OCR-2 构造 OCRConfig。optimized 对齐官方 run_dpsk_ocr2_pdf.py。"""
     from docrestore.pipeline.config import OCRConfig
 
@@ -187,22 +190,24 @@ def _build_deepseek_config(preset: str, gpu_id: str) -> OCRConfig:
             vllm_swap_space_gb=0.0,
             vllm_disable_mm_preprocessor_cache=True,
             vllm_disable_log_stats=True,
+            ocr_batch_size=batch_size,
         )
     return OCRConfig(
         model="deepseek/ocr-2",
         gpu_id=gpu_id,
         deepseek_python=deepseek_py,
+        ocr_batch_size=batch_size,
     )
 
 
 def _build_config(
-    engine: str, preset: str, gpu_id: str, output_dir: Path,
+    engine: str, preset: str, gpu_id: str, output_dir: Path, batch_size: int,
 ) -> OCRConfig:
     """根据 engine/preset 分派到对应的构造器。"""
     if engine == "paddle-ocr":
-        return _build_paddle_config(preset, gpu_id, output_dir)
+        return _build_paddle_config(preset, gpu_id, output_dir, batch_size)
     if engine == "deepseek-ocr-2":
-        return _build_deepseek_config(preset, gpu_id)
+        return _build_deepseek_config(preset, gpu_id, batch_size)
     msg = f"未知引擎: {engine}"
     raise ValueError(msg)
 
@@ -248,15 +253,20 @@ async def _bench(
     warmup: int,
     runs: int,
     gpu_sample_interval_ms: int,
+    batch_size: int,
 ) -> dict[str, object]:
-    """跑 benchmark 主流程：起引擎 → warmup → N 轮遍历 → 关引擎。"""
+    """跑 benchmark 主流程：起引擎 → warmup → N 轮遍历 → 关引擎。
+
+    batch_size >= 2 时一次性 ocr_batch(整个 run)，worker 内并发；
+    batch_size == 1 时逐张 ocr() 走串行路径（兼容原基线）。
+    """
     from docrestore.ocr.engine_manager import EngineManager
 
     pages_root = output_dir / "pages_ocr"
     await asyncio.to_thread(output_dir.mkdir, parents=True, exist_ok=True)
     await asyncio.to_thread(pages_root.mkdir, exist_ok=True)
 
-    config = _build_config(engine_name, preset, gpu_id, output_dir)
+    config = _build_config(engine_name, preset, gpu_id, output_dir, batch_size)
     gpu_lock = asyncio.Lock()
     manager = EngineManager(default_config=config, gpu_lock=gpu_lock)
 
@@ -272,6 +282,7 @@ async def _bench(
         "num_images": len(images),
         "warmup": warmup,
         "runs": runs,
+        "batch_size": batch_size,
         "gpu_sample_interval_ms": gpu_sample_interval_ms,
     }
     per_page: list[PagePerf] = []
@@ -314,19 +325,32 @@ async def _bench(
                 await asyncio.to_thread(shutil.rmtree, run_dir)
             await asyncio.to_thread(run_dir.mkdir)
             print(
-                f"[{engine_name}/{preset}] run {run_idx}/{runs}...",
+                f"[{engine_name}/{preset}] run {run_idx}/{runs}"
+                f" (batch_size={batch_size})...",
                 flush=True,
             )
             t_run = time.time()
-            for img in images:
-                t_page = time.time()
-                await engine.ocr(img, run_dir)
-                per_page.append(PagePerf(
-                    image_path=str(img.relative_to(PROJECT_ROOT)),
-                    run_idx=run_idx,
-                    elapsed=time.time() - t_page,
-                ))
-            elapsed = time.time() - t_run
+            if batch_size >= 2:
+                # 批量模式：整 run 一次 ocr_batch，单张延迟按均值分摊
+                await engine.ocr_batch(images, run_dir)
+                elapsed = time.time() - t_run
+                per_img = elapsed / len(images)
+                for img in images:
+                    per_page.append(PagePerf(
+                        image_path=str(img.relative_to(PROJECT_ROOT)),
+                        run_idx=run_idx,
+                        elapsed=per_img,
+                    ))
+            else:
+                for img in images:
+                    t_page = time.time()
+                    await engine.ocr(img, run_dir)
+                    per_page.append(PagePerf(
+                        image_path=str(img.relative_to(PROJECT_ROOT)),
+                        run_idx=run_idx,
+                        elapsed=time.time() - t_page,
+                    ))
+                elapsed = time.time() - t_run
             run_elapsed.append(elapsed)
             print(
                 f"  run {run_idx} done: {elapsed:.1f}s "
@@ -386,6 +410,10 @@ def main() -> None:
         "--gpu-sample-interval-ms", type=int, default=500,
         help="nvidia-smi 采样间隔（毫秒）",
     )
+    parser.add_argument(
+        "--batch-size", type=int, default=1,
+        help="OCR 批大小；>=2 时走 ocr_batch（worker 并发），1 为逐张基线",
+    )
     args = parser.parse_args()
 
     images_root = PROJECT_ROOT / args.images_root
@@ -414,6 +442,7 @@ def main() -> None:
         warmup=args.warmup,
         runs=args.runs,
         gpu_sample_interval_ms=args.gpu_sample_interval_ms,
+        batch_size=args.batch_size,
     ))
 
     print(

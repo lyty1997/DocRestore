@@ -16,6 +16,89 @@ limitations under the License.
 
 # DocRestore 开发进度
 
+## 2026-04-16 OCR 批量推理 + Pipeline 全流程埋点 + GPU 显存监控
+
+### 背景
+
+上午 bench 验证 vLLM 通用参数优化对稳态吞吐无收益，下午切换方向——让 worker 内部用 `asyncio.gather` 把多张图并发喂给 vLLM，直接吃下 continuous batching 红利。顺手把 GPU 显存碎片化监控和 Pipeline 全流程埋点一起补齐。
+
+### 完成内容
+
+**配置层**
+
+- `OCRConfig` 新增 `ocr_batch_size: int = 4` / `gpu_monitor_enable: bool = True` / `gpu_monitor_interval_s: float = 1.0` / `gpu_memory_safety_margin_mib: int = 1024`
+- `PipelineConfig` 新增 `profiling_enable: bool = False` / `profiling_output_path: str = ""`（默认关闭避免生产开销；`DOCRESTORE_PROFILING=1` 强制覆盖）
+
+**Profiler 基础设施**（`backend/docrestore/pipeline/profiler.py`）
+
+- `Protocol` 定义统一接口 `stage() / record_external() / export_json() / export_summary_table()`
+- `NullProfiler`：禁用时单次 ~50ns no-op，`stage()` 返回共享 context manager 不分配对象
+- `MemoryProfiler`：事件收集 + JSON 导出 + 扁平化耗时表（按 `pipeline.total` 计算 share%）
+- `ContextVar` 跨 async await 传播：`current_profiler() / set_current_profiler() / reset_current_profiler()`；嵌套调用自动复用外层 profiler，避免 Pipeline 实例并发调用时事件相互污染
+
+**DeepSeek worker**（`scripts/deepseek_ocr_worker.py`）
+
+- 新增 `ocr_batch` JSON-Lines 命令：`asyncio.gather(return_exceptions=True)` 并发处理整批，单张失败不拖垮整批，响应 `{ok: true, results: [...]}` 按序返回
+- 后台 GPU monitor task：启动时 `asyncio.create_task`，1s 采样一次 `torch.cuda.mem_get_info() / memory_allocated() / memory_reserved()` 计算 `frag_ratio`，free 低于 `safety_margin_bytes` 时主动调 `empty_cache()`；日志前缀 `[gpu_monitor]` 写到 stderr
+- `_build_init_cmd` 透传 `ocr_batch_size / gpu_monitor_*` 给 worker
+
+**DeepSeekOCR2Engine**（`backend/docrestore/ocr/deepseek_ocr2.py`）
+
+- 新增 `ocr_batch()` 覆写：已有 `result.mmd` 缓存直接磁盘加载，其余 pending 送 worker
+- `_send_ocr_batch_with_oom_retry`：遇 `_OOMError` 对半降级（`size //= 2`），降到 1 仍 OOM 才抛 `RuntimeError`；不回升避免震荡
+- 抽出 `_parse_single_result` 在 `ocr()` 和 `ocr_batch()` 间共享，避免两路径解析逻辑漂移
+
+**Pipeline 主循环埋点**（`backend/docrestore/pipeline/pipeline.py`）
+
+- `_task_profiler` async 上下文管理器：根调用创建 `MemoryProfiler` 并绑定 `ContextVar`，嵌套调用复用上层；退出时导出 `profile.json` + 写 summary table 日志
+- 核心阶段埋点：`pipeline.total` / `pipeline.subdir` / `ocr.batch` / `ocr.single` / `cleaner.page` / `dedup.*` / `pii.phase` / `llm.doc_boundary` / `llm.refine_phase` / `llm.refine_segment` / `llm.gap_fill_*` / `llm.final_refine` / `reassemble` / `doc_split` / `render.write`
+- `_run_ocr`：`isinstance(engine, WorkerBackedOCREngine)` 且 `batch_size >= 2` 时走 `engine.ocr_batch()`，否则回退逐张 `ocr()`——用 isinstance 而非 hasattr 避免 AsyncMock 测试替身误判
+
+**测试**
+
+- `tests/pipeline/test_profiler.py`：21 项单测覆盖 NullProfiler 零开销 / MemoryProfiler 事件记录 / export_json / export_summary_table / ContextVar 嵌套行为 / stage 异常记录
+
+**Bench 脚本扩展**（`scripts/bench_ocr.py`）
+
+- 新增 `--batch-size` CLI 参数：`>=2` 时整 run 一次 `engine.ocr_batch()`，`1` 走逐张 `ocr()` 对照基线
+- `OCRConfig.ocr_batch_size` 随 preset 构造传入
+
+### Benchmark 结果（RTX 4070 SUPER，36 张图 × 2 runs）
+
+| 名称 | 引擎 | 预设 | batch | mean_run(s) | img/s | GPU_util_mean(%) | GPU_util_p95(%) | mem_peak(MiB) |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| deepseek_baseline | deepseek-ocr-2 | baseline | 1 | 119.1 | 0.30 | 52.3 | 73.0 | 9867 |
+| deepseek_optimized | deepseek-ocr-2 | optimized | 1 | 118.3 | 0.30 | 56.6 | 71.0 | 11683 |
+| **deepseek_batch4** | deepseek-ocr-2 | optimized | **4** | **64.7** | **0.56** | 52.2 | **81.0** | 11843 |
+
+对比 baseline：
+- **吞吐 +87%**（0.30 → 0.56 img/s），超过目标 ≥0.45 img/s
+- **GPU p95 利用率 +8pp**（73% → 81%），峰值段饱和度明显提升
+- 峰值显存 +2GB（9867 → 11843 MiB），仍在 12GB 安全范围内
+- 均值 GPU 利用率不变（52%）——批量让 work 更快结束，空闲段占比相对上升抵消了峰值提升
+
+### 关键结论
+
+1. **worker 内 `asyncio.gather` 是最短路径**：不改 Pipeline 粒度、不改 GPU 锁语义，一层并发就吃下 continuous batching 的 87% 吞吐红利
+2. **`batch_size=4` 是 RTX 4070 SUPER 的甜点**：显存占用 11.8GiB/12GiB，已经逼近；再加大需配合 OOM halving 才稳
+3. **Profiler 的 `isinstance(WorkerBackedOCREngine)` 比 `hasattr` 更稳**：AsyncMock 自动生成属性让 hasattr/iscoroutinefunction 双重误判，测试路径直接跑进 batch 分支返回 mock 对象被 dedup 模块吃不下
+
+### 坑点
+
+- `pytest.raises(ValueError)` 被 ruff PT011 要求加 `match` 参数，否则过宽
+- worker `import torch` 之前写 `# type: ignore[import-untyped]` 会触发 mypy `unused-ignore`（torch 已装类型桩），直接去掉
+- worker gpu_monitor 日志走 stderr，父进程 `_stream_stderr_progress` 只在 initialize 阶段读 stderr，初始化后停止——导致 bench log 看不到 `[gpu_monitor]` 行。短任务无影响（pipe buffer 够用），长任务需后续补一个 stderr consumer 转 logger
+
+### 相关提交（dev 分支）
+
+- `1524379` OCR 批量推理 + Pipeline 全流程埋点 + GPU 显存监控
+
+### 遗留
+
+- Paddle worker 并发 HTTP 请求（Task #13，延后）——当前 PaddleOCR 路径仍是基类 `ocr_batch`（逐张串行）
+- worker stderr 持续读入 logger（gpu_monitor 日志回传父进程）
+- Pipeline 级并行（两条 pipeline：一条 OCR 时另一条做 PII/LLM 精修）——下一步
+
 ## 2026-04-16 OCR vLLM 优化参数基线对比
 
 ### 背景
