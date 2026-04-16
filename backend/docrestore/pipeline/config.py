@@ -99,12 +99,24 @@ class OCRConfig(BaseModel):
     # GPU 选择（两个引擎通用，前端可选）
     gpu_id: str = "1"  # CUDA_VISIBLE_DEVICES，默认 GPU 1
 
+    # === 两引擎共有的 vLLM 优化参数 ===
+    # DeepSeek 进程内直接透传到 AsyncEngineArgs；
+    # PaddleOCR 通过 scripts/bench_ocr.py 生成的 backend_config YAML 注入
+    # ppocr-server。None 表示沿用 vLLM 默认值，不主动覆盖。
+    vllm_enforce_eager: bool | None = None  # 显式控制 CUDA Graph 启用
+    vllm_block_size: int | None = None  # KV cache block 大小（默认 16，常用 256）
+    vllm_swap_space_gb: float | None = None  # CPU swap GiB（默认 4，OCR 场景可 0）
+    vllm_disable_mm_preprocessor_cache: bool = False  # OCR 每张图不同，缓存命中率 0
+    vllm_disable_log_stats: bool = False  # 关闭 vLLM 内部统计日志
+
     # === PaddleOCR 专用（model="paddle-ocr/..." 时生效）===
     paddle_python: str = ""  # PaddleOCR conda 环境的 python 路径
     paddle_ocr_timeout: int = 300  # 单张 OCR 超时（秒）
     paddle_restart_interval: int = 20  # 每 N 张图片重启 worker（0 禁用）
     # worker 脚本路径（空串时使用默认仓库内路径）
     paddle_worker_script: str = ""
+    # ppocr-server 的 --backend_config YAML 路径（空串时用 PaddleOCR 默认配置）
+    paddle_server_backend_config: str = ""
 
     # PaddleOCR server 模式（paddle_server_url 非空时启用）
     paddle_server_url: str = ""  # 如 "http://localhost:8119/v1"

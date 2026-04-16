@@ -113,7 +113,7 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
         return True
 
     def _build_init_cmd(self) -> dict[str, object]:
-        return {
+        cmd: dict[str, object] = {
             "cmd": "initialize",
             "model_path": self._config.model_path,
             "gpu_memory_utilization": self._config.gpu_memory_utilization,
@@ -131,7 +131,16 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
             "normalize_mean": list(self._config.normalize_mean),
             "normalize_std": list(self._config.normalize_std),
             "prompt": self._config.prompt,
+            # 两引擎共有的 vLLM 优化参数透传（None 时 worker 不覆盖默认值）
+            "vllm_enforce_eager": self._config.vllm_enforce_eager,
+            "vllm_block_size": self._config.vllm_block_size,
+            "vllm_swap_space_gb": self._config.vllm_swap_space_gb,
+            "vllm_disable_mm_preprocessor_cache": (
+                self._config.vllm_disable_mm_preprocessor_cache
+            ),
+            "vllm_disable_log_stats": self._config.vllm_disable_log_stats,
         }
+        return cmd
 
     async def _send_init_command(
         self,

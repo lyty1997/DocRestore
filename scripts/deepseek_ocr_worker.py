@@ -140,18 +140,40 @@ class Worker:
             self._config = config
             model_path = config.get("model_path", "models/DeepSeek-OCR-2")
 
-            engine_args = AsyncEngineArgs(
-                model=model_path,
-                hf_overrides={
+            # 基础 vLLM engine 参数
+            engine_kwargs: dict[str, Any] = {
+                "model": model_path,
+                "hf_overrides": {
                     "architectures": ["DeepseekOCR2ForCausalLM"]
                 },
-                dtype="bfloat16",
-                max_model_len=int(config.get("max_model_len", 8192)),
-                trust_remote_code=True,
-                gpu_memory_utilization=float(
+                "dtype": "bfloat16",
+                "max_model_len": int(config.get("max_model_len", 8192)),
+                "trust_remote_code": True,
+                "gpu_memory_utilization": float(
                     config.get("gpu_memory_utilization", 0.75)
                 ),
-            )
+            }
+
+            # 两引擎共有的 vLLM 优化参数（None/False 表示沿用 vLLM 默认值）
+            enforce_eager = config.get("vllm_enforce_eager")
+            if enforce_eager is not None:
+                engine_kwargs["enforce_eager"] = bool(enforce_eager)
+
+            block_size = config.get("vllm_block_size")
+            if block_size is not None:
+                engine_kwargs["block_size"] = int(block_size)
+
+            swap_space = config.get("vllm_swap_space_gb")
+            if swap_space is not None:
+                engine_kwargs["swap_space"] = float(swap_space)
+
+            if bool(config.get("vllm_disable_mm_preprocessor_cache", False)):
+                engine_kwargs["disable_mm_preprocessor_cache"] = True
+
+            if bool(config.get("vllm_disable_log_stats", False)):
+                engine_kwargs["disable_log_stats"] = True
+
+            engine_args = AsyncEngineArgs(**engine_kwargs)
             self._engine = AsyncLLMEngine.from_engine_args(engine_args)
 
             ngram_size = int(config.get("ngram_size", 20))
