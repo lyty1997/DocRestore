@@ -109,6 +109,20 @@ class OCRConfig(BaseModel):
     vllm_disable_mm_preprocessor_cache: bool = False  # OCR 每张图不同，缓存命中率 0
     vllm_disable_log_stats: bool = False  # 关闭 vLLM 内部统计日志
 
+    # === 批量推理 + 显存监控（方案 1 / performance_toolkit）===
+    # OCR 批大小：Pipeline 一次向 worker 提交 N 张图，worker 内 asyncio.gather
+    # 并发处理，vLLM 自动 continuous batching，CPU 后处理与下一批 GPU 天然 overlap。
+    # < 2 回退逐张处理（保留旧路径，便于对比或兜底）。
+    ocr_batch_size: int = 4
+    # 启用 worker 内后台 GPU 监控 task（nvidia-smi 外部采样仍由 gpu_sampler.py 完成，
+    # 这里监控的是 Python 进程内 torch.cuda 视角 —— free / allocated / reserved /
+    # frag_ratio —— 方便定位显存碎片化）。
+    gpu_monitor_enable: bool = True
+    gpu_monitor_interval_s: float = 1.0  # 采样周期（秒）
+    # free 显存低于该阈值时 worker 主动调用 torch.cuda.empty_cache() 回收碎片，
+    # 并写 WARN 日志供父进程展示。
+    gpu_memory_safety_margin_mib: int = 1024
+
     # === PaddleOCR 专用（model="paddle-ocr/..." 时生效）===
     paddle_python: str = ""  # PaddleOCR conda 环境的 python 路径
     paddle_ocr_timeout: int = 300  # 单张 OCR 超时（秒）
@@ -252,3 +266,10 @@ class PipelineConfig(BaseModel):
     pii: PIIConfig = Field(default_factory=PIIConfig)
     db_path: str = "data/docrestore.db"  # SQLite 持久化路径
     debug: bool = True  # 落盘各阶段中间结果到 output_dir/debug/
+
+    # 性能调试开关：开启后 Pipeline 全流程埋点，任务结束写 profile.json
+    # + 打印扁平化耗时表。默认关闭以避免生产环境引入 ~1-2μs/stage 开销。
+    # 环境变量 DOCRESTORE_PROFILING=1 可强制覆盖。
+    profiling_enable: bool = False
+    # profile.json 输出路径；空串 → {output_dir}/profile.json
+    profiling_output_path: str = ""

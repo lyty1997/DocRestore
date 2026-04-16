@@ -21,9 +21,10 @@ OCR → 清洗 → 去重合并 → LLM 精修 → 缺口补充 → 输出。
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import aiofiles
@@ -48,7 +49,7 @@ from docrestore.models import (
     Region,
     TaskProgress,
 )
-from docrestore.ocr.base import OCREngine
+from docrestore.ocr.base import OCREngine, WorkerBackedOCREngine
 from docrestore.ocr.engine_manager import EngineManager
 from docrestore.output.renderer import Renderer
 from docrestore.pipeline.config import (
@@ -56,6 +57,15 @@ from docrestore.pipeline.config import (
     OCRConfig,
     PIIConfig,
     PipelineConfig,
+)
+from docrestore.pipeline.profiler import (
+    MemoryProfiler,
+    NullProfiler,
+    Profiler,
+    create_profiler,
+    current_profiler,
+    reset_current_profiler,
+    set_current_profiler,
 )
 from docrestore.privacy.redactor import EntityLexicon, PIIRedactor
 from docrestore.processing.cleaner import OCRCleaner
@@ -136,6 +146,55 @@ class Pipeline:
         """注入 LLM 精修器（允许外部传入 mock）"""
         self._refiner = refiner
 
+    @contextlib.asynccontextmanager
+    async def _task_profiler(
+        self, output_dir: Path,
+    ) -> AsyncIterator[tuple[Profiler, bool]]:
+        """进入根任务时创建 Profiler，嵌套调用时复用上层 Profiler。
+
+        - 若当前 context 已有非 Null profiler（嵌套调用）→ 直接复用
+        - 否则（根调用）→ 创建 + 绑定 contextvar + 退出时导出 profile.json
+
+        返回 `(profiler, is_root)`，is_root 给调用方判断是否需要做只在根
+        执行的动作（目前只有 profile.json 导出，由本方法自己处理）。
+        """
+        existing = current_profiler()
+        if not isinstance(existing, NullProfiler):
+            yield existing, False
+            return
+
+        profiler = create_profiler(enable=self._config.profiling_enable)
+        token = set_current_profiler(profiler)
+        try:
+            yield profiler, True
+        finally:
+            reset_current_profiler(token)
+            if isinstance(profiler, MemoryProfiler):
+                await self._export_profile(profiler, output_dir)
+
+    async def _export_profile(
+        self,
+        profiler: MemoryProfiler,
+        output_dir: Path,
+    ) -> None:
+        """落盘 profile.json + 打印扁平化汇总表到日志。"""
+        configured = self._config.profiling_output_path
+        out_path = (
+            Path(configured) if configured
+            else output_dir / "profile.json"
+        )
+        try:
+            await asyncio.to_thread(profiler.export_json, out_path)
+            table = profiler.export_summary_table()
+            if table:
+                logger.info(
+                    "Pipeline profile → %s\n%s", out_path, table,
+                )
+        except Exception:
+            logger.warning(
+                "导出 profile.json 失败: %s", out_path, exc_info=True,
+            )
+
     async def _save_debug(
         self,
         output_dir: Path,
@@ -199,52 +258,66 @@ class Pipeline:
         llm/ocr/pii 为 None 时使用 `self.config` 内的默认配置；非空时
         视为本次请求的完整配置快照（由上游合成，pipeline 内部不再合并）。
         """
-        leaf_dirs = await asyncio.to_thread(
-            find_image_dirs, image_dir,
-        )
-        if not leaf_dirs:
-            msg = f"未找到图片文件: {image_dir}"
-            raise FileNotFoundError(msg)
+        async with self._task_profiler(output_dir) as (profiler, _is_root):
+            with profiler.stage(
+                "pipeline.total",
+                image_dir=str(image_dir),
+                mode="tree",
+            ):
+                leaf_dirs = await asyncio.to_thread(
+                    find_image_dirs, image_dir,
+                )
+                if not leaf_dirs:
+                    msg = f"未找到图片文件: {image_dir}"
+                    raise FileNotFoundError(msg)
 
-        # 单目录：直接委托 process_many
-        if len(leaf_dirs) == 1 and leaf_dirs[0] == image_dir:
-            return await self.process_many(
-                image_dir, output_dir, on_progress,
-                llm, gpu_lock, pii, ocr,
-            )
+                # 单目录：直接委托 process_many（复用当前 profiler）
+                if (
+                    len(leaf_dirs) == 1 and leaf_dirs[0] == image_dir
+                ):
+                    return await self.process_many(
+                        image_dir, output_dir, on_progress,
+                        llm, gpu_lock, pii, ocr,
+                    )
 
-        # 多子目录：逐目录处理，聚合结果
-        all_results: list[PipelineResult] = []
-        for i, leaf in enumerate(leaf_dirs):
-            rel = leaf.relative_to(image_dir)
-            sub_output = output_dir / rel
+                # 多子目录：逐目录处理，聚合结果
+                all_results: list[PipelineResult] = []
+                for i, leaf in enumerate(leaf_dirs):
+                    rel = leaf.relative_to(image_dir)
+                    sub_output = output_dir / rel
 
-            logger.info(
-                "process_tree: [%d/%d] %s",
-                i + 1, len(leaf_dirs), rel,
-            )
+                    logger.info(
+                        "process_tree: [%d/%d] %s",
+                        i + 1, len(leaf_dirs), rel,
+                    )
 
-            # 包装进度回调，添加子目录标识
-            wrapped_progress = self._wrap_progress(
-                on_progress, str(rel),
-                i, len(leaf_dirs),
-            )
+                    # 包装进度回调，添加子目录标识
+                    wrapped_progress = self._wrap_progress(
+                        on_progress, str(rel),
+                        i, len(leaf_dirs),
+                    )
 
-            sub_results = await self.process_many(
-                leaf, sub_output, wrapped_progress,
-                llm, gpu_lock, pii, ocr,
-            )
+                    with profiler.stage(
+                        "pipeline.subdir",
+                        subdir=str(rel),
+                        index=i + 1,
+                        total=len(leaf_dirs),
+                    ):
+                        sub_results = await self.process_many(
+                            leaf, sub_output, wrapped_progress,
+                            llm, gpu_lock, pii, ocr,
+                        )
 
-            # 补全 doc_dir：加上子目录相对路径前缀
-            for result in sub_results:
-                if result.doc_dir:
-                    result.doc_dir = str(rel / result.doc_dir)
-                else:
-                    result.doc_dir = str(rel)
+                    # 补全 doc_dir：加上子目录相对路径前缀
+                    for result in sub_results:
+                        if result.doc_dir:
+                            result.doc_dir = str(rel / result.doc_dir)
+                        else:
+                            result.doc_dir = str(rel)
 
-            all_results.extend(sub_results)
+                    all_results.extend(sub_results)
 
-        return all_results
+                return all_results
 
     @staticmethod
     def _wrap_progress(
@@ -283,6 +356,30 @@ class Pipeline:
         → 拆分子文档 → 每篇独立 gap fill / final refine / render。
         返回 list[PipelineResult]（单文档退化为长度 1）。
         """
+        async with self._task_profiler(output_dir) as (profiler, is_root):
+            root_stage = profiler.stage(
+                "pipeline.total",
+                image_dir=str(image_dir),
+                mode="many",
+            ) if is_root else contextlib.nullcontext()
+            with root_stage:
+                return await self._process_many_body(
+                    image_dir, output_dir, on_progress,
+                    llm, gpu_lock, pii, ocr,
+                )
+
+    async def _process_many_body(  # noqa: C901
+        self,
+        image_dir: Path,
+        output_dir: Path,
+        on_progress: Callable[[TaskProgress], None] | None,
+        llm: LLMConfig | None,
+        gpu_lock: asyncio.Lock | None,
+        pii: PIIConfig | None,
+        ocr: OCRConfig | None,
+    ) -> list[PipelineResult]:
+        """process_many 的实际实现（profiler 已由外层 _task_profiler 绑定）。"""
+        profiler = current_profiler()
         await asyncio.to_thread(
             output_dir.mkdir, parents=True, exist_ok=True
         )
@@ -318,16 +415,19 @@ class Pipeline:
             raise RuntimeError(msg)
 
         # OCR + 清洗
-        pages = await self._ocr_and_clean(
-            images, output_dir, gpu_lock, _report, ocr,
-        )
+        with profiler.stage("ocr.phase", num_images=len(images)):
+            pages = await self._ocr_and_clean(
+                images, output_dir, gpu_lock, _report, ocr,
+            )
 
         # 跨页频率过滤：移除侧栏等高频重复行
-        strip_repeated_lines(pages, self._config.dedup)
+        with profiler.stage("dedup.strip_repeated", num_pages=len(pages)):
+            strip_repeated_lines(pages, self._config.dedup)
 
         # 去重合并
-        dedup = PageDeduplicator(self._config.dedup)
-        merged = dedup.merge_all_pages(pages)
+        with profiler.stage("dedup.merge", num_pages=len(pages)):
+            dedup = PageDeduplicator(self._config.dedup)
+            merged = dedup.merge_all_pages(pages)
         await self._save_debug(
             output_dir, "merged_raw.md", merged.markdown
         )
@@ -338,46 +438,51 @@ class Pipeline:
         cloud_blocked = False
         pii_cfg = pii or self._config.pii
         if pii_cfg.enable or pii_cfg.custom_sensitive_words:
-            (
-                merged, redaction_records,
-                entity_lexicon, cloud_blocked,
-            ) = await self._redact_pii(
-                merged, llm, pii_cfg,
-                output_dir, _report,
-            )
+            with profiler.stage("pii.phase"):
+                (
+                    merged, redaction_records,
+                    entity_lexicon, cloud_blocked,
+                ) = await self._redact_pii(
+                    merged, llm, pii_cfg,
+                    output_dir, _report,
+                )
 
         # 文档边界检测（在分段精修前）
         doc_boundaries: list[DocBoundary] = []
         if not cloud_blocked:
-            doc_boundaries = await self._detect_doc_boundaries(
-                merged, llm, _report,
-            )
-            if doc_boundaries:
-                merged = self._insert_doc_boundaries(
-                    merged, doc_boundaries,
+            with profiler.stage("llm.doc_boundary"):
+                doc_boundaries = await self._detect_doc_boundaries(
+                    merged, llm, _report,
                 )
+                if doc_boundaries:
+                    merged = self._insert_doc_boundaries(
+                        merged, doc_boundaries,
+                    )
 
         # LLM 精修
         if cloud_blocked:
             refined_results: list[RefinedResult] = []
             all_gaps: list[Gap] = []
         else:
-            refined_results, all_gaps = (
-                await self._refine_segments(
-                    merged, output_dir, llm, _report,
+            with profiler.stage("llm.refine_phase"):
+                refined_results, all_gaps = (
+                    await self._refine_segments(
+                        merged, output_dir, llm, _report,
+                    )
                 )
-            )
 
         # 重组
-        reassembled = self._reassemble(refined_results, merged)
+        with profiler.stage("reassemble"):
+            reassembled = self._reassemble(refined_results, merged)
         await self._save_debug(
             output_dir, "reassembled.md", reassembled.markdown,
         )
 
         # 按文档边界拆分
-        sub_docs = self._split_by_doc_boundaries(
-            reassembled, pages,
-        )
+        with profiler.stage("doc_split"):
+            sub_docs = self._split_by_doc_boundaries(
+                reassembled, pages,
+            )
         _report(
             "doc_split", 0, 1,
             f"检测到 {len(sub_docs)} 篇文档",
@@ -386,72 +491,90 @@ class Pipeline:
         # 每个子文档独立后处理
         results: list[PipelineResult] = []
         for di, (title, page_names, sub_doc) in enumerate(sub_docs):
-            sub_output = self._resolve_sub_output_dir(
-                output_dir, title, di, len(sub_docs),
-            )
-            await asyncio.to_thread(
-                sub_output.mkdir, parents=True, exist_ok=True,
-            )
-
-            # 过滤该子文档的 pages 和 gaps
-            page_name_set = set(page_names)
-            sub_pages = [
-                p for p in pages
-                if p.image_path.name in page_name_set
-            ]
-            sub_gaps = [
-                g for g in all_gaps
-                if g.after_image in page_name_set
-            ]
-
-            sub_truncated = False
-            if not cloud_blocked:
-                sub_doc = await self._maybe_fill_gaps(
-                    sub_doc, sub_gaps, sub_pages,
-                    sub_output, llm, gpu_lock,
-                    _report, entity_lexicon,
+            with profiler.stage(
+                "doc.postprocess",
+                doc_index=di + 1,
+                doc_total=len(sub_docs),
+                title=title,
+            ):
+                sub_output = self._resolve_sub_output_dir(
+                    output_dir, title, di, len(sub_docs),
                 )
-                sub_doc, sub_truncated = (
-                    await self._do_final_refine(
-                        sub_doc, sub_output, llm, _report,
+                await asyncio.to_thread(
+                    sub_output.mkdir, parents=True, exist_ok=True,
+                )
+
+                # 过滤该子文档的 pages 和 gaps
+                page_name_set = set(page_names)
+                sub_pages = [
+                    p for p in pages
+                    if p.image_path.name in page_name_set
+                ]
+                sub_gaps = [
+                    g for g in all_gaps
+                    if g.after_image in page_name_set
+                ]
+
+                sub_truncated = False
+                if not cloud_blocked:
+                    with profiler.stage(
+                        "llm.gap_fill_phase",
+                        num_gaps=len(sub_gaps),
+                    ):
+                        sub_doc = await self._maybe_fill_gaps(
+                            sub_doc, sub_gaps, sub_pages,
+                            sub_output, llm, gpu_lock,
+                            _report, entity_lexicon,
+                        )
+                    with profiler.stage("llm.final_refine"):
+                        sub_doc, sub_truncated = (
+                            await self._do_final_refine(
+                                sub_doc, sub_output, llm, _report,
+                            )
+                        )
+
+                _, extra_gaps = parse_gaps(sub_doc.markdown)
+                sub_gaps.extend(extra_gaps)
+
+                # 输出
+                label = (
+                    f" ({di + 1}/{len(sub_docs)})"
+                    if len(sub_docs) > 1 else ""
+                )
+                _report(
+                    "render", di + 1, len(sub_docs),
+                    f"渲染输出{label}...",
+                )
+                with profiler.stage("render.write"):
+                    renderer = Renderer(self._config.output)
+                    doc_path = await renderer.render(
+                        sub_doc, sub_output, ocr_root_dir=output_dir,
                     )
+
+                # 聚合警告
+                warnings = self._collect_warnings(
+                    refined_results, sub_gaps, sub_truncated,
                 )
+                if cloud_blocked:
+                    warnings.append(
+                        "PII 实体检测失败，已阻断云端 LLM 调用",
+                    )
 
-            _, extra_gaps = parse_gaps(sub_doc.markdown)
-            sub_gaps.extend(extra_gaps)
-
-            # 输出
-            label = f" ({di + 1}/{len(sub_docs)})" if len(sub_docs) > 1 else ""
-            _report("render", di + 1, len(sub_docs), f"渲染输出{label}...")
-            renderer = Renderer(self._config.output)
-            doc_path = await renderer.render(
-                sub_doc, sub_output, ocr_root_dir=output_dir,
-            )
-
-            # 聚合警告
-            warnings = self._collect_warnings(
-                refined_results, sub_gaps, sub_truncated,
-            )
-            if cloud_blocked:
-                warnings.append(
-                    "PII 实体检测失败，已阻断云端 LLM 调用",
+                doc_dir = (
+                    "" if sub_output == output_dir
+                    else sub_output.name
                 )
-
-            doc_dir = (
-                "" if sub_output == output_dir
-                else sub_output.name
-            )
-            final_md = doc_path.read_text(encoding="utf-8")
-            results.append(PipelineResult(
-                output_path=doc_path,
-                markdown=final_md,
-                images=sub_doc.images,
-                gaps=sub_gaps,
-                warnings=warnings,
-                redaction_records=redaction_records,
-                doc_title=title,
-                doc_dir=doc_dir,
-            ))
+                final_md = doc_path.read_text(encoding="utf-8")
+                results.append(PipelineResult(
+                    output_path=doc_path,
+                    markdown=final_md,
+                    images=sub_doc.images,
+                    gaps=sub_gaps,
+                    warnings=warnings,
+                    redaction_records=redaction_records,
+                    doc_title=title,
+                    doc_dir=doc_dir,
+                ))
 
         return results
 
@@ -463,7 +586,13 @@ class Pipeline:
         report_fn: ReportFn,
         ocr: OCRConfig | None = None,
     ) -> list[PageOCR]:
-        """逐张 OCR → 清洗，返回 PageOCR 列表。"""
+        """OCR（支持 batch 并发）→ 清洗，返回 PageOCR 列表。
+
+        - ocr_batch_size >= 2 且引擎支持 `ocr_batch` → 一次性提交所有图，
+          引擎内部按 batch_size 分块并发，vLLM 做 continuous batching。
+        - 否则回退到逐张 ocr()（保留旧路径）。
+        gpu_lock 覆盖整个 ocr_batch 调用或每次单图调用。
+        """
         # 通过 EngineManager 获取正确引擎（按需切换）
         if self._engine_manager is not None:
             # 引擎初始化进度 → 通过 report_fn 推送到前端（stage="init"）
@@ -478,28 +607,79 @@ class Pipeline:
         else:
             msg = "OCR 引擎未初始化"
             raise RuntimeError(msg)
+
+        ocr_cfg = ocr or self._config.ocr
+        batch_size = max(1, ocr_cfg.ocr_batch_size)
+        pages = await self._run_ocr(
+            engine, images, output_dir,
+            gpu_lock, report_fn, batch_size,
+        )
+
+        # 清洗 + 落盘 debug（纯 CPU/IO，与 GPU 无关，顺序处理即可）
+        profiler = current_profiler()
         cleaner = OCRCleaner()
-        pages: list[PageOCR] = []
-
-        for i, img in enumerate(images):
-            if gpu_lock is not None:
-                async with gpu_lock:
-                    page = await engine.ocr(img, output_dir)
-            else:
-                page = await engine.ocr(img, output_dir)
-
-            report_fn(
-                "ocr", i + 1, len(images),
-                f"OCR 第 {i + 1}/{len(images)} 张...",
+        for page in pages:
+            with profiler.stage(
+                "cleaner.page", stem=page.image_path.stem,
+            ):
+                await cleaner.clean(page)
+            await self._save_debug(
+                output_dir,
+                f"{page.image_path.stem}_cleaned.md",
+                page.cleaned_text,
             )
 
-            await cleaner.clean(page)
-            stem = page.image_path.stem
-            await self._save_debug(
-                output_dir, f"{stem}_cleaned.md", page.cleaned_text,
+        return pages
+
+    async def _run_ocr(
+        self,
+        engine: OCREngine,
+        images: list[Path],
+        output_dir: Path,
+        gpu_lock: asyncio.Lock | None,
+        report_fn: ReportFn,
+        batch_size: int,
+    ) -> list[PageOCR]:
+        """OCR 调度：batch_size>=2 走 ocr_batch，否则逐张 ocr。"""
+        profiler = current_profiler()
+        total = len(images)
+
+        def _on_batch_progress(done: int, tot: int) -> None:
+            report_fn(
+                "ocr", done, tot, f"OCR {done}/{tot}...",
+            )
+
+        # 只有 WorkerBackedOCREngine 子类才有真正的 ocr_batch 实现
+        # （避免 AsyncMock 等测试替身让 hasattr/iscoroutinefunction 误判）
+        if batch_size >= 2 and isinstance(engine, WorkerBackedOCREngine):
+            with profiler.stage(
+                "ocr.batch",
+                num_images=total,
+                batch_size=batch_size,
+            ):
+                if gpu_lock is not None:
+                    async with gpu_lock:
+                        return await engine.ocr_batch(
+                            images, output_dir, _on_batch_progress,
+                        )
+                return await engine.ocr_batch(
+                    images, output_dir, _on_batch_progress,
+                )
+
+        # Fallback：逐张 ocr()，保留旧路径
+        pages: list[PageOCR] = []
+        for i, img in enumerate(images):
+            with profiler.stage("ocr.single", stem=img.stem):
+                if gpu_lock is not None:
+                    async with gpu_lock:
+                        page = await engine.ocr(img, output_dir)
+                else:
+                    page = await engine.ocr(img, output_dir)
+            report_fn(
+                "ocr", i + 1, total,
+                f"OCR 第 {i + 1}/{total} 张...",
             )
             pages.append(page)
-
         return pages
 
     async def _refine_segments(
@@ -517,11 +697,13 @@ class Pipeline:
             llm_cfg = llm
             refiner = self._create_refiner(llm_cfg)
 
-        segmenter = DocumentSegmenter(
-            max_chars_per_segment=llm_cfg.max_chars_per_segment,
-            overlap_lines=llm_cfg.segment_overlap_lines,
-        )
-        segments = segmenter.segment(merged.markdown)
+        profiler = current_profiler()
+        with profiler.stage("llm.segment"):
+            segmenter = DocumentSegmenter(
+                max_chars_per_segment=llm_cfg.max_chars_per_segment,
+                overlap_lines=llm_cfg.segment_overlap_lines,
+            )
+            segments = segmenter.segment(merged.markdown)
 
         all_gaps: list[Gap] = []
         refined_results: list[RefinedResult] = []
@@ -535,7 +717,15 @@ class Pipeline:
                 output_dir, f"segments/{i}_input.md", seg.text
             )
 
-            result = await self._refine_one_segment(refiner, seg.text, i, len(segments))
+            with profiler.stage(
+                "llm.refine_segment",
+                index=i + 1,
+                total=len(segments),
+                input_chars=len(seg.text),
+            ):
+                result = await self._refine_one_segment(
+                    refiner, seg.text, i, len(segments),
+                )
 
             # 截断检测：行数比例启发式（finish_reason 已标记的不重复检测）
             input_lines = seg.text.count("\n") + 1
@@ -846,6 +1036,7 @@ class Pipeline:
         reocr_cache: dict[str, str] = {}
         markdown = doc.markdown
         filled_count = 0
+        profiler = current_profiler()
 
         for gi, gap in enumerate(gaps):
             report_fn(
@@ -862,11 +1053,17 @@ class Pipeline:
                 continue
 
             try:
-                filled_text = await self._fill_one_gap(
-                    gap, page_map, page_order,
-                    reocr_cache, gpu_lock, refiner,
-                    entity_lexicon,
-                )
+                with profiler.stage(
+                    "llm.gap_fill_one",
+                    after_image=gap.after_image,
+                    index=gi + 1,
+                    total=len(gaps),
+                ):
+                    filled_text = await self._fill_one_gap(
+                        gap, page_map, page_order,
+                        reocr_cache, gpu_lock, refiner,
+                        entity_lexicon,
+                    )
             except Exception:
                 logger.warning(
                     "缺口补充失败（after_image=%s），跳过",

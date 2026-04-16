@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import signal
+from collections.abc import Callable
 from pathlib import Path
 
 from docrestore.models import PageOCR, Region
@@ -37,6 +38,10 @@ from docrestore.ocr.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _OOMError(RuntimeError):
+    """Worker 侧显存不足 —— 触发 batch_size 降级重试。"""
 
 
 def _extract_stderr_message(line: str) -> str | None:
@@ -139,6 +144,12 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
                 self._config.vllm_disable_mm_preprocessor_cache
             ),
             "vllm_disable_log_stats": self._config.vllm_disable_log_stats,
+            # GPU 监控配置（worker 内后台 task）
+            "gpu_monitor_enable": self._config.gpu_monitor_enable,
+            "gpu_monitor_interval_s": self._config.gpu_monitor_interval_s,
+            "gpu_memory_safety_margin_mib": (
+                self._config.gpu_memory_safety_margin_mib
+            ),
         }
         return cmd
 
@@ -233,32 +244,149 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
         })
 
         if not resp.get("ok"):
-            error = resp.get("error", "未知错误")
+            error = str(resp.get("error", "未知错误"))
+            if self._is_oom_error(error):
+                raise _OOMError(error)
             msg = f"DeepSeek-OCR-2 处理失败: {error}"
             raise RuntimeError(msg)
 
-        raw_text = str(resp.get("raw_text", ""))
-        image_size_raw = resp.get("image_size", [0, 0])
-        if not isinstance(image_size_raw, list) or len(image_size_raw) < 2:
-            image_size_raw = [0, 0]
-        image_size: tuple[int, int] = (
-            int(image_size_raw[0]),
-            int(image_size_raw[1]),
-        )
-        has_eos = bool(resp.get("has_eos", True))
-        resp_ocr_dir = resp.get("ocr_dir")
-        actual_ocr_dir = Path(str(resp_ocr_dir)) if resp_ocr_dir else ocr_dir
+        return self._parse_single_result(resp, image_path, ocr_dir)
 
-        regions = self._parse_regions(resp.get("regions", []), actual_ocr_dir)
+    async def ocr_batch(
+        self,
+        image_paths: list[Path],
+        output_dir: Path,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> list[PageOCR]:
+        """批量 OCR：一次向 worker 提交 N 张图，worker 内并发处理。
 
-        return PageOCR(
-            image_path=image_path,
-            image_size=image_size,
-            raw_text=raw_text,
-            regions=regions,
-            output_dir=actual_ocr_dir,
-            has_eos=has_eos,
-        )
+        - batch_size < 2 时回退基类逐张实现（保留对照路径）。
+        - 已有 result.mmd 的图跳过 worker，直接从磁盘加载。
+        - OOM 时按 batch_size 对半降级重试，单图仍 OOM 才抛 RuntimeError。
+        """
+        await self._recover_desync_if_needed()
+
+        batch_size = max(1, self._config.ocr_batch_size)
+        if batch_size < 2:
+            return await super().ocr_batch(
+                image_paths, output_dir, on_progress,
+            )
+
+        total = len(image_paths)
+        results: dict[Path, PageOCR] = {}
+        pending: list[Path] = []
+
+        completed = 0
+        for path in image_paths:
+            ocr_dir = output_dir / f"{path.stem}_OCR"
+            if (ocr_dir / OCR_RESULT_FILENAME).exists():
+                logger.info("跳过已有OCR结果: %s", path.name)
+                results[path] = await self._load_existing_ocr(path, ocr_dir)
+                completed += 1
+                if on_progress is not None:
+                    on_progress(completed, total)
+            else:
+                pending.append(path)
+
+        if pending:
+            processed = await self._send_ocr_batch_with_oom_retry(
+                pending, output_dir, batch_size,
+                on_progress, completed, total,
+            )
+            results.update(processed)
+
+        return [results[p] for p in image_paths if p in results]
+
+    async def _send_ocr_batch_with_oom_retry(
+        self,
+        pending: list[Path],
+        output_dir: Path,
+        batch_size: int,
+        on_progress: Callable[[int, int], None] | None,
+        already_done: int,
+        total: int,
+    ) -> dict[Path, PageOCR]:
+        """按 batch_size 分块发送；遇 OOM 对半降级，不再回升避免震荡。"""
+        results: dict[Path, PageOCR] = {}
+        i = 0
+        current_size = max(1, batch_size)
+        completed = already_done
+        while i < len(pending):
+            chunk = pending[i : i + current_size]
+            try:
+                chunk_results = await self._send_ocr_batch_all(
+                    chunk, output_dir,
+                )
+            except _OOMError as exc:
+                if current_size == 1:
+                    msg = f"DeepSeek-OCR-2 单图 OCR 显存不足: {exc}"
+                    raise RuntimeError(msg) from exc
+                new_size = max(1, current_size // 2)
+                logger.warning(
+                    "DeepSeek-OCR-2 batch OOM，降级 %d → %d",
+                    current_size, new_size,
+                )
+                current_size = new_size
+                continue
+
+            results.update(chunk_results)
+            i += len(chunk)
+            completed += len(chunk)
+            if on_progress is not None:
+                on_progress(completed, total)
+
+        return results
+
+    async def _send_ocr_batch_all(
+        self,
+        chunk: list[Path],
+        output_dir: Path,
+    ) -> dict[Path, PageOCR]:
+        """发送单个 chunk 并解析 worker 的 batch 响应。"""
+        resp = await self._send_command({
+            "cmd": "ocr_batch",
+            "image_paths": [str(p) for p in chunk],
+            "output_dir": str(output_dir),
+            "enable_column_filter": self._config.enable_column_filter,
+            "column_filter_min_sidebar": self._config.column_filter_min_sidebar,
+        })
+
+        if not resp.get("ok"):
+            error = str(resp.get("error", "未知错误"))
+            if self._is_oom_error(error):
+                raise _OOMError(error)
+            msg = f"DeepSeek-OCR-2 batch 处理失败: {error}"
+            raise RuntimeError(msg)
+
+        items_raw = resp.get("results", [])
+        if not isinstance(items_raw, list):
+            msg = (
+                "DeepSeek-OCR-2 batch 返回 results 非列表: "
+                f"{type(items_raw).__name__}"
+            )
+            raise RuntimeError(msg)
+
+        results: dict[Path, PageOCR] = {}
+        for idx, item in enumerate(items_raw):
+            if not isinstance(item, dict) or idx >= len(chunk):
+                continue
+            image_path = chunk[idx]
+
+            if not item.get("ok"):
+                error = str(item.get("error", "未知错误"))
+                if self._is_oom_error(error):
+                    raise _OOMError(error)
+                msg = (
+                    f"DeepSeek-OCR-2 处理 {image_path.name} 失败: {error}"
+                )
+                raise RuntimeError(msg)
+
+            fallback_ocr_dir = output_dir / f"{image_path.stem}_OCR"
+            results[image_path] = self._parse_single_result(
+                item, image_path, fallback_ocr_dir,
+            )
+
+        return results
 
     async def reocr_page(self, image_path: Path) -> str:
         """对整页图片重新 OCR，返回清洗后的 markdown（gap fill 用）。"""
@@ -275,6 +403,47 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
             raise RuntimeError(msg)
 
         return str(resp.get("raw_text", ""))
+
+    def _parse_single_result(
+        self,
+        item: dict[str, object],
+        image_path: Path,
+        fallback_ocr_dir: Path,
+    ) -> PageOCR:
+        """从 worker 单张/批响应项构造 PageOCR（ocr/ocr_batch 共用）。"""
+        raw_text = str(item.get("raw_text", ""))
+        image_size_raw = item.get("image_size", [0, 0])
+        if not isinstance(image_size_raw, list) or len(image_size_raw) < 2:
+            image_size_raw = [0, 0]
+        image_size: tuple[int, int] = (
+            int(image_size_raw[0]),
+            int(image_size_raw[1]),
+        )
+        has_eos = bool(item.get("has_eos", True))
+        resp_ocr_dir = item.get("ocr_dir")
+        actual_ocr_dir = (
+            Path(str(resp_ocr_dir)) if resp_ocr_dir else fallback_ocr_dir
+        )
+        regions = self._parse_regions(item.get("regions", []), actual_ocr_dir)
+
+        return PageOCR(
+            image_path=image_path,
+            image_size=image_size,
+            raw_text=raw_text,
+            regions=regions,
+            output_dir=actual_ocr_dir,
+            has_eos=has_eos,
+        )
+
+    @staticmethod
+    def _is_oom_error(err: str) -> bool:
+        """判定错误字符串是否为 CUDA OOM（触发 batch 降级重试）。"""
+        low = err.lower()
+        return (
+            "out of memory" in low
+            or "cuda out of memory" in low
+            or "oom" in low
+        )
 
     @staticmethod
     def _parse_regions(
