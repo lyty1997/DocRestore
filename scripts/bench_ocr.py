@@ -75,13 +75,14 @@ if TYPE_CHECKING:
 # ── PaddleOCR 优化配置（写成 YAML 由 paddlex 转成 vLLM CLI 参数） ──
 # paddlex 只透传 YAML 中出现的键，不出现的仍用 PaddleOCR 默认（含
 # gpu-memory-utilization=0.85 / max-model-len=16384 / api-server-count=4 等）。
-# 这里只覆盖两引擎共有的 5 项优化。
-# 注意：vLLM CLI --block-size 仅接受 {1,8,16,32,64,128}，官方参考脚本的 256
-#       仅在 Python API 内部有效，CLI 路径要降到 128。
+# 注意：
+#   - vLLM CLI --block-size 仅接受 {1,8,16,32,64,128}，官方参考脚本的 256
+#     仅在 Python API 内部有效，CLI 路径要降到 128。
+#   - 不设置 enforce_eager（PaddleOCR 默认 CUDA Graph 已开启，设 True 反而
+#     会禁用 CUDA Graph 导致明显回退；实测 +70% 延迟）。
 PADDLE_OPTIMIZED_BACKEND_CONFIG: dict[str, object] = {
     "block_size": 128,
     "swap_space": 0,
-    "enforce_eager": True,
     "disable_mm_preprocessor_cache": True,
     "disable_log_stats": True,
 }
