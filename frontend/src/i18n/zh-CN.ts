@@ -1,0 +1,189 @@
+/**
+ * 简体中文翻译（默认语言，也是翻译键的来源）
+ */
+
+export const zhCN = {
+  // ── 通用 ──
+  "common.cancel": "取消",
+  "common.confirm": "确认",
+  "common.delete": "删除",
+  "common.save": "保存",
+  "common.saving": "保存中...",
+  "common.saveFailed": "保存失败",
+  "common.retry": "重试",
+  "common.loading": "加载中...",
+  "common.close": "关闭",
+  "common.clear": "清除",
+  "common.enabled": "已开启",
+  "common.disabled": "已关闭",
+  "common.preview": "预览",
+  "common.edit": "编辑",
+  "common.dateLocale": "zh-CN",
+
+  // ── 状态（任务列表 + 任务详情共用）──
+  "status.pending": "等待中",
+  "status.processing": "处理中",
+  "status.completed": "已完成",
+  "status.failed": "已失败",
+
+  // ── 侧边栏 ──
+  "sidebar.newTask": "新建任务",
+  "sidebar.expandSidebar": "展开侧边栏",
+  "sidebar.collapseSidebar": "折叠侧边栏",
+  "sidebar.expand": "展开",
+  "sidebar.collapse": "折叠",
+  "sidebar.switchDayMode": "切换日间模式",
+  "sidebar.switchNightMode": "切换夜间模式",
+  "sidebar.dayMode": "☀ 日间模式",
+  "sidebar.nightMode": "☾ 夜间模式",
+  "sidebar.apiTokenSettings": "API Token 设置",
+  "sidebar.apiToken": "API Token",
+  "sidebar.resizeSidebar": "调整侧边栏宽度",
+
+  // ── 任务列表 ──
+  "taskList.title": "任务列表",
+  "taskList.empty": "暂无任务",
+  "taskList.loadMore": "加载更多",
+
+  // ── 任务表单 ──
+  "taskForm.sourceLabel": "图片来源",
+  "taskForm.outputDirLabel": "输出目录",
+  "taskForm.outputDirPlaceholder": "留空则自动生成到 /tmp/docrestore_xxx",
+  "taskForm.browse": "浏览...",
+  "taskForm.ocrEngine": "OCR 引擎",
+  "taskForm.gpu": "GPU",
+  "taskForm.paddleOcrName": "PaddleOCR-VL（推荐）",
+  "taskForm.paddleOcrDesc": "轻量快速，适合常规文档，CPU/GPU 均可运行",
+  "taskForm.deepseekOcrName": "DeepSeek-OCR-2",
+  "taskForm.deepseekOcrDesc": "高精度大模型，适合复杂版面，需要 GPU",
+  "taskForm.gpu0": "GPU 0 (A2)",
+  "taskForm.gpu1": "GPU 1 (RTX 4070 Super)",
+  "taskForm.llmConfigExpanded": "▾ LLM 精修配置",
+  "taskForm.llmConfigCollapsed": "▸ LLM 精修配置",
+  "taskForm.modelName": "模型名称",
+  "taskForm.modelNamePlaceholder": "例如 openai/gpt-4o、openai/glm-5",
+  "taskForm.apiBaseUrl": "API Base URL",
+  "taskForm.apiBaseUrlPlaceholder": "留空使用默认地址",
+  "taskForm.apiKey": "API Key",
+  "taskForm.apiKeyPlaceholder": "留空使用服务器默认密钥",
+  "taskForm.rememberConfig": "记住配置",
+  "taskForm.llmHint":
+    "不填则跳过 LLM 精修，仅输出 OCR 原始结果。模型名称使用 litellm 格式（provider/model）。",
+  "taskForm.storageWarning": " 配置（含 API Key）将以明文存储在浏览器本地。",
+  "taskForm.piiTitle": "脱敏功能",
+  "taskForm.piiDesc":
+    "开启后自动检测并脱敏手机号、邮箱、身份证号等隐私信息。也可添加自定义敏感词，无需开启即生效。",
+  "taskForm.piiWordPlaceholder": "输入自定义敏感词，按回车添加",
+  "taskForm.piiCodePlaceholder": "代号（可选，留空用默认占位符）",
+  "taskForm.piiWordAdd": "添加",
+  "taskForm.piiWordRemove": "移除 {word}",
+  "taskForm.startProcessing": "开始处理",
+
+  // ── 任务进度 ──
+  "taskProgress.stageInit": "引擎初始化",
+  "taskProgress.stageOcr": "OCR 识别",
+  "taskProgress.stageClean": "文本清洗",
+  "taskProgress.stageMerge": "去重合并",
+  "taskProgress.stageRefine": "LLM 精修",
+  "taskProgress.stageRender": "渲染输出",
+  "taskProgress.waiting": "等待开始",
+  "taskProgress.taskLabel": "任务：{taskId}",
+  "taskProgress.polling": "轮询",
+
+  // ── 任务结果 ──
+  "taskResult.title": "处理结果",
+  "taskResult.downloadZip": "下载结果（zip）",
+  "taskResult.docTab": "文档 {index}",
+  "taskResult.processNew": "处理新文档",
+  "taskResult.resetBtn": "重新开始",
+
+  // ── 任务详情 ──
+  "taskDetail.title": "任务详情",
+  "taskDetail.idLabel": "ID: {taskId}",
+  "taskDetail.cancelTask": "取消任务",
+  "taskDetail.cancelConfirm": "确定要取消任务 {taskId} 吗？",
+  "taskDetail.deleteTask": "删除任务",
+  "taskDetail.deleteConfirm":
+    "确定要删除任务 {taskId} 及其所有产物吗？此操作不可撤销。",
+  "taskDetail.downloadZip": "下载结果（zip）",
+  "taskDetail.errorLabel": "错误：",
+  "taskDetail.loadingResults": "加载结果...",
+  "taskDetail.docPreview": "文档预览",
+  "taskDetail.noResults": "暂无可用结果",
+  "taskDetail.loadError": "加载任务信息失败",
+  "taskDetail.loadingTask": "加载任务信息...",
+  "taskDetail.cancelFailed": "取消失败",
+  "taskDetail.deleteFailed": "删除失败",
+  "taskDetail.retryFailed": "重试失败",
+
+  // ── App 级别 ──
+  "app.processingFailed": "处理失败",
+  "app.unknownError": "未知错误",
+
+  // ── 回到顶部 ──
+  "backToTop.label": "回到顶部",
+
+  // ── Token 设置 ──
+  "tokenSettings.title": "API Token",
+  "tokenSettings.hintPrefix": "对应服务端环境变量 ",
+  "tokenSettings.hintSuffix": "。未设置时留空即可。",
+  "tokenSettings.placeholder": "粘贴 API Token",
+  "tokenSettings.ariaLabel": "API Token 设置",
+
+  // ── 文件上传 ──
+  "fileUploader.selectFiles": "选择图片文件",
+  "fileUploader.selectDir": "选择目录",
+  "fileUploader.fileTypeHint":
+    "支持 JPG、PNG、BMP、TIFF 格式。选择目录时自动遍历子目录。",
+  "fileUploader.uploading": "正在上传... {uploaded} / {total}",
+  "fileUploader.cancelUpload": "取消上传",
+  "fileUploader.uploadComplete": "上传完成：{count} 个文件",
+  "fileUploader.skippedFiles": "跳过 {count} 个不支持的文件",
+  "fileUploader.useUploaded": "使用已上传文件",
+  "fileUploader.confirmed": "已确认",
+  "fileUploader.reselect": "重新选择",
+  "fileUploader.uploadFailed": "上传失败",
+
+  // ── 目录选择 ──
+  "dirPicker.title": "选择输出目录",
+  "dirPicker.currentPath": "当前路径：",
+  "dirPicker.parentDir": ".. (上级目录)",
+  "dirPicker.emptyDir": "（空目录）",
+  "dirPicker.newDirPlaceholder": "输入新目录名（可选，留空则使用当前目录）",
+  "dirPicker.selectWithDir": "选择: {path}/{dir}",
+  "dirPicker.selectPath": "选择: {path}",
+  "dirPicker.accessError": "无法访问目录",
+
+  // ── 原图面板 ──
+  "sourceImages.title": "原图（点击放大）",
+  "sourceImages.lightboxAlt": "放大查看",
+
+  // ── 上传预览 ──
+  "uploadPreview.title": "上传预览",
+  "uploadPreview.photoCount": "{count} 张照片",
+  "uploadPreview.groupCount": "{count} 张",
+  "uploadPreview.ungrouped": "未分组",
+  "uploadPreview.noImages": "当前没有可用图片",
+  "uploadPreview.deleting": "删除中...",
+
+  // ── 来源选择（本地/服务器） ──
+  "sourcePicker.localTab": "本地",
+  "sourcePicker.serverTab": "服务器",
+  "sourcePicker.currentPath": "当前路径：",
+  "sourcePicker.parentDir": ".. (上级目录)",
+  "sourcePicker.emptyDir": "（当前目录下无图片和子目录）",
+  "sourcePicker.useThisDir": "使用当前目录",
+  "sourcePicker.useSelectedFiles": "使用选中的 {count} 个文件",
+  "sourcePicker.confirmed": "已选择：{path}",
+  "sourcePicker.reset": "重新选择",
+  "sourcePicker.browseError": "浏览目录失败",
+  "sourcePicker.stageError": "服务器文件登记失败",
+  "sourcePicker.fileCheckboxAria": "选择 {name}",
+  "sourcePicker.pathPlaceholder": "直接输入服务器路径（可选）",
+  "sourcePicker.goPath": "跳转",
+  "sourcePicker.sizeKB": "{size} KB",
+  "sourcePicker.imageCount": "{count} 张",
+} as const satisfies Record<string, string>;
+
+/** 翻译键类型——从 zhCN 自动推导，其他 locale 文件必须实现全部 key */
+export type TranslationKey = keyof typeof zhCN;

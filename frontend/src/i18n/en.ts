@@ -1,0 +1,197 @@
+/**
+ * English translations
+ *
+ * Type constraint: must implement all keys from zhCN.
+ * Missing any key will cause a compile error.
+ */
+
+import type { TranslationKey } from "./zh-CN";
+
+export const en: Record<TranslationKey, string> = {
+  // ── Common ──
+  "common.cancel": "Cancel",
+  "common.confirm": "Confirm",
+  "common.delete": "Delete",
+  "common.save": "Save",
+  "common.saving": "Saving...",
+  "common.saveFailed": "Save failed",
+  "common.retry": "Retry",
+  "common.loading": "Loading...",
+  "common.close": "Close",
+  "common.clear": "Clear",
+  "common.enabled": "Enabled",
+  "common.disabled": "Disabled",
+  "common.preview": "Preview",
+  "common.edit": "Edit",
+  "common.dateLocale": "en-US",
+
+  // ── Status ──
+  "status.pending": "Pending",
+  "status.processing": "Processing",
+  "status.completed": "Completed",
+  "status.failed": "Failed",
+
+  // ── Sidebar ──
+  "sidebar.newTask": "New Task",
+  "sidebar.expandSidebar": "Expand sidebar",
+  "sidebar.collapseSidebar": "Collapse sidebar",
+  "sidebar.expand": "Expand",
+  "sidebar.collapse": "Collapse",
+  "sidebar.switchDayMode": "Switch to light mode",
+  "sidebar.switchNightMode": "Switch to dark mode",
+  "sidebar.dayMode": "☀ Light",
+  "sidebar.nightMode": "☾ Dark",
+  "sidebar.apiTokenSettings": "API Token Settings",
+  "sidebar.apiToken": "API Token",
+  "sidebar.resizeSidebar": "Resize sidebar",
+
+  // ── Task list ──
+  "taskList.title": "Tasks",
+  "taskList.empty": "No tasks yet",
+  "taskList.loadMore": "Load More",
+
+  // ── Task form ──
+  "taskForm.sourceLabel": "Image Source",
+  "taskForm.outputDirLabel": "Output Directory",
+  "taskForm.outputDirPlaceholder":
+    "Leave empty for auto-generated path (/tmp/docrestore_xxx)",
+  "taskForm.browse": "Browse...",
+  "taskForm.ocrEngine": "OCR Engine",
+  "taskForm.gpu": "GPU",
+  "taskForm.paddleOcrName": "PaddleOCR-VL (Recommended)",
+  "taskForm.paddleOcrDesc":
+    "Lightweight and fast, suitable for standard documents, runs on CPU/GPU",
+  "taskForm.deepseekOcrName": "DeepSeek-OCR-2",
+  "taskForm.deepseekOcrDesc":
+    "High-precision large model, suitable for complex layouts, requires GPU",
+  "taskForm.gpu0": "GPU 0 (A2)",
+  "taskForm.gpu1": "GPU 1 (RTX 4070 Super)",
+  "taskForm.llmConfigExpanded": "▾ LLM Refinement Settings",
+  "taskForm.llmConfigCollapsed": "▸ LLM Refinement Settings",
+  "taskForm.modelName": "Model Name",
+  "taskForm.modelNamePlaceholder": "e.g. openai/gpt-4o, openai/glm-5",
+  "taskForm.apiBaseUrl": "API Base URL",
+  "taskForm.apiBaseUrlPlaceholder": "Leave empty for default URL",
+  "taskForm.apiKey": "API Key",
+  "taskForm.apiKeyPlaceholder": "Leave empty to use server default key",
+  "taskForm.rememberConfig": "Remember settings",
+  "taskForm.llmHint":
+    "Leave empty to skip LLM refinement and output raw OCR results. Model name uses litellm format (provider/model).",
+  "taskForm.storageWarning":
+    " Settings (including API Key) are stored in plaintext in your browser.",
+  "taskForm.piiTitle": "Privacy Redaction",
+  "taskForm.piiDesc":
+    "When enabled, automatically detects and masks phone numbers, emails, ID numbers, and other PII. Custom sensitive words can also be added and work even when this is off.",
+  "taskForm.piiWordPlaceholder": "Enter a sensitive word, press Enter to add",
+  "taskForm.piiCodePlaceholder": "Code (optional, falls back to default placeholder)",
+  "taskForm.piiWordAdd": "Add",
+  "taskForm.piiWordRemove": "Remove {word}",
+  "taskForm.startProcessing": "Start Processing",
+
+  // ── Task progress ──
+  "taskProgress.stageInit": "Engine Init",
+  "taskProgress.stageOcr": "OCR Recognition",
+  "taskProgress.stageClean": "Text Cleaning",
+  "taskProgress.stageMerge": "Dedup & Merge",
+  "taskProgress.stageRefine": "LLM Refinement",
+  "taskProgress.stageRender": "Render Output",
+  "taskProgress.waiting": "Waiting to start",
+  "taskProgress.taskLabel": "Task: {taskId}",
+  "taskProgress.polling": "Polling",
+
+  // ── Task result ──
+  "taskResult.title": "Results",
+  "taskResult.downloadZip": "Download Results (zip)",
+  "taskResult.docTab": "Document {index}",
+  "taskResult.processNew": "Process New Document",
+  "taskResult.resetBtn": "Start Over",
+
+  // ── Task detail ──
+  "taskDetail.title": "Task Detail",
+  "taskDetail.idLabel": "ID: {taskId}",
+  "taskDetail.cancelTask": "Cancel Task",
+  "taskDetail.cancelConfirm":
+    "Are you sure you want to cancel task {taskId}?",
+  "taskDetail.deleteTask": "Delete Task",
+  "taskDetail.deleteConfirm":
+    "Are you sure you want to delete task {taskId} and all its outputs? This action cannot be undone.",
+  "taskDetail.downloadZip": "Download Results (zip)",
+  "taskDetail.errorLabel": "Error: ",
+  "taskDetail.loadingResults": "Loading results...",
+  "taskDetail.docPreview": "Document Preview",
+  "taskDetail.noResults": "No results available",
+  "taskDetail.loadError": "Failed to load task info",
+  "taskDetail.loadingTask": "Loading task info...",
+  "taskDetail.cancelFailed": "Cancel failed",
+  "taskDetail.deleteFailed": "Delete failed",
+  "taskDetail.retryFailed": "Retry failed",
+
+  // ── App-level ──
+  "app.processingFailed": "Processing Failed",
+  "app.unknownError": "Unknown error",
+
+  // ── Back to top ──
+  "backToTop.label": "Back to top",
+
+  // ── Token settings ──
+  "tokenSettings.title": "API Token",
+  "tokenSettings.hintPrefix": "Corresponds to server environment variable ",
+  "tokenSettings.hintSuffix": ". Leave empty if not configured.",
+  "tokenSettings.placeholder": "Paste API Token",
+  "tokenSettings.ariaLabel": "API Token Settings",
+
+  // ── File uploader ──
+  "fileUploader.selectFiles": "Select Image Files",
+  "fileUploader.selectDir": "Select Directory",
+  "fileUploader.fileTypeHint":
+    "Supports JPG, PNG, BMP, TIFF formats. Selecting a directory traverses subdirectories automatically.",
+  "fileUploader.uploading": "Uploading... {uploaded} / {total}",
+  "fileUploader.cancelUpload": "Cancel Upload",
+  "fileUploader.uploadComplete": "Upload complete: {count} files",
+  "fileUploader.skippedFiles": "Skipped {count} unsupported files",
+  "fileUploader.useUploaded": "Use Uploaded Files",
+  "fileUploader.confirmed": "Confirmed",
+  "fileUploader.reselect": "Re-select",
+  "fileUploader.uploadFailed": "Upload failed",
+
+  // ── Directory picker ──
+  "dirPicker.title": "Select Output Directory",
+  "dirPicker.currentPath": "Current path: ",
+  "dirPicker.parentDir": ".. (Parent directory)",
+  "dirPicker.emptyDir": "(Empty directory)",
+  "dirPicker.newDirPlaceholder":
+    "Enter new directory name (optional, leave empty for current directory)",
+  "dirPicker.selectWithDir": "Select: {path}/{dir}",
+  "dirPicker.selectPath": "Select: {path}",
+  "dirPicker.accessError": "Cannot access directory",
+
+  // ── Source images ──
+  "sourceImages.title": "Source Images (click to enlarge)",
+  "sourceImages.lightboxAlt": "Enlarged view",
+
+  // ── Upload preview ──
+  "uploadPreview.title": "Upload Preview",
+  "uploadPreview.photoCount": "{count} photos",
+  "uploadPreview.groupCount": "{count} files",
+  "uploadPreview.ungrouped": "Ungrouped",
+  "uploadPreview.noImages": "No images available",
+  "uploadPreview.deleting": "Deleting...",
+
+  // ── Source picker (local / server) ──
+  "sourcePicker.localTab": "Local",
+  "sourcePicker.serverTab": "Server",
+  "sourcePicker.currentPath": "Current path: ",
+  "sourcePicker.parentDir": ".. (Parent directory)",
+  "sourcePicker.emptyDir": "(No images or subdirectories here)",
+  "sourcePicker.useThisDir": "Use this directory",
+  "sourcePicker.useSelectedFiles": "Use {count} selected file(s)",
+  "sourcePicker.confirmed": "Selected: {path}",
+  "sourcePicker.reset": "Re-select",
+  "sourcePicker.browseError": "Failed to browse directory",
+  "sourcePicker.stageError": "Failed to register server files",
+  "sourcePicker.fileCheckboxAria": "Select {name}",
+  "sourcePicker.pathPlaceholder": "Jump to a server path (optional)",
+  "sourcePicker.goPath": "Go",
+  "sourcePicker.sizeKB": "{size} KB",
+  "sourcePicker.imageCount": "{count} images",
+};
