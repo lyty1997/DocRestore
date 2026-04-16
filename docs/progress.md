@@ -16,6 +16,65 @@ limitations under the License.
 
 # DocRestore 开发进度
 
+## 2026-04-16 OCR vLLM 优化参数基线对比
+
+### 背景
+
+两款 OCR 引擎（PaddleOCR-VL / DeepSeek-OCR-2）均基于 vLLM 推理。先验证 vLLM 通用优化参数是否能带来吞吐收益，再评估通过 pipeline 并行捕获空闲 GPU 的空间。
+
+### 完成内容
+
+**配置层 —— 5 个 vLLM 通用优化字段透传**
+
+- `OCRConfig` 新增：`vllm_enforce_eager: bool | None` / `vllm_block_size: int | None` / `vllm_swap_space_gb: float | None` / `vllm_disable_mm_preprocessor_cache: bool` / `vllm_disable_log_stats: bool`；另增 `paddle_server_backend_config: str`（YAML 路径透传给 `paddleocr genai_server --backend_config`）。
+- `scripts/deepseek_ocr_worker.py`：`AsyncEngineArgs` 改为条件 kwargs 字典，仅当字段非 None/非默认时传入，避免污染 vLLM 默认值。
+- `backend/docrestore/ocr/deepseek_ocr2.py::_build_init_cmd()`：5 个字段随 init 命令透传到 worker。
+- `backend/docrestore/ocr/engine_manager.py::_start_ppocr_server()`：`paddle_server_backend_config` 非空时追加 `--backend_config <path>`。
+
+**基准脚本三件套**
+
+- `scripts/gpu_sampler.py`：独立进程 wrap `nvidia-smi -lms 500`，SIGTERM/SIGINT 转发 + CSV flush 保证完整数据。
+- `scripts/bench_ocr.py`：统一 EngineManager.ensure() → warmup → N 次 run，写 `summary.json` + `per_page.csv` + `gpu_trace.csv`。每次 run 独立子目录避免增量 OCR 命中缓存。
+- `scripts/bench_compare.py`：多次 bench 汇总 markdown 表；`_find_prefix()` 用 `startswith` 匹配 nvidia-smi 的 ` utilization.gpu [%]` 列名（带前导空格 + 单位后缀）。
+
+**Benchmark 执行（RTX 4070，36 张图 × 2 runs）**
+
+| 名称 | 引擎 | 预设 | init(s) | warmup(s) | mean_run(s) | img/s | GPU_util_mean(%) | GPU_util_p95(%) | mem_peak(MiB) |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| paddle_baseline | paddle-ocr | baseline | 79.9 | 11.3 | 103.2 | 0.35 | 20.1 | 66.0 | 9131 |
+| paddle_optimized | paddle-ocr | optimized | 79.9 | 11.9 | 106.3 | 0.34 | 19.8 | 65.0 | 9131 |
+| deepseek_baseline | deepseek-ocr-2 | baseline | 56.6 | 5.0 | 119.1 | 0.30 | 52.3 | 73.0 | 9867 |
+| deepseek_optimized | deepseek-ocr-2 | optimized | 41.6 | 5.1 | 118.3 | 0.30 | 56.6 | 71.0 | 11683 |
+
+汇总表：`output/bench/summary.md`；每次 run 的 `summary.json` / `per_page.csv` / `gpu_trace.csv` 保存在对应子目录。
+
+### 关键结论
+
+1. **vLLM 通用优化参数对稳态吞吐无收益**：PaddleOCR 0.35→0.34 img/s、DeepSeek 0.30→0.30 img/s，差异在噪声范围内。
+2. **`enforce_eager=True` 反而劣化 PaddleOCR -70%**（2.86 → 4.86 s/img）：PaddleOCR 的 `paddleocr_vl_09b.py` 默认让 vLLM 启用 CUDA Graph，强制 eager 会关闭图优化。据此从 PADDLE 优化预设中移除该参数，保留坏数据作为 `paddle_optimized_enforce_eager_v1`。
+3. **DeepSeek 优化仅 init 节省 27%**（56.6s → 41.6s）：主要来自 `gpu_memory_utilization=0.9`（原 0.75）降低了首次预分配的抖动。推理稳态无差异。
+4. **GPU 利用率偏低，验证 pipeline 并行空间**：PaddleOCR 均值 20% / p95 66%，DeepSeek 均值 52% / p95 73%。空闲 GPU 足以支撑 pipeline 层并行（OCR ↔ LLM 精修异步流水线、或多请求队列覆盖 idle）。
+
+### 坑点
+
+- vLLM CLI `--block-size` 仅接受 {1,8,16,32,64,128}，DeepSeek 官方脚本里的 256 是走 Python API 的（校验路径不同）；`bench_ocr.py` 将两个引擎的优化预设统一到 128。
+- nvidia-smi CSV 列名形如 ` utilization.gpu [%]`（前导空格 + 单位后缀），`DictReader` 必须按前缀匹配而非精确 key。
+- `pre-commit` hook 使用 `language: system`，commit 前必须 `conda activate docrestore`，否则 `mypy/ruff` 报 command not found。
+
+### 相关提交（dev 分支）
+
+- `8e16351` 配置层新增 5 个 vLLM 字段 + OCRConfig 透传
+- `cc522e1` 新增 bench 脚本 (bench_ocr / gpu_sampler)
+- `f238956` 新增 bench_compare 对比脚本
+- `14db297` 优化预设 block_size 256 → 128
+- `b4e4b9a` PaddleOCR 优化预设移除 enforce_eager
+- `a404300` bench_compare 匹配 nvidia-smi 列名单位后缀
+
+### 遗留
+
+- 通用优化无稳态收益 → 下一步应设计 pipeline 层并行（OCR 与 LLM 精修异步流水，或队列式批处理），在空闲 GPU 周期内吸收更多任务。
+- PaddleOCR GPU 利用率仅 20%，是首选并行目标。
+
 ## 2026-04-15 设计文档全量审查与同步
 
 ### 背景
