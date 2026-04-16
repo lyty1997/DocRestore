@@ -31,6 +31,7 @@ import argparse
 import csv
 import json
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,13 +62,19 @@ def _parse_gpu_trace(trace: Path) -> tuple[float, float, float]:
     with trace.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         fieldnames = reader.fieldnames or []
-        # nvidia-smi 表头带空格前缀，规范化为去空格小写
-        norm = {name: name.strip() for name in fieldnames}
+        # nvidia-smi 表头形如 ' utilization.gpu [%]'（带前导空格 + 单位后缀）
+        util_col = _find_prefix(fieldnames, "utilization.gpu")
+        mem_col = _find_prefix(fieldnames, "memory.used")
+        if util_col is None or mem_col is None:
+            msg = (
+                f"gpu_trace.csv 缺少列（现有: {fieldnames}）"
+            )
+            raise KeyError(msg)
         for row in reader:
             try:
-                util = float(row[_find(norm, "utilization.gpu")].strip())
-                m = float(row[_find(norm, "memory.used")].strip())
-            except (KeyError, ValueError):
+                util = float(row[util_col].strip())
+                m = float(row[mem_col].strip())
+            except (ValueError, AttributeError):
                 continue
             utils.append(util)
             mem.append(m)
@@ -82,13 +89,12 @@ def _parse_gpu_trace(trace: Path) -> tuple[float, float, float]:
     return mean_u, p95_u, mem_peak
 
 
-def _find(norm: dict[str, str], key: str) -> str:
-    """从带空格前缀的表头字典中找到匹配 key 的原始列名。"""
-    for original, stripped in norm.items():
-        if stripped == key:
-            return original
-    msg = f"gpu_trace.csv 缺少列: {key} (现有: {list(norm.values())})"
-    raise KeyError(msg)
+def _find_prefix(fieldnames: Sequence[str], prefix: str) -> str | None:
+    """按 strip() 后 startswith(prefix) 匹配列名，返回原始列名。"""
+    for name in fieldnames:
+        if name.strip().startswith(prefix):
+            return name
+    return None
 
 
 def _load(bench_dir: Path) -> BenchRecord:
