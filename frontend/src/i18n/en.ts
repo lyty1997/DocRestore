@@ -102,6 +102,7 @@ export const en: Record<TranslationKey, string> = {
   "taskProgress.waiting": "Waiting to start",
   "taskProgress.taskLabel": "Task: {taskId}",
   "taskProgress.polling": "Polling",
+  "taskProgress.subtasksLabel": "Processing {count} subdocuments in parallel",
 
   // ── Task result ──
   "taskResult.title": "Results",

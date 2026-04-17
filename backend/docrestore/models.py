@@ -146,3 +146,6 @@ class TaskProgress:
     total: int = 0
     percent: float = 0.0
     message: str = ""
+    # 并行子目录标识：非空表示这是某个子目录的进度帧（见 process_tree）；
+    # 空表示任务级/单目录主进度。前端按该字段分轨渲染。
+    subtask: str = ""

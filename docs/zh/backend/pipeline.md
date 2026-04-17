@@ -85,7 +85,7 @@ class Pipeline:
 **调用约定**：
 
 - 必须先 `initialize()` 再 `process_tree()` / `process_many()`；任务结束后调用 `shutdown()` 释放资源。
-- `process_tree()` 是统一入口：自动识别单/多子目录结构，最终委托给 `process_many()`。
+- `process_tree()` 是统一入口：自动识别单/多子目录结构，最终委托给 `process_many()`。多子目录时用 `asyncio.gather` 并行调用（详见 §9.3）。
 - `process_many()` 返回 `list[PipelineResult]`（支持多文档输出）。
 - **多文档处理**：reassemble 之后调用 `refiner.detect_doc_boundaries()`（独立 LLM 调用，返回 `list[DocBoundary]`），按边界拆分为多个子文档。每个子文档独立 gap fill → final refine → render，产物落在 `{output_dir}/{sanitized_title}/document.md`。
 - `gpu_lock`：
@@ -325,7 +325,24 @@ LLM 负责在精修时处理段间重叠的去重，`_reassemble()` 只做简单
 > 原因：粗粒度 pipeline 计数无法保护 API 限流；改为细粒度 LLM 调用计数，
 > 语义更精确，OCR 仍由 `gpu_lock` 强制串行。
 
-### 9.3 无组级并发
+### 9.3 子目录并行（process_tree）
+
+`process_tree` 发现 image_dir 下有多个叶子子目录时，用 `asyncio.gather` 并行调用
+`process_many`，而不是串行 for 循环。每个子目录内部仍完整走 OCR → PII → LLM →
+render 流水。实际并发度由底层锁决定：
+
+- **OCR**：`gpu_lock` 强制串行（峰值并发 ≤ 1），防止 GPU OOM；
+- **LLM**：`llm_semaphore` 限流（默认 3），多子目录的 refine/gap_fill 可并发进入；
+- **PII / dedup / reassemble / render**：纯 CPU / IO，完全并行。
+
+因此 subdir 1 进入 LLM 阶段（已释放 `gpu_lock`）时，subdir 2 的 OCR 可立即启动，
+避免"做 LLM 时 GPU 空闲"。任一子目录抛异常即 `asyncio.gather` 整体 fail-fast，
+上层 `TaskManager` 将任务标记 FAILED（与串行语义一致）。
+
+> 测试：`tests/pipeline/test_process_tree_parallel.py` 观察时间轴，断言
+> subdir 2 的 OCR 开始时间早于 subdir 1 的 refine 结束时间。
+
+### 9.4 无组级并发
 
 聚类已移除，所有图片视为同一份文档，因此不存在”组级并发”或”按组分裂任务”的调度逻辑。所有并发策略以”任务级”为边界。
 

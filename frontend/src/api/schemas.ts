@@ -13,6 +13,8 @@ export const ProgressResponseSchema = z.object({
   total: z.number(),
   percent: z.number(),
   message: z.string(),
+  /** 子目录标识（process_tree 并行时每一路的 rel path，空=主进度） */
+  subtask: z.string().default(""),
 });
 export type ProgressResponse = z.infer<typeof ProgressResponseSchema>;
 

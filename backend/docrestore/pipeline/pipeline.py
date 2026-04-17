@@ -292,44 +292,66 @@ class Pipeline:
                         llm, gpu_lock, pii, ocr,
                     )
 
-                # 多子目录：逐目录处理，聚合结果
-                all_results: list[PipelineResult] = []
-                for i, leaf in enumerate(leaf_dirs):
-                    rel = leaf.relative_to(image_dir)
-                    sub_output = output_dir / rel
-
-                    logger.info(
-                        "process_tree: [%d/%d] %s",
-                        i + 1, len(leaf_dirs), rel,
-                    )
-
-                    # 包装进度回调，添加子目录标识
-                    wrapped_progress = self._wrap_progress(
-                        on_progress, str(rel),
-                        i, len(leaf_dirs),
-                    )
-
-                    with profiler.stage(
-                        "pipeline.subdir",
-                        subdir=str(rel),
-                        index=i + 1,
+                # 多子目录：并行处理，聚合结果。
+                # asyncio.gather 让多个子目录的 OCR/PII/LLM 阶段按锁粒度交错：
+                # - gpu_lock 保证 OCR 串行
+                # - llm_semaphore 限流 LLM API
+                # - CPU/regex/IO 阶段真正并行
+                # 任一子目录失败即 raise（整个任务 FAILED），语义与串行一致。
+                sub_results_list = await asyncio.gather(*[
+                    self._process_leaf(
+                        i, leaf, image_dir, output_dir,
+                        on_progress, llm, gpu_lock, pii, ocr,
                         total=len(leaf_dirs),
-                    ):
-                        sub_results = await self.process_many(
-                            leaf, sub_output, wrapped_progress,
-                            llm, gpu_lock, pii, ocr,
-                        )
+                    )
+                    for i, leaf in enumerate(leaf_dirs)
+                ])
+                return [r for sub in sub_results_list for r in sub]
 
-                    # 补全 doc_dir：加上子目录相对路径前缀
-                    for result in sub_results:
-                        if result.doc_dir:
-                            result.doc_dir = str(rel / result.doc_dir)
-                        else:
-                            result.doc_dir = str(rel)
+    async def _process_leaf(
+        self,
+        index: int,
+        leaf: Path,
+        image_dir: Path,
+        output_dir: Path,
+        on_progress: Callable[[TaskProgress], None] | None,
+        llm: LLMConfig | None,
+        gpu_lock: asyncio.Lock | None,
+        pii: PIIConfig | None,
+        ocr: OCRConfig | None,
+        *,
+        total: int,
+    ) -> list[PipelineResult]:
+        """process_tree 并行分支：处理单个叶子目录并补全 doc_dir。"""
+        profiler = current_profiler()
+        rel = leaf.relative_to(image_dir)
+        sub_output = output_dir / rel
 
-                    all_results.extend(sub_results)
+        logger.info(
+            "process_tree: [%d/%d] %s", index + 1, total, rel,
+        )
 
-                return all_results
+        wrapped_progress = self._wrap_progress(
+            on_progress, str(rel), index, total,
+        )
+
+        with profiler.stage(
+            "pipeline.subdir",
+            subdir=str(rel),
+            index=index + 1,
+            total=total,
+        ):
+            sub_results = await self.process_many(
+                leaf, sub_output, wrapped_progress,
+                llm, gpu_lock, pii, ocr,
+            )
+
+        for result in sub_results:
+            if result.doc_dir:
+                result.doc_dir = str(rel / result.doc_dir)
+            else:
+                result.doc_dir = str(rel)
+        return sub_results
 
     @staticmethod
     def _wrap_progress(
@@ -338,11 +360,16 @@ class Pipeline:
         dir_index: int,
         dir_total: int,
     ) -> Callable[[TaskProgress], None] | None:
-        """包装进度回调，在 message 中附加子目录信息。"""
+        """包装进度回调：标记 subtask + 附加 message 前缀。
+
+        - `p.subtask = dir_label`：前端按该字段分轨渲染每个子目录进度条
+        - message 前缀保留，供 CLI / 非结构化客户端阅读
+        """
         if on_progress is None:
             return None
 
         def wrapped(p: TaskProgress) -> None:
+            p.subtask = dir_label
             p.message = (
                 f"[{dir_index + 1}/{dir_total} {dir_label}] "
                 f"{p.message}"

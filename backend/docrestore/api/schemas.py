@@ -84,6 +84,7 @@ class ProgressResponse(BaseModel):
     total: int
     percent: float
     message: str
+    subtask: str = ""  # 子目录标识（非空=process_tree 并行的某一路）
 
 
 class TaskResponse(BaseModel):

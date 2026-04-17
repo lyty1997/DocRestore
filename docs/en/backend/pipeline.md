@@ -84,7 +84,7 @@ class Pipeline:
 **Calling conventions**:
 
 - You must call `initialize()` before `process_tree()` / `process_many()`; call `shutdown()` after tasks complete to release resources.
-- `process_tree()` is the unified entry point: it automatically detects single/multi-subdirectory structures and ultimately delegates to `process_many()`.
+- `process_tree()` is the unified entry point: it automatically detects single/multi-subdirectory structures and ultimately delegates to `process_many()`. Multiple leaf subdirectories run in parallel via `asyncio.gather` (see §9.3).
 - `process_many()` returns `list[PipelineResult]` (supporting multi-document output).
 - **Multi-document processing**: After reassembly, calls `refiner.detect_doc_boundaries()` (a separate LLM call returning `list[DocBoundary]`), then splits into multiple sub-documents by boundary. Each sub-document independently undergoes gap fill -> final refine -> render, with artifacts placed in `{output_dir}/{sanitized_title}/document.md`.
 - `gpu_lock`:
@@ -326,7 +326,27 @@ During development, full tracebacks are returned for debugging convenience. The 
 > the finer-grained per-LLM-call counter is semantically precise. OCR is still
 > forced to be serial by `gpu_lock`.
 
-### 9.3 No Group-level Concurrency
+### 9.3 Subdirectory Parallelism (process_tree)
+
+When `process_tree` finds multiple leaf subdirectories under `image_dir`, it dispatches
+`process_many` for each subdir via `asyncio.gather` instead of a serial for-loop. Each
+subdirectory still runs the full OCR → PII → LLM → render pipeline. The effective
+concurrency is shaped by the underlying locks:
+
+- **OCR**: serialized by `gpu_lock` (peak concurrency ≤ 1), preventing GPU OOM;
+- **LLM**: throttled by `llm_semaphore` (default 3); refine / gap_fill across
+  subdirectories can execute concurrently;
+- **PII / dedup / reassemble / render**: pure CPU/IO, fully parallel.
+
+As a result, once subdir 1 enters its LLM stage (and has released `gpu_lock`), subdir 2
+can start OCR immediately, avoiding the "GPU idle while LLM runs" gap. If any subdir
+raises, `asyncio.gather` fails fast and the upstream `TaskManager` marks the task as
+FAILED (same semantics as the serial version).
+
+> Test: `tests/pipeline/test_process_tree_parallel.py` inspects the time axis and
+> asserts that subdir 2's OCR starts before subdir 1's refine ends.
+
+### 9.4 No Group-level Concurrency
 
 Clustering has been removed -- all images are treated as a single document, so there is no "group-level concurrency" or "split-by-group task" scheduling logic. All concurrency strategies are bounded at the task level.
 

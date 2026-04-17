@@ -32,7 +32,7 @@ function App(): React.JSX.Element {
   const {
     taskId,
     status,
-    progress,
+    progresses,
     allResults,
     error,
     wsState,
@@ -106,7 +106,7 @@ function App(): React.JSX.Element {
               <section className="section-progress">
                 <TaskProgress
                   taskId={taskId}
-                  progress={progress}
+                  progresses={progresses}
                   wsState={wsState}
                   pollingEnabled={pollingEnabled}
                 />

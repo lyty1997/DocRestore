@@ -636,6 +636,48 @@ body {
   color: var(--color-text-secondary);
 }
 
+.progress-row + .progress-row {
+  margin-top: 0.75rem;
+}
+
+.subtasks {
+  margin-top: 1rem;
+  padding-top: 0.85rem;
+  border-top: 1px dashed var(--color-border);
+}
+
+.subtasks-header {
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+  margin-bottom: 0.6rem;
+  letter-spacing: 0.02em;
+}
+
+.subtask-row {
+  padding: 0.55rem 0.75rem;
+  border-radius: calc(var(--radius) - 2px);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  margin-bottom: 0.5rem;
+}
+
+.subtask-row:last-child {
+  margin-bottom: 0;
+}
+
+.subtask-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  margin-bottom: 0.35rem;
+  font-family: "Fira Code", "Consolas", monospace;
+  word-break: break-all;
+}
+
+.subtask-row .progress-bar-container {
+  height: 6px;
+}
+
 /* ── Error ─────────────────────────────────────── */
 .error-box {
   background: var(--color-error-bg);

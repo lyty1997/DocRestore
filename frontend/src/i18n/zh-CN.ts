@@ -93,6 +93,7 @@ export const zhCN = {
   "taskProgress.waiting": "等待开始",
   "taskProgress.taskLabel": "任务：{taskId}",
   "taskProgress.polling": "轮询",
+  "taskProgress.subtasksLabel": "并行处理 {count} 个子文档",
 
   // ── 任务结果 ──
   "taskResult.title": "处理结果",

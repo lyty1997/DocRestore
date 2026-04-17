@@ -97,6 +97,7 @@ export const zhTW: Record<TranslationKey, string> = {
   "taskProgress.waiting": "等待開始",
   "taskProgress.taskLabel": "任務：{taskId}",
   "taskProgress.polling": "輪詢",
+  "taskProgress.subtasksLabel": "並行處理 {count} 篇子文件",
 
   // ── 任務結果 ──
   "taskResult.title": "處理結果",

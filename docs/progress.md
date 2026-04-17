@@ -16,6 +16,61 @@ limitations under the License.
 
 # DocRestore 开发进度
 
+## 2026-04-17 process_tree 多子目录并行（asyncio.gather）
+
+### 背景
+
+用户反馈：含 2 个子目录的 image_dir 处理时，subdir 1 进入 PII/LLM 精修阶段后 GPU 空闲（`nvidia-smi` 0%），subdir 2 要等 subdir 1 完全处理完才开始 OCR。
+
+根因：`pipeline/pipeline.py::process_tree` 的 `for leaf in leaf_dirs: await process_many(...)` 是**同步 for 循环**，从 `eed4c8a` 初版就如此。`a778bcc` 的 "Pipeline 级并行" 优化覆盖的是**跨 API task** 并发 + LLM API 全局限流，**不覆盖单 task 内多子目录**。
+
+### 完成内容
+
+**Pipeline 改动**（`backend/docrestore/pipeline/pipeline.py`）
+- `process_tree` 多子目录分支：`for` 循环 → `asyncio.gather(*[_process_leaf(...) for ...])`
+- 抽出 `_process_leaf(index, leaf, ...)` 协程：负责单个叶子目录的 `process_many` 调用 + `doc_dir` 补全
+- 异常语义保持：`asyncio.gather` 默认 fail-fast，任一 subdir 失败即整个 task FAILED
+- profiler 兼容：`current_profiler()` 依赖 ContextVar，asyncio.Task copy 时自动继承父 context → 多子目录共享同一根 profiler，事件按时间戳合并无污染
+
+**并发模型**（已由锁机制天然保证）
+- OCR：`gpu_lock` 串行（峰值 ≤ 1），防 GPU OOM
+- LLM：`llm_semaphore` 限流（默认 3），多 subdir 的 refine/fill_gap/doc_boundary 可并发
+- PII regex / dedup / reassemble / render：纯 CPU/IO，真正并行
+
+**前端进度分轨展示（配套）**
+- `TaskProgress` dataclass + `ProgressResponse` pydantic 模型新增 `subtask: str = ""` 字段；`_wrap_progress` 除原有 message 前缀外，把 `dir_label` 写入 `p.subtask`
+- `useTaskRunner` 把 `progress: TaskProgress | undefined` 改为 `progresses: Record<string, TaskProgress>`，WS / polling 收到帧时按 `subtask` 作为 key 分桶更新
+- `TaskProgress.tsx` 重构：主进度条（key = ""）+ 虚线分隔 + "并行处理 N 个子文档" + 每个 subtask 一条直接展开的进度条（不折叠），含 subtask label / stage / counts / percent / message
+- 三语 i18n 加 `taskProgress.subtasksLabel`；`App.css` 加 `.subtasks / .subtask-row / .subtask-label` 样式
+- 视觉验证：`screenshots/task_progress_parallel_subtasks.png`（用 `?mock=progresses` URL query 注入 mock 数据截图后回滚，dev 代码未保留）
+
+**测试**
+- `tests/pipeline/test_process_tree_parallel.py`（3 用例）
+  - `test_subdir_ocr_overlaps_with_prior_subdir_refine`：时间轴观察，断言 subdir 2 OCR start < subdir 1 refine end（跨子目录并行成立）
+  - `test_ocr_still_serialized_by_gpu_lock`：OCR 峰值并发 = 1（gpu_lock 仍然兜底）
+  - `test_progress_subtask_field_is_populated`：多子目录推送的 progress 帧 `subtask` 都非空且与 leaf 对应
+- 回归：`tests/pipeline/` + `tests/api/` + `tests/llm/` 共 263 passed + 2 skipped；`mypy --strict` 41 文件 0 error；`ruff check` 0 issue；frontend `tsc` / `eslint` 0 error
+
+**文档**
+- `docs/zh/backend/pipeline.md` §9.3 新增"子目录并行"，原 §9.3 改为 §9.4
+- `docs/en/backend/pipeline.md` 同步
+- §3.1 调用约定句末补 "多子目录时用 asyncio.gather 并行调用"
+
+### 关键决策
+
+1. **为何不引入 `max_concurrent_subdirs` 配置？** 子目录并发度已由 gpu_lock（OCR 串行）和 llm_semaphore（LLM 限流）隐式约束，再加一个显式上限会让配置面冗余。当前语义清晰：子目录无条件并行，具体"并多少"由底层锁决定。
+2. **为何用 `asyncio.gather` 而非 `TaskGroup`？** Python 3.11+ 的 `TaskGroup` 语义更严格但兼容性要求更高；项目 3.12 虽支持，但 `gather` + fail-fast 已经满足需求，不引入语法转换成本。
+3. **为何把 `_process_leaf` 抽成实例方法而非内嵌函数？** 便于测试单独 mock（虽然目前没用到），且 profiler stage 的参数单独列出可读性更好。
+
+### 遗留
+
+- AGE-16 流式并行 Pipeline（单 task 内 OCR/LLM 页级流水）仍未实施，设计文档 `docs/zh/backend/references/streaming-pipeline.md` 保留
+- 多任务 API 并发入口仍只有 `curl`/MCP，前端 `TaskForm` UX 是"一次一提交"
+
+### 相关提交
+
+- 本次（待提交）：process_tree 多子目录 asyncio.gather 并行
+
 ## 2026-04-17 OCR 引擎按需预热接口与前端预加载按钮
 
 ### 背景

@@ -28,8 +28,12 @@ interface UseTaskRunnerReturn {
   taskId: string | undefined;
   /** 页面状态 */
   status: TaskStatus;
-  /** 最新进度 */
-  progress: TaskProgress | undefined;
+  /**
+   * 按 subtask 分轨保存的最新进度帧：
+   * - key "" 是任务级/单目录主进度
+   * - 其它 key 为 process_tree 并行时的子目录相对路径
+   */
+  progresses: Record<string, TaskProgress>;
   /** 完成后的 markdown 结果（第一篇，向下兼容） */
   resultMarkdown: string | undefined;
   /** 全部文档结果 */
@@ -72,7 +76,9 @@ const WS_CONNECT_TIMEOUT = 5000;
 export function useTaskRunner(): UseTaskRunnerReturn {
   const [taskId, setTaskId] = useState<string | undefined>();
   const [status, setStatus] = useState<TaskStatus>("idle");
-  const [progress, setProgress] = useState<TaskProgress | undefined>();
+  const [progresses, setProgresses] = useState<Record<string, TaskProgress>>(
+    {},
+  );
   const [resultMarkdown, setResultMarkdown] = useState<string | undefined>();
   const [allResults, setAllResults] = useState<TaskResultResponse[]>([]);
   const [taskResult, setTaskResult] = useState<
@@ -140,7 +146,8 @@ export function useTaskRunner(): UseTaskRunnerReturn {
       if (!isMountedRef.current) return;
 
       if (resp.progress) {
-        setProgress(resp.progress);
+        const frame = resp.progress;
+        setProgresses((prev) => ({ ...prev, [frame.subtask]: frame }));
       }
 
       switch (resp.status) {
@@ -226,7 +233,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
               ? (JSON.parse(event.data) as unknown)
               : event.data;
           const parsed = TaskProgressSchema.parse(data);
-          setProgress(parsed);
+          setProgresses((prev) => ({ ...prev, [parsed.subtask]: parsed }));
           setStatus("processing");
         } catch {
           // schema 校验失败，降级到轮询
@@ -303,7 +310,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
       // 重置状态
       cleanup();
       setStatus("pending");
-      setProgress(undefined);
+      setProgresses({});
       setResultMarkdown(undefined);
       setAllResults([]);
       setTaskResult(undefined);
@@ -341,7 +348,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
     cleanup();
     setTaskId(undefined);
     setStatus("idle");
-    setProgress(undefined);
+    setProgresses({});
     setResultMarkdown(undefined);
     setAllResults([]);
     setTaskResult(undefined);
@@ -353,7 +360,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
   return {
     taskId,
     status,
-    progress,
+    progresses,
     resultMarkdown,
     allResults,
     taskResult,
