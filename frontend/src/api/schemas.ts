@@ -165,3 +165,19 @@ export const UploadCompleteResponseSchema = z.object({
   total_size_bytes: z.number(),
 });
 export type UploadCompleteResponse = z.infer<typeof UploadCompleteResponseSchema>;
+
+/** OCR 引擎状态响应 */
+export const OcrStatusResponseSchema = z.object({
+  current_model: z.string(),
+  current_gpu: z.string(),
+  is_ready: z.boolean(),
+  is_switching: z.boolean(),
+});
+export type OcrStatusResponse = z.infer<typeof OcrStatusResponseSchema>;
+
+/** OCR 引擎预热响应 */
+export const OcrWarmupResponseSchema = z.object({
+  status: z.string(),
+  message: z.string(),
+});
+export type OcrWarmupResponse = z.infer<typeof OcrWarmupResponseSchema>;

@@ -60,6 +60,21 @@ class EngineManager:
         return self._current_model
 
     @property
+    def current_gpu(self) -> str:
+        """当前活跃的 GPU ID。"""
+        return self._current_gpu
+
+    @property
+    def is_ready(self) -> bool:
+        """当前引擎是否已初始化就绪。"""
+        return self._engine is not None and self._engine.is_ready
+
+    @property
+    def is_switching(self) -> bool:
+        """是否正在切换引擎（switch_lock 被持有）。"""
+        return self._switch_lock.locked()
+
+    @property
     def engine(self) -> OCREngine | None:
         """当前引擎实例（可能为 None）。"""
         return self._engine
@@ -201,21 +216,31 @@ class EngineManager:
         port = config.paddle_server_port
         gpu_id = config.gpu_id
         model_name = config.paddle_server_model_name
+        backend_config_path = config.paddle_server_backend_config
 
         logger.info(
-            "启动 ppocr-server: port=%d, gpu=%s, model=%s",
+            "启动 ppocr-server: port=%d, gpu=%s, model=%s%s",
             port, gpu_id, model_name,
+            f", backend_config={backend_config_path}"
+            if backend_config_path else "",
         )
 
         env = {**os.environ}
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         env["CUDA_VISIBLE_DEVICES"] = gpu_id
 
-        self._ppocr_server_proc = await asyncio.create_subprocess_exec(
+        argv: list[str] = [
             python_path, "-m", "paddleocr", "genai_server",
             "--model_name", model_name,
             "--backend", "vllm",
             "--port", str(port),
+        ]
+        # 可选 backend_config YAML：内容由 paddlex 解析为 vLLM CLI 参数
+        if backend_config_path:
+            argv.extend(["--backend_config", backend_config_path])
+
+        self._ppocr_server_proc = await asyncio.create_subprocess_exec(
+            *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,

@@ -20,9 +20,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
-from typing import Protocol
+from collections.abc import AsyncIterator
+from typing import Any, Protocol
 
 import litellm
 
@@ -85,10 +88,18 @@ class BaseLLMRefiner:
 
     detect_pii_entities 默认返回空列表（本地 LLM 场景无需检测）；
     云端实现 CloudLLMRefiner 覆盖此方法做真实实体识别。
+
+    semaphore 用于限制跨 pipeline 的 LLM API 全局并发。None 表示不限流，
+    便于单元测试直接构造。生产路径由 Pipeline 从 Scheduler 注入。
     """
 
-    def __init__(self, config: LLMConfig) -> None:
+    def __init__(
+        self,
+        config: LLMConfig,
+        semaphore: asyncio.Semaphore | None = None,
+    ) -> None:
         self._config = config
+        self._semaphore = semaphore
 
     def _build_kwargs(
         self, messages: list[dict[str, str]],
@@ -106,6 +117,24 @@ class BaseLLMRefiner:
             kwargs["api_key"] = self._config.api_key
         return kwargs
 
+    @contextlib.asynccontextmanager
+    async def _rate_limit(self) -> AsyncIterator[None]:
+        """持有 semaphore 期间允许发起 LLM 请求。未注入 semaphore 时直接放行。"""
+        if self._semaphore is None:
+            yield
+            return
+        async with self._semaphore:
+            yield
+
+    async def _call_llm(self, kwargs: dict[str, object]) -> Any:
+        """统一出口：限流 + litellm.acompletion。
+
+        所有 refine / fill_gap / final_refine / detect_* 都必须经此方法，
+        确保 LLM API 全局并发受 scheduler.llm_semaphore 约束。
+        """
+        async with self._rate_limit():
+            return await litellm.acompletion(**kwargs)
+
     async def refine(
         self, raw_markdown: str, context: RefineContext,
     ) -> RefinedResult:
@@ -119,7 +148,7 @@ class BaseLLMRefiner:
         messages = build_refine_prompt(raw_markdown, context)
         kwargs = self._build_kwargs(messages)
 
-        response = await litellm.acompletion(**kwargs)
+        response = await self._call_llm(kwargs)
         if not response.choices:
             msg = f"LLM 返回空 choices（model={self._config.model}）"
             raise RuntimeError(msg)
@@ -152,7 +181,7 @@ class BaseLLMRefiner:
         )
         kwargs = self._build_kwargs(messages)
 
-        response = await litellm.acompletion(**kwargs)
+        response = await self._call_llm(kwargs)
         if not response.choices:
             msg = f"LLM 返回空 choices（model={self._config.model}）"
             raise RuntimeError(msg)
@@ -171,7 +200,7 @@ class BaseLLMRefiner:
         messages = build_final_refine_prompt(markdown)
         kwargs = self._build_kwargs(messages)
 
-        response = await litellm.acompletion(**kwargs)
+        response = await self._call_llm(kwargs)
         if not response.choices:
             msg = (
                 "LLM 返回空 choices"
@@ -199,7 +228,7 @@ class BaseLLMRefiner:
         messages = build_doc_boundary_detect_prompt(merged_markdown)
         kwargs = self._build_kwargs(messages)
 
-        response = await litellm.acompletion(**kwargs)
+        response = await self._call_llm(kwargs)
         if not response.choices:
             logger.warning("文档边界检测返回空 choices，假定单文档")
             return []

@@ -65,17 +65,17 @@ class TestGPULock:
             pass
 
 
-class TestPipelineSemaphore:
-    """Pipeline Semaphore 并发限流测试"""
+class TestLLMSemaphore:
+    """LLM API 全局并发限流测试"""
 
     @pytest.mark.asyncio
     async def test_semaphore_limits_concurrency(self) -> None:
         """semaphore 限制同时运行的协程数"""
         max_concurrent = 2
         scheduler = PipelineScheduler(
-            max_concurrent_pipelines=max_concurrent
+            max_concurrent_llm_requests=max_concurrent
         )
-        sem = scheduler.pipeline_semaphore
+        sem = scheduler.llm_semaphore
 
         concurrent_count = 0
         max_observed = 0
@@ -99,7 +99,7 @@ class TestPipelineSemaphore:
     async def test_semaphore_default_value(self) -> None:
         """默认并发数为 3"""
         scheduler = PipelineScheduler()
-        sem = scheduler.pipeline_semaphore
+        sem = scheduler.llm_semaphore
 
         concurrent_count = 0
         max_observed = 0
@@ -121,8 +121,8 @@ class TestPipelineSemaphore:
     @pytest.mark.asyncio
     async def test_semaphore_throughput(self) -> None:
         """并发执行比串行快"""
-        scheduler = PipelineScheduler(max_concurrent_pipelines=3)
-        sem = scheduler.pipeline_semaphore
+        scheduler = PipelineScheduler(max_concurrent_llm_requests=3)
+        sem = scheduler.llm_semaphore
 
         async def worker() -> None:
             async with sem:
@@ -141,8 +141,8 @@ class TestSchedulerIntegration:
 
     @pytest.mark.asyncio
     async def test_lock_and_semaphore_independent(self) -> None:
-        """gpu_lock 和 pipeline_semaphore 互不影响"""
-        scheduler = PipelineScheduler(max_concurrent_pipelines=2)
+        """gpu_lock 和 llm_semaphore 互不影响"""
+        scheduler = PipelineScheduler(max_concurrent_llm_requests=2)
 
         results: list[str] = []
 
@@ -152,19 +152,19 @@ class TestSchedulerIntegration:
                 results.append("ocr")
                 await asyncio.sleep(0.01)
 
-        async def pipeline_worker(name: str) -> None:
-            """模拟下游 pipeline（需要 Semaphore）"""
-            async with scheduler.pipeline_semaphore:
-                results.append(f"pipe_{name}")
+        async def llm_worker(name: str) -> None:
+            """模拟 LLM 调用（需要 Semaphore）"""
+            async with scheduler.llm_semaphore:
+                results.append(f"llm_{name}")
                 await asyncio.sleep(0.01)
 
-        # OCR 和 pipeline 可以同时运行（不同锁）
+        # OCR 和 LLM 可以同时运行（不同锁）
         await asyncio.gather(
             ocr_worker(),
-            pipeline_worker("a"),
-            pipeline_worker("b"),
+            llm_worker("a"),
+            llm_worker("b"),
         )
 
         assert "ocr" in results
-        assert "pipe_a" in results
-        assert "pipe_b" in results
+        assert "llm_a" in results
+        assert "llm_b" in results

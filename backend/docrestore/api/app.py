@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import os
 import shutil
@@ -175,11 +177,16 @@ def create_app(
 
         # 创建全局调度器
         scheduler = PipelineScheduler(
-            max_concurrent_pipelines=config.queue.max_concurrent_pipelines,
+            max_concurrent_llm_requests=config.llm.max_concurrent_requests,
         )
+
+        # 全局 LLM 限流 semaphore 必须在 initialize() 之前注入，
+        # 否则默认 refiner 不会带上 semaphore，跨任务并发不受控。
+        pipeline.set_llm_semaphore(scheduler.llm_semaphore)
 
         # 优先使用外部注入的引擎（测试用），否则使用 EngineManager
         engine = getattr(app.state, "ocr_engine", None)
+        engine_manager: EngineManager | None = None
         if engine is not None:
             pipeline.set_ocr_engine(engine)
         else:
@@ -193,6 +200,26 @@ def create_app(
             await pipeline.shutdown()
             raise
 
+        # 后台预热默认 OCR 引擎（尽力而为，不阻塞服务启动）
+        warmup_task: asyncio.Task[None] | None = None
+        if engine_manager is not None:
+
+            async def _warmup_default_engine() -> None:
+                try:
+                    logger.info(
+                        "后台预热默认 OCR 引擎: %s (GPU %s)",
+                        config.ocr.model, config.ocr.gpu_id,
+                    )
+                    await engine_manager.ensure()
+                    logger.info("默认 OCR 引擎预热完成")
+                except Exception:
+                    logger.warning(
+                        "默认 OCR 引擎预热失败（不影响服务）",
+                        exc_info=True,
+                    )
+
+            warmup_task = asyncio.create_task(_warmup_default_engine())
+
         # 初始化持久化层
         db = TaskDatabase(config.db_path)
         await db.initialize()
@@ -200,6 +227,7 @@ def create_app(
         manager = TaskManager(pipeline, scheduler=scheduler, db=db)
         set_task_manager(manager)
         app.state.task_manager = manager
+        app.state.engine_manager = engine_manager
         app.state.scheduler = scheduler
         app.state.db = db
 
@@ -207,6 +235,12 @@ def create_app(
         cleanup_task = await start_cleanup_task()
 
         yield
+
+        # 取消未完成的预热任务
+        if warmup_task is not None and not warmup_task.done():
+            warmup_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await warmup_task
 
         cleanup_task.cancel()
         cleanup_all_sessions()

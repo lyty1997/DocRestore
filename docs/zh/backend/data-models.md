@@ -298,6 +298,8 @@ class LLMConfig(BaseModel):
     # 截断检测启发式
     truncation_ratio_threshold: float = 0.3   # 输出 < 输入 × (1 - ratio) 视为截断
     truncation_min_input_lines: int = 20      # 输入行数 ≤ 此值不触发启发式
+    # 全局 LLM API 并发上限（跨所有 pipeline 共享的 asyncio.Semaphore 名额）
+    max_concurrent_requests: int = 3
 ```
 
 ### 4.5 OutputConfig
@@ -308,14 +310,7 @@ class OutputConfig(BaseModel):
     image_quality: int = 95
 ```
 
-### 4.6 QueueConfig
-
-```python
-class QueueConfig(BaseModel):
-    max_concurrent_pipelines: int = 3
-```
-
-### 4.7 CustomWord
+### 4.6 CustomWord
 
 自定义敏感词条目，可选代号。
 
@@ -326,7 +321,7 @@ class CustomWord(BaseModel):
     code: str = ""                     # 为空则回退 PIIConfig.custom_words_placeholder
 ```
 
-### 4.8 PIIConfig
+### 4.7 PIIConfig
 
 ```python
 class PIIConfig(BaseModel):
@@ -353,7 +348,7 @@ class PIIConfig(BaseModel):
     block_cloud_on_detect_failure: bool = True
 ```
 
-### 4.9 PipelineConfig（总配置）
+### 4.8 PipelineConfig（总配置）
 
 ```python
 class PipelineConfig(BaseModel):
@@ -361,11 +356,14 @@ class PipelineConfig(BaseModel):
     dedup: DedupConfig = Field(default_factory=DedupConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
-    queue: QueueConfig = Field(default_factory=QueueConfig)
     pii: PIIConfig = Field(default_factory=PIIConfig)
     db_path: str = "data/docrestore.db"    # SQLite 持久化路径
     debug: bool = True                     # 落盘中间产物到 output_dir/debug/
 ```
+
+> 任务并发上限从 `QueueConfig.max_concurrent_pipelines` 迁移为
+> `LLMConfig.max_concurrent_requests`（语义更精确：限制的是 LLM API 调用并发，
+> OCR 仍由 `scheduler.gpu_lock` 强制串行）。
 
 ## 5. 被谁依赖
 
@@ -380,5 +378,5 @@ class PipelineConfig(BaseModel):
 | `privacy/` | `PIIConfig`, `RedactionRecord` |
 | `output/renderer.py` | `MergedDocument`, `Region`, `OutputConfig` |
 | `pipeline/` | `PipelineConfig`, `PipelineResult`, `TaskProgress`, 全部数据对象 |
-| `pipeline/scheduler.py` | `QueueConfig` |
+| `pipeline/scheduler.py` | `LLMConfig.max_concurrent_requests` |
 | `api/` | `TaskProgress`, `PipelineResult` |

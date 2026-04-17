@@ -18,8 +18,6 @@ from __future__ import annotations
 
 import json
 
-import litellm
-
 from docrestore.llm.base import BaseLLMRefiner
 from docrestore.llm.prompts import build_pii_detect_prompt
 
@@ -38,7 +36,7 @@ class CloudLLMRefiner(BaseLLMRefiner):
         messages = build_pii_detect_prompt(text)
         kwargs = self._build_kwargs(messages)
 
-        response = await litellm.acompletion(**kwargs)
+        response = await self._call_llm(kwargs)
         if not response.choices:
             msg = (
                 "LLM 返回空 choices"

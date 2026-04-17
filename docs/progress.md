@@ -16,6 +16,273 @@ limitations under the License.
 
 # DocRestore 开发进度
 
+## 2026-04-17 OCR 引擎按需预热接口与前端预加载按钮
+
+### 背景
+
+启动后第一张图必须等引擎冷启动（PaddleOCR-VL ~80 s 装载、DeepSeek-OCR-2 ~40 s）。用户希望：(1) 服务启动后默认引擎自动预热；(2) 切换引擎时能在表单上预先触发，不必占用第一张图的处理时间。
+
+### 完成内容
+
+**后端**
+
+- `api/schemas.py`：新增 `OCRWarmupRequest { model, gpu_id }` 与 `OCRStatusResponse { current_model, current_gpu, is_ready, is_switching }`。
+- `api/routes.py`：
+  - `_get_engine_manager(request)`：从 `app.state.engine_manager` 取实例，缺失时 500。
+  - `GET /ocr/status`：直接映射 `EngineManager` 同名属性。
+  - `POST /ocr/warmup`：`ready / switching / accepted` 三态分支；`accepted` 路径用 `manager.pipeline.config.ocr.model_copy(update={...})` 合成完整 `OCRConfig`，`asyncio.create_task(em.ensure(config))` 后台执行，立即返回。
+- `api/app.py::lifespan`：构造完 `EngineManager` 后立即 `asyncio.create_task` 预热默认引擎；shutdown 时 cancel 未完成的 warmup task。
+- `ocr/engine_manager.py`：新增 `current_gpu` / `is_ready` / `is_switching` 三个只读属性（`is_ready` 同时检查 `_engine and _engine.is_ready`，`is_switching` 复用 `_switch_lock.locked()`）。
+- `pipeline/pipeline.py`：暴露 `engine_manager` 只读属性，方便路由层将来按需查询，无新行为。
+
+**前端**
+
+- `api/schemas.ts` + `api/client.ts`：`OcrStatusResponseSchema` / `OcrWarmupResponseSchema` + `getOcrStatus()` / `warmupOcrEngine(model, gpuId)`。
+- `components/TaskForm.tsx`：
+  - 新增 `EngineStatus = "idle" | "warming" | "ready" | "error"`。
+  - 挂载时一次性查询 `/ocr/status`；命中目标且 `is_ready` 直接进入 `ready`。
+  - 切换 OCR 引擎或 GPU 下拉框 → 重置回 `idle`。
+  - 点击预加载按钮：进入 `warming` → 调 warmup → 启动 3 s 轮询 `/ocr/status`（命中目标即停，60 s 超时 fail-safe）。
+  - `useRef<setInterval>` 在卸载时 `clearInterval`，避免泄漏。
+- 三语 i18n：`taskForm.engineWarmup` / `engineWarming` / `engineReady` / `engineError`（zh-CN/zh-TW/en）。
+- `App.css`：`ocr-warmup-area` flex 容器 + `btn-warmup` 浅色边框风格 + `engine-status--ready/error` 双色状态文案。
+
+**测试**
+
+- `tests/api/test_ocr_endpoints.py`：5 个用例覆盖 status 字段映射、未挂载 EngineManager 返回 500、warmup 三态分支、`accepted` 触发 `em.ensure` 一次且参数为 `model_copy` 后的完整 OCRConfig。
+- `tests/api/` 全量 87 用例通过。
+
+**视觉验证（playwright）**
+
+- `screenshots/taskform_warmup_idle.png`：默认状态下"预加载引擎"按钮与 OCR/GPU 下拉同行排布正常。
+- `screenshots/taskform_warmup_error.png`：后端未启动时点击 → 红色"加载失败"文字出现，错误处理路径打通。
+
+### 关键决策
+
+1. **为何 lifespan 后台预热而非阻塞启动？** 服务可用性优先：API/上传等接口不应等 OCR 引擎；预热失败也只 warning，不影响后续请求级 warmup。
+2. **为何 `accepted` 路径走 `asyncio.create_task` 而不是同步等？** 引擎切换可能耗时数十秒，HTTP 请求不应卡这么久；前端通过 `/ocr/status` 轮询拿终态。
+3. **为何 `is_switching` 用 `_switch_lock.locked()` 直接暴露？** EngineManager 的切换语义已经用 lock 表达，重复维护一个布尔 flag 容易和锁状态漂移。
+4. **为何前端在 dropdown 切换时重置 `engineStatus`？** 旧的 ready 态对新选项无意义；强制用户重新预热避免误以为已就绪。
+
+### 遗留
+
+- 前端无对应单测（`useEffect + setInterval` 时序较繁，留待后续 vitest fake timers 补齐）。
+- 真实 GPU 环境下的端到端预热耗时未做基准记录（依赖具体硬件）。
+
+## 2026-04-17 Pipeline 级并行（多任务并发 + LLM API 全局限流）
+
+### 背景
+
+OCR batch 优化后单任务吞吐已达 0.56 img/s，但 LLM 精修阶段占整体耗时 50%+ 且 API 调用天然异步，单任务内部没有并发度。决定让多个 task 并行跑，同时新增全局 LLM 限流防止把云端 API 打爆。
+
+### 完成内容
+
+**配置层（AGE-pipeline-parallel）**
+
+- `LLMConfig` 新增 `max_concurrent_requests: int = 3`：跨所有 pipeline 共享的 LLM API 并发上限
+- 删除 `QueueConfig` 类及 `PipelineConfig.queue` 字段（原 `max_concurrent_pipelines` 迁移到 `LLMConfig`，语义更精确）
+
+**Scheduler 重构**（`pipeline/scheduler.py`）
+
+- `_pipeline_semaphore` → `_llm_semaphore`，构造参数 `max_concurrent_pipelines` → `max_concurrent_llm_requests`
+- 属性 `pipeline_semaphore` → `llm_semaphore`
+- 模块文档更新：跨任务 GPU 串行 + LLM API 限流
+
+**BaseLLMRefiner 统一限流出口**（`llm/base.py`）
+
+- 构造器新增 `semaphore: asyncio.Semaphore | None = None`（可选，便于单测）
+- 新增 `_call_llm(kwargs)`：所有 `litellm.acompletion` 调用的统一出口，先 acquire `semaphore` 再发请求
+- refine / fill_gap / final_refine / detect_doc_boundaries 全部改走 `_call_llm`
+- `CloudLLMRefiner.detect_pii_entities` 同样走 `_call_llm`
+- 子类 `LocalLLMRefiner` 通过继承自动支持（不覆盖 `_call_llm`）
+
+**Pipeline 注入 Scheduler**（`pipeline/pipeline.py` + `api/app.py`）
+
+- `Pipeline.__init__` 新增 `self._llm_semaphore: asyncio.Semaphore | None = None`
+- 新增 `set_llm_semaphore(sem)`（在 `initialize()` 之前调用，否则默认 refiner 不带限流）
+- `_create_refiner` 从 `@staticmethod` 改为实例方法，传 `semaphore=self._llm_semaphore`
+- `api/app.py` lifespan 在创建 Scheduler 后立刻 `pipeline.set_llm_semaphore(scheduler.llm_semaphore)`
+
+**Gap fill 三段锁序（重要）**
+
+- 锁序：`llm_semaphore`（segment refine）→ 释放 → `gpu_lock`（re-OCR）→ 释放 → `llm_semaphore`（fill_gap）
+- 非嵌套，无死锁；re-OCR 阶段必须释放 `llm_semaphore`，否则 sem=1 场景下其它任务会被误阻塞
+- 集成测试（`tests/pipeline/test_concurrent_tasks.py::test_reocr_releases_llm_semaphore`）验证该不变量
+
+**测试**
+
+- 新增 `tests/llm/test_base_semaphore.py`：3 个用例覆盖 semaphore 注入 / 未注入 / 全入口都走限流
+- 新增 `tests/pipeline/test_concurrent_tasks.py`：3 个用例覆盖 2 任务共享 semaphore(1) 峰值 ≤ 1 / Scheduler 共享 / gap fill 锁序
+- 更新 `tests/pipeline/test_scheduler.py`：属性名迁移（9 处）
+- 更新 `tests/test_config.py`：删 QueueConfig 导入 + 2 处 assertion，改为 `max_concurrent_requests` 默认值/覆盖测试
+- 更新 `tests/pipeline/test_local_refiner_integration.py` / `test_local_provider_e2e.py`：`Pipeline._create_refiner` 从 staticmethod 改实例方法后的调用迁移
+- 全量测试：396 passed, 1 skipped
+
+**Benchmark 脚本**（`scripts/bench_pipeline_parallel.py`）
+
+- 对比 `serial`（N 任务顺序）vs `parallel`（N 任务并发）wall-time，输出 summary.json + 每任务 profile top-stage 聚合
+- 验收标准（设计文档 §8.3）：并发耗时 ≤ 0.6 × 串行（speedup ≥ 1.67×），实际运行由用户自行触发（需 GPU + API key）
+
+**文档同步**
+
+- `docs/zh/backend/pipeline.md` §9.2：`pipeline_semaphore 预留` 章节重写为 `LLM API 全局限流`（含三段锁序说明）
+- `docs/en/backend/pipeline.md`：对应英文版更新
+- `docs/zh/backend/data-models.md` / `docs/en/backend/data-models.md`：删 §4.6 QueueConfig，LLMConfig 补 `max_concurrent_requests` 字段
+- `README.md` / `README.en.md`：配置列表移除 QueueConfig，LLMConfig 列项补全局并发上限说明
+
+### 关键决策
+
+1. **为何删 `pipeline_semaphore` 而不是保留预留位？** 粗粒度 pipeline 计数无法保护 LLM API 限流（一条 pipeline 可能发几十次 LLM 请求），细粒度 per-call 限流语义更精确。
+2. **为何构造器注入 semaphore 而不是 ContextVar？** 便于测试直接构造（无需 ContextVar 上下文），同时避免 ContextVar 在非 Task 栈（如直接 await）里的传播歧义。
+3. **为何 gap fill 不把 sem + gpu_lock 嵌套？** `sem → gpu_lock` 嵌套会导致：task A 持 sem 等 gpu_lock，task B 持 gpu_lock 等 sem → 潜在死锁。非嵌套三段锁序彻底规避。
+
+### 遗留
+
+- 真实 bench 未运行（需 GPU + GEMINI_API_KEY + 实际图片集，`scripts/bench_pipeline_parallel.py` 已就绪）
+- AGE-13 Paddle worker 并发 HTTP 请求仍 pending（本次未触及，独立优化）
+
+## 2026-04-16 OCR 批量推理 + Pipeline 全流程埋点 + GPU 显存监控
+
+### 背景
+
+上午 bench 验证 vLLM 通用参数优化对稳态吞吐无收益，下午切换方向——让 worker 内部用 `asyncio.gather` 把多张图并发喂给 vLLM，直接吃下 continuous batching 红利。顺手把 GPU 显存碎片化监控和 Pipeline 全流程埋点一起补齐。
+
+### 完成内容
+
+**配置层**
+
+- `OCRConfig` 新增 `ocr_batch_size: int = 4` / `gpu_monitor_enable: bool = True` / `gpu_monitor_interval_s: float = 1.0` / `gpu_memory_safety_margin_mib: int = 1024`
+- `PipelineConfig` 新增 `profiling_enable: bool = False` / `profiling_output_path: str = ""`（默认关闭避免生产开销；`DOCRESTORE_PROFILING=1` 强制覆盖）
+
+**Profiler 基础设施**（`backend/docrestore/pipeline/profiler.py`）
+
+- `Protocol` 定义统一接口 `stage() / record_external() / export_json() / export_summary_table()`
+- `NullProfiler`：禁用时单次 ~50ns no-op，`stage()` 返回共享 context manager 不分配对象
+- `MemoryProfiler`：事件收集 + JSON 导出 + 扁平化耗时表（按 `pipeline.total` 计算 share%）
+- `ContextVar` 跨 async await 传播：`current_profiler() / set_current_profiler() / reset_current_profiler()`；嵌套调用自动复用外层 profiler，避免 Pipeline 实例并发调用时事件相互污染
+
+**DeepSeek worker**（`scripts/deepseek_ocr_worker.py`）
+
+- 新增 `ocr_batch` JSON-Lines 命令：`asyncio.gather(return_exceptions=True)` 并发处理整批，单张失败不拖垮整批，响应 `{ok: true, results: [...]}` 按序返回
+- 后台 GPU monitor task：启动时 `asyncio.create_task`，1s 采样一次 `torch.cuda.mem_get_info() / memory_allocated() / memory_reserved()` 计算 `frag_ratio`，free 低于 `safety_margin_bytes` 时主动调 `empty_cache()`；日志前缀 `[gpu_monitor]` 写到 stderr
+- `_build_init_cmd` 透传 `ocr_batch_size / gpu_monitor_*` 给 worker
+
+**DeepSeekOCR2Engine**（`backend/docrestore/ocr/deepseek_ocr2.py`）
+
+- 新增 `ocr_batch()` 覆写：已有 `result.mmd` 缓存直接磁盘加载，其余 pending 送 worker
+- `_send_ocr_batch_with_oom_retry`：遇 `_OOMError` 对半降级（`size //= 2`），降到 1 仍 OOM 才抛 `RuntimeError`；不回升避免震荡
+- 抽出 `_parse_single_result` 在 `ocr()` 和 `ocr_batch()` 间共享，避免两路径解析逻辑漂移
+
+**Pipeline 主循环埋点**（`backend/docrestore/pipeline/pipeline.py`）
+
+- `_task_profiler` async 上下文管理器：根调用创建 `MemoryProfiler` 并绑定 `ContextVar`，嵌套调用复用上层；退出时导出 `profile.json` + 写 summary table 日志
+- 核心阶段埋点：`pipeline.total` / `pipeline.subdir` / `ocr.batch` / `ocr.single` / `cleaner.page` / `dedup.*` / `pii.phase` / `llm.doc_boundary` / `llm.refine_phase` / `llm.refine_segment` / `llm.gap_fill_*` / `llm.final_refine` / `reassemble` / `doc_split` / `render.write`
+- `_run_ocr`：`isinstance(engine, WorkerBackedOCREngine)` 且 `batch_size >= 2` 时走 `engine.ocr_batch()`，否则回退逐张 `ocr()`——用 isinstance 而非 hasattr 避免 AsyncMock 测试替身误判
+
+**测试**
+
+- `tests/pipeline/test_profiler.py`：21 项单测覆盖 NullProfiler 零开销 / MemoryProfiler 事件记录 / export_json / export_summary_table / ContextVar 嵌套行为 / stage 异常记录
+
+**Bench 脚本扩展**（`scripts/bench_ocr.py`）
+
+- 新增 `--batch-size` CLI 参数：`>=2` 时整 run 一次 `engine.ocr_batch()`，`1` 走逐张 `ocr()` 对照基线
+- `OCRConfig.ocr_batch_size` 随 preset 构造传入
+
+### Benchmark 结果（RTX 4070 SUPER，36 张图 × 2 runs）
+
+| 名称 | 引擎 | 预设 | batch | mean_run(s) | img/s | GPU_util_mean(%) | GPU_util_p95(%) | mem_peak(MiB) |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| deepseek_baseline | deepseek-ocr-2 | baseline | 1 | 119.1 | 0.30 | 52.3 | 73.0 | 9867 |
+| deepseek_optimized | deepseek-ocr-2 | optimized | 1 | 118.3 | 0.30 | 56.6 | 71.0 | 11683 |
+| **deepseek_batch4** | deepseek-ocr-2 | optimized | **4** | **64.7** | **0.56** | 52.2 | **81.0** | 11843 |
+
+对比 baseline：
+- **吞吐 +87%**（0.30 → 0.56 img/s），超过目标 ≥0.45 img/s
+- **GPU p95 利用率 +8pp**（73% → 81%），峰值段饱和度明显提升
+- 峰值显存 +2GB（9867 → 11843 MiB），仍在 12GB 安全范围内
+- 均值 GPU 利用率不变（52%）——批量让 work 更快结束，空闲段占比相对上升抵消了峰值提升
+
+### 关键结论
+
+1. **worker 内 `asyncio.gather` 是最短路径**：不改 Pipeline 粒度、不改 GPU 锁语义，一层并发就吃下 continuous batching 的 87% 吞吐红利
+2. **`batch_size=4` 是 RTX 4070 SUPER 的甜点**：显存占用 11.8GiB/12GiB，已经逼近；再加大需配合 OOM halving 才稳
+3. **Profiler 的 `isinstance(WorkerBackedOCREngine)` 比 `hasattr` 更稳**：AsyncMock 自动生成属性让 hasattr/iscoroutinefunction 双重误判，测试路径直接跑进 batch 分支返回 mock 对象被 dedup 模块吃不下
+
+### 坑点
+
+- `pytest.raises(ValueError)` 被 ruff PT011 要求加 `match` 参数，否则过宽
+- worker `import torch` 之前写 `# type: ignore[import-untyped]` 会触发 mypy `unused-ignore`（torch 已装类型桩），直接去掉
+- worker gpu_monitor 日志走 stderr，父进程 `_stream_stderr_progress` 只在 initialize 阶段读 stderr，初始化后停止——导致 bench log 看不到 `[gpu_monitor]` 行。短任务无影响（pipe buffer 够用），长任务需后续补一个 stderr consumer 转 logger
+
+### 相关提交（dev 分支）
+
+- `1524379` OCR 批量推理 + Pipeline 全流程埋点 + GPU 显存监控
+
+### 遗留
+
+- Paddle worker 并发 HTTP 请求（Task #13，延后）——当前 PaddleOCR 路径仍是基类 `ocr_batch`（逐张串行）
+- worker stderr 持续读入 logger（gpu_monitor 日志回传父进程）
+- Pipeline 级并行（两条 pipeline：一条 OCR 时另一条做 PII/LLM 精修）——下一步
+
+## 2026-04-16 OCR vLLM 优化参数基线对比
+
+### 背景
+
+两款 OCR 引擎（PaddleOCR-VL / DeepSeek-OCR-2）均基于 vLLM 推理。先验证 vLLM 通用优化参数是否能带来吞吐收益，再评估通过 pipeline 并行捕获空闲 GPU 的空间。
+
+### 完成内容
+
+**配置层 —— 5 个 vLLM 通用优化字段透传**
+
+- `OCRConfig` 新增：`vllm_enforce_eager: bool | None` / `vllm_block_size: int | None` / `vllm_swap_space_gb: float | None` / `vllm_disable_mm_preprocessor_cache: bool` / `vllm_disable_log_stats: bool`；另增 `paddle_server_backend_config: str`（YAML 路径透传给 `paddleocr genai_server --backend_config`）。
+- `scripts/deepseek_ocr_worker.py`：`AsyncEngineArgs` 改为条件 kwargs 字典，仅当字段非 None/非默认时传入，避免污染 vLLM 默认值。
+- `backend/docrestore/ocr/deepseek_ocr2.py::_build_init_cmd()`：5 个字段随 init 命令透传到 worker。
+- `backend/docrestore/ocr/engine_manager.py::_start_ppocr_server()`：`paddle_server_backend_config` 非空时追加 `--backend_config <path>`。
+
+**基准脚本三件套**
+
+- `scripts/gpu_sampler.py`：独立进程 wrap `nvidia-smi -lms 500`，SIGTERM/SIGINT 转发 + CSV flush 保证完整数据。
+- `scripts/bench_ocr.py`：统一 EngineManager.ensure() → warmup → N 次 run，写 `summary.json` + `per_page.csv` + `gpu_trace.csv`。每次 run 独立子目录避免增量 OCR 命中缓存。
+- `scripts/bench_compare.py`：多次 bench 汇总 markdown 表；`_find_prefix()` 用 `startswith` 匹配 nvidia-smi 的 ` utilization.gpu [%]` 列名（带前导空格 + 单位后缀）。
+
+**Benchmark 执行（RTX 4070，36 张图 × 2 runs）**
+
+| 名称 | 引擎 | 预设 | init(s) | warmup(s) | mean_run(s) | img/s | GPU_util_mean(%) | GPU_util_p95(%) | mem_peak(MiB) |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| paddle_baseline | paddle-ocr | baseline | 79.9 | 11.3 | 103.2 | 0.35 | 20.1 | 66.0 | 9131 |
+| paddle_optimized | paddle-ocr | optimized | 79.9 | 11.9 | 106.3 | 0.34 | 19.8 | 65.0 | 9131 |
+| deepseek_baseline | deepseek-ocr-2 | baseline | 56.6 | 5.0 | 119.1 | 0.30 | 52.3 | 73.0 | 9867 |
+| deepseek_optimized | deepseek-ocr-2 | optimized | 41.6 | 5.1 | 118.3 | 0.30 | 56.6 | 71.0 | 11683 |
+
+汇总表：`output/bench/summary.md`；每次 run 的 `summary.json` / `per_page.csv` / `gpu_trace.csv` 保存在对应子目录。
+
+### 关键结论
+
+1. **vLLM 通用优化参数对稳态吞吐无收益**：PaddleOCR 0.35→0.34 img/s、DeepSeek 0.30→0.30 img/s，差异在噪声范围内。
+2. **`enforce_eager=True` 反而劣化 PaddleOCR -70%**（2.86 → 4.86 s/img）：PaddleOCR 的 `paddleocr_vl_09b.py` 默认让 vLLM 启用 CUDA Graph，强制 eager 会关闭图优化。据此从 PADDLE 优化预设中移除该参数，保留坏数据作为 `paddle_optimized_enforce_eager_v1`。
+3. **DeepSeek 优化仅 init 节省 27%**（56.6s → 41.6s）：主要来自 `gpu_memory_utilization=0.9`（原 0.75）降低了首次预分配的抖动。推理稳态无差异。
+4. **GPU 利用率偏低，验证 pipeline 并行空间**：PaddleOCR 均值 20% / p95 66%，DeepSeek 均值 52% / p95 73%。空闲 GPU 足以支撑 pipeline 层并行（OCR ↔ LLM 精修异步流水线、或多请求队列覆盖 idle）。
+
+### 坑点
+
+- vLLM CLI `--block-size` 仅接受 {1,8,16,32,64,128}，DeepSeek 官方脚本里的 256 是走 Python API 的（校验路径不同）；`bench_ocr.py` 将两个引擎的优化预设统一到 128。
+- nvidia-smi CSV 列名形如 ` utilization.gpu [%]`（前导空格 + 单位后缀），`DictReader` 必须按前缀匹配而非精确 key。
+- `pre-commit` hook 使用 `language: system`，commit 前必须 `conda activate docrestore`，否则 `mypy/ruff` 报 command not found。
+
+### 相关提交（dev 分支）
+
+- `8e16351` 配置层新增 5 个 vLLM 字段 + OCRConfig 透传
+- `cc522e1` 新增 bench 脚本 (bench_ocr / gpu_sampler)
+- `f238956` 新增 bench_compare 对比脚本
+- `14db297` 优化预设 block_size 256 → 128
+- `b4e4b9a` PaddleOCR 优化预设移除 enforce_eager
+- `a404300` bench_compare 匹配 nvidia-smi 列名单位后缀
+
+### 遗留
+
+- 通用优化无稳态收益 → 下一步应设计 pipeline 层并行（OCR 与 LLM 精修异步流水，或队列式批处理），在空闲 GPU 周期内吸收更多任务。
+- PaddleOCR GPU 利用率仅 20%，是首选并行目标。
+
 ## 2026-04-15 设计文档全量审查与同步
 
 ### 背景

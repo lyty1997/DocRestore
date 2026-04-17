@@ -200,6 +200,20 @@ class UploadCompleteResponse(BaseModel):
     total_size_bytes: int
 ```
 
+**OCR 引擎按需预热**（前端 TaskForm "预加载引擎" 按钮使用）：
+
+```python
+class OCRWarmupRequest(BaseModel):
+    model: str = "paddle-ocr/ppocr-v4"
+    gpu_id: str = "1"
+
+class OCRStatusResponse(BaseModel):
+    current_model: str
+    current_gpu: str
+    is_ready: bool       # _engine.is_ready
+    is_switching: bool   # _switch_lock.locked()
+```
+
 ### 3.3 路由（api/routes.py + api/upload.py）
 
 端点总览：
@@ -395,6 +409,20 @@ doc-2/images/...
 - 会话 TTL `_SESSION_TTL_SECONDS=3600`，后台 `_CLEANUP_INTERVAL_SECONDS=1800` 轮询清理
 - app shutdown 时 `cleanup_all_sessions()` 兜底删除所有临时目录
 
+#### GET /api/v1/ocr/status — 查询当前 OCR 引擎状态
+
+- 返回 `OCRStatusResponse { current_model, current_gpu, is_ready, is_switching }`，字段直接来自 `EngineManager` 同名属性
+- `app.state.engine_manager` 未挂载时返回 500（注入引擎或未启动 lifespan 的测试场景）
+
+#### POST /api/v1/ocr/warmup — 触发引擎预热
+
+- 请求 `OCRWarmupRequest { model, gpu_id }`，缺省值 `paddle-ocr/ppocr-v4 + GPU 1`
+- 响应 `{ status, message }`：
+  - `ready`：当前引擎已就绪且 model/gpu_id 都匹配，立即返回
+  - `switching`：`EngineManager._switch_lock` 被持有（其它请求触发的切换正在进行中）
+  - `accepted`：用 `manager.pipeline.config.ocr.model_copy(update={...})` 合成完整 `OCRConfig`，`asyncio.create_task` 后台调用 `engine_manager.ensure(config)`，立即返回
+- 后台预热失败仅 `logger.warning`，不会写回 API 响应；前端通过轮询 `/ocr/status` 自行判断终态
+
 ## 4. 依赖的接口
 
 | 来源 | 使用 |
@@ -413,6 +441,7 @@ API 层不直接依赖 OCR 层、处理层、LLM 层或输出层。
 - **WebSocket 广播**：`TaskManager.subscribe_progress()` 返回单生产者多消费者的 `asyncio.Queue`（maxsize=1 背压），连接断开时 `unsubscribe_progress()`。
 - **Assets 安全**：`_validate_asset_path` + `_resolve_asset_path` 双层校验（白名单 + `is_relative_to` 防穿越），允许子目录形式以兼容多文档结构。
 - **Zip 组装**：`_build_result_zip_bytes` 在内存中用 `ZIP_DEFLATED` 组装；空 `doc_dir` 走根目录，非空走子目录前缀。
+- **按需引擎预热**：`lifespan` 中创建完 `EngineManager` 后，用 `asyncio.create_task` 后台调用 `engine_manager.ensure()` 预热默认引擎（不阻塞服务可用性，失败仅记 warning）；`/ocr/warmup` 也走同一条路径，但允许调用方覆盖 `model/gpu_id`。`EngineManager` 暴露 `current_gpu / is_ready / is_switching` 三个只读属性供 `/ocr/status` 直接映射。
 
 ## 6. 错误响应（MVP）
 

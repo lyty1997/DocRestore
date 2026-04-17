@@ -22,7 +22,7 @@ limitations under the License.
    - **Local upload**: `FileUploader` drag-and-drop/file selection -> chunked upload session -> `UploadPreviewPanel` for preview and removal -> obtain temporary `image_dir` on completion
    - **Server browsing**: `DirectoryPicker` browses server directories to directly select an existing `image_dir`
    - **Server file aggregation**: Multi-select server files -> `POST /sources/server` -> symlinked temporary directory
-2. `TaskForm` to fill in `output_dir` + optional advanced configuration (LLM model / OCR engine / PII settings) -> create task
+2. `TaskForm` to fill in `output_dir` + optional advanced configuration (LLM model / OCR engine / PII settings) -> create task; optionally click **Preload Engine** to trigger backend OCR engine switching ahead of submission
 3. `TaskProgress` displays real-time progress (WebSocket preferred, polling fallback); `SourceImagePanel` synchronously shows the source image currently being processed
 4. `TaskDetail` summary: `TaskResult` renders Markdown (with images) + multi-document navigation (single-document tasks have only one entry)
 5. Download (`/download` zip) / save manual refinement (`PUT /results/{index}`) / retry / delete
@@ -109,6 +109,23 @@ Image references in Markdown need to be rewritten to assets API paths, compatibl
 - Multi-document: `images/xxx.jpg` within a sub-document -> `/api/v1/tasks/{task_id}/assets/{doc_dir}/images/xxx.jpg`
 
 Implementation: react-markdown custom `img` component that constructs a prefix using the current result's `doc_dir`.
+
+## 5.5 OCR Engine Warmup
+
+The **Preload Engine** button at the top of `TaskForm` lets the user move the model/GPU into place before submitting a task, avoiding a cold-start wait on the first image.
+
+| State | Trigger | Button label | Side text |
+|---|---|---|---|
+| `idle` | initial / dropdown changed | "Preload Engine" | -- |
+| `warming` | POST `/ocr/warmup` returned `accepted` / `switching` | "Loading..." | -- |
+| `ready` | warmup returned `ready` or `/ocr/status` poll matched | "Preload Engine" (disabled) | "Ready" (green) |
+| `error` | warmup call threw | "Preload Engine" | "Load Failed" (red) |
+
+Implementation notes (`TaskForm.tsx`):
+- One-shot `/ocr/status` query on mount: when the active model/GPU matches the form selection and `is_ready` is true, jump straight to `ready`.
+- Switching the OCR engine or GPU dropdown resets `engineStatus` back to `idle`.
+- Entering `warming` starts a 3 s `/ocr/status` poll, stops as soon as the target matches and `is_ready`; the timer is hard-capped at 60 s as a fail-safe.
+- A `useRef<setInterval>` clears the timer on unmount.
 
 ## 6. Download Functionality
 

@@ -28,7 +28,8 @@ Core responsibilities:
 - **Progress reporting**: Continuously pushes `TaskProgress` via the `on_progress` callback (forwarded by the API/WS layer).
 - **Concurrency & resources**:
   - GPU serialization: OCR and re-OCR use `asyncio.Lock` for serialization (cross-task shared lock provided by Scheduler).
-  - Downstream (CPU/network) stages execute serially by default (not currently connected to pipeline_semaphore).
+  - LLM rate limiting: All LLM API calls (refine / fill_gap / final_refine / detect_*) are gated by `scheduler.llm_semaphore`
+    (constructed from `LLMConfig.max_concurrent_requests`). The cap applies across **all concurrently running pipelines**. See Section 9.2.
 
 > Historical note: Earlier coordinate-based / text-feature clustering has been removed. Multi-document recognition is now handled by **LLM document boundary detection** (`LLMRefiner.detect_doc_boundaries()`); see Section 10. In single-document scenarios, `list[PipelineResult]` has length 1.
 
@@ -305,10 +306,25 @@ During development, full tracebacks are returned for debugging convenience. The 
 - Both OCR and re-OCR are serialized via `asyncio.Lock` to prevent multiple tasks from simultaneously occupying the GPU and causing OOM.
 - It is recommended that `PipelineScheduler.gpu_lock` provide a unified shared lock for cross-task serialization.
 
-### 9.2 pipeline_semaphore (Reserved)
+### 9.2 Global LLM API Rate Limiting (asyncio.Semaphore)
 
-Currently `Pipeline.process()` does not use `pipeline_semaphore`; downstream stages (dedup/refinement/output) execute serially within each task by default.
-If limiting "the number of concurrently running pipelines" is needed in the future, a unified semaphore should be introduced/restored at the Scheduler layer.
+- `PipelineScheduler.llm_semaphore` is constructed from `LLMConfig.max_concurrent_requests`
+  (default 3) and shared across every pipeline instance.
+- `BaseLLMRefiner._call_llm()` is the single entry point for every LLM call
+  (`refine` / `fill_gap` / `final_refine` / `detect_doc_boundaries` / `detect_pii_entities`);
+  all of them are rate-limited through this gate.
+- Injection path: `api/app.py` lifespan creates the Scheduler, then
+  `pipeline.set_llm_semaphore(scheduler.llm_semaphore)` → `Pipeline._create_refiner()`
+  builds `CloudLLMRefiner(cfg, semaphore=self._llm_semaphore)`.
+- **Gap fill three-stage lock sequence** (non-nested, deadlock-free):
+  1. Segment refine: holds `llm_semaphore`, calls LLM;
+  2. Re-OCR: releases `llm_semaphore`, acquires `gpu_lock`, calls `reocr_page`;
+  3. `fill_gap`: releases `gpu_lock`, re-acquires `llm_semaphore`, calls LLM.
+
+> Historical note: `QueueConfig.max_concurrent_pipelines` / `pipeline_semaphore` have been removed.
+> Reason: the coarse-grained pipeline counter cannot enforce API quotas;
+> the finer-grained per-LLM-call counter is semantically precise. OCR is still
+> forced to be serial by `gpu_lock`.
 
 ### 9.3 No Group-level Concurrency
 

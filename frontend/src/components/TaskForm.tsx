@@ -2,11 +2,15 @@
  * 任务创建表单：统一来源选择（本地/服务器）+ 输出目录 + OCR/LLM/PII 配置
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
+import { getOcrStatus, warmupOcrEngine } from "../api/client";
 import { useTranslation } from "../i18n";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { SourcePicker } from "./SourcePicker";
+
+/** OCR 引擎状态 */
+type EngineStatus = "idle" | "warming" | "ready" | "error";
 
 /** localStorage 持久化的 LLM 配置 */
 const LLM_STORAGE_KEY = "docrestore_llm_config";
@@ -128,9 +132,11 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
   /** 是否记住 LLM 配置 */
   const [rememberLlm, setRememberLlm] = useState(stored !== undefined);
 
-  /* OCR 引擎选择 */
+  /* OCR 引擎选择 + 预热状态 */
   const [ocrModel, setOcrModel] = useState<string>(DEFAULT_OCR_MODEL);
   const [gpuId, setGpuId] = useState<string>(DEFAULT_GPU_ID);
+  const [engineStatus, setEngineStatus] = useState<EngineStatus>("idle");
+  const pollRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
 
   /* 脱敏开关 + 敏感词（每条可选独立代号） */
   const [piiEnabled, setPiiEnabled] = useState(false);
@@ -196,6 +202,85 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
     setApiKeySaved(false);
     setApiKeyDraft("");
   };
+
+  /* 挂载时查询默认引擎预热状态 */
+  useEffect(() => {
+    let cancelled = false;
+    const check = async (): Promise<void> => {
+      try {
+        const s = await getOcrStatus();
+        if (cancelled) return;
+        if (s.current_model === ocrModel && s.current_gpu === gpuId) {
+          setEngineStatus(
+            s.is_ready ? "ready" : (s.is_switching ? "warming" : "idle"),
+          );
+        }
+      } catch {
+        /* 查询失败不影响使用 */
+      }
+    };
+    void check();
+    return (): void => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- 仅挂载时查询
+
+  /* 清理轮询定时器 */
+  useEffect(() => {
+    return (): void => {
+      if (pollRef.current !== undefined) clearInterval(pollRef.current);
+    };
+  }, []);
+
+  /** 轮询引擎状态直到就绪或超时 */
+  const pollEngineReady = useCallback(
+    (targetModel: string, targetGpu: string): void => {
+      if (pollRef.current !== undefined) clearInterval(pollRef.current);
+      const id = setInterval(() => {
+        void (async (): Promise<void> => {
+          try {
+            const s = await getOcrStatus();
+            if (
+              s.current_model === targetModel &&
+              s.current_gpu === targetGpu &&
+              s.is_ready
+            ) {
+              setEngineStatus("ready");
+              clearInterval(id);
+              pollRef.current = undefined;
+            }
+          } catch {
+            /* 静默重试 */
+          }
+        })();
+      }, 3000);
+      pollRef.current = id;
+      /* 60s 超时自动停止 */
+      setTimeout(() => {
+        if (pollRef.current === id) {
+          clearInterval(id);
+          pollRef.current = undefined;
+        }
+      }, 60_000);
+    },
+    [],
+  );
+
+  /** 预加载引擎：调 warmup API 并启动轮询 */
+  const handleWarmup = useCallback((): void => {
+    setEngineStatus("warming");
+    void (async (): Promise<void> => {
+      try {
+        const resp = await warmupOcrEngine(ocrModel, gpuId);
+        if (resp.status === "ready") {
+          setEngineStatus("ready");
+          return;
+        }
+        /* accepted 或 switching → 开始轮询 */
+        pollEngineReady(ocrModel, gpuId);
+      } catch {
+        setEngineStatus("error");
+      }
+    })();
+  }, [ocrModel, gpuId, pollEngineReady]);
 
   const handleSourceComplete = useCallback((dir: string): void => {
     setImageDir(dir);
@@ -291,6 +376,7 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
               value={ocrModel}
               onChange={(e) => {
                 setOcrModel(e.target.value);
+                setEngineStatus("idle");
               }}
               disabled={disabled}
             >
@@ -309,6 +395,7 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
               value={gpuId}
               onChange={(e) => {
                 setGpuId(e.target.value);
+                setEngineStatus("idle");
               }}
               disabled={disabled}
             >
@@ -318,6 +405,22 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
                 </option>
               ))}
             </select>
+          </div>
+          <div className="ocr-warmup-area">
+            <button
+              type="button"
+              className="btn-warmup"
+              onClick={handleWarmup}
+              disabled={disabled || engineStatus === "warming" || engineStatus === "ready"}
+            >
+              {engineStatus === "warming"
+                ? t("taskForm.engineWarming")
+                : t("taskForm.engineWarmup")}
+            </button>
+            <span className={`engine-status engine-status--${engineStatus}`}>
+              {engineStatus === "ready" && t("taskForm.engineReady")}
+              {engineStatus === "error" && t("taskForm.engineError")}
+            </span>
           </div>
         </div>
         <p className="ocr-engine-hint">

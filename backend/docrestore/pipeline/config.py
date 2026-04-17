@@ -99,12 +99,38 @@ class OCRConfig(BaseModel):
     # GPU 选择（两个引擎通用，前端可选）
     gpu_id: str = "1"  # CUDA_VISIBLE_DEVICES，默认 GPU 1
 
+    # === 两引擎共有的 vLLM 优化参数 ===
+    # DeepSeek 进程内直接透传到 AsyncEngineArgs；
+    # PaddleOCR 通过 scripts/bench_ocr.py 生成的 backend_config YAML 注入
+    # ppocr-server。None 表示沿用 vLLM 默认值，不主动覆盖。
+    vllm_enforce_eager: bool | None = None  # 显式控制 CUDA Graph 启用
+    vllm_block_size: int | None = None  # KV cache block 大小（默认 16，常用 256）
+    vllm_swap_space_gb: float | None = None  # CPU swap GiB（默认 4，OCR 场景可 0）
+    vllm_disable_mm_preprocessor_cache: bool = False  # OCR 每张图不同，缓存命中率 0
+    vllm_disable_log_stats: bool = False  # 关闭 vLLM 内部统计日志
+
+    # === 批量推理 + 显存监控（方案 1 / performance_toolkit）===
+    # OCR 批大小：Pipeline 一次向 worker 提交 N 张图，worker 内 asyncio.gather
+    # 并发处理，vLLM 自动 continuous batching，CPU 后处理与下一批 GPU 天然 overlap。
+    # < 2 回退逐张处理（保留旧路径，便于对比或兜底）。
+    ocr_batch_size: int = 4
+    # 启用 worker 内后台 GPU 监控 task（nvidia-smi 外部采样仍由 gpu_sampler.py 完成，
+    # 这里监控的是 Python 进程内 torch.cuda 视角 —— free / allocated / reserved /
+    # frag_ratio —— 方便定位显存碎片化）。
+    gpu_monitor_enable: bool = True
+    gpu_monitor_interval_s: float = 1.0  # 采样周期（秒）
+    # free 显存低于该阈值时 worker 主动调用 torch.cuda.empty_cache() 回收碎片，
+    # 并写 WARN 日志供父进程展示。
+    gpu_memory_safety_margin_mib: int = 1024
+
     # === PaddleOCR 专用（model="paddle-ocr/..." 时生效）===
     paddle_python: str = ""  # PaddleOCR conda 环境的 python 路径
     paddle_ocr_timeout: int = 300  # 单张 OCR 超时（秒）
     paddle_restart_interval: int = 20  # 每 N 张图片重启 worker（0 禁用）
     # worker 脚本路径（空串时使用默认仓库内路径）
     paddle_worker_script: str = ""
+    # ppocr-server 的 --backend_config YAML 路径（空串时用 PaddleOCR 默认配置）
+    paddle_server_backend_config: str = ""
 
     # PaddleOCR server 模式（paddle_server_url 非空时启用）
     paddle_server_url: str = ""  # 如 "http://localhost:8119/v1"
@@ -170,6 +196,8 @@ class LLMConfig(BaseModel):
     truncation_ratio_threshold: float = 0.3
     # 输入行数少于此值时不触发截断启发式（样本太小误判率高）
     truncation_min_input_lines: int = 20
+    # 全局 LLM API 并发上限（跨所有 pipeline 共享的 asyncio.Semaphore 名额）
+    max_concurrent_requests: int = 3
 
 
 class OutputConfig(BaseModel):
@@ -177,12 +205,6 @@ class OutputConfig(BaseModel):
 
     image_format: str = "jpg"
     image_quality: int = 95
-
-
-class QueueConfig(BaseModel):
-    """任务队列配置"""
-
-    max_concurrent_pipelines: int = 3  # 下游 pipeline 最大并发
 
 
 class CustomWord(BaseModel):
@@ -236,7 +258,13 @@ class PipelineConfig(BaseModel):
     dedup: DedupConfig = Field(default_factory=DedupConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
-    queue: QueueConfig = Field(default_factory=QueueConfig)
     pii: PIIConfig = Field(default_factory=PIIConfig)
     db_path: str = "data/docrestore.db"  # SQLite 持久化路径
     debug: bool = True  # 落盘各阶段中间结果到 output_dir/debug/
+
+    # 性能调试开关：开启后 Pipeline 全流程埋点，任务结束写 profile.json
+    # + 打印扁平化耗时表。默认关闭以避免生产环境引入 ~1-2μs/stage 开销。
+    # 环境变量 DOCRESTORE_PROFILING=1 可强制覆盖。
+    profiling_enable: bool = False
+    # profile.json 输出路径；空串 → {output_dir}/profile.json
+    profiling_output_path: str = ""

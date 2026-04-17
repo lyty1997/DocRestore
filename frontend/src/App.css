@@ -2420,6 +2420,47 @@ body {
   cursor: not-allowed;
 }
 
+.ocr-warmup-area {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 0 0 auto;
+}
+
+.btn-warmup {
+  padding: 0.55rem 0.75rem;
+  font-size: 0.85rem;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-surface-alt);
+  color: var(--color-text);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.2s, opacity 0.2s;
+}
+
+.btn-warmup:hover:not(:disabled) {
+  border-color: var(--color-primary);
+}
+
+.btn-warmup:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.engine-status {
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.engine-status--ready {
+  color: var(--color-success, #22c55e);
+}
+
+.engine-status--error {
+  color: var(--color-error, #ef4444);
+}
+
 .ocr-engine-hint {
   margin: 0.35rem 0 0;
   font-size: 0.78rem;

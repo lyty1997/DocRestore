@@ -17,6 +17,8 @@ import {
   UploadSessionFileDeleteResponseSchema,
   UploadSessionFilesResponseSchema,
   UploadSessionResponseSchema,
+  OcrStatusResponseSchema,
+  OcrWarmupResponseSchema,
   type ActionResponse,
   type BrowseDirsResponse,
   type CreateTaskResponse,
@@ -31,6 +33,8 @@ import {
   type UploadSessionFileDeleteResponse,
   type UploadSessionFilesResponse,
   type UploadSessionResponse,
+  type OcrStatusResponse,
+  type OcrWarmupResponse,
 } from "./schemas";
 import { appendTokenToUrl, getAuthHeaders, loadApiToken } from "./auth";
 
@@ -302,4 +306,25 @@ export async function completeUpload(
     headers: apiHeaders(),
   });
   return handleResponse(response, UploadCompleteResponseSchema);
+}
+
+/** 查询 OCR 引擎状态 */
+export async function getOcrStatus(): Promise<OcrStatusResponse> {
+  const response = await fetch(`${API_BASE}/ocr/status`, {
+    headers: apiHeaders(),
+  });
+  return handleResponse(response, OcrStatusResponseSchema);
+}
+
+/** 预热 OCR 引擎 */
+export async function warmupOcrEngine(
+  model: string,
+  gpuId: string,
+): Promise<OcrWarmupResponse> {
+  const response = await fetch(`${API_BASE}/ocr/warmup`, {
+    method: "POST",
+    headers: apiHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ model, gpu_id: gpuId }),
+  });
+  return handleResponse(response, OcrWarmupResponseSchema);
 }
