@@ -766,23 +766,26 @@ class Pipeline:
                     refiner, seg.text, i, len(segments),
                 )
 
-            # 截断检测：行数比例启发式（finish_reason 已标记的不重复检测）
+            # 截断检测（合并 finish_reason=length 与行数比例启发式）：
+            # 任一判定为 truncated 则直接回退到原文 —— 截断的精修结果
+            # 会丢失后半段内容，比"未精修但信息完整"的原文更危险
             input_lines = seg.text.count("\n") + 1
             output_lines = result.markdown.count("\n") + 1
-            if (
-                not result.truncated
-                and input_lines > llm_cfg.truncation_min_input_lines
+            heuristic_truncated = (
+                input_lines > llm_cfg.truncation_min_input_lines
                 and output_lines
                 < input_lines * (1 - llm_cfg.truncation_ratio_threshold)
-            ):
-                result = RefinedResult(
-                    markdown=result.markdown,
-                    gaps=result.gaps,
-                    truncated=True,
-                )
+            )
+            if result.truncated or heuristic_truncated:
                 logger.warning(
-                    "段 %d 疑似截断（输入 %d 行 → 输出 %d 行）",
+                    "段 %d 疑似截断（输入 %d 行 → 输出 %d 行），回退到原文",
                     i + 1, input_lines, output_lines,
+                )
+                # gaps 基于截断后内容不可信，清空；保留 truncated 标记用于 warnings
+                result = RefinedResult(
+                    markdown=seg.text,
+                    gaps=[],
+                    truncated=True,
                 )
 
             refined_results.append(result)
@@ -1299,11 +1302,17 @@ class Pipeline:
                 "final_refined.md",
                 result.markdown,
             )
+            # 截断时回退原文：result.markdown 只到一半反而丢数据
+            if result.truncated:
+                logger.warning(
+                    "整篇文档级精修疑似截断，回退到原文",
+                )
+                return doc, True
             return MergedDocument(
                 markdown=result.markdown,
                 images=doc.images,
                 gaps=doc.gaps + result.gaps,
-            ), result.truncated
+            ), False
         except Exception:
             logger.warning(
                 "整篇文档级精修失败，回退到原文",

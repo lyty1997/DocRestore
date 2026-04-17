@@ -213,33 +213,57 @@ class TestWarningsAggregationE2E:
     async def test_all_three_warning_types_aggregate(
         self, tmp_path: Path,
     ) -> None:
-        """段截断 + 整篇截断 + 未补 gap 同时出现 → warnings 三类齐全。"""
+        """段截断 + 整篇截断 + 未补 gap 同时出现 → warnings 三类齐全。
+
+        注意：truncated 段的 gaps 会被清空（截断后 gap 坐标不可信），所以三种
+        警告不能由单一 refine 调用同时制造。此处用 max_chars_per_segment=30
+        + 标题分段把文档切成两段：段 1（40 行长 x 输入）触发启发式截断并清空
+        gaps；段 2（短）返回 truncated=False + 未补 gap。final_refine 另外
+        返回 truncated=True。三种警告独立产生并在 warnings 里汇总。
+        """
         cfg = PipelineConfig(
             llm=LLMConfig(
                 model="test-model",
                 enable_gap_fill=True,
                 enable_final_refine=True,
+                max_chars_per_segment=30,  # 强制按标题分段
             ),
             pii=PIIConfig(enable=False),
         )
         pipeline = Pipeline(cfg)
-        engine = _engine({"x.jpg": "x text", "y.jpg": "y text"})
+        # 用 # 标题让 segmenter 分成两段
+        long_text = "# 标题 X\n" + "\n".join(
+            f"x 行 {i}" for i in range(40)
+        )
+        short_text = "# 标题 Y\ny text"
+        engine = _engine({"x.jpg": long_text, "y.jpg": short_text})
         engine.reocr_page = AsyncMock(return_value="reocr")
         pipeline.set_ocr_engine(engine)
 
         refiner = MagicMock()
 
+        call_counter = {"n": 0}
+
         async def _refine(text: str, _ctx: object) -> object:
+            call_counter["n"] += 1
+            if call_counter["n"] == 1:
+                # 第一段（长输入）→ 返回极短内容触发启发式截断
+                return RefinedResult(
+                    markdown="short",
+                    gaps=[],
+                    truncated=False,
+                )
+            # 其余段：truncated=False + 携带一个未能补上的 gap
             return RefinedResult(
                 markdown=text,
                 gaps=[
                     Gap(
-                        after_image="x.jpg",
-                        context_before="x",
-                        context_after="y",
+                        after_image="y.jpg",
+                        context_before="y",
+                        context_after="",
                     ),
                 ],
-                truncated=True,
+                truncated=False,
             )
 
         refiner.refine = AsyncMock(side_effect=_refine)

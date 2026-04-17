@@ -16,6 +16,65 @@ limitations under the License.
 
 # DocRestore 开发进度
 
+## 2026-04-17 补：PII JSON 解析容错 + 精修截断一律回退原文
+
+### 背景
+
+用户实测两个问题同时出现：
+
+1. **PII 实体检测 JSON 解析失败**：某些 LLM（GLM-5 等）在 instruct 模式下会把 JSON 用 markdown code fence 包裹返回：
+   ```
+   ```json
+   {"person_names": ["..."], "org_names": ["..."]}
+   ```
+   ```
+   `json.loads` 直接对整串解析必然 JSONDecodeError，PII 检测抛 RuntimeError，后续云端 LLM 精修被 `block_cloud_on_detect_failure` 全部跳过。
+
+2. **"段 X 疑似截断（输入 N 行 → 输出 M 行）"只是 warning 没 fallback**：输出不到输入一半的截断段，`result.markdown` 仍是截断内容，直接进入下游 reassemble + final_refine。一旦截断，后半段内容丢失，下游拿到残缺文档。
+
+### 完成内容
+
+**PII JSON 解析容错**（`backend/docrestore/llm/cloud.py`）
+- 新增 `_extract_json_payload(raw) -> str`：
+  - 纯 JSON → 原样返回
+  - ```` ```json\n...\n``` ```` / ```` ```\n...\n``` ```` → 正则剥围栏
+  - 无围栏但前后带说明文字 → 取首 `{` 到末 `}` 之间子串
+- `detect_pii_entities` 先走 `_extract_json_payload` 再 `json.loads`；错误信息保留原始 raw（前 200 字）便于调试
+
+**截断段一律回退原文**（`backend/docrestore/pipeline/pipeline.py::_refine_segments`）
+- 统一 `finish_reason=length`（refiner 自报）与行数比例启发式为单一分支
+- 任一判定 truncated=True → `markdown = seg.text`，`gaps = []`（截断后 LLM 返回的 gap 坐标不可信），保留 `truncated` 标记供 `_collect_warnings` 产生 warnings
+- 日志从"疑似截断"改为"疑似截断（...），回退到原文"
+
+**整篇精修截断回退**（`backend/docrestore/pipeline/pipeline.py::_final_refine`）
+- `result.truncated=True` → 返回原 `doc`（不用被截断的 `result.markdown`）
+- 非截断路径照常用精修结果
+
+### 测试
+
+- `tests/llm/test_cloud_truncation.py`（+9 用例）：
+  - `TestExtractJsonPayload`(5)：纯 JSON / ```json / ```/ 前后空白 / 前后说明
+  - `TestDetectPiiEntitiesJsonParse`(3)：code fence 复现用户场景 / 裸 JSON / 完全非 JSON RuntimeError
+- `tests/pipeline/test_truncation.py`：
+  - 调整 `test_short_output_gets_flagged_truncated` / `test_refiner_self_reported_truncation_falls_back`：断言 markdown 回退 `input_text` 且 gaps 清空
+  - 新增 `TestFinalRefineFallback`(2)：truncated 回退原 doc / 未截断使用精修结果
+- `tests/pipeline/test_warnings_e2e.py::test_all_three_warning_types_aggregate`：因"truncated 清空 gaps"语义调整，改为 `max_chars_per_segment=30` 强制按标题分段，段 1 启发式截断 + 段 2 产生 gap + final_refine 截断，三种警告独立产生
+
+### 回归
+
+- pytest: 521 passed + 8 skipped（原 511+8，新增 10 个）
+- mypy --strict: 108 文件 0 错误
+- ruff check: 全部通过
+
+### 语义变化（需要注意的向下兼容风险）
+
+- 旧行为：截断段的 `RefinedResult.markdown` 是 LLM 截断输出；下游得到半截的"精修"markdown
+- 新行为：截断段的 `RefinedResult.markdown` 是**原文**；下游得到原始 OCR 结果（未精修但信息完整）
+- `_collect_warnings` 仍会告知用户该段截断；用户看到 warnings 时输出的正确读法是"段 X 未精修，按原文拼接"
+- 如果有外部消费者依赖 "truncated=True 时 markdown 非空且是 LLM 输出"，需要同步调整（本仓库内已全部同步）
+
+---
+
 ## 2026-04-17 补：ppocr-server 孤儿进程四层兜底清理（atexit/PDEATHSIG/SIGHUP/启动扫描）
 
 ### 背景

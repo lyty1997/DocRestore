@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CloudLLMRefiner 截断检测测试（mock litellm）"""
+"""CloudLLMRefiner 截断检测 + PII JSON 解析测试（mock litellm）"""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from docrestore.llm.cloud import CloudLLMRefiner
+from docrestore.llm.cloud import CloudLLMRefiner, _extract_json_payload
 from docrestore.models import RefineContext
 from docrestore.pipeline.config import LLMConfig
 
@@ -116,3 +116,82 @@ class TestCloudTruncationDetection:
         result = await refiner.final_refine("# 原始文档")
 
         assert result.truncated is False
+
+
+class TestExtractJsonPayload:
+    """_extract_json_payload 剥 markdown code fence。"""
+
+    def test_plain_json_unchanged(self) -> None:
+        raw = '{"a": 1}'
+        assert _extract_json_payload(raw) == '{"a": 1}'
+
+    def test_json_code_fence_stripped(self) -> None:
+        """```json\\n...\\n``` 剥围栏。"""
+        raw = '```json\n{"a": 1}\n```'
+        assert _extract_json_payload(raw) == '{"a": 1}'
+
+    def test_plain_code_fence_stripped(self) -> None:
+        """```\\n...\\n``` （无语言标签）剥围栏。"""
+        raw = '```\n{"a": 1}\n```'
+        assert _extract_json_payload(raw) == '{"a": 1}'
+
+    def test_code_fence_with_surrounding_whitespace(self) -> None:
+        raw = '  \n```json\n{"a": 1, "b": 2}\n```  \n'
+        assert _extract_json_payload(raw) == '{"a": 1, "b": 2}'
+
+    def test_explanatory_text_around_json(self) -> None:
+        """前后带解释说明 → 取首个 { 到末 }。"""
+        raw = '以下是检测结果：\n{"a": 1}\n希望对你有帮助。'
+        assert _extract_json_payload(raw) == '{"a": 1}'
+
+
+class TestDetectPiiEntitiesJsonParse:
+    """detect_pii_entities 能处理 markdown code fence 响应。"""
+
+    @pytest.mark.asyncio
+    @patch("docrestore.llm.base.litellm.acompletion")
+    async def test_code_fenced_json_parsed(
+        self, mock_acompletion: AsyncMock,
+    ) -> None:
+        """LLM 用 ```json ... ``` 包裹响应时也能解析（复现用户场景）。"""
+        fenced = (
+            '```json\n'
+            '{"person_names": ["Charles Cazabon"], '
+            '"org_names": ["\u5e73\u5934\u54e5"]}\n'
+            '```'
+        )
+        mock_acompletion.return_value = _make_response(fenced, "stop")
+
+        refiner = CloudLLMRefiner(_make_config())
+        persons, orgs = await refiner.detect_pii_entities("test")
+
+        assert persons == ["Charles Cazabon"]
+        assert orgs == ["\u5e73\u5934\u54e5"]
+
+    @pytest.mark.asyncio
+    @patch("docrestore.llm.base.litellm.acompletion")
+    async def test_plain_json_still_parsed(
+        self, mock_acompletion: AsyncMock,
+    ) -> None:
+        """裸 JSON 响应也能正常解析。"""
+        raw = '{"person_names": ["\u674e\u56db"], "org_names": []}'
+        mock_acompletion.return_value = _make_response(raw, "stop")
+
+        refiner = CloudLLMRefiner(_make_config())
+        persons, orgs = await refiner.detect_pii_entities("test")
+
+        assert persons == ["\u674e\u56db"]
+        assert orgs == []
+
+    @pytest.mark.asyncio
+    @patch("docrestore.llm.base.litellm.acompletion")
+    async def test_non_json_raises_runtime(
+        self, mock_acompletion: AsyncMock,
+    ) -> None:
+        """完全不是 JSON（连 {} 都没有）→ RuntimeError。"""
+        mock_acompletion.return_value = _make_response(
+            "抱歉，我无法理解你的问题。", "stop",
+        )
+        refiner = CloudLLMRefiner(_make_config())
+        with pytest.raises(RuntimeError, match="非 JSON"):
+            await refiner.detect_pii_entities("test")

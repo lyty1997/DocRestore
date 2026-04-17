@@ -76,7 +76,11 @@ class TestTruncationHeuristicInRefineSegments:
     async def test_short_output_gets_flagged_truncated(
         self, tmp_path: Path,
     ) -> None:
-        """40 行输入 + 5 行输出（输出占比 ≈12.5% < 70% 阈值）→ 启发式标记截断。"""
+        """40 行输入 + 5 行输出（输出占比 ≈12.5% < 70% 阈值）→ 启发式标记截断。
+
+        触发截断后 markdown 必须回退到原文（seg.text），而不是保留截断的输出 ——
+        截断的 LLM 输出已丢掉后半段内容，留下会误导下游 reassemble。
+        """
         input_lines = 40
         output_lines = 5
         assert input_lines > _TRUNCATION_MIN_INPUT_LINES
@@ -101,9 +105,10 @@ class TestTruncationHeuristicInRefineSegments:
         )
 
         assert len(results) == 1
-        assert results[0].markdown == output_text
-        # 核心断言：启发式把 truncated 从 False 翻成了 True
+        # 核心断言：启发式把 truncated 从 False 翻成了 True，且 markdown 回退原文
         assert results[0].truncated is True
+        assert results[0].markdown == input_text
+        assert results[0].gaps == []
 
     @pytest.mark.asyncio
     async def test_output_close_to_input_not_flagged(
@@ -150,13 +155,15 @@ class TestTruncationHeuristicInRefineSegments:
         assert results[0].truncated is False
 
     @pytest.mark.asyncio
-    async def test_refiner_self_reported_truncation_preserved(
+    async def test_refiner_self_reported_truncation_falls_back(
         self, tmp_path: Path,
     ) -> None:
-        """refiner 自报 truncated=True 时，启发式有 `not result.truncated` 守卫，
-        不会重复检测；状态必须原样保留。"""
+        """refiner 自报 truncated=True（finish_reason=length）时同样回退原文。
+
+        统一与启发式截断走同一回退分支，避免半截输出进入下游。
+        """
         input_text = "\n".join(f"L{i}" for i in range(40))
-        output_text = "\n".join(f"O{i}" for i in range(35))  # 不会触发启发式
+        output_text = "\n".join(f"O{i}" for i in range(35))  # 启发式不会触发
 
         pipeline, _ = _make_pipeline_with_refiner(
             output_text, refiner_truncated=True,
@@ -168,8 +175,10 @@ class TestTruncationHeuristicInRefineSegments:
         )
 
         assert len(results) == 1
-        # refiner 自报 True，启发式 guard 保留原状态
+        # refiner 自报截断 → 一视同仁回退原文
         assert results[0].truncated is True
+        assert results[0].markdown == input_text
+        assert results[0].gaps == []
 
 
 class TestCollectWarningsStaticMethod:
@@ -249,6 +258,66 @@ class TestCollectWarningsStaticMethod:
             final_truncated=False,
         )
         assert warnings == []
+
+
+class TestFinalRefineFallback:
+    """_final_refine 截断时回退原文。"""
+
+    @pytest.mark.asyncio
+    async def test_final_refine_truncated_falls_back_to_doc(
+        self, tmp_path: Path,
+    ) -> None:
+        """_final_refine 返回 truncated=True → 回退原 doc，不用截断的精修结果。"""
+        cfg = PipelineConfig(llm=LLMConfig(model="test-model"))
+        pipeline = Pipeline(cfg)
+
+        refiner = MagicMock()
+        refiner.final_refine = AsyncMock(
+            return_value=RefinedResult(
+                markdown="# 截断输出（只有前半段）",
+                gaps=[],
+                truncated=True,
+            ),
+        )
+
+        doc = MergedDocument(
+            markdown="# 原始完整文档\n" + "\n".join(
+                f"第 {i} 段正文" for i in range(1, 40)
+            ),
+        )
+        new_doc, is_truncated = await pipeline._final_refine(
+            refiner, doc, tmp_path, _noop_report,
+        )
+
+        assert is_truncated is True
+        # 核心断言：回退到原文，不是截断的精修输出
+        assert new_doc.markdown == doc.markdown
+        assert "截断输出" not in new_doc.markdown
+
+    @pytest.mark.asyncio
+    async def test_final_refine_not_truncated_uses_refined(
+        self, tmp_path: Path,
+    ) -> None:
+        """_final_refine 未截断时照常使用精修后的 markdown。"""
+        cfg = PipelineConfig(llm=LLMConfig(model="test-model"))
+        pipeline = Pipeline(cfg)
+
+        refiner = MagicMock()
+        refiner.final_refine = AsyncMock(
+            return_value=RefinedResult(
+                markdown="# 精修完成",
+                gaps=[],
+                truncated=False,
+            ),
+        )
+
+        doc = MergedDocument(markdown="# 原始文档")
+        new_doc, is_truncated = await pipeline._final_refine(
+            refiner, doc, tmp_path, _noop_report,
+        )
+
+        assert is_truncated is False
+        assert new_doc.markdown == "# 精修完成"
 
 
 class TestTruncationHeuristicE2E:
