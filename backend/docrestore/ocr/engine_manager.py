@@ -32,7 +32,7 @@ import time
 from collections.abc import Callable
 from types import FrameType
 
-from docrestore.ocr.base import OCREngine
+from docrestore.ocr.base import OCREngine, _drain_stream_to_logger
 from docrestore.ocr.router import _parse_model, create_engine
 from docrestore.pipeline.config import OCRConfig
 
@@ -242,6 +242,8 @@ class EngineManager:
         self._current_model: str = ""
         self._current_gpu: str = ""
         self._ppocr_server_proc: asyncio.subprocess.Process | None = None
+        # ppocr-server 的 stdout/stderr drain task（防 pipe buffer 写满）
+        self._ppocr_drain_tasks: list[asyncio.Task[None]] = []
         self._switch_lock = asyncio.Lock()
 
     @property
@@ -480,6 +482,30 @@ class EngineManager:
 
         logger.info("ppocr-server 已就绪 (port=%d)", port)
 
+        # server ready 之后挂起 stdout/stderr drain：否则日志累积把 64KB pipe
+        # buffer 写满，server 内任何 logging 阻塞在 pipe_write → HTTP 响应
+        # 全部卡死 → worker OCR 300s 超时循环。_wait_server_ready 期间由
+        # _collect_stderr_progress 读 stderr 提取启动进度，此时已结束，不冲突。
+        proc = self._ppocr_server_proc
+        if proc.stdout is not None:
+            self._ppocr_drain_tasks.append(
+                asyncio.create_task(
+                    _drain_stream_to_logger(
+                        proc.stdout, "[ppocr-server stdout]",
+                    ),
+                    name="ppocr-server-stdout-drain",
+                ),
+            )
+        if proc.stderr is not None:
+            self._ppocr_drain_tasks.append(
+                asyncio.create_task(
+                    _drain_stream_to_logger(
+                        proc.stderr, "[ppocr-server stderr]",
+                    ),
+                    name="ppocr-server-stderr-drain",
+                ),
+            )
+
     async def _stop_ppocr_server(self) -> None:
         """关闭 ppocr-server 整个进程组（含 vLLM EngineCore 子进程）。
 
@@ -494,6 +520,16 @@ class EngineManager:
         # 正常路径清理走起：先从兜底名单移除，避免 atexit 重复 kill
         _untrack_pgid(pid)
         logger.info("关闭 ppocr-server 进程组 (pid=%s)...", pid)
+
+        # 先 cancel drain tasks：进程被 killpg 后 stdout/stderr EOF，
+        # drain 会自然退出；cancel 是兜底，避免卡在 readline
+        for task in self._ppocr_drain_tasks:
+            task.cancel()
+        if self._ppocr_drain_tasks:
+            await asyncio.gather(
+                *self._ppocr_drain_tasks, return_exceptions=True,
+            )
+            self._ppocr_drain_tasks = []
         try:
             # 向整个进程组发送 SIGTERM
             os.killpg(pid, signal.SIGTERM)

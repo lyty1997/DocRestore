@@ -17,9 +17,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
@@ -38,6 +40,33 @@ ProgressFn = Callable[[str], None]
 OCR_RESULT_FILENAME = "result.mmd"
 OCR_RAW_RESULT_FILENAME = "result_ori.mmd"
 OCR_DEBUG_COORDS_FILENAME = "debug_coords.jsonl"
+
+
+async def _drain_stream_to_logger(
+    stream: asyncio.StreamReader,
+    log_prefix: str,
+    *,
+    tail: deque[str] | None = None,
+) -> None:
+    """持续消费 stream，避免 64KB pipe buffer 写满后子进程阻塞在 write()。
+
+    - 按行读取 → debug 级别转发到 logger
+    - 可选写入 tail（deque maxlen 自动丢头），供进程退出后取最后 N 行诊断
+    - EOF（readline 返回空 bytes）正常退出；CancelledError 透传
+    """
+    try:
+        while True:
+            raw = await stream.readline()
+            if not raw:
+                return
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            if tail is not None:
+                tail.append(line)
+            logger.debug("%s %s", log_prefix, line)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.debug("%s drain 异常", log_prefix, exc_info=True)
 
 
 class OCREngine(Protocol):
@@ -105,6 +134,9 @@ class WorkerBackedOCREngine(ABC):
         self._process: asyncio.subprocess.Process | None = None
         self._ready = False
         self._desync = False
+        # worker stderr drain 任务 + 最近 N 行缓冲（供 _raise_worker_exited 取）
+        self._stderr_drain_task: asyncio.Task[None] | None = None
+        self._stderr_tail: deque[str] = deque(maxlen=200)
 
     @property
     def is_ready(self) -> bool:
@@ -237,6 +269,20 @@ class WorkerBackedOCREngine(ABC):
             limit=self._config.worker_stdio_buffer_bytes,
             start_new_session=self._start_new_session(),
         )
+        # 启动 stderr drain task：worker 日志都写 stderr（stdout 是 JSON Lines
+        # 协议通道，绝对不能被 drain）。不做这一步的话，worker 跑久了 stderr
+        # pipe buffer（默认 64KB）写满，worker 内任何 print/logging 都会阻塞
+        # 在 write()，下一条 OCR 命令的响应永远发不出来 → 主进程 300s 超时。
+        self._stderr_tail.clear()
+        if self._process.stderr is not None:
+            self._stderr_drain_task = asyncio.create_task(
+                _drain_stream_to_logger(
+                    self._process.stderr,
+                    f"[{self.engine_name} stderr]",
+                    tail=self._stderr_tail,
+                ),
+                name=f"{self.engine_name}-stderr-drain",
+            )
 
     async def initialize(
         self, on_progress: ProgressFn | None = None,
@@ -281,6 +327,15 @@ class WorkerBackedOCREngine(ABC):
             try:
                 await self._terminate_process()
             finally:
+                # 进程已退出 → stderr 被关闭，drain task 会自然读到 EOF 退出；
+                # 这里主动 cancel 是兜底（若 _terminate 异常或 EOF 延迟）
+                if self._stderr_drain_task is not None:
+                    self._stderr_drain_task.cancel()
+                    with contextlib.suppress(
+                        asyncio.CancelledError, Exception,
+                    ):
+                        await self._stderr_drain_task
+                    self._stderr_drain_task = None
                 # 显式关闭 stdin，避免 __del__ 时事件循环已关闭
                 if self._process is not None and self._process.stdin:
                     self._process.stdin.close()
@@ -392,10 +447,21 @@ class WorkerBackedOCREngine(ABC):
         return await self._read_response(raw, stdout, read_timeout)
 
     async def _raise_worker_exited(self) -> None:
-        """worker 进程退出时，收集 stderr 后抛出 RuntimeError。"""
-        stderr_text = ""
-        if self._process is not None and self._process.stderr is not None:
-            stderr_bytes = await self._process.stderr.read()
-            stderr_text = stderr_bytes.decode("utf-8", errors="replace")
-        msg = f"{self.engine_name} worker 意外退出: {stderr_text[:500]}"
+        """worker 进程退出时，从 stderr tail 取最后 N 行抛出 RuntimeError。
+
+        stderr 已由 drain task 持续消费写入 self._stderr_tail；这里等 drain
+        task 把 EOF 前的残留读完（给它 1s 窗口），再把最近行拼起来当错误信息。
+        """
+        if self._stderr_drain_task is not None:
+            with contextlib.suppress(
+                asyncio.CancelledError, TimeoutError, Exception,
+            ):
+                await asyncio.wait_for(
+                    self._stderr_drain_task, timeout=1.0,
+                )
+        stderr_text = "\n".join(self._stderr_tail)
+        msg = (
+            f"{self.engine_name} worker 意外退出: "
+            f"{stderr_text[-500:]}"
+        )
         raise RuntimeError(msg)

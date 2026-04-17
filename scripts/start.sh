@@ -31,6 +31,14 @@ log() { echo -e "${CYAN}[DocRestore]${NC} $*"; }
 err() { echo -e "${RED}[错误]${NC} $*" >&2; }
 
 _CLEANING_UP=0
+# 第二次 Ctrl+C 直接升级到 SIGKILL（用户意图是马上退，别再等）
+_force_kill() {
+    log "收到第二次中断，强杀所有子进程"
+    # shellcheck disable=SC2046
+    kill -9 $(jobs -p) 2>/dev/null || true
+    exit 130
+}
+
 cleanup() {
     # 重入保护：防止 INT/TERM/EXIT 多次触发
     if [ "$_CLEANING_UP" -eq 1 ]; then
@@ -38,12 +46,35 @@ cleanup() {
     fi
     _CLEANING_UP=1
 
-    # 收到信号后先移除 trap，避免 kill 产生的后续信号再次进入
-    trap - EXIT INT TERM
+    # 收到信号后把 INT 改接到强杀分支，EXIT/TERM 摘掉避免重入
+    trap - EXIT TERM
+    trap _force_kill INT
 
-    log "正在关闭服务..."
-    # 向子进程发送 TERM（不含自身）
-    jobs -p | xargs -r kill 2>/dev/null || true
+    log "正在关闭服务... (再按一次 Ctrl+C 强制退出)"
+    local pids
+    pids="$(jobs -p)"
+    if [ -n "$pids" ]; then
+        # 先给 SIGTERM，优雅退出
+        # shellcheck disable=SC2086
+        kill $pids 2>/dev/null || true
+        # 最多等 10s（uvicorn lifespan 里 ppocr-server + vLLM 清理需要时间）
+        local waited=0
+        while [ "$waited" -lt 20 ]; do
+            # shellcheck disable=SC2086
+            if ! kill -0 $pids 2>/dev/null; then
+                break
+            fi
+            sleep 0.5
+            waited=$((waited + 1))
+        done
+        # SIGKILL 兜底：防止 lifespan 卡在某个 await 不退
+        # shellcheck disable=SC2086
+        if kill -0 $pids 2>/dev/null; then
+            log "子进程未在 10s 内退出，升级到 SIGKILL"
+            # shellcheck disable=SC2086
+            kill -9 $pids 2>/dev/null || true
+        fi
+    fi
     wait 2>/dev/null || true
     log "已关闭"
 }

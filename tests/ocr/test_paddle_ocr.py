@@ -47,6 +47,8 @@ class MockProcess:
         self.stdin.wait_closed = AsyncMock()
         self.stdout = AsyncMock()
         self.stderr = AsyncMock()
+        # drain task 会立刻 readline → 返回 b"" 表示 EOF，干净退出
+        self.stderr.readline = AsyncMock(return_value=b"")
         self.returncode: int | None = None
         self._responses: list[dict[str, object]] = []
         self._terminated = False
