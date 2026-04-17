@@ -175,8 +175,12 @@ def create_app(
 
         # 创建全局调度器
         scheduler = PipelineScheduler(
-            max_concurrent_pipelines=config.queue.max_concurrent_pipelines,
+            max_concurrent_llm_requests=config.llm.max_concurrent_requests,
         )
+
+        # 全局 LLM 限流 semaphore 必须在 initialize() 之前注入，
+        # 否则默认 refiner 不会带上 semaphore，跨任务并发不受控。
+        pipeline.set_llm_semaphore(scheduler.llm_semaphore)
 
         # 优先使用外部注入的引擎（测试用），否则使用 EngineManager
         engine = getattr(app.state, "ocr_engine", None)

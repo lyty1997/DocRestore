@@ -128,6 +128,7 @@ class Pipeline:
         self._ocr_engine: OCREngine | None = None
         self._engine_manager: EngineManager | None = None
         self._refiner: LLMRefiner | None = None
+        self._llm_semaphore: asyncio.Semaphore | None = None
 
     @property
     def config(self) -> PipelineConfig:
@@ -145,6 +146,13 @@ class Pipeline:
     def set_refiner(self, refiner: LLMRefiner) -> None:
         """注入 LLM 精修器（允许外部传入 mock）"""
         self._refiner = refiner
+
+    def set_llm_semaphore(self, semaphore: asyncio.Semaphore) -> None:
+        """注入全局 LLM 并发信号量（由 app.py 从 PipelineScheduler 传入）。
+
+        必须在 initialize() 之前调用，否则默认 refiner 不受信号量保护。
+        """
+        self._llm_semaphore = semaphore
 
     @contextlib.asynccontextmanager
     async def _task_profiler(
@@ -211,14 +219,13 @@ class Pipeline:
         async with aiofiles.open(target, "w", encoding="utf-8") as f:
             await f.write(content)
 
-    @staticmethod
-    def _create_refiner(llm_cfg: LLMConfig) -> BaseLLMRefiner:
-        """根据 provider 创建对应的 LLM 精修器。"""
+    def _create_refiner(self, llm_cfg: LLMConfig) -> BaseLLMRefiner:
+        """根据 provider 创建对应的 LLM 精修器，并注入全局限流 semaphore。"""
         if llm_cfg.provider == "local":
             from docrestore.llm.local import LocalLLMRefiner
 
-            return LocalLLMRefiner(llm_cfg)
-        return CloudLLMRefiner(llm_cfg)
+            return LocalLLMRefiner(llm_cfg, semaphore=self._llm_semaphore)
+        return CloudLLMRefiner(llm_cfg, semaphore=self._llm_semaphore)
 
     async def initialize(self) -> None:
         """创建并初始化 OCR 引擎 + LLM 精修器

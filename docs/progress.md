@@ -16,6 +16,78 @@ limitations under the License.
 
 # DocRestore 开发进度
 
+## 2026-04-17 Pipeline 级并行（多任务并发 + LLM API 全局限流）
+
+### 背景
+
+OCR batch 优化后单任务吞吐已达 0.56 img/s，但 LLM 精修阶段占整体耗时 50%+ 且 API 调用天然异步，单任务内部没有并发度。决定让多个 task 并行跑，同时新增全局 LLM 限流防止把云端 API 打爆。
+
+### 完成内容
+
+**配置层（AGE-pipeline-parallel）**
+
+- `LLMConfig` 新增 `max_concurrent_requests: int = 3`：跨所有 pipeline 共享的 LLM API 并发上限
+- 删除 `QueueConfig` 类及 `PipelineConfig.queue` 字段（原 `max_concurrent_pipelines` 迁移到 `LLMConfig`，语义更精确）
+
+**Scheduler 重构**（`pipeline/scheduler.py`）
+
+- `_pipeline_semaphore` → `_llm_semaphore`，构造参数 `max_concurrent_pipelines` → `max_concurrent_llm_requests`
+- 属性 `pipeline_semaphore` → `llm_semaphore`
+- 模块文档更新：跨任务 GPU 串行 + LLM API 限流
+
+**BaseLLMRefiner 统一限流出口**（`llm/base.py`）
+
+- 构造器新增 `semaphore: asyncio.Semaphore | None = None`（可选，便于单测）
+- 新增 `_call_llm(kwargs)`：所有 `litellm.acompletion` 调用的统一出口，先 acquire `semaphore` 再发请求
+- refine / fill_gap / final_refine / detect_doc_boundaries 全部改走 `_call_llm`
+- `CloudLLMRefiner.detect_pii_entities` 同样走 `_call_llm`
+- 子类 `LocalLLMRefiner` 通过继承自动支持（不覆盖 `_call_llm`）
+
+**Pipeline 注入 Scheduler**（`pipeline/pipeline.py` + `api/app.py`）
+
+- `Pipeline.__init__` 新增 `self._llm_semaphore: asyncio.Semaphore | None = None`
+- 新增 `set_llm_semaphore(sem)`（在 `initialize()` 之前调用，否则默认 refiner 不带限流）
+- `_create_refiner` 从 `@staticmethod` 改为实例方法，传 `semaphore=self._llm_semaphore`
+- `api/app.py` lifespan 在创建 Scheduler 后立刻 `pipeline.set_llm_semaphore(scheduler.llm_semaphore)`
+
+**Gap fill 三段锁序（重要）**
+
+- 锁序：`llm_semaphore`（segment refine）→ 释放 → `gpu_lock`（re-OCR）→ 释放 → `llm_semaphore`（fill_gap）
+- 非嵌套，无死锁；re-OCR 阶段必须释放 `llm_semaphore`，否则 sem=1 场景下其它任务会被误阻塞
+- 集成测试（`tests/pipeline/test_concurrent_tasks.py::test_reocr_releases_llm_semaphore`）验证该不变量
+
+**测试**
+
+- 新增 `tests/llm/test_base_semaphore.py`：3 个用例覆盖 semaphore 注入 / 未注入 / 全入口都走限流
+- 新增 `tests/pipeline/test_concurrent_tasks.py`：3 个用例覆盖 2 任务共享 semaphore(1) 峰值 ≤ 1 / Scheduler 共享 / gap fill 锁序
+- 更新 `tests/pipeline/test_scheduler.py`：属性名迁移（9 处）
+- 更新 `tests/test_config.py`：删 QueueConfig 导入 + 2 处 assertion，改为 `max_concurrent_requests` 默认值/覆盖测试
+- 更新 `tests/pipeline/test_local_refiner_integration.py` / `test_local_provider_e2e.py`：`Pipeline._create_refiner` 从 staticmethod 改实例方法后的调用迁移
+- 全量测试：396 passed, 1 skipped
+
+**Benchmark 脚本**（`scripts/bench_pipeline_parallel.py`）
+
+- 对比 `serial`（N 任务顺序）vs `parallel`（N 任务并发）wall-time，输出 summary.json + 每任务 profile top-stage 聚合
+- 验收标准（设计文档 §8.3）：并发耗时 ≤ 0.6 × 串行（speedup ≥ 1.67×），实际运行由用户自行触发（需 GPU + API key）
+
+**文档同步**
+
+- `docs/zh/backend/pipeline.md` §9.2：`pipeline_semaphore 预留` 章节重写为 `LLM API 全局限流`（含三段锁序说明）
+- `docs/en/backend/pipeline.md`：对应英文版更新
+- `docs/zh/backend/data-models.md` / `docs/en/backend/data-models.md`：删 §4.6 QueueConfig，LLMConfig 补 `max_concurrent_requests` 字段
+- `README.md` / `README.en.md`：配置列表移除 QueueConfig，LLMConfig 列项补全局并发上限说明
+
+### 关键决策
+
+1. **为何删 `pipeline_semaphore` 而不是保留预留位？** 粗粒度 pipeline 计数无法保护 LLM API 限流（一条 pipeline 可能发几十次 LLM 请求），细粒度 per-call 限流语义更精确。
+2. **为何构造器注入 semaphore 而不是 ContextVar？** 便于测试直接构造（无需 ContextVar 上下文），同时避免 ContextVar 在非 Task 栈（如直接 await）里的传播歧义。
+3. **为何 gap fill 不把 sem + gpu_lock 嵌套？** `sem → gpu_lock` 嵌套会导致：task A 持 sem 等 gpu_lock，task B 持 gpu_lock 等 sem → 潜在死锁。非嵌套三段锁序彻底规避。
+
+### 遗留
+
+- 真实 bench 未运行（需 GPU + GEMINI_API_KEY + 实际图片集，`scripts/bench_pipeline_parallel.py` 已就绪）
+- AGE-13 Paddle worker 并发 HTTP 请求仍 pending（本次未触及，独立优化）
+
 ## 2026-04-16 OCR 批量推理 + Pipeline 全流程埋点 + GPU 显存监控
 
 ### 背景

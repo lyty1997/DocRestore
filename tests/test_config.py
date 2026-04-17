@@ -24,7 +24,6 @@ from docrestore.pipeline.config import (
     OutputConfig,
     PIIConfig,
     PipelineConfig,
-    QueueConfig,
 )
 
 
@@ -134,18 +133,20 @@ class TestPipelineConfig:
         assert cfg.ocr.model == "paddle-ocr/ppocr-v4"
         assert cfg.output.image_format == "jpg"
 
-    def test_queue_defaults(self) -> None:
-        """QueueConfig 嵌套默认值"""
-        cfg = PipelineConfig()
-        assert isinstance(cfg.queue, QueueConfig)
-        assert cfg.queue.max_concurrent_pipelines == 3
+    def test_llm_max_concurrent_requests_default(self) -> None:
+        """LLMConfig.max_concurrent_requests 默认 3。
 
-    def test_override_queue(self) -> None:
-        """覆盖 QueueConfig"""
+        取代旧 QueueConfig.max_concurrent_pipelines。
+        """
+        cfg = PipelineConfig()
+        assert cfg.llm.max_concurrent_requests == 3
+
+    def test_override_llm_max_concurrent_requests(self) -> None:
+        """覆盖 LLMConfig.max_concurrent_requests"""
         cfg = PipelineConfig(
-            queue=QueueConfig(max_concurrent_pipelines=1),
+            llm=LLMConfig(max_concurrent_requests=1),
         )
-        assert cfg.queue.max_concurrent_pipelines == 1
+        assert cfg.llm.max_concurrent_requests == 1
 
     def test_independent_instances(self) -> None:
         """不同实例的子配置互不影响"""

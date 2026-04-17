@@ -63,8 +63,8 @@ Runtime configuration is controlled via `PipelineConfig` (`backend/docrestore/pi
 
 - `OCRConfig` -- Engine selection, GPU ID, image preprocessing, sidebar filtering
 - `DedupConfig` -- Line-level fuzzy matching threshold, overlap context lines
-- `LLMConfig` -- Provider (cloud/local), model, API endpoint, segment size, truncation detection
-- `OutputConfig` / `PIIConfig` / `QueueConfig` -- Output format, PII redaction, task concurrency
+- `LLMConfig` -- Provider (cloud/local), model, API endpoint, segment size, truncation detection, global concurrency cap (`max_concurrent_requests`)
+- `OutputConfig` / `PIIConfig` -- Output format, PII redaction
 
 See [docs/en/backend/data-models.md](docs/en/backend/data-models.md) for field descriptions.
 

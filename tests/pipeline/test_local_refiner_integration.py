@@ -36,7 +36,7 @@ class TestCreateRefiner:
             provider="cloud",
             model="openai/gpt-4",
         )
-        refiner = Pipeline._create_refiner(cfg)
+        refiner = Pipeline(PipelineConfig())._create_refiner(cfg)
         assert isinstance(refiner, CloudLLMRefiner)
 
     def test_local_provider(self) -> None:
@@ -46,14 +46,14 @@ class TestCreateRefiner:
             model="ollama/qwen2.5",
             api_base="http://localhost:11434/v1",
         )
-        refiner = Pipeline._create_refiner(cfg)
+        refiner = Pipeline(PipelineConfig())._create_refiner(cfg)
         assert isinstance(refiner, LocalLLMRefiner)
 
     def test_default_provider_is_cloud(self) -> None:
         """默认 provider 为 'cloud'"""
         cfg = LLMConfig(model="openai/gpt-4")
         assert cfg.provider == "cloud"
-        refiner = Pipeline._create_refiner(cfg)
+        refiner = Pipeline(PipelineConfig())._create_refiner(cfg)
         assert isinstance(refiner, CloudLLMRefiner)
 
 
@@ -92,7 +92,7 @@ class TestLocalRefinerPII:
             provider="local",
             model="ollama/qwen2.5",
         )
-        refiner = Pipeline._create_refiner(cfg)
+        refiner = Pipeline(PipelineConfig())._create_refiner(cfg)
         # _redact_pii 中的 isinstance 检查
         assert not isinstance(refiner, CloudLLMRefiner)
 

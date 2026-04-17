@@ -83,21 +83,26 @@ def _build_image_dir(root: Path, names: list[str]) -> Path:
 class TestCreateRefinerDispatches:
     """_create_refiner 根据 provider 选择对应实现"""
 
+    def _make_pipeline(self) -> Pipeline:
+        from docrestore.pipeline.config import PipelineConfig
+
+        return Pipeline(PipelineConfig())
+
     def test_local_provider_returns_local_refiner(self) -> None:
         cfg = LLMConfig(provider="local", model="ollama/x")
-        refiner = Pipeline._create_refiner(cfg)
+        refiner = self._make_pipeline()._create_refiner(cfg)
         assert isinstance(refiner, LocalLLMRefiner)
         assert not isinstance(refiner, CloudLLMRefiner)
 
     def test_cloud_provider_returns_cloud_refiner(self) -> None:
         cfg = LLMConfig(provider="cloud", model="openai/x")
-        refiner = Pipeline._create_refiner(cfg)
+        refiner = self._make_pipeline()._create_refiner(cfg)
         assert isinstance(refiner, CloudLLMRefiner)
         assert not isinstance(refiner, LocalLLMRefiner)
 
     def test_default_provider_is_cloud(self) -> None:
         cfg = LLMConfig(model="openai/x")  # provider 默认 "cloud"
-        assert Pipeline._create_refiner(cfg).__class__.__name__ \
+        assert self._make_pipeline()._create_refiner(cfg).__class__.__name__ \
             == "CloudLLMRefiner"
 
 
@@ -120,7 +125,7 @@ class TestLocalProviderFullChain:
         pipeline = Pipeline(cfg)
         pipeline.set_ocr_engine(_engine({"a.jpg": "原始内容"}))
         # 注入由 Pipeline._create_refiner 产生的真 LocalLLMRefiner
-        pipeline.set_refiner(Pipeline._create_refiner(llm_cfg))
+        pipeline.set_refiner(pipeline._create_refiner(llm_cfg))
 
         img_dir = _build_image_dir(tmp_path, ["a.jpg"])
 
@@ -157,7 +162,7 @@ class TestLocalProviderFullChain:
         cfg = PipelineConfig(llm=llm_cfg, pii=PIIConfig(enable=False))
         pipeline = Pipeline(cfg)
         pipeline.set_ocr_engine(_engine({"p.jpg": "段落1"}))
-        pipeline.set_refiner(Pipeline._create_refiner(llm_cfg))
+        pipeline.set_refiner(pipeline._create_refiner(llm_cfg))
 
         img_dir = _build_image_dir(tmp_path, ["p.jpg"])
 
@@ -202,7 +207,7 @@ class TestLocalProviderWithPII:
         pipeline.set_ocr_engine(_engine({
             "p.jpg": "联系 13812345678 或 abc@test.com",
         }))
-        pipeline.set_refiner(Pipeline._create_refiner(llm_cfg))
+        pipeline.set_refiner(pipeline._create_refiner(llm_cfg))
 
         img_dir = _build_image_dir(tmp_path, ["p.jpg"])
 

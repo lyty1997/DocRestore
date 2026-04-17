@@ -63,8 +63,8 @@ GEMINI_API_KEY=sk-xxx
 
 - `OCRConfig` — 引擎选择、GPU id、图片预处理、侧栏过滤
 - `DedupConfig` — 行级模糊匹配阈值、重叠上下文行数
-- `LLMConfig` — provider（cloud/local）、模型、API 地址、分段大小、截断检测
-- `OutputConfig` / `PIIConfig` / `QueueConfig` — 输出格式、PII 脱敏、任务并发
+- `LLMConfig` — provider（cloud/local）、模型、API 地址、分段大小、截断检测、全局并发上限（`max_concurrent_requests`）
+- `OutputConfig` / `PIIConfig` — 输出格式、PII 脱敏
 
 字段说明详见 [docs/backend/data-models.md](docs/zh/backend/data-models.md)。
 

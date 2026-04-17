@@ -196,6 +196,8 @@ class LLMConfig(BaseModel):
     truncation_ratio_threshold: float = 0.3
     # 输入行数少于此值时不触发截断启发式（样本太小误判率高）
     truncation_min_input_lines: int = 20
+    # 全局 LLM API 并发上限（跨所有 pipeline 共享的 asyncio.Semaphore 名额）
+    max_concurrent_requests: int = 3
 
 
 class OutputConfig(BaseModel):
@@ -203,12 +205,6 @@ class OutputConfig(BaseModel):
 
     image_format: str = "jpg"
     image_quality: int = 95
-
-
-class QueueConfig(BaseModel):
-    """任务队列配置"""
-
-    max_concurrent_pipelines: int = 3  # 下游 pipeline 最大并发
 
 
 class CustomWord(BaseModel):
@@ -262,7 +258,6 @@ class PipelineConfig(BaseModel):
     dedup: DedupConfig = Field(default_factory=DedupConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
-    queue: QueueConfig = Field(default_factory=QueueConfig)
     pii: PIIConfig = Field(default_factory=PIIConfig)
     db_path: str = "data/docrestore.db"  # SQLite 持久化路径
     debug: bool = True  # 落盘各阶段中间结果到 output_dir/debug/
