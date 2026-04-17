@@ -445,3 +445,64 @@ class TestProgressPubSub:
         # 只保留最新
         assert got.current in {1, 5}
         assert q.empty()
+
+
+class TestShutdown:
+    """TaskManager.shutdown：cancel 所有运行中任务。"""
+
+    @pytest.mark.asyncio
+    async def test_shutdown_cancels_pending_running_tasks(self) -> None:
+        """挂起的运行中任务被 cancel，shutdown 完成后清空注册表。"""
+        mgr = _make_manager()
+
+        task_done_events: list[asyncio.Event] = []
+
+        async def hang_forever() -> None:
+            done = asyncio.Event()
+            task_done_events.append(done)
+            try:
+                await asyncio.Future()  # 永远挂起
+            except asyncio.CancelledError:
+                done.set()
+                raise
+
+        bg1 = asyncio.create_task(hang_forever(), name="task1")
+        bg2 = asyncio.create_task(hang_forever(), name="task2")
+        mgr.register_running_task("tid1", bg1)
+        mgr.register_running_task("tid2", bg2)
+
+        # 让挂起任务先 schedule
+        await asyncio.sleep(0)
+        assert len(task_done_events) == 2
+        assert all(not e.is_set() for e in task_done_events)
+
+        await mgr.shutdown()
+
+        # 两个任务都被 cancel 并走到 CancelledError 分支
+        assert all(e.is_set() for e in task_done_events)
+        assert bg1.done()
+        assert bg2.done()
+        assert mgr._running_tasks == {}  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_shutdown_noop_when_no_running_tasks(self) -> None:
+        """没有运行中任务时 shutdown 快速返回。"""
+        mgr = _make_manager()
+        # 不注册任何任务，直接 shutdown 应立即返回
+        await mgr.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_swallows_task_exceptions(self) -> None:
+        """任务抛非 CancelledError 异常时 shutdown 只记录不重抛。"""
+        mgr = _make_manager()
+
+        async def raise_runtime() -> None:
+            raise RuntimeError("boom")
+
+        bg = asyncio.create_task(raise_runtime(), name="err-task")
+        mgr.register_running_task("err", bg)
+        await asyncio.sleep(0)  # 让任务产生异常
+
+        # shutdown 不应把 RuntimeError 抛出来
+        await mgr.shutdown()
+        assert bg.done()

@@ -177,17 +177,26 @@ class EngineManager:
         logger.info("切换 OCR 引擎: %s", ", ".join(parts))
 
     async def _shutdown_current(self) -> None:
-        """关闭当前引擎和 ppocr-server。"""
-        if self._engine is not None:
-            try:
-                await self._engine.shutdown()
-            except Exception:
-                logger.warning("引擎 shutdown 异常", exc_info=True)
-            self._engine = None
+        """关闭当前引擎和 ppocr-server。
 
-        await self._stop_ppocr_server()
-        self._current_model = ""
-        self._current_gpu = ""
+        try/finally 保证 _stop_ppocr_server 无论 engine.shutdown 成功/失败/
+        被 cancel 都会被调用 — ppocr-server 是独立 session leader，
+        不清理会遗留孤儿进程（含 vLLM EngineCore 子进程）。
+        """
+        try:
+            if self._engine is not None:
+                try:
+                    await self._engine.shutdown()
+                except Exception:
+                    logger.warning("引擎 shutdown 异常", exc_info=True)
+                finally:
+                    self._engine = None
+        finally:
+            try:
+                await self._stop_ppocr_server()
+            finally:
+                self._current_model = ""
+                self._current_gpu = ""
 
     async def _start_ppocr_server(
         self,

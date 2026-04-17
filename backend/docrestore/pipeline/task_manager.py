@@ -463,6 +463,35 @@ class TaskManager:
         """注册后台运行的 asyncio.Task 引用（供取消使用）。"""
         self._running_tasks[task_id] = bg
 
+    async def shutdown(self) -> None:
+        """服务关闭时调用：cancel 所有运行中任务并等待退出。
+
+        必要性：Pipeline.shutdown 会释放 OCR 引擎 stdin/stdout；若此时仍有
+        task 协程在 _send_command 里读写 stream，会与 engine.shutdown 并发
+        抢占导致协议错乱/阻塞。先在这里统一 cancel + gather 保证串行。
+        """
+        if not self._running_tasks:
+            return
+
+        tasks = list(self._running_tasks.values())
+        logger.info("TaskManager.shutdown 取消 %d 个运行中任务", len(tasks))
+        for bg in tasks:
+            bg.cancel()
+
+        # 等全部退出（不管是 CancelledError 还是已完成），不吞异常之外的信号
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for bg, result in zip(tasks, results, strict=True):
+            if isinstance(result, BaseException) and not isinstance(
+                result, asyncio.CancelledError,
+            ):
+                logger.warning(
+                    "shutdown 期间任务 %s 抛出非预期异常",
+                    bg.get_name(),
+                    exc_info=result,
+                )
+
+        self._running_tasks.clear()
+
     async def cancel_task(self, task_id: str) -> str | None:
         """取消运行中的任务。
 

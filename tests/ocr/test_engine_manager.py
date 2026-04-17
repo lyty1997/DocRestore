@@ -172,6 +172,39 @@ class TestShutdown:
         await manager.shutdown()
         assert manager.engine is None
 
+    @pytest.mark.asyncio
+    async def test_shutdown_stops_ppocr_even_if_engine_shutdown_cancelled(
+        self,
+    ) -> None:
+        """engine.shutdown 抛 CancelledError 时 _stop_ppocr_server 仍被调用。
+
+        回归保护 orphan vLLM EngineCore 问题：
+        修复前 _shutdown_current 的 _stop_ppocr_server 不在 finally，
+        engine.shutdown 抛 CancelledError 会跳过 ppocr-server 清理。
+        """
+        manager, _ = _make_manager(model="deepseek/ocr-2")
+        engine = _make_mock_engine()
+        engine.shutdown = AsyncMock(side_effect=asyncio.CancelledError)
+
+        with patch(
+            "docrestore.ocr.engine_manager.create_engine",
+            return_value=engine,
+        ):
+            await manager.ensure()
+
+        stop_ppocr_mock = AsyncMock(return_value=None)
+        with (
+            patch.object(manager, "_stop_ppocr_server", stop_ppocr_mock),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await manager.shutdown()
+
+        # 关键断言：即便 engine.shutdown 抛 CancelledError，
+        # ppocr-server 清理也必须被调用（否则孤儿进程）
+        stop_ppocr_mock.assert_awaited_once()
+        assert manager.engine is None
+        assert manager.current_model == ""
+
 
 class TestExtractStderrMessage:
     """_extract_stderr_message 静态方法五分支"""

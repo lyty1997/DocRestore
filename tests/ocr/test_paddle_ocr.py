@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -231,3 +232,153 @@ async def test_shutdown(
 
         assert not engine.is_ready
         assert mock_process._terminated
+
+
+@pytest.mark.asyncio
+async def test_shutdown_fast_when_worker_unresponsive(
+    paddle_config: OCRConfig,
+    mock_process: MockProcess,
+) -> None:
+    """worker 假死（readline 永不返回）时，shutdown 仍能快速完成。
+
+    回归保护：修复前 _send_command 会等满 paddle_ocr_timeout=60s；
+    修复后由 SHUTDOWN_COMMAND_TIMEOUT_SECONDS=3.0s 控制，总时长 < 5s。
+    """
+    import time
+
+    mock_process.set_responses([{"ok": True}])  # only initialize
+
+    # shutdown 期间 readline 永远 hang
+    call_count = {"n": 0}
+
+    async def readline() -> bytes:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # 第一次是 initialize 的响应
+            return (json.dumps({"ok": True}) + "\n").encode("utf-8")
+        # 后续（shutdown 命令的响应）永远挂起
+        await asyncio.Future()
+        return b""  # 不会到达
+
+    mock_process.stdout.readline = readline
+
+    original_exists = Path.exists
+
+    def mock_exists(path_self: Path) -> bool:
+        if str(path_self) == paddle_config.paddle_python:
+            return True
+        return original_exists(path_self)
+
+    with (
+        patch.object(Path, "exists", lambda p: mock_exists(p)),
+        patch(
+            "asyncio.create_subprocess_exec",
+            return_value=mock_process,
+        ),
+    ):
+        engine = PaddleOCREngine(paddle_config)
+        await engine.initialize()
+
+        start = time.monotonic()
+        await engine.shutdown()
+        elapsed = time.monotonic() - start
+
+        # SHUTDOWN_COMMAND_TIMEOUT_SECONDS=3.0s + terminate 缓冲，总 < 5s
+        assert elapsed < 5.0, (
+            f"shutdown 耗时 {elapsed:.1f}s，远超 3s 超时"
+        )
+        assert mock_process._terminated
+        assert not engine.is_ready
+
+
+@pytest.mark.asyncio
+async def test_shutdown_force_skips_graceful_command(
+    paddle_config: OCRConfig,
+    mock_process: MockProcess,
+) -> None:
+    """shutdown(force=True) 跳过 graceful 命令，直接 terminate 进程。
+
+    _restart_worker 场景：worker 已假死，发 shutdown 命令无意义。
+    """
+    import time
+
+    mock_process.set_responses([{"ok": True}])  # only initialize
+
+    original_exists = Path.exists
+
+    def mock_exists(path_self: Path) -> bool:
+        if str(path_self) == paddle_config.paddle_python:
+            return True
+        return original_exists(path_self)
+
+    with (
+        patch.object(Path, "exists", lambda p: mock_exists(p)),
+        patch(
+            "asyncio.create_subprocess_exec",
+            return_value=mock_process,
+        ),
+    ):
+        engine = PaddleOCREngine(paddle_config)
+        await engine.initialize()
+        # 记录 initialize 后的 write 调用次数基线
+        init_write_count = mock_process.stdin.write.call_count
+
+        start = time.monotonic()
+        await engine.shutdown(force=True)
+        elapsed = time.monotonic() - start
+
+        # force=True 应立即 terminate，不走 3s 超时
+        assert elapsed < 1.0, f"force shutdown 耗时 {elapsed:.1f}s，应瞬时"
+        # 没有新的 write 调用（没发 shutdown 命令）
+        assert mock_process.stdin.write.call_count == init_write_count
+        assert mock_process._terminated
+
+
+@pytest.mark.asyncio
+async def test_restart_worker_uses_force_shutdown(
+    paddle_config: OCRConfig,
+    mock_process: MockProcess,
+) -> None:
+    """_restart_worker 内部调用 shutdown(force=True)，不发 graceful 命令。
+
+    保证 OCR 超时后重启路径不会在 shutdown 命令上二次阻塞。
+    """
+    # initialize 两次响应（原始 + 重启后）
+    mock_process.set_responses([{"ok": True}, {"ok": True}])
+
+    original_exists = Path.exists
+
+    def mock_exists(path_self: Path) -> bool:
+        if str(path_self) == paddle_config.paddle_python:
+            return True
+        return original_exists(path_self)
+
+    with (
+        patch.object(Path, "exists", lambda p: mock_exists(p)),
+        patch(
+            "asyncio.create_subprocess_exec",
+            return_value=mock_process,
+        ),
+    ):
+        engine = PaddleOCREngine(paddle_config)
+        await engine.initialize()
+
+        # 记录 initialize 后所有 write 调用的 cmd 字段
+        sent_cmds_before = [
+            json.loads(call.args[0].decode("utf-8"))["cmd"]
+            for call in mock_process.stdin.write.call_args_list
+        ]
+
+        await engine._restart_worker()
+
+        sent_cmds_after = [
+            json.loads(call.args[0].decode("utf-8"))["cmd"]
+            for call in mock_process.stdin.write.call_args_list
+        ]
+        # restart 期间不应发送 "shutdown" 命令
+        new_cmds = sent_cmds_after[len(sent_cmds_before):]
+        assert "shutdown" not in new_cmds, (
+            f"_restart_worker 仍发送 shutdown 命令: {new_cmds}"
+        )
+        # initialize 命令被重新发送
+        assert "initialize" in new_cmds

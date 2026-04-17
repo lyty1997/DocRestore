@@ -254,33 +254,50 @@ class WorkerBackedOCREngine(ABC):
         self._ready = True
         logger.info("%s 引擎初始化完成", self.engine_name)
 
-    async def shutdown(self) -> None:
-        """通用 shutdown：先发命令，再终止进程，最后关闭 stdin。"""
+    # 优雅 shutdown 命令等 worker 响应的最长时间（秒）。
+    # 远短于 _get_timeout() 的 OCR 超时（300s+），避免 worker 假死时 shutdown 雪崩。
+    SHUTDOWN_COMMAND_TIMEOUT_SECONDS = 3.0
+
+    async def shutdown(self, *, force: bool = False) -> None:
+        """通用 shutdown：可选 graceful 命令 → 终止进程 → 关闭 stdin。
+
+        - force=False（默认）：先发 shutdown 命令（短超时 3s），
+          让 worker 自行清理；超时/异常立刻跳到 terminate。
+        - force=True：跳过 graceful 命令，直接 terminate。
+          供 _restart_worker 等"worker 假死"场景使用。
+        """
         if self._process is not None:
-            try:
-                await self._send_command({"cmd": "shutdown"})
-            except Exception:
-                logger.debug(
-                    "发送 shutdown 命令失败（worker 可能已退出）",
-                    exc_info=True,
-                )
-            finally:
+            if not force:
                 try:
-                    await self._terminate_process()
-                finally:
-                    # 显式关闭 stdin，避免 __del__ 时事件循环已关闭
-                    if self._process is not None and self._process.stdin:
-                        self._process.stdin.close()
-                        await self._process.stdin.wait_closed()
-                    self._process = None
+                    await asyncio.wait_for(
+                        self._send_command({"cmd": "shutdown"}),
+                        timeout=self.SHUTDOWN_COMMAND_TIMEOUT_SECONDS,
+                    )
+                except (Exception, TimeoutError):
+                    logger.debug(
+                        "发送 shutdown 命令失败/超时（worker 可能假死）",
+                        exc_info=True,
+                    )
+            try:
+                await self._terminate_process()
+            finally:
+                # 显式关闭 stdin，避免 __del__ 时事件循环已关闭
+                if self._process is not None and self._process.stdin:
+                    self._process.stdin.close()
+                    await self._process.stdin.wait_closed()
+                self._process = None
 
         self._ready = False
         logger.info("%s 引擎已关闭", self.engine_name)
 
     async def _restart_worker(self) -> None:
-        """重启 worker 进程（用于清理累积显存或恢复协议失步）。"""
+        """重启 worker 进程（用于清理累积显存或恢复协议失步）。
+
+        restart 场景下 worker 往往已经假死/卡住，graceful 命令没有意义，
+        直接 force=True 终止进程避免再次在 shutdown 命令上阻塞。
+        """
         logger.info("重启 %s worker...", self.engine_name)
-        await self.shutdown()
+        await self.shutdown(force=True)
         await self.initialize()
         logger.info("%s worker 重启完成", self.engine_name)
 

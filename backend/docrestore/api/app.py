@@ -242,6 +242,10 @@ def create_app(
             with contextlib.suppress(asyncio.CancelledError):
                 await warmup_task
 
+        # 先 cancel 运行中的 OCR 任务，避免它们与 pipeline.shutdown 并发
+        # 抢占 worker stdin/stdout（会导致 StreamReader 冲突或长时间阻塞）
+        await manager.shutdown()
+
         cleanup_task.cancel()
         cleanup_all_sessions()
         await pipeline.shutdown()

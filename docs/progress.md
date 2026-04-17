@@ -16,6 +16,61 @@ limitations under the License.
 
 # DocRestore 开发进度
 
+## 2026-04-17 修复 OCR worker 假死/shutdown 孤儿进程（vLLM EngineCore）
+
+### 背景
+
+用户反馈：任务处理多篇子文档，第 5 篇 OCR 响应超时触发 `_restart_worker` 重试，worker 没能重启而是卡住，用户 Ctrl+C 退出后，`VLLM::EngineCore` 成为孤儿进程（ppocr-server 随之残留）。
+
+### 根因
+
+四层叠加：
+
+1. **A — `base.py::shutdown` 无短超时**：graceful `{"cmd":"shutdown"}` 命令的响应等待继承 `paddle_ocr_timeout=300s`，worker 假死时雪崩。
+2. **B — `engine_manager.py::_shutdown_current` 清理顺序脆弱**：`_stop_ppocr_server` 不在 finally，`engine.shutdown` 抛 `CancelledError` 时直接跳过，ppocr-server（独立 session leader，`start_new_session=True`）连同内部 vLLM EngineCore 永远无人清理。
+3. **C — lifespan shutdown 不 cancel 运行中任务**：OCR 任务仍在 `_send_command` 里读写 worker stdin/stdout 时，`pipeline.shutdown()` 并发调用 `engine.shutdown` → 两个协程争抢同一 StreamReader，行为未定义。
+4. **D — `_restart_worker` 走 graceful 路径**：worker 已假死仍先发 shutdown 命令属于无用操作（A 修好后影响变小，但语义应该直接）。
+
+### 完成内容
+
+**OCR 引擎改动**（`backend/docrestore/ocr/base.py`）
+- 新增类常量 `SHUTDOWN_COMMAND_TIMEOUT_SECONDS = 3.0`
+- `WorkerBackedOCREngine.shutdown(*, force: bool = False)`：
+  - `force=False` 默认：`asyncio.wait_for(_send_command({"cmd":"shutdown"}), timeout=3.0)`，TimeoutError/Exception 立刻跳到 `_terminate_process`
+  - `force=True`：跳过 graceful 命令，直接 terminate
+- `_restart_worker` 改为 `await self.shutdown(force=True)`
+
+**EngineManager 改动**（`backend/docrestore/ocr/engine_manager.py`）
+- `_shutdown_current` 改 try/finally 结构：`_stop_ppocr_server` 始终在外层 finally，内层 `engine = None` 也在 finally → engine.shutdown 成功/失败/CancelledError 都不影响 ppocr-server 清理
+
+**TaskManager 改动**（`backend/docrestore/pipeline/task_manager.py`）
+- 新增 `async def shutdown(self)`：cancel 所有 `_running_tasks` + `asyncio.gather(return_exceptions=True)` 等退出，记录非 CancelledError 的异常
+
+**lifespan 改动**（`backend/docrestore/api/app.py`）
+- cleanup 顺序调整：`warmup_task.cancel` → `manager.shutdown()` → `cleanup_task.cancel` → `pipeline.shutdown()`
+- 保证 pipeline.shutdown 运行时没有并发的 OCR 任务抢 worker 流
+
+### 测试
+
+- `tests/ocr/test_paddle_ocr.py`（+3 用例）：
+  - `test_shutdown_fast_when_worker_unresponsive` — readline 永不返回时 shutdown < 5s
+  - `test_shutdown_force_skips_graceful_command` — force=True 零延迟 + 不发 shutdown 命令
+  - `test_restart_worker_uses_force_shutdown` — `_restart_worker` 不发 shutdown 命令
+- `tests/ocr/test_engine_manager.py`（+1 用例）：
+  - `test_shutdown_stops_ppocr_even_if_engine_shutdown_cancelled` — engine.shutdown 抛 CancelledError 时 `_stop_ppocr_server` 仍被调一次
+- `tests/pipeline/test_task_manager.py`（+3 用例）：
+  - `test_shutdown_cancels_pending_running_tasks` — 挂起任务被 cancel + running_tasks 清空
+  - `test_shutdown_noop_when_no_running_tasks` — 空集合快速返回
+  - `test_shutdown_swallows_task_exceptions` — 任务非 CancelledError 异常不向外抛
+
+### 回归
+
+- `pytest -q`：497 passed, 8 skipped（新增 7 用例）
+- `mypy --strict backend/`：41 files 0 errors
+- `ruff check backend/ tests/`：All checks passed
+
+---
+
 ## 2026-04-17 process_tree 多子目录并行（asyncio.gather）
 
 ### 背景
