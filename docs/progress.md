@@ -16,6 +16,74 @@ limitations under the License.
 
 # DocRestore 开发进度
 
+## 2026-04-17 补：ppocr-server 孤儿进程四层兜底清理（atexit/PDEATHSIG/SIGHUP/启动扫描）
+
+### 背景
+
+上一轮（同日）shutdown 链路加固仅覆盖 async lifespan 能完整执行完的退出路径；实测发现用户在 "任务 OCR 超时 → lifespan shutdown 卡住 → Ctrl+C 两次" 场景下，uvicorn force-quit 直接 `sys.exit`，`_stop_ppocr_server` 根本没机会跑，残留现场：
+
+```
+PID 2708324  PPID=1         paddleocr genai_server ...   ← ppocr-server 被 init 收养
+PID 2708805  PPID=2708324   VLLM::EngineCore             ← 7758MiB 显存占用
+```
+
+手工 `killpg(2708324, SIGTERM)` 一次性带走整个进程组（ppocr-server + vLLM + resource_tracker）—— killpg 机制本身正确，问题是根本没被触发。
+
+### 根因
+
+async lifespan 清理路径在下列退出场景全部失效：
+- **uvicorn force-quit（两次 Ctrl+C）**：第二次 SIGINT 设 `server.force_exit=True`，跳出 main loop，lifespan shutdown 的 `await` 被截断
+- **SIGTERM/SIGHUP 默认行为**：Python 默认对 SIGTERM/SIGHUP 是 terminate，不跑 atexit；uvicorn 接管 SIGINT/SIGTERM，不管 SIGHUP
+- **SIGKILL / OOM killer**：任何软件层机制都救不了；vLLM 作为 ppocr-server 子进程未继承 PDEATHSIG
+
+### 完成内容
+
+四层兜底清理机制（`backend/docrestore/ocr/engine_manager.py` 模块级）：
+
+**A. atexit hook** —— 主防线
+- `_kill_pgid_sync(pgid, grace_seconds=3.0)`：同步 SIGTERM → 轮询探活 → SIGKILL
+- `_track_pgid(pgid)` / `_untrack_pgid(pgid)`：幂等注册/取消 atexit 回调
+- `_start_ppocr_server` 启动成功后 `_track_pgid(proc.pid)`；`_stop_ppocr_server` 开头 `_untrack_pgid(pid)` 避免重复 kill
+- 覆盖：uvicorn force-quit / sys.exit / Python 主线程正常结束
+
+**B. PDEATHSIG(SIGKILL)** —— kill -9 兜底
+- `_prctl_set_pdeathsig()`（preexec_fn）：Linux only，ctypes 调 libc `prctl(PR_SET_PDEATHSIG, SIGKILL)`；fork 子进程里 logging 不安全，异常静默吞掉
+- 传给 `asyncio.create_subprocess_exec(..., preexec_fn=_prctl_set_pdeathsig)`
+- 覆盖：docrestore 被 SIGKILL → 内核自动 SIGKILL ppocr-server（vLLM 孤儿仍依赖 D 下次启动兜底）
+
+**C. SIGHUP handler** —— 终端关闭 / SSH 断开
+- `_sighup_handler`：同步 killpg 所有 tracked pgid + 转发 SIGTERM 给自己（让 uvicorn 走正常 shutdown）
+- `_install_signal_handlers()`：幂等安装，SIGINT/SIGTERM 交给 uvicorn
+- 覆盖：uvicorn 不接管的 SIGHUP
+
+**D. 启动时扫描清理** —— 上次遗留
+- `cleanup_stale_ppocr_servers()`：遍历 `/proc`，按 cmdline 匹配 `paddleocr` + `genai_server`，解析 `/proc/<pid>/stat` 字段 4（pgid）去重后批量 `_kill_pgid_sync`
+- `lifespan` startup 开头 `asyncio.to_thread(cleanup_stale_ppocr_servers)`
+- 覆盖：上次 kill -9 残留的 vLLM 孤儿
+
+### 测试（`tests/ocr/test_engine_manager.py`）
+
+新增 14 个用例：
+- `TestKillPgidSync`(3)：SIGTERM 生效 / SIGKILL 兜底 / ProcessLookupError 早退
+- `TestPgidTracking`(4)：注册 atexit+signal / 幂等 / untrack / 未 track 的 pgid noop
+- `TestSighupHandler`(1)：killpg 所有 tracked + 转发 SIGTERM
+- `TestExtractPaddleocrPgid`(3)：正向解析 / 非 paddleocr / cmdline 读失败
+- `TestCleanupStaleServers`(3)：pgid 去重 / 非 Linux / listdir OSError
+
+### 回归
+
+- pytest: 511 passed + 8 skipped（原 497+8，新增 14）
+- mypy --strict: 108 源文件 0 错误
+- ruff check: 全部通过
+- 手工验证：`killpg(2708324, SIGTERM)` 一次带走整个进程组包括 vLLM
+
+### 残余风险
+
+- docrestore 被 SIGKILL（kill -9 / OOM killer）时 atexit 不跑，PDEATHSIG 能杀 ppocr-server 但 vLLM 仍孤儿 —— 依赖下次启动 D 扫描兜底
+- 非 Linux 平台（macOS/Windows）PDEATHSIG 和 /proc 扫描都不可用（本项目本就要求 Linux + CUDA，已接受）
+
+---
+
 ## 2026-04-17 修复 OCR worker 假死/shutdown 孤儿进程（vLLM EngineCore）
 
 ### 背景

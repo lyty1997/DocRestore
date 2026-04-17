@@ -21,12 +21,16 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import contextlib
 import logging
 import os
 import re
 import signal
+import sys
+import time
 from collections.abc import Callable
+from types import FrameType
 
 from docrestore.ocr.base import OCREngine
 from docrestore.ocr.router import _parse_model, create_engine
@@ -36,6 +40,192 @@ logger = logging.getLogger(__name__)
 
 # 进度回调：message → 前端展示
 ProgressFn = Callable[[str], None]
+
+
+# ─────────────────────────────────────────────────────────────
+# 进程级兜底清理（atexit / signal / PDEATHSIG / 启动扫描）
+# ─────────────────────────────────────────────────────────────
+# ppocr-server 是独立 session leader（start_new_session=True），
+# vLLM EngineCore 是它的子进程，属于同一进程组。只要 killpg 到整个
+# 进程组，vLLM 就会被带走。
+#
+# 清理路径分四层，依次覆盖不同退出场景：
+#   A. atexit —— uvicorn force-quit / sys.exit 等 Python 主线程结束
+#   B. PDEATHSIG(SIGKILL) —— docrestore 被 kill -9（内核自动杀 ppocr-server）
+#   C. SIGHUP handler —— 终端关闭 / SSH 断开
+#   D. startup scan —— 上次遗留（kill -9 之后 vLLM 孤儿）清理
+# 最残存的盲区仅有：docrestore 被 SIGKILL 导致 PDEATHSIG 生效但 vLLM
+# 作为 ppocr-server 子进程未继承 PDEATHSIG —— 靠 D 下次启动时兜底。
+
+_atexit_callbacks: dict[int, Callable[[], None]] = {}
+_tracked_pgids: set[int] = set()
+_signal_handlers_installed = False
+_original_sighup_handler: (
+    Callable[[int, FrameType | None], None] | int | None
+) = None
+
+
+def _kill_pgid_sync(pgid: int, grace_seconds: float = 3.0) -> None:
+    """同步清理进程组：SIGTERM → 最长 grace_seconds → SIGKILL。
+
+    用于 atexit / signal handler 等同步上下文（不能 await）。
+    所有 OSError 静默吞掉，因为进程退出路径上 logging 可能已失效。
+    """
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, OSError):
+        return
+
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)  # 探测进程组是否还存活
+        except (ProcessLookupError, OSError):
+            return
+        time.sleep(0.1)
+
+    with contextlib.suppress(ProcessLookupError, OSError):
+        os.killpg(pgid, signal.SIGKILL)
+
+
+def _prctl_set_pdeathsig() -> None:
+    """preexec_fn：设置 PR_SET_PDEATHSIG=SIGKILL。
+
+    fork 之后 exec 之前运行于子进程。Linux only；其他平台或 libc 加载
+    失败都静默跳过，绝不阻止子进程启动（失败也不影响主流程，仅失去
+    kill -9 兜底能力）。
+    """
+    if sys.platform != "linux":
+        return
+    try:
+        import ctypes
+        pr_set_pdeathsig = 1
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(pr_set_pdeathsig, signal.SIGKILL, 0, 0, 0)
+    except Exception:  # noqa: BLE001, S110 — fork 后 logging 可能死锁，只能静默
+        pass
+
+
+def _sighup_handler(
+    signum: int, frame: FrameType | None,
+) -> None:
+    """SIGHUP handler：同步清理 pgid 后转发 SIGTERM 让 uvicorn 正常关闭。"""
+    del signum, frame
+    for pgid in list(_tracked_pgids):
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.killpg(pgid, signal.SIGTERM)
+    with contextlib.suppress(ProcessLookupError, OSError):
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
+def _install_signal_handlers() -> None:
+    """安装进程级 SIGHUP handler（幂等）。
+
+    SIGINT/SIGTERM 由 uvicorn 自己处理（走 lifespan shutdown + atexit 兜底），
+    我们只接管 uvicorn 不管的 SIGHUP（终端关闭 / SSH 断开）。
+    """
+    global _signal_handlers_installed, _original_sighup_handler
+    if _signal_handlers_installed:
+        return
+    _signal_handlers_installed = True
+
+    try:
+        _original_sighup_handler = signal.signal(
+            signal.SIGHUP, _sighup_handler,
+        )
+    except (OSError, ValueError):
+        # Windows 或非主线程：signal.signal 不可用
+        logger.debug("SIGHUP handler 安装失败", exc_info=True)
+
+
+def _track_pgid(pgid: int) -> None:
+    """注册 pgid 到 atexit + signal 双重清理（幂等）。"""
+    if pgid in _atexit_callbacks:
+        return
+    _tracked_pgids.add(pgid)
+
+    def _cleanup() -> None:
+        _kill_pgid_sync(pgid)
+
+    atexit.register(_cleanup)
+    _atexit_callbacks[pgid] = _cleanup
+    _install_signal_handlers()
+
+
+def _untrack_pgid(pgid: int) -> None:
+    """从进程级清理机制中移除 pgid（正常 shutdown 时调用）。"""
+    _tracked_pgids.discard(pgid)
+    cb = _atexit_callbacks.pop(pgid, None)
+    if cb is not None:
+        atexit.unregister(cb)
+
+
+def cleanup_stale_ppocr_servers() -> list[int]:
+    """启动时扫描并清理残留的 paddleocr genai_server 进程。
+
+    Linux only。遍历 /proc 找到 cmdline 含 `paddleocr` + `genai_server`
+    的进程，按进程组 ID 去重后批量 killpg。返回被清理的 pgid 列表。
+    """
+    if sys.platform != "linux":
+        return []
+
+    try:
+        proc_entries = os.listdir("/proc")
+    except OSError:
+        return []
+
+    stale_pgids: set[int] = set()
+    for entry in proc_entries:
+        if not entry.isdigit():
+            continue
+        pgid = _extract_paddleocr_pgid(entry)
+        if pgid is not None:
+            stale_pgids.add(pgid)
+
+    cleaned: list[int] = []
+    for pgid in stale_pgids:
+        logger.warning(
+            "发现残留的 paddleocr genai_server 进程组 pgid=%d，清理中...",
+            pgid,
+        )
+        _kill_pgid_sync(pgid)
+        cleaned.append(pgid)
+
+    return cleaned
+
+
+def _extract_paddleocr_pgid(pid_str: str) -> int | None:
+    """读取 /proc/{pid}/cmdline 和 stat，若为 paddleocr genai_server 返回 pgid。"""
+    try:
+        with open(f"/proc/{pid_str}/cmdline", "rb") as f:
+            cmdline = f.read().replace(b"\x00", b" ").decode(
+                "utf-8", errors="replace",
+            )
+    except OSError:
+        return None
+
+    if "paddleocr" not in cmdline or "genai_server" not in cmdline:
+        return None
+
+    try:
+        with open(f"/proc/{pid_str}/stat", encoding="utf-8") as f:
+            stat = f.read()
+    except OSError:
+        return None
+
+    # /proc/<pid>/stat 格式：pid (comm) state ppid pgid ...
+    # comm 可能含空格/括号，按最后一个 ")" 切分后再取字段
+    try:
+        rparen = stat.rindex(")")
+    except ValueError:
+        return None
+    fields = stat[rparen + 2:].split()
+    if len(fields) < 3:
+        return None
+    try:
+        return int(fields[2])  # 跳过 state / ppid，取 pgid
+    except ValueError:
+        return None
 
 
 class EngineManager:
@@ -254,7 +444,10 @@ class EngineManager:
             stderr=asyncio.subprocess.PIPE,
             env=env,
             start_new_session=True,  # 独立进程组，方便 killpg 清理子进程
+            preexec_fn=_prctl_set_pdeathsig,  # 父进程死则子进程被内核 SIGKILL
         )
+        # start_new_session=True 保证 pid == pgid，登记到进程级兜底清理。
+        _track_pgid(self._ppocr_server_proc.pid)
 
         # 等待 server 就绪，超时/异常/取消时清理进程
         timeout = config.paddle_server_startup_timeout
@@ -298,6 +491,8 @@ class EngineManager:
             return
 
         pid = self._ppocr_server_proc.pid
+        # 正常路径清理走起：先从兜底名单移除，避免 atexit 重复 kill
+        _untrack_pgid(pid)
         logger.info("关闭 ppocr-server 进程组 (pid=%s)...", pid)
         try:
             # 向整个进程组发送 SIGTERM

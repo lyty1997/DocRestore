@@ -36,7 +36,10 @@ from docrestore.api.upload import (
     start_cleanup_task,
     upload_router,
 )
-from docrestore.ocr.engine_manager import EngineManager
+from docrestore.ocr.engine_manager import (
+    EngineManager,
+    cleanup_stale_ppocr_servers,
+)
 from docrestore.persistence.database import TaskDatabase
 from docrestore.pipeline.config import PipelineConfig
 from docrestore.pipeline.pipeline import Pipeline
@@ -173,6 +176,15 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         """启动时初始化 Pipeline + Scheduler，关闭时释放资源"""
+        # 上次意外退出（kill -9 / OOM）可能留下 paddleocr genai_server 孤儿
+        # 进程（含 vLLM EngineCore 占 GPU 显存），启动前扫描清理
+        stale = await asyncio.to_thread(cleanup_stale_ppocr_servers)
+        if stale:
+            logger.warning(
+                "启动前清理了 %d 个残留 ppocr-server 进程组: %s",
+                len(stale), stale,
+            )
+
         pipeline = Pipeline(config)
 
         # 创建全局调度器

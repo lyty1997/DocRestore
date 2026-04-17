@@ -21,15 +21,20 @@
 - shutdown() 调用引擎 shutdown
 - _extract_stderr_message 五个关键分支
 - _start_ppocr_server：未配置 paddle_server_python 时跳过
+- 进程级兜底清理（atexit / signal / 启动扫描）
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from docrestore.ocr import engine_manager as em_mod
 from docrestore.ocr.engine_manager import EngineManager
 from docrestore.pipeline.config import OCRConfig
 
@@ -290,3 +295,289 @@ class TestStartPpocrServer:
         await manager._start_ppocr_server(config, on_progress=None)
 
         assert manager._ppocr_server_proc is None
+
+
+# ─────────────────────────────────────────────────────────────
+# 进程级兜底清理测试（atexit / signal / 启动扫描）
+# ─────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def clean_pgid_state() -> Iterator[None]:
+    """测试前后清理 engine_manager 全局 pgid 状态，避免测试间污染。"""
+    em_mod._atexit_callbacks.clear()
+    em_mod._tracked_pgids.clear()
+    yield
+    em_mod._atexit_callbacks.clear()
+    em_mod._tracked_pgids.clear()
+
+
+class TestKillPgidSync:
+    """_kill_pgid_sync 同步清理进程组。"""
+
+    def test_sigterm_clears_group(self) -> None:
+        """SIGTERM 后首次存活探测即 ProcessLookupError → 不升级 SIGKILL。"""
+        import signal as _signal
+
+        calls: list[tuple[int, int]] = []
+
+        def fake_killpg(pgid: int, sig: int) -> None:
+            calls.append((pgid, sig))
+            if sig == 0:
+                raise ProcessLookupError
+
+        with (
+            patch(
+                "docrestore.ocr.engine_manager.os.killpg",
+                side_effect=fake_killpg,
+            ),
+            patch("docrestore.ocr.engine_manager.time.sleep"),
+        ):
+            em_mod._kill_pgid_sync(9999)
+
+        assert (9999, _signal.SIGTERM) in calls
+        assert (9999, _signal.SIGKILL) not in calls
+
+    def test_sigkill_fallback_when_grace_exceeded(self) -> None:
+        """grace 超时且进程组仍活 → SIGKILL。"""
+        import signal as _signal
+
+        calls: list[tuple[int, int]] = []
+
+        def fake_killpg(pgid: int, sig: int) -> None:
+            calls.append((pgid, sig))  # 无异常：进程仍活
+
+        mono = iter([0.0, 100.0])
+
+        with (
+            patch(
+                "docrestore.ocr.engine_manager.os.killpg",
+                side_effect=fake_killpg,
+            ),
+            patch("docrestore.ocr.engine_manager.time.sleep"),
+            patch(
+                "docrestore.ocr.engine_manager.time.monotonic",
+                side_effect=lambda: next(mono),
+            ),
+        ):
+            em_mod._kill_pgid_sync(9999, grace_seconds=3.0)
+
+        assert (9999, _signal.SIGTERM) in calls
+        assert (9999, _signal.SIGKILL) in calls
+
+    def test_initial_sigterm_lookup_error_returns_early(self) -> None:
+        """初始 SIGTERM 就 ProcessLookupError（进程已死）→ 直接返回。"""
+        with patch(
+            "docrestore.ocr.engine_manager.os.killpg",
+            side_effect=ProcessLookupError,
+        ) as mock_killpg:
+            em_mod._kill_pgid_sync(9999)
+        assert mock_killpg.call_count == 1
+
+
+@pytest.mark.usefixtures("clean_pgid_state")
+class TestPgidTracking:
+    """_track_pgid / _untrack_pgid atexit + signal 注册。"""
+
+    def test_track_registers_atexit_and_signal(self) -> None:
+        """_track_pgid 注册 atexit 回调并安装 signal handler。"""
+        with (
+            patch(
+                "docrestore.ocr.engine_manager.atexit.register",
+            ) as mock_reg,
+            patch(
+                "docrestore.ocr.engine_manager._install_signal_handlers",
+            ) as mock_sig,
+        ):
+            em_mod._track_pgid(12345)
+
+        assert 12345 in em_mod._tracked_pgids
+        assert 12345 in em_mod._atexit_callbacks
+        mock_reg.assert_called_once()
+        mock_sig.assert_called_once()
+
+    def test_track_idempotent(self) -> None:
+        """同一 pgid 重复 track 只注册一次 atexit。"""
+        with (
+            patch(
+                "docrestore.ocr.engine_manager.atexit.register",
+            ) as mock_reg,
+            patch(
+                "docrestore.ocr.engine_manager._install_signal_handlers",
+            ),
+        ):
+            em_mod._track_pgid(12345)
+            em_mod._track_pgid(12345)
+        assert mock_reg.call_count == 1
+
+    def test_untrack_removes_atexit(self) -> None:
+        """_untrack_pgid 调用 atexit.unregister 并清空名单。"""
+        with (
+            patch("docrestore.ocr.engine_manager.atexit.register"),
+            patch(
+                "docrestore.ocr.engine_manager.atexit.unregister",
+            ) as mock_unreg,
+            patch(
+                "docrestore.ocr.engine_manager._install_signal_handlers",
+            ),
+        ):
+            em_mod._track_pgid(12345)
+            em_mod._untrack_pgid(12345)
+
+        assert 12345 not in em_mod._tracked_pgids
+        assert 12345 not in em_mod._atexit_callbacks
+        mock_unreg.assert_called_once()
+
+    def test_untrack_unknown_is_noop(self) -> None:
+        """untrack 从未 track 过的 pgid 不报错，也不触发 unregister。"""
+        with patch(
+            "docrestore.ocr.engine_manager.atexit.unregister",
+        ) as mock_unreg:
+            em_mod._untrack_pgid(99999)
+        mock_unreg.assert_not_called()
+
+
+@pytest.mark.usefixtures("clean_pgid_state")
+class TestSighupHandler:
+    """_sighup_handler：SIGHUP 时 killpg + 转发 SIGTERM 给自身。"""
+
+    def test_sighup_kills_all_tracked_and_forwards_sigterm(self) -> None:
+        import signal as _signal
+
+        em_mod._tracked_pgids.add(111)
+        em_mod._tracked_pgids.add(222)
+
+        killpg_calls: list[tuple[int, int]] = []
+        kill_calls: list[tuple[int, int]] = []
+
+        def fake_killpg(pgid: int, sig: int) -> None:
+            killpg_calls.append((pgid, sig))
+
+        def fake_kill(pid: int, sig: int) -> None:
+            kill_calls.append((pid, sig))
+
+        with (
+            patch(
+                "docrestore.ocr.engine_manager.os.killpg",
+                side_effect=fake_killpg,
+            ),
+            patch(
+                "docrestore.ocr.engine_manager.os.kill",
+                side_effect=fake_kill,
+            ),
+            patch(
+                "docrestore.ocr.engine_manager.os.getpid",
+                return_value=777,
+            ),
+        ):
+            em_mod._sighup_handler(_signal.SIGHUP, None)
+
+        assert (111, _signal.SIGTERM) in killpg_calls
+        assert (222, _signal.SIGTERM) in killpg_calls
+        assert (777, _signal.SIGTERM) in kill_calls
+
+
+class TestExtractPaddleocrPgid:
+    """_extract_paddleocr_pgid：/proc 解析。"""
+
+    def test_valid_paddleocr_returns_pgid(self, tmp_path: Path) -> None:
+        """cmdline 含 paddleocr + genai_server → 解析出 pgid。"""
+        proc_dir = tmp_path / "proc" / "1234"
+        proc_dir.mkdir(parents=True)
+        (proc_dir / "cmdline").write_bytes(
+            b"python\x00-m\x00paddleocr\x00genai_server\x00--port\x008119"
+        )
+        # /proc/<pid>/stat 格式：pid (comm) state ppid pgid sid ...
+        (proc_dir / "stat").write_text(
+            "1234 (python) S 1 5678 5678 0 0",
+        )
+
+        real_open = open  # 保存未被 patch 的 open
+
+        # mock 需覆盖 open 全签名，统一用 Any 避免类型体操。
+        def fake_open(  # noqa: ANN401
+            path: Any, *args: Any, **kwargs: Any,
+        ) -> Any:
+            p = str(path)
+            if p.startswith("/proc/1234/"):
+                real = tmp_path / p.lstrip("/")
+                return real_open(real, *args, **kwargs)
+            msg = f"unexpected path: {p}"
+            raise OSError(msg)
+
+        with patch("builtins.open", side_effect=fake_open):
+            assert em_mod._extract_paddleocr_pgid("1234") == 5678
+
+    def test_non_paddleocr_returns_none(self, tmp_path: Path) -> None:
+        """cmdline 不含 paddleocr/genai_server → 返回 None。"""
+        proc_dir = tmp_path / "proc" / "1234"
+        proc_dir.mkdir(parents=True)
+        (proc_dir / "cmdline").write_bytes(
+            b"python\x00app.py\x00--port\x008000",
+        )
+        real_open = open
+
+        def fake_open(  # noqa: ANN401
+            path: Any, *args: Any, **kwargs: Any,
+        ) -> Any:
+            p = str(path)
+            if p.startswith("/proc/1234/"):
+                real = tmp_path / p.lstrip("/")
+                return real_open(real, *args, **kwargs)
+            msg = f"unexpected: {p}"
+            raise OSError(msg)
+
+        with patch("builtins.open", side_effect=fake_open):
+            assert em_mod._extract_paddleocr_pgid("1234") is None
+
+    def test_cmdline_read_fails_returns_none(self) -> None:
+        """OSError 读不到 cmdline → 返回 None。"""
+        with patch("builtins.open", side_effect=OSError("no such file")):
+            assert em_mod._extract_paddleocr_pgid("1234") is None
+
+
+class TestCleanupStaleServers:
+    """cleanup_stale_ppocr_servers 启动扫描。"""
+
+    def test_cleans_stale_pgids_dedup(self) -> None:
+        """两个 pid 同一 pgid → 只 kill 一次该 pgid。"""
+        with (
+            patch(
+                "docrestore.ocr.engine_manager.sys.platform", "linux",
+            ),
+            patch(
+                "docrestore.ocr.engine_manager.os.listdir",
+                return_value=["1", "2", "abc", "3"],
+            ),
+            patch(
+                "docrestore.ocr.engine_manager._extract_paddleocr_pgid",
+                side_effect=lambda pid: {
+                    "1": 5000, "2": 5000, "3": None,
+                }.get(pid),
+            ),
+            patch(
+                "docrestore.ocr.engine_manager._kill_pgid_sync",
+            ) as mock_kill,
+        ):
+            cleaned = em_mod.cleanup_stale_ppocr_servers()
+
+        assert cleaned == [5000]
+        mock_kill.assert_called_once_with(5000)
+
+    def test_non_linux_returns_empty(self) -> None:
+        with patch(
+            "docrestore.ocr.engine_manager.sys.platform", "darwin",
+        ):
+            assert em_mod.cleanup_stale_ppocr_servers() == []
+
+    def test_listdir_oserror_returns_empty(self) -> None:
+        with (
+            patch(
+                "docrestore.ocr.engine_manager.sys.platform", "linux",
+            ),
+            patch(
+                "docrestore.ocr.engine_manager.os.listdir",
+                side_effect=OSError,
+            ),
+        ):
+            assert em_mod.cleanup_stale_ppocr_servers() == []
