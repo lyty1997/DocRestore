@@ -139,6 +139,11 @@ class Pipeline:
         """注入 OCR 引擎（允许外部传入 mock，测试用）"""
         self._ocr_engine = engine
 
+    @property
+    def engine_manager(self) -> EngineManager | None:
+        """引擎管理器实例（只读，供路由层查询状态 / 触发预热）。"""
+        return self._engine_manager
+
     def set_engine_manager(self, manager: EngineManager) -> None:
         """注入引擎管理器（生产环境使用，支持按需切换）"""
         self._engine_manager = manager

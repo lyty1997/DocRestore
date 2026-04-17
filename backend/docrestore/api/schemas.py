@@ -244,3 +244,22 @@ class UploadCompleteResponse(BaseModel):
     image_dir: str
     file_count: int
     total_size_bytes: int
+
+
+# ── OCR 引擎预热 ──────────────────────────────────────────
+
+
+class OCRWarmupRequest(BaseModel):
+    """OCR 引擎预热请求"""
+
+    model: str = "paddle-ocr/ppocr-v4"
+    gpu_id: str = "1"
+
+
+class OCRStatusResponse(BaseModel):
+    """OCR 引擎状态响应"""
+
+    current_model: str
+    current_gpu: str
+    is_ready: bool
+    is_switching: bool

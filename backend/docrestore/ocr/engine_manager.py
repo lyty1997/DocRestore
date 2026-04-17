@@ -60,6 +60,21 @@ class EngineManager:
         return self._current_model
 
     @property
+    def current_gpu(self) -> str:
+        """当前活跃的 GPU ID。"""
+        return self._current_gpu
+
+    @property
+    def is_ready(self) -> bool:
+        """当前引擎是否已初始化就绪。"""
+        return self._engine is not None and self._engine.is_ready
+
+    @property
+    def is_switching(self) -> bool:
+        """是否正在切换引擎（switch_lock 被持有）。"""
+        return self._switch_lock.locked()
+
+    @property
     def engine(self) -> OCREngine | None:
         """当前引擎实例（可能为 None）。"""
         return self._engine

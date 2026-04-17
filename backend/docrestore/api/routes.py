@@ -25,7 +25,7 @@ from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
 from fastapi.responses import FileResponse, Response
 from starlette.websockets import WebSocketDisconnect
 
@@ -37,6 +37,8 @@ from docrestore.api.schemas import (
     CreateTaskRequest,
     CustomSensitiveWord,
     DirEntry,
+    OCRStatusResponse,
+    OCRWarmupRequest,
     ProgressResponse,
     SourceImagesResponse,
     StageServerSourceRequest,
@@ -57,6 +59,7 @@ from docrestore.pipeline.config import (
 )
 
 if TYPE_CHECKING:
+    from docrestore.ocr.engine_manager import EngineManager
     from docrestore.pipeline.task_manager import TaskManager
 
 logger = logging.getLogger(__name__)
@@ -811,3 +814,66 @@ async def stage_server_source(
         )
 
     return await asyncio.to_thread(_stage_files, req.paths)
+
+
+# ── OCR 引擎预热 ──────────────────────────────────────────
+
+
+def _get_engine_manager(request: Request) -> EngineManager:
+    """从 app.state 获取 EngineManager 实例。"""
+    em: EngineManager | None = getattr(request.app.state, "engine_manager", None)
+    if em is None:
+        raise HTTPException(
+            status_code=500,
+            detail="EngineManager 未初始化",
+        )
+    return em
+
+
+@router.get("/ocr/status", response_model=OCRStatusResponse)
+async def get_ocr_status(request: Request) -> OCRStatusResponse:
+    """查询当前 OCR 引擎状态。"""
+    em = _get_engine_manager(request)
+    return OCRStatusResponse(
+        current_model=em.current_model,
+        current_gpu=em.current_gpu,
+        is_ready=em.is_ready,
+        is_switching=em.is_switching,
+    )
+
+
+@router.post("/ocr/warmup")
+async def warmup_ocr_engine(
+    req: OCRWarmupRequest,
+    request: Request,
+) -> dict[str, str]:
+    """预加载指定 OCR 引擎（后台异步，立即返回）。"""
+    em = _get_engine_manager(request)
+
+    # 已匹配且就绪 → 直接返回
+    if em.is_ready and em.current_model == req.model and em.current_gpu == req.gpu_id:
+        return {"status": "ready", "message": "引擎已就绪"}
+
+    # 正在切换 → 返回 switching 状态
+    if em.is_switching:
+        return {"status": "switching", "message": "引擎正在切换中"}
+
+    # 构造完整配置并发起后台预热
+    manager = _get_manager()
+    warmup_config = manager.pipeline.config.ocr.model_copy(
+        update={"model": req.model, "gpu_id": req.gpu_id},
+    )
+
+    async def _do_warmup() -> None:
+        """后台执行引擎预热。"""
+        try:
+            await em.ensure(warmup_config)
+            logger.info(
+                "OCR 引擎预热完成: %s (GPU %s)",
+                req.model, req.gpu_id,
+            )
+        except Exception:
+            logger.warning("OCR 引擎预热失败", exc_info=True)
+
+    asyncio.create_task(_do_warmup())
+    return {"status": "accepted", "message": "引擎预热已开始"}

@@ -200,6 +200,20 @@ class UploadCompleteResponse(BaseModel):
     total_size_bytes: int
 ```
 
+**OCR engine warmup** (used by the TaskForm "Preload Engine" button):
+
+```python
+class OCRWarmupRequest(BaseModel):
+    model: str = "paddle-ocr/ppocr-v4"
+    gpu_id: str = "1"
+
+class OCRStatusResponse(BaseModel):
+    current_model: str
+    current_gpu: str
+    is_ready: bool       # _engine.is_ready
+    is_switching: bool   # _switch_lock.locked()
+```
+
 ### 3.3 Routes (api/routes.py + api/upload.py)
 
 Endpoint overview:
@@ -228,6 +242,8 @@ Endpoint overview:
 | `GET` | `/uploads/{sid}/files/{fid}` | Preview a single file in a session |
 | `DELETE` | `/uploads/{sid}/files/{fid}` | Delete a single file in a session |
 | `POST` | `/uploads/{sid}/complete` | Complete the session, returns a temp directory usable as `image_dir` |
+| `GET` | `/ocr/status` | Current `EngineManager` state (model / gpu / is_ready / is_switching) |
+| `POST` | `/ocr/warmup` | Trigger background engine warmup; returns `ready` / `switching` / `accepted` |
 
 #### POST /api/v1/tasks -- Create Task
 
@@ -395,6 +411,20 @@ The frontend `FileUploader` component uses the following flow:
 - Session TTL: `_SESSION_TTL_SECONDS=3600`; background cleanup runs every `_CLEANUP_INTERVAL_SECONDS=1800`
 - On app shutdown, `cleanup_all_sessions()` deletes all temporary directories as a safety net
 
+#### GET /api/v1/ocr/status -- Current OCR engine state
+
+- Returns `OCRStatusResponse { current_model, current_gpu, is_ready, is_switching }`; fields are read directly from the `EngineManager` properties of the same name.
+- Returns 500 if `app.state.engine_manager` is missing (e.g. test apps that inject a mocked engine without going through the `lifespan`).
+
+#### POST /api/v1/ocr/warmup -- Trigger engine warmup
+
+- Request `OCRWarmupRequest { model, gpu_id }`, defaults to `paddle-ocr/ppocr-v4 + GPU 1`.
+- Response `{ status, message }`:
+  - `ready`: the current engine matches both `model` and `gpu_id` and is already initialized.
+  - `switching`: `EngineManager._switch_lock` is currently held (another caller is mid-switch).
+  - `accepted`: the route synthesizes a full `OCRConfig` via `manager.pipeline.config.ocr.model_copy(update={...})`, then dispatches `engine_manager.ensure(config)` through `asyncio.create_task` and returns immediately.
+- Background warmup failures are only logged (`logger.warning`); the frontend polls `/ocr/status` to determine the final state.
+
 ## 4. Dependencies
 
 | Source | Usage |
@@ -413,6 +443,7 @@ The API layer does not directly depend on the OCR layer, processing layer, LLM l
 - **WebSocket broadcast**: `TaskManager.subscribe_progress()` returns a single-producer multi-consumer `asyncio.Queue` (maxsize=1 for back-pressure); `unsubscribe_progress()` is called on connection close.
 - **Asset security**: `_validate_asset_path` + `_resolve_asset_path` dual-layer verification (whitelist + `is_relative_to` traversal prevention), allowing subdirectory patterns for multi-document structure compatibility.
 - **Zip assembly**: `_build_result_zip_bytes` assembles in memory using `ZIP_DEFLATED`; empty `doc_dir` goes to the root directory, non-empty uses a subdirectory prefix.
+- **On-demand engine warmup**: after constructing the `EngineManager` in `lifespan`, the app dispatches `engine_manager.ensure()` on a background task to prewarm the default engine without blocking startup (failures are only logged as warnings). `/ocr/warmup` reuses the same path but lets callers override `model` / `gpu_id`. `EngineManager` exposes `current_gpu` / `is_ready` / `is_switching` read-only properties that `/ocr/status` maps verbatim.
 
 ## 6. Error Responses (MVP)
 

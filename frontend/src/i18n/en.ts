@@ -64,6 +64,10 @@ export const en: Record<TranslationKey, string> = {
   "taskForm.deepseekOcrName": "DeepSeek-OCR-2",
   "taskForm.deepseekOcrDesc":
     "High-precision large model, suitable for complex layouts, requires GPU",
+  "taskForm.engineWarmup": "Preload Engine",
+  "taskForm.engineWarming": "Loading...",
+  "taskForm.engineReady": "Ready",
+  "taskForm.engineError": "Load Failed",
   "taskForm.gpu0": "GPU 0 (A2)",
   "taskForm.gpu1": "GPU 1 (RTX 4070 Super)",
   "taskForm.llmConfigExpanded": "▾ LLM Refinement Settings",

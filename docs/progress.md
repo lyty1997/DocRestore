@@ -16,6 +16,59 @@ limitations under the License.
 
 # DocRestore 开发进度
 
+## 2026-04-17 OCR 引擎按需预热接口与前端预加载按钮
+
+### 背景
+
+启动后第一张图必须等引擎冷启动（PaddleOCR-VL ~80 s 装载、DeepSeek-OCR-2 ~40 s）。用户希望：(1) 服务启动后默认引擎自动预热；(2) 切换引擎时能在表单上预先触发，不必占用第一张图的处理时间。
+
+### 完成内容
+
+**后端**
+
+- `api/schemas.py`：新增 `OCRWarmupRequest { model, gpu_id }` 与 `OCRStatusResponse { current_model, current_gpu, is_ready, is_switching }`。
+- `api/routes.py`：
+  - `_get_engine_manager(request)`：从 `app.state.engine_manager` 取实例，缺失时 500。
+  - `GET /ocr/status`：直接映射 `EngineManager` 同名属性。
+  - `POST /ocr/warmup`：`ready / switching / accepted` 三态分支；`accepted` 路径用 `manager.pipeline.config.ocr.model_copy(update={...})` 合成完整 `OCRConfig`，`asyncio.create_task(em.ensure(config))` 后台执行，立即返回。
+- `api/app.py::lifespan`：构造完 `EngineManager` 后立即 `asyncio.create_task` 预热默认引擎；shutdown 时 cancel 未完成的 warmup task。
+- `ocr/engine_manager.py`：新增 `current_gpu` / `is_ready` / `is_switching` 三个只读属性（`is_ready` 同时检查 `_engine and _engine.is_ready`，`is_switching` 复用 `_switch_lock.locked()`）。
+- `pipeline/pipeline.py`：暴露 `engine_manager` 只读属性，方便路由层将来按需查询，无新行为。
+
+**前端**
+
+- `api/schemas.ts` + `api/client.ts`：`OcrStatusResponseSchema` / `OcrWarmupResponseSchema` + `getOcrStatus()` / `warmupOcrEngine(model, gpuId)`。
+- `components/TaskForm.tsx`：
+  - 新增 `EngineStatus = "idle" | "warming" | "ready" | "error"`。
+  - 挂载时一次性查询 `/ocr/status`；命中目标且 `is_ready` 直接进入 `ready`。
+  - 切换 OCR 引擎或 GPU 下拉框 → 重置回 `idle`。
+  - 点击预加载按钮：进入 `warming` → 调 warmup → 启动 3 s 轮询 `/ocr/status`（命中目标即停，60 s 超时 fail-safe）。
+  - `useRef<setInterval>` 在卸载时 `clearInterval`，避免泄漏。
+- 三语 i18n：`taskForm.engineWarmup` / `engineWarming` / `engineReady` / `engineError`（zh-CN/zh-TW/en）。
+- `App.css`：`ocr-warmup-area` flex 容器 + `btn-warmup` 浅色边框风格 + `engine-status--ready/error` 双色状态文案。
+
+**测试**
+
+- `tests/api/test_ocr_endpoints.py`：5 个用例覆盖 status 字段映射、未挂载 EngineManager 返回 500、warmup 三态分支、`accepted` 触发 `em.ensure` 一次且参数为 `model_copy` 后的完整 OCRConfig。
+- `tests/api/` 全量 87 用例通过。
+
+**视觉验证（playwright）**
+
+- `screenshots/taskform_warmup_idle.png`：默认状态下"预加载引擎"按钮与 OCR/GPU 下拉同行排布正常。
+- `screenshots/taskform_warmup_error.png`：后端未启动时点击 → 红色"加载失败"文字出现，错误处理路径打通。
+
+### 关键决策
+
+1. **为何 lifespan 后台预热而非阻塞启动？** 服务可用性优先：API/上传等接口不应等 OCR 引擎；预热失败也只 warning，不影响后续请求级 warmup。
+2. **为何 `accepted` 路径走 `asyncio.create_task` 而不是同步等？** 引擎切换可能耗时数十秒，HTTP 请求不应卡这么久；前端通过 `/ocr/status` 轮询拿终态。
+3. **为何 `is_switching` 用 `_switch_lock.locked()` 直接暴露？** EngineManager 的切换语义已经用 lock 表达，重复维护一个布尔 flag 容易和锁状态漂移。
+4. **为何前端在 dropdown 切换时重置 `engineStatus`？** 旧的 ready 态对新选项无意义；强制用户重新预热避免误以为已就绪。
+
+### 遗留
+
+- 前端无对应单测（`useEffect + setInterval` 时序较繁，留待后续 vitest fake timers 补齐）。
+- 真实 GPU 环境下的端到端预热耗时未做基准记录（依赖具体硬件）。
+
 ## 2026-04-17 Pipeline 级并行（多任务并发 + LLM API 全局限流）
 
 ### 背景
