@@ -245,8 +245,15 @@ async def main() -> None:
         ),
     )
 
-    # 创建 pipeline
+    # 创建 pipeline + scheduler（提供 gpu_lock / llm_semaphore，
+    # process_tree 并行分支下保证 OCR 串行 + LLM 限流，否则 stdio 会并发冲突）
+    from docrestore.pipeline.scheduler import PipelineScheduler
+
     pipeline = Pipeline(config)
+    scheduler = PipelineScheduler(
+        max_concurrent_llm_requests=config.llm.max_concurrent_requests,
+    )
+    pipeline.set_llm_semaphore(scheduler.llm_semaphore)
 
     print(f"\n初始化 pipeline（OCR 模型: {args.ocr_model}）...")
     t0 = time.time()
@@ -265,6 +272,7 @@ async def main() -> None:
         image_dir=image_root,
         output_dir=output_root,
         on_progress=on_progress,
+        gpu_lock=scheduler.gpu_lock,
     )
 
     elapsed = time.time() - t1
