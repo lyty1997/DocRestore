@@ -162,12 +162,19 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
         stop_event = asyncio.Event()
         stderr_task = asyncio.create_task(
             self._stream_stderr_progress(stop_event, on_progress),
+            name="deepseek-stderr-progress",
         )
         try:
             resp = await self._send_command(init_cmd)
         finally:
+            # 先 set 让 drain 自然退出；再 cancel 兜底（drain 可能卡在
+            # wait_for readline 的 0.5s 间隙内，cancel 立即打断）；最后
+            # gather 等它完全退出，避免 initialize 被 cancel 时 stderr
+            # 任务残留，worker pipe buffer 继续堆积。
             stop_event.set()
-            await stderr_task
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await stderr_task
         return resp
 
     async def _terminate_process(self) -> None:

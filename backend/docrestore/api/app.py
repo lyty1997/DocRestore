@@ -258,7 +258,12 @@ def create_app(
         # 抢占 worker stdin/stdout（会导致 StreamReader 冲突或长时间阻塞）
         await manager.shutdown()
 
+        # 取消上传会话清理循环：必须 await，否则 CancelledError 可能
+        # 在 event loop 关闭后才抛出，产生 "Task was destroyed but it
+        # is pending!" 警告或残留 shutil 操作。
         cleanup_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await cleanup_task
         cleanup_all_sessions()
         await pipeline.shutdown()
         await db.close()

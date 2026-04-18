@@ -21,6 +21,7 @@ import logging
 import tempfile
 import traceback
 import uuid
+from collections.abc import Coroutine
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -103,11 +104,31 @@ class TaskManager:
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
         self._subscribers: dict[str, set[asyncio.Queue[TaskProgress]]] = {}
+        # 追踪所有 fire-and-forget 的后台协程（DB 持久化 / 进度广播 /
+        # 引擎预热等）。shutdown 时统一 cancel + gather，避免残留任务
+        # 持续跑或在 event loop 关闭后抛未捕获异常。
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def pipeline(self) -> Pipeline:
         """暴露底层 Pipeline，用于 API 层读取默认 Config 合成请求快照。"""
         return self._pipeline
+
+    def spawn_background(
+        self,
+        coro: Coroutine[object, object, None],
+        *,
+        name: str = "",
+    ) -> asyncio.Task[None]:
+        """登记一个后台任务，shutdown 时会统一 cancel + gather。
+
+        所有 fire-and-forget 协程（DB 写入、进度广播、OCR 预热等）都
+        应走这里，避免被 GC 掉或在应用关闭后仍在运行。
+        """
+        task = asyncio.create_task(coro, name=name or None)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
 
     def subscriber_count(self, task_id: str) -> int:
         """返回指定任务的订阅者数量（测试/诊断用）。
@@ -143,7 +164,10 @@ class TaskManager:
 
         # 异步写 DB（不阻塞创建流程）
         if self._db is not None:
-            asyncio.create_task(self._persist_new_task(task))
+            self.spawn_background(
+                self._persist_new_task(task),
+                name=f"persist-new-task-{task_id}",
+            )
 
         return task
 
@@ -205,7 +229,10 @@ class TaskManager:
             return
         task.progress = progress
         if self._subscribers.get(task_id):
-            asyncio.create_task(self._broadcast_progress(task_id, progress))
+            self.spawn_background(
+                self._broadcast_progress(task_id, progress),
+                name=f"broadcast-progress-{task_id}",
+            )
 
     async def _broadcast_progress(
         self, task_id: str, progress: TaskProgress
@@ -464,23 +491,38 @@ class TaskManager:
         self._running_tasks[task_id] = bg
 
     async def shutdown(self) -> None:
-        """服务关闭时调用：cancel 所有运行中任务并等待退出。
+        """服务关闭时调用：cancel 所有运行中任务和后台协程并等待退出。
 
         必要性：Pipeline.shutdown 会释放 OCR 引擎 stdin/stdout；若此时仍有
         task 协程在 _send_command 里读写 stream，会与 engine.shutdown 并发
         抢占导致协议错乱/阻塞。先在这里统一 cancel + gather 保证串行。
+
+        除了用户任务（_running_tasks），还要清理 fire-and-forget 的后台协程
+        （DB 写入、进度广播、OCR 预热等），否则 event loop 关闭后它们会抛
+        "got Future <...> attached to a different loop" 或残留运行。
         """
-        if not self._running_tasks:
+        running = list(self._running_tasks.values())
+        background = list(self._background_tasks)
+        if not running and not background:
             return
 
-        tasks = list(self._running_tasks.values())
-        logger.info("TaskManager.shutdown 取消 %d 个运行中任务", len(tasks))
-        for bg in tasks:
+        if running:
+            logger.info(
+                "TaskManager.shutdown 取消 %d 个运行中任务", len(running),
+            )
+        if background:
+            logger.info(
+                "TaskManager.shutdown 取消 %d 个后台协程", len(background),
+            )
+
+        for bg in running:
+            bg.cancel()
+        for bg in background:
             bg.cancel()
 
-        # 等全部退出（不管是 CancelledError 还是已完成），不吞异常之外的信号
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for bg, result in zip(tasks, results, strict=True):
+        all_tasks = running + background
+        results = await asyncio.gather(*all_tasks, return_exceptions=True)
+        for bg, result in zip(all_tasks, results, strict=True):
             if isinstance(result, BaseException) and not isinstance(
                 result, asyncio.CancelledError,
             ):
@@ -491,6 +533,7 @@ class TaskManager:
                 )
 
         self._running_tasks.clear()
+        self._background_tasks.clear()
 
     async def cancel_task(self, task_id: str) -> str | None:
         """取消运行中的任务。

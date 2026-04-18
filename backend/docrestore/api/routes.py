@@ -339,8 +339,17 @@ async def create_task(
         pii=pii_cfg,
     )
     logger.info("任务已创建: task_id=%s", task.task_id)
-    bg = asyncio.create_task(manager.run_task(task.task_id))
-    manager.register_running_task(task.task_id, bg)
+    bg = asyncio.create_task(
+        manager.run_task(task.task_id),
+        name=f"run-task-{task.task_id}",
+    )
+    try:
+        manager.register_running_task(task.task_id, bg)
+    except BaseException:
+        # register_running_task 抛出（极少见，例如 dict 被外部篡改）时
+        # 必须 cancel bg，否则 create_task 启动的协程完全脱管
+        bg.cancel()
+        raise
     logger.info("后台任务已启动，准备返回响应")
     return TaskResponse(
         task_id=task.task_id,
@@ -610,8 +619,15 @@ async def retry_task(task_id: str) -> ActionResponse:
         raise HTTPException(status_code=409, detail=result)
 
     # result 是新创建的 Task
-    bg = asyncio.create_task(manager.run_task(result.task_id))
-    manager.register_running_task(result.task_id, bg)
+    bg = asyncio.create_task(
+        manager.run_task(result.task_id),
+        name=f"run-task-{result.task_id}",
+    )
+    try:
+        manager.register_running_task(result.task_id, bg)
+    except BaseException:
+        bg.cancel()
+        raise
 
     return ActionResponse(
         task_id=result.task_id,
@@ -872,8 +888,13 @@ async def warmup_ocr_engine(
                 "OCR 引擎预热完成: %s (GPU %s)",
                 req.model, req.gpu_id,
             )
+        except asyncio.CancelledError:
+            # 应用 shutdown 时 TaskManager 会 cancel 所有后台任务
+            logger.info("OCR 引擎预热被取消")
+            raise
         except Exception:
             logger.warning("OCR 引擎预热失败", exc_info=True)
 
-    asyncio.create_task(_do_warmup())
+    # 通过 TaskManager 统一追踪，shutdown 时 cancel + gather
+    manager.spawn_background(_do_warmup(), name=f"ocr-warmup-{req.model}")
     return {"status": "accepted", "message": "引擎预热已开始"}

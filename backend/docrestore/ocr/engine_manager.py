@@ -521,33 +521,40 @@ class EngineManager:
         _untrack_pgid(pid)
         logger.info("关闭 ppocr-server 进程组 (pid=%s)...", pid)
 
-        # 先 cancel drain tasks：进程被 killpg 后 stdout/stderr EOF，
-        # drain 会自然退出；cancel 是兜底，避免卡在 readline
-        for task in self._ppocr_drain_tasks:
-            task.cancel()
-        if self._ppocr_drain_tasks:
-            await asyncio.gather(
-                *self._ppocr_drain_tasks, return_exceptions=True,
-            )
-            self._ppocr_drain_tasks = []
         try:
-            # 向整个进程组发送 SIGTERM
-            os.killpg(pid, signal.SIGTERM)
-            await asyncio.wait_for(
-                self._ppocr_server_proc.wait(),
-                timeout=self._default_config.paddle_server_shutdown_timeout,
-            )
-        except TimeoutError:
-            # vLLM 加载阶段可能不响应 SIGTERM，升级到 SIGKILL
-            logger.info("ppocr-server 进程组未响应 SIGTERM，发送 SIGKILL")
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(pid, signal.SIGKILL)
-            await self._ppocr_server_proc.wait()
-        except ProcessLookupError:
-            logger.debug("ppocr-server 进程组已退出")
-        except OSError:
-            logger.debug("关闭 ppocr-server 进程组异常", exc_info=True)
+            # 进程杀掉 → stdout/stderr EOF → drain 自然退出。这里先 cancel
+            # 再 gather 是兜底，避免 drain 卡在 readline 间隙无法退出。
+            for task in self._ppocr_drain_tasks:
+                task.cancel()
+            if self._ppocr_drain_tasks:
+                await asyncio.gather(
+                    *self._ppocr_drain_tasks, return_exceptions=True,
+                )
+            try:
+                # 向整个进程组发送 SIGTERM
+                os.killpg(pid, signal.SIGTERM)
+                await asyncio.wait_for(
+                    self._ppocr_server_proc.wait(),
+                    timeout=(
+                        self._default_config.paddle_server_shutdown_timeout
+                    ),
+                )
+            except TimeoutError:
+                # vLLM 加载阶段可能不响应 SIGTERM，升级到 SIGKILL
+                logger.info(
+                    "ppocr-server 进程组未响应 SIGTERM，发送 SIGKILL",
+                )
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(pid, signal.SIGKILL)
+                await self._ppocr_server_proc.wait()
+            except ProcessLookupError:
+                logger.debug("ppocr-server 进程组已退出")
+            except OSError:
+                logger.debug("关闭 ppocr-server 进程组异常", exc_info=True)
         finally:
+            # drain tasks 和 proc 句柄无论上面哪条路径失败都必须清空，
+            # 否则下次启动又会看到残留任务 / 句柄导致状态错乱。
+            self._ppocr_drain_tasks = []
             self._ppocr_server_proc = None
 
         logger.info("ppocr-server 进程组已关闭")
