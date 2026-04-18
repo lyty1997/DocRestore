@@ -24,6 +24,8 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+import time
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
@@ -39,8 +41,43 @@ from docrestore.llm.prompts import (
 )
 from docrestore.models import DocBoundary, Gap, RefineContext, RefinedResult
 from docrestore.pipeline.config import LLMConfig
+from docrestore.pipeline.profiler import current_profiler
 
 logger = logging.getLogger(__name__)
+_timing_logger = logging.getLogger("docrestore.llm.timing")
+
+
+def _ensure_timing_file_handler() -> None:
+    """把 docrestore.llm.timing 路由到文件（幂等）。
+
+    路径取 env DOCRESTORE_LLM_TIMING_LOG，默认 logs/llm_timing.log；
+    设为空字符串可禁用。无论是否走 FastAPI create_app 都会初始化，
+    覆盖 scripts/run_e2e.py 等脚本路径。
+    """
+    log_path = os.environ.get(
+        "DOCRESTORE_LLM_TIMING_LOG", "logs/llm_timing.log",
+    ).strip()
+    if not log_path:
+        return
+    target = os.path.abspath(log_path)
+    for h in _timing_logger.handlers:
+        if (
+            isinstance(h, logging.FileHandler)
+            and os.path.abspath(h.baseFilename) == target
+        ):
+            return
+    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+    handler = logging.FileHandler(target, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s.%(msecs)03d %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    _timing_logger.addHandler(handler)
+    _timing_logger.setLevel(logging.INFO)
+    _timing_logger.propagate = False
+
+
+_ensure_timing_file_handler()
 
 
 class LLMRefiner(Protocol):
@@ -129,11 +166,41 @@ class BaseLLMRefiner:
     async def _call_llm(self, kwargs: dict[str, object]) -> Any:
         """统一出口：限流 + litellm.acompletion。
 
-        所有 refine / fill_gap / final_refine / detect_* 都必须经此方法，
-        确保 LLM API 全局并发受 scheduler.llm_semaphore 约束。
+        埋两个 profiler span：
+        - llm.sem_wait：等待 llm_semaphore（定位并发瓶颈）
+        - llm.api_call：真实 litellm 网络/重试耗时（定位上游慢）
         """
+        prof = current_profiler()
+        model = str(kwargs.get("model", ""))
+        raw_messages = kwargs.get("messages", [])
+        messages = raw_messages if isinstance(raw_messages, list) else []
+        msg_chars = sum(
+            len(str(m.get("content", "")))
+            for m in messages
+            if isinstance(m, dict)
+        )
+
+        wait_start = time.monotonic()
         async with self._rate_limit():
-            return await litellm.acompletion(**kwargs)
+            wait_s = time.monotonic() - wait_start
+            prof.record_external("llm.sem_wait", wait_s, model=model)
+            call_start = time.monotonic()
+            status = "ok"
+            try:
+                with prof.stage(
+                    "llm.api_call", model=model, input_chars=msg_chars,
+                ):
+                    return await litellm.acompletion(**kwargs)
+            except Exception:
+                status = "error"
+                raise
+            finally:
+                call_s = time.monotonic() - call_start
+                _timing_logger.info(
+                    "llm_call model=%s status=%s wait_s=%.3f call_s=%.3f "
+                    "input_chars=%d",
+                    model, status, wait_s, call_s, msg_chars,
+                )
 
     async def refine(
         self, raw_markdown: str, context: RefineContext,
