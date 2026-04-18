@@ -163,8 +163,13 @@ def _untrack_pgid(pgid: int) -> None:
 def cleanup_stale_ppocr_servers() -> list[int]:
     """启动时扫描并清理残留的 paddleocr genai_server 进程。
 
-    Linux only。遍历 /proc 找到 cmdline 含 `paddleocr` + `genai_server`
-    的进程，按进程组 ID 去重后批量 killpg。返回被清理的 pgid 列表。
+    Linux only。遍历 /proc 找两类残留：
+    1. cmdline 含 `paddleocr` + `genai_server` 的 ppocr-server 本体
+    2. cmdline 为 `VLLM::EngineCore` 且 ppid==1 的孤儿（vLLM fork 后重写
+       cmdline，父进程 ppocr-server 被 PDEATHSIG 杀掉后它会被 init 接管，
+       独占 GPU 显存却不含 paddleocr 关键字 —— 需要单独识别）
+
+    两类命中统一按 pgid 去重后批量 killpg。返回被清理的 pgid 列表。
     """
     if sys.platform != "linux":
         return []
@@ -194,38 +199,59 @@ def cleanup_stale_ppocr_servers() -> list[int]:
     return cleaned
 
 
-def _extract_paddleocr_pgid(pid_str: str) -> int | None:
-    """读取 /proc/{pid}/cmdline 和 stat，若为 paddleocr genai_server 返回 pgid。"""
-    try:
-        with open(f"/proc/{pid_str}/cmdline", "rb") as f:
-            cmdline = f.read().replace(b"\x00", b" ").decode(
-                "utf-8", errors="replace",
-            )
-    except OSError:
-        return None
+def _read_proc_stat_fields(pid_str: str) -> list[str] | None:
+    """读 /proc/{pid}/stat，按最后一个 ')' 切分后返回剩余字段。
 
-    if "paddleocr" not in cmdline or "genai_server" not in cmdline:
-        return None
-
+    格式：pid (comm) state ppid pgid sid ...  —— comm 可能含空格/括号。
+    返回字段：[state, ppid, pgid, sid, ...]，失败返回 None。
+    """
     try:
         with open(f"/proc/{pid_str}/stat", encoding="utf-8") as f:
             stat = f.read()
     except OSError:
         return None
-
-    # /proc/<pid>/stat 格式：pid (comm) state ppid pgid ...
-    # comm 可能含空格/括号，按最后一个 ")" 切分后再取字段
     try:
         rparen = stat.rindex(")")
     except ValueError:
         return None
-    fields = stat[rparen + 2:].split()
-    if len(fields) < 3:
+    return stat[rparen + 2:].split()
+
+
+def _extract_paddleocr_pgid(pid_str: str) -> int | None:
+    """识别残留进程并返回 pgid。
+
+    命中条件（满足任一即可）：
+    - cmdline 含 `paddleocr` + `genai_server`（ppocr-server 本体）
+    - cmdline 为 `VLLM::EngineCore` 且 ppid==1（孤儿 EngineCore）
+    """
+    try:
+        with open(f"/proc/{pid_str}/cmdline", "rb") as f:
+            cmdline = f.read().replace(b"\x00", b" ").decode(
+                "utf-8", errors="replace",
+            ).strip()
+    except OSError:
+        return None
+
+    is_ppocr = "paddleocr" in cmdline and "genai_server" in cmdline
+    is_vllm_engine = "VLLM::EngineCore" in cmdline
+
+    if not (is_ppocr or is_vllm_engine):
+        return None
+
+    fields = _read_proc_stat_fields(pid_str)
+    if fields is None or len(fields) < 3:
         return None
     try:
-        return int(fields[2])  # 跳过 state / ppid，取 pgid
+        ppid = int(fields[1])
+        pgid = int(fields[2])
     except ValueError:
         return None
+
+    # 孤儿 EngineCore 必须 ppid==1 才算残留，否则可能是别家活着的 vLLM
+    if is_vllm_engine and not is_ppocr and ppid != 1:
+        return None
+
+    return pgid
 
 
 class EngineManager:
