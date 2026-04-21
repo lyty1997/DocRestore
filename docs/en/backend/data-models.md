@@ -239,7 +239,7 @@ Contains many fields, grouped by sub-feature:
 - `normalize_mean: tuple[float, float, float] = (0.5, 0.5, 0.5)` / `normalize_std`
 - `ngram_size=20` / `ngram_window_size=90` / `ngram_whitelist_token_ids={128821, 128822}`
 - `prompt: str` -- OCR prompt template (contains `<|grounding|>`)
-- `gpu_id: str = "1"` -- `CUDA_VISIBLE_DEVICES`, shared by both engines
+- `gpu_id: str | None = None` -- `CUDA_VISIBLE_DEVICES`, shared by both engines; `None` means auto — `EngineManager.ensure()` calls `gpu_detect.pick_best_gpu()` to pick the GPU with the most VRAM
 
 **Sidebar filtering**
 - `enable_column_filter: bool = False` -- disabled by default due to insufficient PaddleOCR precision
@@ -300,6 +300,10 @@ class LLMConfig(BaseModel):
     truncation_min_input_lines: int = 20      # 输入行数 ≤ 此值不触发启发式
     # Global LLM API concurrency cap (shared asyncio.Semaphore across pipelines)
     max_concurrent_requests: int = 3
+    # Disk cache for refine results: keyed by content hash under
+    # {output_dir}/.llm_cache/; lets resumed tasks skip already-refined segments.
+    # Only non-truncated successful results are persisted.
+    enable_cache: bool = True
 ```
 
 ### 4.5 OutputConfig

@@ -150,7 +150,7 @@ class EngineManager:
 
 **配置语义**：`ensure()` 直接接收完整 `OCRConfig`（或 `None`）。请求级字段合成由 API 路由层一次性完成，下游各层（TaskManager / Pipeline / EngineManager）只认完整快照，不再做字段级合并。
 
-**GPU 选择**：`OCRConfig.gpu_id`（默认 `"1"`）统一控制两个引擎的 GPU。前端可在创建任务时选择。EngineManager 通过 `CUDA_VISIBLE_DEVICES` 传递给 ppocr-server 和 DeepSeek worker。
+**GPU 选择**：`OCRConfig.gpu_id` 默认 `None`，表示"自动"。`EngineManager.ensure()` 入口会调 `docrestore.ocr.gpu_detect.pick_best_gpu()` 按显存降序落地成具体物理索引，再通过 `CUDA_VISIBLE_DEVICES` 传给 ppocr-server 和 DeepSeek worker。前端任务表单调用 `GET /api/v1/gpus`（返回 `gpus + recommended`）渲染下拉；"自动（推荐）"项传空字符串，后端再次调 `pick_best_gpu` 保持权威。
 
 ### 5.2 DeepSeekOCR2Engine（ocr/deepseek_ocr2.py）
 

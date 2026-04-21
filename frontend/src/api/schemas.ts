@@ -41,6 +41,12 @@ export const TaskResultResponseSchema = z.object({
   markdown: z.string(),
   doc_title: z.string().optional(),
   doc_dir: z.string().optional(),
+  /**
+   * 子文档级错误（2026-04-21 引入）。非空表示此子文档处理失败，
+   * markdown 可能为空，前端应显示 error 而非渲染 markdown。
+   * 后端老版本无此字段时默认为空字符串。
+   */
+  error: z.string().default(""),
 });
 export type TaskResultResponse = z.infer<typeof TaskResultResponseSchema>;
 
@@ -181,10 +187,29 @@ export type UploadCompleteResponse = z.infer<typeof UploadCompleteResponseSchema
 export const OcrStatusResponseSchema = z.object({
   current_model: z.string(),
   current_gpu: z.string(),
+  /** 后端 2026-04-21 起新增字段；旧后端缺字段时 z.string().default 回退为 "" */
+  current_gpu_name: z.string().default(""),
   is_ready: z.boolean(),
   is_switching: z.boolean(),
 });
 export type OcrStatusResponse = z.infer<typeof OcrStatusResponseSchema>;
+
+/** 单张 GPU 的元信息（GET /gpus 响应元素） */
+export const GpuInfoSchema = z.object({
+  index: z.string(),
+  name: z.string(),
+  memory_total_mb: z.number(),
+  memory_free_mb: z.number().nullable().optional(),
+  compute_capability: z.string().nullable().optional(),
+});
+export type GpuInfo = z.infer<typeof GpuInfoSchema>;
+
+/** GET /gpus 响应：GPU 列表 + 推荐索引 */
+export const GpuListResponseSchema = z.object({
+  gpus: z.array(GpuInfoSchema),
+  recommended: z.string().nullable().optional(),
+});
+export type GpuListResponse = z.infer<typeof GpuListResponseSchema>;
 
 /** OCR 引擎预热响应 */
 export const OcrWarmupResponseSchema = z.object({

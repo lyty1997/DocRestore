@@ -37,6 +37,8 @@ from docrestore.api.schemas import (
     CreateTaskRequest,
     CustomSensitiveWord,
     DirEntry,
+    GPUInfoResponse,
+    GPUListResponse,
     OCRStatusResponse,
     OCRWarmupRequest,
     ProgressResponse,
@@ -52,6 +54,7 @@ from docrestore.api.schemas import (
     TaskResultsResponse,
     UpdateMarkdownRequest,
 )
+from docrestore.ocr.gpu_detect import list_gpus, pick_best_gpu
 from docrestore.models import TaskProgress
 from docrestore.pipeline.config import (
     CustomWord,
@@ -400,16 +403,21 @@ async def get_result(
 async def get_results(
     task_id: str,
 ) -> TaskResultsResponse:
-    """获取已完成任务的全部文档结果列表。"""
+    """获取任务已有的全部文档结果列表。
+
+    放宽规则（2026-04-21）：completed 和 failed 都返回，只要 results 非空。
+    failed 任务里每个成功子文档可正常预览；失败子文档的 `error` 非空，
+    前端据此切换展示（错误文本 vs markdown）。
+    """
     manager = _get_manager()
     task = manager.get_task(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    if task.status.value != "completed" or not task.results:
+    if not task.results:
         raise HTTPException(
             status_code=404,
-            detail="任务尚未完成或已失败",
+            detail="任务尚无结果（未完成或根级错误）",
         )
 
     items = [
@@ -419,6 +427,7 @@ async def get_results(
             markdown=r.markdown,
             doc_title=r.doc_title,
             doc_dir=r.doc_dir,
+            error=r.error,
         )
         for r in task.results
     ]
@@ -480,8 +489,12 @@ async def download_task_result(task_id: str) -> Response:
 
     output_dir = Path(task.output_dir)
 
-    # 收集子目录列表
-    doc_dirs = [r.doc_dir for r in task.results] if task.results else []
+    # 收集子目录列表；跳过失败的子文档（markdown 未落盘，没什么可下载的）
+    doc_dirs = (
+        [r.doc_dir for r in task.results if not r.error]
+        if task.results
+        else []
+    )
 
     # 至少有一个 document.md 存在才能下载
     has_any = any(
@@ -637,7 +650,7 @@ async def cleanup_tasks(req: TaskCleanupRequest) -> TaskCleanupResponse:
 
 @router.post("/tasks/{task_id}/retry", response_model=ActionResponse)
 async def retry_task(task_id: str) -> ActionResponse:
-    """重试失败的任务"""
+    """重试失败的任务（从头跑，不复用 output_dir）"""
     manager = _get_manager()
     result = await manager.retry_task(task_id)
 
@@ -661,6 +674,37 @@ async def retry_task(task_id: str) -> ActionResponse:
     return ActionResponse(
         task_id=result.task_id,
         message="已创建重试任务",
+    )
+
+
+@router.post("/tasks/{task_id}/resume", response_model=ActionResponse)
+async def resume_task(task_id: str) -> ActionResponse:
+    """继续失败任务 — 复用原 output_dir，OCR 层自动跳过已完成图。
+
+    仅 FAILED 状态（含用户取消）可继续。返回新建 task 的 task_id。
+    """
+    manager = _get_manager()
+    result = await manager.resume_task(task_id)
+
+    if result is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    if isinstance(result, str):
+        raise HTTPException(status_code=409, detail=result)
+
+    bg = asyncio.create_task(
+        manager.run_task(result.task_id),
+        name=f"run-task-{result.task_id}",
+    )
+    try:
+        manager.register_running_task(result.task_id, bg)
+    except BaseException:
+        bg.cancel()
+        raise
+
+    return ActionResponse(
+        task_id=result.task_id,
+        message="已创建续跑任务",
     )
 
 
@@ -882,8 +926,32 @@ async def get_ocr_status(request: Request) -> OCRStatusResponse:
     return OCRStatusResponse(
         current_model=em.current_model,
         current_gpu=em.current_gpu,
+        current_gpu_name=em.current_gpu_name,
         is_ready=em.is_ready,
         is_switching=em.is_switching,
+    )
+
+
+@router.get("/gpus", response_model=GPUListResponse)
+async def list_available_gpus() -> GPUListResponse:
+    """枚举系统可见的 GPU + 推荐索引。
+
+    前端据此渲染"GPU 选择"下拉；"自动"项默认 value="" 交给后端的
+    `pick_best_gpu()`。GPU 探测不抢 gpu_lock，允许并发调用。
+    """
+    gpus = await asyncio.to_thread(list_gpus)
+    return GPUListResponse(
+        gpus=[
+            GPUInfoResponse(
+                index=g.index,
+                name=g.name,
+                memory_total_mb=g.memory_total_mb,
+                memory_free_mb=g.memory_free_mb,
+                compute_capability=g.compute_capability,
+            )
+            for g in gpus
+        ],
+        recommended=pick_best_gpu(gpus),
     )
 
 
@@ -895,8 +963,15 @@ async def warmup_ocr_engine(
     """预加载指定 OCR 引擎（后台异步，立即返回）。"""
     em = _get_engine_manager(request)
 
+    # gpu_id=None 先落地成推荐值，便于 is_ready 匹配和日志可读
+    target_gpu = req.gpu_id or pick_best_gpu() or "0"
+
     # 已匹配且就绪 → 直接返回
-    if em.is_ready and em.current_model == req.model and em.current_gpu == req.gpu_id:
+    if (
+        em.is_ready
+        and em.current_model == req.model
+        and em.current_gpu == target_gpu
+    ):
         return {"status": "ready", "message": "引擎已就绪"}
 
     # 正在切换 → 返回 switching 状态
@@ -906,7 +981,7 @@ async def warmup_ocr_engine(
     # 构造完整配置并发起后台预热
     manager = _get_manager()
     warmup_config = manager.pipeline.config.ocr.model_copy(
-        update={"model": req.model, "gpu_id": req.gpu_id},
+        update={"model": req.model, "gpu_id": target_gpu},
     )
 
     async def _do_warmup() -> None:
@@ -915,7 +990,7 @@ async def warmup_ocr_engine(
             await em.ensure(warmup_config)
             logger.info(
                 "OCR 引擎预热完成: %s (GPU %s)",
-                req.model, req.gpu_id,
+                req.model, target_gpu,
             )
         except asyncio.CancelledError:
             # 应用 shutdown 时 TaskManager 会 cancel 所有后台任务

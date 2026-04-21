@@ -194,3 +194,171 @@ class DocumentSegmenter:
             )
 
         return segments
+
+
+# ── 流式分段提取器 ────────────────────────────────────────
+
+_HEADING_RE = re.compile(r"^#{1,6}\s+")
+_PAGE_MARKER_PREFIX = "<!-- page:"
+
+
+class StreamSegmentExtractor:
+    """流式分段：从增长中的 markdown 增量提取 segment。
+
+    与 `DocumentSegmenter` 的区别：
+    - 一次提取一段（`try_extract`）而不是全切
+    - `max_chars` 每次调用传入，支持运行时自适应调整（`RateController`）
+    - 只做 backward overlap（流式模式下未来文本未知）
+
+    典型用法：
+        extractor = StreamSegmentExtractor(overlap_lines=5)
+        while True:
+            result = extractor.try_extract(current_text, offset, L_star)
+            if result is None:
+                break  # 文本不够长，等更多页面
+            seg_text, offset = result
+            refine(seg_text)
+    """
+
+    def __init__(self, overlap_lines: int = 5) -> None:
+        self._overlap_lines = overlap_lines
+        self._prev_tail_lines: list[str] = []
+
+    def try_extract(
+        self, full_text: str, offset: int, max_chars: int,
+    ) -> tuple[str, int] | None:
+        """尝试从 full_text[offset:] 提取一个 segment。
+
+        - full_text[offset:] 长度 < max_chars 返回 None（等更多文本）
+        - 否则在 [offset + max_chars*0.8, offset + max_chars*1.2] 内按
+          heading > page marker > 空行 > 任意换行 的优先级搜切点
+        - 超出 1.2 倍仍无切点 → 在 offset + max_chars 强制切
+
+        返回 (segment_text_with_backward_overlap, new_offset)。
+        """
+        remaining_len = len(full_text) - offset
+        if remaining_len < max_chars:
+            return None
+
+        cut_pos = self._find_cut_position(
+            full_text, offset, max_chars,
+        )
+        actual = full_text[offset:cut_pos]
+        seg_text = self._compose_with_overlap(actual)
+        self._update_tail(actual)
+        return seg_text, cut_pos
+
+    def extract_remaining(
+        self, full_text: str, offset: int,
+    ) -> tuple[str, int]:
+        """强制把 full_text[offset:] 作为最后一段返回（可为空串）。
+
+        含 backward overlap。始终返回有效结果。
+        """
+        actual = full_text[offset:]
+        seg_text = self._compose_with_overlap(actual)
+        self._update_tail(actual)
+        return seg_text, len(full_text)
+
+    def reset(self) -> None:
+        """清除 overlap 历史（新文档开始时使用）。"""
+        self._prev_tail_lines = []
+
+    # ── 内部实现 ──────────────────────────────────────────
+
+    def _find_cut_position(
+        self, text: str, offset: int, max_chars: int,
+    ) -> int:
+        """在 [offset + 0.8*max, offset + 1.2*max] 搜最优切点。
+
+        切点取 `\\n` 之后的行起始位置（即从 cut_pos 开始是新一行）。
+        """
+        total = len(text)
+        min_cut = offset + int(max_chars * 0.8)
+        max_cut = offset + int(max_chars * 1.2)
+        if max_cut > total:
+            max_cut = total
+        if min_cut >= total:
+            return total
+
+        line_starts = self._line_starts_in(text, min_cut, max_cut)
+        if not line_starts:
+            # 搜索窗口内一个换行都没有 → 强制在 max_cut 切
+            return offset + max_chars
+
+        cut = self._select_best_cut(text, line_starts)
+        return cut if cut >= 0 else offset + max_chars
+
+    def _select_best_cut(
+        self, text: str, line_starts: list[int],
+    ) -> int:
+        """按优先级（heading > page_marker > blank > any）选首个匹配位置。"""
+        buckets: dict[str, int] = {
+            "heading": -1,
+            "page_marker": -1,
+            "blank": -1,
+            "any": -1,
+        }
+        for pos in line_starts:
+            if buckets["any"] < 0:
+                buckets["any"] = pos
+            kind = self._classify_line(text, pos)
+            if kind is not None and buckets[kind] < 0:
+                buckets[kind] = pos
+        for key in ("heading", "page_marker", "blank", "any"):
+            if buckets[key] >= 0:
+                return buckets[key]
+        return -1
+
+    @staticmethod
+    def _classify_line(text: str, pos: int) -> str | None:
+        """判断 text 中 pos 位置所在行属于哪种切点类型。"""
+        line_end = text.find("\n", pos)
+        line = text[pos:line_end] if line_end != -1 else text[pos:]
+        stripped = line.strip()
+        if not stripped:
+            return "blank"
+        if _HEADING_RE.match(line):
+            return "heading"
+        if stripped.startswith(_PAGE_MARKER_PREFIX):
+            return "page_marker"
+        return None
+
+    @staticmethod
+    def _line_starts_in(
+        text: str, from_pos: int, to_pos: int,
+    ) -> list[int]:
+        """返回 [from_pos, to_pos) 内所有行起始位置（`\\n` 之后的 index）。"""
+        starts: list[int] = []
+        # 回退到 from_pos 所在行的起始位置（如果 from_pos 不是行首，
+        # 则看 from_pos 到 to_pos 之间的下一个 `\n` 之后位置）
+        cursor = from_pos
+        if cursor > 0 and text[cursor - 1] != "\n":
+            nxt = text.find("\n", cursor, to_pos)
+            if nxt == -1:
+                return []
+            cursor = nxt + 1
+        while cursor < to_pos:
+            starts.append(cursor)
+            nxt = text.find("\n", cursor, to_pos)
+            if nxt == -1:
+                break
+            cursor = nxt + 1
+        return starts
+
+    def _compose_with_overlap(self, actual_segment: str) -> str:
+        """在 actual_segment 头部附加 backward overlap（若有）。"""
+        if not self._prev_tail_lines:
+            return actual_segment
+        overlap = "\n".join(self._prev_tail_lines)
+        if actual_segment.startswith("\n"):
+            return overlap + actual_segment
+        return overlap + "\n" + actual_segment
+
+    def _update_tail(self, actual_segment: str) -> None:
+        """记录本段末尾若干行作为下一段 overlap 来源。"""
+        if self._overlap_lines <= 0 or not actual_segment:
+            self._prev_tail_lines = []
+            return
+        lines = actual_segment.rstrip("\n").splitlines()
+        self._prev_tail_lines = lines[-self._overlap_lines:]

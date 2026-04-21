@@ -150,7 +150,7 @@ class EngineManager:
 
 **Configuration semantics**: `ensure()` directly receives a complete `OCRConfig` (or `None`). Request-level field composition is done once by the API route layer; all downstream layers (TaskManager / Pipeline / EngineManager) only accept complete snapshots and do not perform field-level merging.
 
-**GPU selection**: `OCRConfig.gpu_id` (default `"1"`) uniformly controls the GPU for both engines. The frontend can select it when creating a task. EngineManager passes it to the ppocr-server and DeepSeek worker via `CUDA_VISIBLE_DEVICES`.
+**GPU selection**: `OCRConfig.gpu_id` defaults to `None` (auto). `EngineManager.ensure()` calls `docrestore.ocr.gpu_detect.pick_best_gpu()` at the entry point to resolve it to a concrete physical index by VRAM (descending), then passes it to ppocr-server and DeepSeek worker via `CUDA_VISIBLE_DEVICES`. The frontend fetches `GET /api/v1/gpus` (`{gpus, recommended}`) to render the selector; the "Auto (recommended)" option sends an empty string so the backend re-runs `pick_best_gpu` and remains authoritative.
 
 ### 5.2 DeepSeekOCR2Engine (ocr/deepseek_ocr2.py)
 

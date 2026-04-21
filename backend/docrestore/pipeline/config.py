@@ -97,7 +97,10 @@ class OCRConfig(BaseModel):
     )
 
     # GPU 选择（两个引擎通用，前端可选）
-    gpu_id: str = "1"  # CUDA_VISIBLE_DEVICES，默认 GPU 1
+    # None 表示 "自动"：engine_manager 组装 CUDA_VISIBLE_DEVICES 时会调
+    # gpu_detect.pick_best_gpu() 选显存最大的一张，保持跨机器可移植。
+    # 显式传入如 "0"/"1" 时以配置为准。
+    gpu_id: str | None = None
 
     # === 两引擎共有的 vLLM 优化参数 ===
     # DeepSeek 进程内直接透传到 AsyncEngineArgs；
@@ -198,6 +201,9 @@ class LLMConfig(BaseModel):
     truncation_min_input_lines: int = 20
     # 全局 LLM API 并发上限（跨所有 pipeline 共享的 asyncio.Semaphore 名额）
     max_concurrent_requests: int = 3
+    # 精修结果磁盘缓存：写到 {output_dir}/.llm_cache/；同 input+model+prompt
+    # 指纹的段自动命中，resume 任务可跳过已精修段。只缓存非截断的成功结果。
+    enable_cache: bool = True
 
 
 class OutputConfig(BaseModel):

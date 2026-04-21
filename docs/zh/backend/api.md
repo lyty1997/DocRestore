@@ -205,13 +205,25 @@ class UploadCompleteResponse(BaseModel):
 ```python
 class OCRWarmupRequest(BaseModel):
     model: str = "paddle-ocr/ppocr-v4"
-    gpu_id: str = "1"
+    gpu_id: str | None = None   # 为 None 时后端 pick_best_gpu 自动选
 
 class OCRStatusResponse(BaseModel):
     current_model: str
     current_gpu: str
+    current_gpu_name: str = "" # 可读型号，便于前端显示
     is_ready: bool       # _engine.is_ready
     is_switching: bool   # _switch_lock.locked()
+
+class GPUInfoResponse(BaseModel):
+    index: str
+    name: str
+    memory_total_mb: int
+    memory_free_mb: int | None = None
+    compute_capability: str | None = None
+
+class GPUListResponse(BaseModel):
+    gpus: list[GPUInfoResponse]
+    recommended: str | None = None
 ```
 
 ### 3.3 路由（api/routes.py + api/upload.py）
@@ -231,7 +243,8 @@ class OCRStatusResponse(BaseModel):
 | `GET` | `/tasks/{id}/source-images` | 列出任务输入图片文件名 |
 | `GET` | `/tasks/{id}/source-images/{filename:path}` | 获取任务输入源图片文件 |
 | `POST` | `/tasks/{id}/cancel` | 取消运行中的任务 |
-| `POST` | `/tasks/{id}/retry` | 重试失败的任务（创建新任务） |
+| `POST` | `/tasks/{id}/retry` | 重试失败的任务（创建新任务，**新 output_dir**，从头跑） |
+| `POST` | `/tasks/{id}/resume` | 继续失败任务（创建新任务，**复用原 output_dir**，OCR 自动跳过已完成图，LLM 精修按 `{output_dir}/.llm_cache/` 命中跳过已精修段） |
 | `DELETE` | `/tasks/{id}` | 删除任务及产物 |
 | `POST` | `/tasks/cleanup` | 批量清理终态任务（仅允许 `completed` / `failed`）|
 | `WS` | `/tasks/{id}/progress` | WebSocket 进度推送（受 `require_auth_ws` 保护） |
@@ -420,12 +433,18 @@ doc-2/images/...
 
 #### GET /api/v1/ocr/status — 查询当前 OCR 引擎状态
 
-- 返回 `OCRStatusResponse { current_model, current_gpu, is_ready, is_switching }`，字段直接来自 `EngineManager` 同名属性
+- 返回 `OCRStatusResponse { current_model, current_gpu, current_gpu_name, is_ready, is_switching }`，字段直接来自 `EngineManager` 同名属性；`current_gpu_name` 供前端展示可读型号
 - `app.state.engine_manager` 未挂载时返回 500（注入引擎或未启动 lifespan 的测试场景）
+
+#### GET /api/v1/gpus — 枚举可用 GPU + 推荐索引
+
+- 返回 `GPUListResponse { gpus: GPUInfoResponse[], recommended: str | None }`；`docrestore.ocr.gpu_detect.list_gpus()` 优先 pynvml、退回 `nvidia-smi`，结果进程级缓存
+- `recommended` 来自 `pick_best_gpu()`（显存降序，tie-break 用索引升序）
+- 前端 TaskForm 挂载时调用；返回为空或接口失败时 UI 降级为"仅 '自动' 一项"
 
 #### POST /api/v1/ocr/warmup — 触发引擎预热
 
-- 请求 `OCRWarmupRequest { model, gpu_id }`，缺省值 `paddle-ocr/ppocr-v4 + GPU 1`
+- 请求 `OCRWarmupRequest { model, gpu_id }`；`gpu_id` 省略或传 `null` 时路由调 `pick_best_gpu()` 落地为具体物理索引再传给 `ensure()`
 - 响应 `{ status, message }`：
   - `ready`：当前引擎已就绪且 model/gpu_id 都匹配，立即返回
   - `switching`：`EngineManager._switch_lock` 被持有（其它请求触发的切换正在进行中）

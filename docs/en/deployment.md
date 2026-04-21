@@ -126,7 +126,7 @@ After the services are running:
 | `BACKEND_HOST` | `0.0.0.0` | Backend listen address |
 | `BACKEND_PORT` | `8000` | Backend listen port |
 | `FRONTEND_PORT` | `5173` | Frontend dev server port |
-| `PPOCR_GPU_ID` | `1` | GPU used by PaddleOCR server |
+| `PPOCR_GPU_ID` | empty (auto) | GPU used by PaddleOCR server; when empty, `gpu_detect.pick_best_gpu` selects the one with the most VRAM |
 | `PPOCR_PORT` | `8119` | PaddleOCR server port |
 | `PPOCR_MODEL` | `PaddleOCR-VL-1.5-0.9B` | PaddleOCR model name |
 
@@ -173,7 +173,7 @@ Specified via `OCRConfig.model`. Supported identifiers:
 | `deepseek/ocr-2` | DeepSeek-OCR-2 | High-accuracy grounding OCR |
 | `deepseek` | DeepSeek-OCR-2 | Short form |
 
-**GPU selection**: `OCRConfig.gpu_id` (default `"1"`) controls which GPU both engines use. The GPU can be selected when creating a task from the frontend, or set via the `PPOCR_GPU_ID` environment variable.
+**GPU selection**: `OCRConfig.gpu_id` (default `None`) controls which GPU both engines use. When unset, the backend calls `docrestore.ocr.gpu_detect.pick_best_gpu()` before starting ppocr-server and picks the GPU with the most VRAM. The frontend task form fetches the list via `GET /api/v1/gpus` so users can override it, and `PPOCR_GPU_ID` can pin it explicitly.
 
 ### 4.2 PaddleOCR Configuration
 
@@ -234,7 +234,7 @@ huggingface-cli download deepseek-ai/DeepSeek-OCR-2 \
 ```yaml
 llm:
   provider: "cloud"          # "cloud" or "local"
-  model: "openai/gemini-3.1-flash-lite-preview"
+  model: "openai/gemini-3-flash-preview-nothinking"
   api_base: "https://poloai.top/v1"
   api_key: ""                # When empty, auto-reads from environment variables
 ```
@@ -311,7 +311,8 @@ After=network.target
 Type=simple
 User=docrestore
 Environment="PATH=/path/to/conda/envs/ppocr_vlm/bin"
-Environment="CUDA_VISIBLE_DEVICES=1"
+# Pin to a specific GPU if needed (leave unset to let vLLM enumerate every visible GPU)
+# Environment="CUDA_VISIBLE_DEVICES=0"
 ExecStart=/path/to/conda/envs/ppocr_vlm/bin/paddleocr genai_server --model_name PaddleOCR-VL-1.5-0.9B --backend vllm --port 8119
 Restart=always
 

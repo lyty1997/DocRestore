@@ -89,8 +89,9 @@ def _auto_configure_paddle(config: PipelineConfig) -> None:
             config.ocr.paddle_server_python = detected
             logger.info("自动检测 ppocr_vlm python: %s", detected)
 
-    # 从环境变量读取 GPU / 端口（与 start.sh 默认值一致）
-    env_gpu = os.environ.get("PPOCR_GPU_ID", "")
+    # 从环境变量读取 GPU / 端口（用户显式指定时生效；未设置则保持 None，
+    # engine_manager 启动 ppocr-server 时会调 gpu_detect.pick_best_gpu 自动选）
+    env_gpu = os.environ.get("PPOCR_GPU_ID", "").strip()
     if env_gpu:
         config.ocr.gpu_id = env_gpu
         logger.info("从环境变量 PPOCR_GPU_ID 配置 GPU: %s", env_gpu)

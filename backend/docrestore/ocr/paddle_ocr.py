@@ -108,7 +108,11 @@ class PaddleOCREngine(WorkerBackedOCREngine):
 
         # 与 ppocr-server 使用同一块 GPU
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-        env["CUDA_VISIBLE_DEVICES"] = self._config.gpu_id
+        # gpu_id=None 兜底：pipeline 直接调 create_engine 时没走 engine_manager
+        from docrestore.ocr.gpu_detect import pick_best_gpu
+        env["CUDA_VISIBLE_DEVICES"] = (
+            self._config.gpu_id or pick_best_gpu() or "0"
+        )
         return env
 
     def _build_init_cmd(self) -> dict[str, object]:

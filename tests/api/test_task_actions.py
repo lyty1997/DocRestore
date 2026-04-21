@@ -291,6 +291,70 @@ class TestRetryTask:
         new_task = routes._task_manager._tasks.get(new_id)  # type: ignore[union-attr]
         assert new_task is not None
         assert new_task.image_dir == old.image_dir
+        # retry 分配新 output_dir（与 resume 的关键差异）
+        assert new_task.output_dir != old.output_dir
+
+
+class TestResumeTask:
+    """POST /tasks/{task_id}/resume — 复用 output_dir 让 OCR 缓存命中"""
+
+    @pytest.mark.asyncio
+    async def test_resume_nonexistent(
+        self, api_client: AsyncClient,
+    ) -> None:
+        resp = await api_client.post("/api/v1/tasks/ghost/resume")
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_resume_pending_task_rejected(
+        self, api_client: AsyncClient, tmp_path: Path,
+    ) -> None:
+        _inject_task("t-resume-pending", TaskStatus.PENDING, tmp_path)
+        resp = await api_client.post(
+            "/api/v1/tasks/t-resume-pending/resume",
+        )
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert "pending" in detail
+        assert "失败任务" in detail
+
+    @pytest.mark.asyncio
+    async def test_resume_completed_task_rejected(
+        self, api_client: AsyncClient, tmp_path: Path,
+    ) -> None:
+        _inject_task("t-resume-done", TaskStatus.COMPLETED, tmp_path)
+        resp = await api_client.post(
+            "/api/v1/tasks/t-resume-done/resume",
+        )
+        assert resp.status_code == 409
+        assert "completed" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_resume_failed_task_reuses_output_dir(
+        self, api_client: AsyncClient, tmp_path: Path,
+    ) -> None:
+        """resume FAILED 任务 → 新 task 继承 image_dir **和 output_dir**。"""
+        old = _inject_task(
+            "t-resume-failed", TaskStatus.FAILED, tmp_path,
+        )
+        resp = await api_client.post(
+            f"/api/v1/tasks/{old.task_id}/resume",
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        new_id = body["task_id"]
+        assert new_id != old.task_id
+        assert body["message"] == "已创建续跑任务"
+
+        new_task = routes._task_manager._tasks.get(new_id)  # type: ignore[union-attr]
+        assert new_task is not None
+        assert new_task.image_dir == old.image_dir
+        # 关键断言：output_dir 必须复用（OCR 缓存命中的前提）
+        assert new_task.output_dir == old.output_dir
+        # 原 FAILED 任务保留
+        assert old.task_id in (
+            routes._task_manager._tasks  # type: ignore[union-attr]
+        )
 
 
 class TestCleanupTasks:

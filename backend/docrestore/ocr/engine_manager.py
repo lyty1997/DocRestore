@@ -33,6 +33,7 @@ from collections.abc import Callable
 from types import FrameType
 
 from docrestore.ocr.base import OCREngine, _drain_stream_to_logger
+from docrestore.ocr.gpu_detect import list_gpus, pick_best_gpu
 from docrestore.ocr.router import _parse_model, create_engine
 from docrestore.pipeline.config import OCRConfig
 
@@ -254,6 +255,17 @@ def _extract_paddleocr_pgid(pid_str: str) -> int | None:
     return pgid
 
 
+def _lookup_gpu_name(index: str) -> str:
+    """按物理索引从探测缓存里查 GPU 型号；找不到返回空串。"""
+    try:
+        for g in list_gpus():
+            if g.index == index:
+                return g.name
+    except Exception:  # noqa: BLE001 — 探测失败不影响主流程
+        logger.debug("查询 GPU 型号失败", exc_info=True)
+    return ""
+
+
 class EngineManager:
     """OCR 引擎生命周期管理器 — 按需切换，自动管理 ppocr-server"""
 
@@ -267,6 +279,7 @@ class EngineManager:
         self._engine: OCREngine | None = None
         self._current_model: str = ""
         self._current_gpu: str = ""
+        self._current_gpu_name: str = ""
         self._ppocr_server_proc: asyncio.subprocess.Process | None = None
         # ppocr-server 的 stdout/stderr drain task（防 pipe buffer 写满）
         self._ppocr_drain_tasks: list[asyncio.Task[None]] = []
@@ -281,6 +294,11 @@ class EngineManager:
     def current_gpu(self) -> str:
         """当前活跃的 GPU ID。"""
         return self._current_gpu
+
+    @property
+    def current_gpu_name(self) -> str:
+        """当前 GPU 的型号字符串（如 "NVIDIA RTX 4070 SUPER"），未就绪时返回空串。"""
+        return self._current_gpu_name
 
     @property
     def is_ready(self) -> bool:
@@ -312,8 +330,18 @@ class EngineManager:
         5. 创建 + initialize 新引擎
         """
         config = ocr or self._default_config
+        # gpu_id=None 表示 "自动"：此处落地为具体物理索引，后续 _is_matched /
+        # _start_ppocr_server / env 组装全部基于字符串，避免再判 None。
+        # 用 model_copy 而非原地修改，防止污染调用方传入的 config。
+        if config.gpu_id is None:
+            resolved_gpu = pick_best_gpu() or "0"
+            config = config.model_copy(update={"gpu_id": resolved_gpu})
+            logger.info("gpu_id 未指定，自动选择 GPU %s", resolved_gpu)
         target_model = config.model
         target_gpu = config.gpu_id
+        if target_gpu is None:
+            # 逻辑上已被上面的 model_copy 落地过，这里留个防御分支便于日后重构。
+            target_gpu = "0"
         logger.debug(
             "ensure() model=%s, gpu=%s (override=%s)",
             target_model, target_gpu, ocr is not None,
@@ -355,6 +383,7 @@ class EngineManager:
                     await engine.initialize(on_progress=on_progress)
                     self._current_model = target_model
                     self._current_gpu = target_gpu
+                    self._current_gpu_name = _lookup_gpu_name(target_gpu)
                 except BaseException:
                     # 任何异常（含 CancelledError）都清理半成品状态
                     logger.info("引擎切换失败，清理资源...")
@@ -415,6 +444,7 @@ class EngineManager:
             finally:
                 self._current_model = ""
                 self._current_gpu = ""
+                self._current_gpu_name = ""
 
     async def _start_ppocr_server(
         self,
@@ -441,7 +471,8 @@ class EngineManager:
             return
 
         port = config.paddle_server_port
-        gpu_id = config.gpu_id
+        # config.gpu_id 通常由 ensure() 入口落地；直接调用时兜底自动探测
+        gpu_id = config.gpu_id or pick_best_gpu() or "0"
         model_name = config.paddle_server_model_name
         backend_config_path = config.paddle_server_backend_config
 

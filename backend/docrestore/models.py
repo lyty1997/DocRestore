@@ -135,6 +135,10 @@ class PipelineResult:
     )
     doc_title: str = ""  # 文档标题（多文档标识）
     doc_dir: str = ""  # 相对于 task.output_dir 的子目录名（空=根目录）
+    # 子文档级错误：process_tree 某个 leaf 失败时用此字段占位；空串代表成功。
+    # 允许前端按 doc 粒度展示"部分完成"状态：成功 doc 可正常预览，失败 doc
+    # 只展示 error 文本 + 保留 doc_dir 供 resume 跳过。
+    error: str = ""
 
 
 @dataclass

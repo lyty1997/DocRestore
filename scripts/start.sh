@@ -17,7 +17,9 @@ BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 
 # PaddleOCR server 配置
-PPOCR_GPU_ID="${PPOCR_GPU_ID:-1}"
+# PPOCR_GPU_ID 未设置 → 不导出 CUDA_VISIBLE_DEVICES，vLLM 自动枚举系统 GPU；
+# 后端启动路径下由 docrestore.ocr.gpu_detect.pick_best_gpu 统一挑显存最大的一张。
+PPOCR_GPU_ID="${PPOCR_GPU_ID:-}"
 PPOCR_PORT="${PPOCR_PORT:-8119}"
 PPOCR_MODEL="${PPOCR_MODEL:-PaddleOCR-VL-1.5-0.9B}"
 
@@ -138,7 +140,8 @@ start_frontend() {
 }
 
 start_ppocr_server() {
-    log "启动 PaddleOCR server → GPU ${PPOCR_GPU_ID}, 端口 ${PPOCR_PORT}"
+    local gpu_display="${PPOCR_GPU_ID:-auto}"
+    log "启动 PaddleOCR server → GPU ${gpu_display}, 端口 ${PPOCR_PORT}"
 
     # 检查 conda
     if ! command -v conda &>/dev/null; then
@@ -163,12 +166,21 @@ start_ppocr_server() {
     conda activate ppocr_vlm
     set -u
 
-    CUDA_DEVICE_ORDER=PCI_BUS_ID \
-    CUDA_VISIBLE_DEVICES="$PPOCR_GPU_ID" \
-    paddleocr genai_server \
-        --model_name "$PPOCR_MODEL" \
-        --backend vllm \
-        --port "$PPOCR_PORT" &
+    # 未显式指定 PPOCR_GPU_ID 时不设 CUDA_VISIBLE_DEVICES，vLLM 自行探测所有 GPU；
+    # 避免"被 hard code 指向不存在的设备导致 NVMLError_InvalidArgument"。
+    if [ -n "$PPOCR_GPU_ID" ]; then
+        CUDA_DEVICE_ORDER=PCI_BUS_ID \
+        CUDA_VISIBLE_DEVICES="$PPOCR_GPU_ID" \
+        paddleocr genai_server \
+            --model_name "$PPOCR_MODEL" \
+            --backend vllm \
+            --port "$PPOCR_PORT" &
+    else
+        paddleocr genai_server \
+            --model_name "$PPOCR_MODEL" \
+            --backend vllm \
+            --port "$PPOCR_PORT" &
+    fi
 }
 
 # 解析参数
@@ -195,7 +207,7 @@ case "$MODE" in
         echo ""
         log "${GREEN}PaddleOCR server 已启动${NC}"
         log "  端口: ${PPOCR_PORT}"
-        log "  GPU:  ${PPOCR_GPU_ID}"
+        log "  GPU:  ${PPOCR_GPU_ID:-auto（vLLM 自选）}"
         log "  模型: ${PPOCR_MODEL}"
         log "  按 Ctrl+C 停止"
         ;;

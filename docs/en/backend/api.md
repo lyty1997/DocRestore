@@ -205,13 +205,25 @@ class UploadCompleteResponse(BaseModel):
 ```python
 class OCRWarmupRequest(BaseModel):
     model: str = "paddle-ocr/ppocr-v4"
-    gpu_id: str = "1"
+    gpu_id: str | None = None  # None lets the backend pick the best GPU
 
 class OCRStatusResponse(BaseModel):
     current_model: str
     current_gpu: str
+    current_gpu_name: str = ""  # human-readable GPU model for the UI
     is_ready: bool       # _engine.is_ready
     is_switching: bool   # _switch_lock.locked()
+
+class GPUInfoResponse(BaseModel):
+    index: str
+    name: str
+    memory_total_mb: int
+    memory_free_mb: int | None = None
+    compute_capability: str | None = None
+
+class GPUListResponse(BaseModel):
+    gpus: list[GPUInfoResponse]
+    recommended: str | None = None
 ```
 
 ### 3.3 Routes (api/routes.py + api/upload.py)
@@ -231,7 +243,8 @@ Endpoint overview:
 | `GET` | `/tasks/{id}/source-images` | List task input image filenames |
 | `GET` | `/tasks/{id}/source-images/{filename:path}` | Retrieve a task input source image file |
 | `POST` | `/tasks/{id}/cancel` | Cancel a running task |
-| `POST` | `/tasks/{id}/retry` | Retry a failed task (creates a new task) |
+| `POST` | `/tasks/{id}/retry` | Retry a failed task (new task with a **fresh output_dir**, re-runs from scratch) |
+| `POST` | `/tasks/{id}/resume` | Resume a failed task (new task that **reuses the original output_dir**; OCR skips images already completed, and LLM refine hits `{output_dir}/.llm_cache/` to skip segments already refined) |
 | `DELETE` | `/tasks/{id}` | Delete task record and artifacts |
 | `POST` | `/tasks/cleanup` | Bulk-delete terminal tasks (`completed` / `failed` only) |
 | `WS` | `/tasks/{id}/progress` | WebSocket progress push (protected by `require_auth_ws`) |
@@ -424,12 +437,18 @@ The frontend `FileUploader` component uses the following flow:
 
 #### GET /api/v1/ocr/status -- Current OCR engine state
 
-- Returns `OCRStatusResponse { current_model, current_gpu, is_ready, is_switching }`; fields are read directly from the `EngineManager` properties of the same name.
+- Returns `OCRStatusResponse { current_model, current_gpu, current_gpu_name, is_ready, is_switching }`; fields are read directly from the `EngineManager` properties of the same name. `current_gpu_name` exposes the human-readable model string for the UI.
 - Returns 500 if `app.state.engine_manager` is missing (e.g. test apps that inject a mocked engine without going through the `lifespan`).
+
+#### GET /api/v1/gpus -- Enumerate visible GPUs + recommendation
+
+- Returns `GPUListResponse { gpus: GPUInfoResponse[], recommended: str | None }`. `docrestore.ocr.gpu_detect.list_gpus()` prefers pynvml and falls back to `nvidia-smi`; results are cached process-wide.
+- `recommended` comes from `pick_best_gpu()` (VRAM descending, tie-break by ascending index).
+- The frontend TaskForm fetches this on mount; on empty results or failures the UI degrades to "Auto only".
 
 #### POST /api/v1/ocr/warmup -- Trigger engine warmup
 
-- Request `OCRWarmupRequest { model, gpu_id }`, defaults to `paddle-ocr/ppocr-v4 + GPU 1`.
+- Request `OCRWarmupRequest { model, gpu_id }`; when `gpu_id` is omitted or `null`, the route calls `pick_best_gpu()` to resolve a concrete physical index before passing it to `ensure()`.
 - Response `{ status, message }`:
   - `ready`: the current engine matches both `model` and `gpu_id` and is already initialized.
   - `switching`: `EngineManager._switch_lock` is currently held (another caller is mid-switch).

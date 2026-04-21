@@ -109,8 +109,12 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
     def _build_subprocess_env(self) -> dict[str, str]:
         env = {**os.environ}
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-        env["CUDA_VISIBLE_DEVICES"] = self._config.gpu_id
-        logger.info("DeepSeek worker GPU: %s", self._config.gpu_id)
+        # gpu_id 通常由 engine_manager.ensure() 落地；pipeline 直接调 create_engine
+        # 时可能仍是 None，此处兜底调 pick_best_gpu。
+        from docrestore.ocr.gpu_detect import pick_best_gpu
+        gpu_id = self._config.gpu_id or pick_best_gpu() or "0"
+        env["CUDA_VISIBLE_DEVICES"] = gpu_id
+        logger.info("DeepSeek worker GPU: %s", gpu_id)
         return env
 
     def _start_new_session(self) -> bool:

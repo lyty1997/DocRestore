@@ -276,11 +276,44 @@ class TaskManager:
                 ocr=task.ocr,
             )
 
+            # process_tree 在 2026-04-21 之后不再对子目录异常 raise，而是把失败
+            # 转成 PipelineResult(error=...) 占位。这里按 error 聚合：
+            # - 任一失败 → task 整体 FAILED，但 results 保留成功部分供 UI 预览
+            # - 全成功 → COMPLETED
+            failed_docs = [r for r in results if r.error]
+            if failed_docs:
+                err_msg = self._summarize_failed_docs(
+                    failed_docs, total=len(results),
+                )
+                logger.warning(
+                    "任务 %s 部分失败: %s", task_id, err_msg,
+                )
+                async with self._lock:
+                    task.status = TaskStatus.FAILED
+                    task.results = results
+                    task.error = err_msg
+                await self._persist_results(
+                    task_id, results, status="failed", error=err_msg,
+                )
+                self.publish_progress(
+                    task_id,
+                    TaskProgress(
+                        stage="failed",
+                        current=len(results) - len(failed_docs),
+                        total=len(results),
+                        percent=0.0,
+                        message=err_msg,
+                    ),
+                )
+                return
+
             async with self._lock:
                 task.status = TaskStatus.COMPLETED
                 task.results = results
 
-            await self._persist_completed(task_id, results)
+            await self._persist_results(
+                task_id, results, status="completed",
+            )
             # 发送终结进度，让 WS 客户端检测到 completed 状态并退出
             self.publish_progress(
                 task_id,
@@ -358,16 +391,24 @@ class TaskManager:
         except Exception:
             logger.exception("持久化状态变更失败: %s → %s", task_id, status)
 
-    async def _persist_completed(
+    async def _persist_results(
         self,
         task_id: str,
         results: list[PipelineResult],
+        *,
+        status: str,
+        error: str | None = None,
     ) -> None:
-        """将完成状态和结果写入 DB。"""
+        """将结果列表持久化到 DB；适用 completed 或 partial-failed 两种终态。
+
+        FAILED 任务保留已成功子文档的 results row，让前端 detail 页能预览
+        "10 篇文档，2 篇失败" 的部分成果。失败 doc（markdown 为空）也写入
+        以保留 doc_dir 信息，前端根据 error 字段区分状态。
+        """
         if self._db is None:
             return
         try:
-            await self._db.update_status(task_id, "completed")
+            await self._db.update_status(task_id, status, error=error)
             if results:
                 rows = [
                     (str(r.output_path), r.doc_title, r.doc_dir)
@@ -375,7 +416,28 @@ class TaskManager:
                 ]
                 await self._db.insert_results(task_id, rows)
         except Exception:
-            logger.exception("持久化完成结果失败: %s", task_id)
+            logger.exception("持久化结果失败: %s (status=%s)", task_id, status)
+
+    @staticmethod
+    def _summarize_failed_docs(
+        failed: list[PipelineResult],
+        *,
+        total: int,
+    ) -> str:
+        """生成 task.error 摘要：'3/5 子文档失败: docA (err1); docB (...)'"""
+        parts: list[str] = []
+        # 只展示前 3 条避免 error 字段过长
+        for r in failed[:3]:
+            label = r.doc_dir or "(根目录)"
+            parts.append(f"{label} ({r.error})")
+        suffix = ""
+        if len(failed) > 3:
+            suffix = f"；另 {len(failed) - 3} 个子目录亦失败"
+        return (
+            f"{len(failed)}/{total} 子文档失败: "
+            + "; ".join(parts)
+            + suffix
+        )
 
     def get_task(self, task_id: str) -> Task | None:
         """查询任务状态（仅内存，同步接口保持兼容）。"""
@@ -665,6 +727,8 @@ class TaskManager:
     async def retry_task(self, task_id: str) -> Task | str | None:
         """重试失败的任务，返回新任务。
 
+        与 resume_task 的区别：不复用原 output_dir（从头跑）。
+
         返回值：
         - None：原任务不存在
         - 错误信息字符串：原任务不可重试
@@ -680,6 +744,33 @@ class TaskManager:
         # 用原任务配置创建新任务
         return self.create_task(
             image_dir=task.image_dir,
+            llm=task.llm,
+            ocr=task.ocr,
+            pii=task.pii,
+        )
+
+    async def resume_task(self, task_id: str) -> Task | str | None:
+        """继续失败任务 — 复用原 output_dir 让 OCR 层缓存命中，跳过已完成图。
+
+        与 retry_task 的唯一区别是保留 output_dir：OCR 引擎 `ocr()` 方法检查
+        `{stem}_OCR/result.mmd` 存在就直接 load，所以只有未完成图会真的跑。
+        LLM 精修 / PII / dedup 仍会全量重算，断点续只省 OCR 时间。
+
+        返回值：
+        - None：原任务不存在
+        - 错误信息字符串：原任务不可继续
+        - Task：新创建的任务（共享原 output_dir）
+        """
+        task = await self.get_task_async(task_id)
+        if task is None:
+            return None
+
+        if task.status != TaskStatus.FAILED:
+            return f"任务状态为 {task.status.value}，仅失败任务可继续"
+
+        return self.create_task(
+            image_dir=task.image_dir,
+            output_dir=task.output_dir,  # 关键：复用 → OCR cache 命中
             llm=task.llm,
             ocr=task.ocr,
             pii=task.pii,

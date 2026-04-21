@@ -4,7 +4,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { getOcrStatus, warmupOcrEngine } from "../api/client";
+import { getOcrStatus, listGpus, warmupOcrEngine } from "../api/client";
+import type { GpuInfo } from "../api/schemas";
 import { useTranslation } from "../i18n";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { SourcePicker } from "./SourcePicker";
@@ -81,16 +82,20 @@ const OCR_ENGINE_KEYS: Record<string, { label: string; desc: string }> = {
   "deepseek/ocr-2": { label: "taskForm.deepseekOcrName", desc: "taskForm.deepseekOcrDesc" },
 };
 
-/** GPU 值常量 */
-const GPU_VALUES = ["0", "1"] as const;
-const GPU_KEYS: Record<string, string> = {
-  "0": "taskForm.gpu0",
-  "1": "taskForm.gpu1",
-};
-
-const DEFAULT_GPU_ID = "1";
+/** GPU 下拉 "自动" 选项的 value；与后端 OCRConfig.gpu_id=None 对应 */
+const GPU_AUTO_VALUE = "";
 
 const DEFAULT_OCR_MODEL = "paddle-ocr/ppocr-v4";
+
+/** 拼 "0 - RTX 4070 SUPER (12 GB)" 标签；缺信息时退化为 "GPU 0" */
+function formatGpuLabel(
+  info: GpuInfo | undefined,
+  fallbackIndex: string,
+): string {
+  if (info === undefined) return `GPU ${fallbackIndex}`;
+  const gib = (info.memory_total_mb / 1024).toFixed(1);
+  return `${info.index} - ${info.name} (${gib} GB)`;
+}
 
 interface TaskFormProps {
   readonly onSubmit: (
@@ -103,10 +108,9 @@ interface TaskFormProps {
   readonly disabled: boolean;
 }
 
-/** 将 key 掩码为 sk-****...***z 形式 */
-function maskKey(key: string): string {
-  if (key.length <= 8) return "*".repeat(key.length);
-  return `${key.slice(0, 4)}${"*".repeat(4)}...${key.slice(-4)}`;
+/** api_base 是否以 /v{数字} 结尾（允许末尾带斜杠）。 */
+function hasVersionSuffix(apiBase: string): boolean {
+  return /\/v\d+\/?$/.test(apiBase.trim());
 }
 
 export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Element {
@@ -123,20 +127,38 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
   const [llmModel, setLlmModel] = useState(stored?.model ?? "");
   const [llmApiBase, setLlmApiBase] = useState(stored?.api_base ?? "");
   const [llmApiKey, setLlmApiKey] = useState(stored?.api_key ?? "");
-  /** 输入框中的临时值（未保存） */
-  const [apiKeyDraft, setApiKeyDraft] = useState("");
-  /** 是否已保存（保存后用掩码显示） */
-  const [apiKeySaved, setApiKeySaved] = useState(
-    stored?.api_key !== undefined && stored.api_key !== "",
-  );
+  /** 是否明文显示 API Key */
+  const [showApiKey, setShowApiKey] = useState(false);
   /** 是否记住 LLM 配置 */
   const [rememberLlm, setRememberLlm] = useState(stored !== undefined);
 
   /* OCR 引擎选择 + 预热状态 */
   const [ocrModel, setOcrModel] = useState<string>(DEFAULT_OCR_MODEL);
-  const [gpuId, setGpuId] = useState<string>(DEFAULT_GPU_ID);
+  /** "" = 自动（后端 pick_best_gpu）；其余为显式物理索引 */
+  const [gpuId, setGpuId] = useState<string>(GPU_AUTO_VALUE);
+  const [gpus, setGpus] = useState<readonly GpuInfo[]>([]);
+  const [recommendedGpu, setRecommendedGpu] = useState<string | undefined>();
   const [engineStatus, setEngineStatus] = useState<EngineStatus>("idle");
   const pollRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+
+  /* 挂载时拉取 GPU 列表 */
+  useEffect(() => {
+    let cancelled = false;
+    const load = async (): Promise<void> => {
+      try {
+        const resp = await listGpus();
+        if (cancelled) return;
+        setGpus(resp.gpus);
+        setRecommendedGpu(resp.recommended ?? undefined);
+      } catch {
+        /* 后端未更新或离线时安静降级：只保留 "自动" 一项 */
+      }
+    };
+    void load();
+    return (): void => {
+      cancelled = true;
+    };
+  }, []);
 
   /* 脱敏开关 + 敏感词（每条可选独立代号） */
   const [piiEnabled, setPiiEnabled] = useState(false);
@@ -189,20 +211,6 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
     setSensitiveWords((prev) => prev.filter((w) => w.word !== word));
   };
 
-  const handleSaveApiKey = (): void => {
-    const trimmed = apiKeyDraft.trim();
-    if (trimmed === "") return;
-    setLlmApiKey(trimmed);
-    setApiKeySaved(true);
-    setApiKeyDraft("");
-  };
-
-  const handleClearApiKey = (): void => {
-    setLlmApiKey("");
-    setApiKeySaved(false);
-    setApiKeyDraft("");
-  };
-
   /* 挂载时查询默认引擎预热状态 */
   useEffect(() => {
     let cancelled = false;
@@ -210,7 +218,9 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
       try {
         const s = await getOcrStatus();
         if (cancelled) return;
-        if (s.current_model === ocrModel && s.current_gpu === gpuId) {
+        /* gpuId=""（自动）时，只要模型匹配就认为是已就绪 */
+        const gpuMatches = gpuId === GPU_AUTO_VALUE || s.current_gpu === gpuId;
+        if (s.current_model === ocrModel && gpuMatches) {
           setEngineStatus(
             s.is_ready ? "ready" : (s.is_switching ? "warming" : "idle"),
           );
@@ -238,9 +248,11 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
         void (async (): Promise<void> => {
           try {
             const s = await getOcrStatus();
+            const gpuMatches =
+              targetGpu === GPU_AUTO_VALUE || s.current_gpu === targetGpu;
             if (
               s.current_model === targetModel &&
-              s.current_gpu === targetGpu &&
+              gpuMatches &&
               s.is_ready
             ) {
               setEngineStatus("ready");
@@ -294,6 +306,13 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
     const model = llmModel.trim();
     const apiBase = llmApiBase.trim();
     const apiKey = llmApiKey.trim();
+
+    /* api_base 防呆：缺 /v1 之类版本号时先弹确认，避免命中网关 SPA 首页 */
+    if (apiBase !== "" && !hasVersionSuffix(apiBase)) {
+      const proceed = globalThis.confirm(t("taskForm.apiBaseUrlWarning"));
+      if (!proceed) return;
+    }
+
     const llm: LLMConfig | undefined =
       model || apiBase || apiKey
         ? {
@@ -312,13 +331,13 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
           }
         : undefined;
 
-    /* OCR 引擎配置：非默认值才传 */
+    /* OCR 引擎配置：模型或 GPU 有显式值才传；gpuId="" 表示自动（不覆盖） */
     const hasOcrOverride =
-      ocrModel !== DEFAULT_OCR_MODEL || gpuId !== DEFAULT_GPU_ID;
+      ocrModel !== DEFAULT_OCR_MODEL || gpuId !== GPU_AUTO_VALUE;
     const ocr: OCRConfig | undefined = hasOcrOverride
       ? {
           model: ocrModel,
-          gpu_id: gpuId === DEFAULT_GPU_ID ? undefined : gpuId,
+          gpu_id: gpuId === GPU_AUTO_VALUE ? undefined : gpuId,
         }
       : undefined;
 
@@ -399,9 +418,20 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
               }}
               disabled={disabled}
             >
-              {GPU_VALUES.map((value) => (
-                <option key={value} value={value}>
-                  {t(GPU_KEYS[value])}
+              <option value={GPU_AUTO_VALUE}>
+                {recommendedGpu !== undefined && gpus.length > 0
+                  ? t("taskForm.gpuAutoWithHint").replace(
+                      "{hint}",
+                      formatGpuLabel(
+                        gpus.find((g) => g.index === recommendedGpu),
+                        recommendedGpu,
+                      ),
+                    )
+                  : t("taskForm.gpuAuto")}
+              </option>
+              {gpus.map((g) => (
+                <option key={g.index} value={g.index}>
+                  {formatGpuLabel(g, g.index)}
                 </option>
               ))}
             </select>
@@ -471,40 +501,30 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
             </div>
             <div className="llm-field">
               <label htmlFor="llm-api-key">{t("taskForm.apiKey")}</label>
-              {apiKeySaved ? (
-                <div className="api-key-saved">
-                  <code className="api-key-mask">{maskKey(llmApiKey)}</code>
-                  <button
-                    type="button"
-                    className="btn-clear-key"
-                    onClick={handleClearApiKey}
-                    disabled={disabled}
-                  >
-                    {t("common.clear")}
-                  </button>
-                </div>
-              ) : (
-                <div className="api-key-input">
-                  <input
-                    id="llm-api-key"
-                    type="password"
-                    value={apiKeyDraft}
-                    onChange={(e) => {
-                      setApiKeyDraft(e.target.value);
-                    }}
-                    placeholder={t("taskForm.apiKeyPlaceholder")}
-                    disabled={disabled}
-                  />
-                  <button
-                    type="button"
-                    className="btn-save-key"
-                    onClick={handleSaveApiKey}
-                    disabled={disabled || apiKeyDraft.trim() === ""}
-                  >
-                    {t("common.save")}
-                  </button>
-                </div>
-              )}
+              <div className="api-key-input">
+                <input
+                  id="llm-api-key"
+                  type={showApiKey ? "text" : "password"}
+                  value={llmApiKey}
+                  onChange={(e) => {
+                    setLlmApiKey(e.target.value);
+                  }}
+                  placeholder={t("taskForm.apiKeyPlaceholder")}
+                  disabled={disabled}
+                />
+                <button
+                  type="button"
+                  className="btn-toggle-key"
+                  onClick={() => {
+                    setShowApiKey((prev) => !prev);
+                  }}
+                  disabled={disabled}
+                >
+                  {showApiKey
+                    ? t("taskForm.apiKeyToggleHide")
+                    : t("taskForm.apiKeyToggleShow")}
+                </button>
+              </div>
             </div>
             <label className="llm-remember" htmlFor="llm-remember">
               <input

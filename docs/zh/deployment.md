@@ -126,7 +126,7 @@ bash scripts/start.sh frontend  # 前端页面：http://localhost:5173
 | `BACKEND_HOST` | `0.0.0.0` | 后端监听地址 |
 | `BACKEND_PORT` | `8000` | 后端监听端口 |
 | `FRONTEND_PORT` | `5173` | 前端开发服务器端口 |
-| `PPOCR_GPU_ID` | `1` | PaddleOCR server 使用的 GPU |
+| `PPOCR_GPU_ID` | 空（自动） | PaddleOCR server 使用的 GPU；留空时由 `gpu_detect.pick_best_gpu` 选显存最大的一张 |
 | `PPOCR_PORT` | `8119` | PaddleOCR server 端口 |
 | `PPOCR_MODEL` | `PaddleOCR-VL-1.5-0.9B` | PaddleOCR 模型名 |
 
@@ -173,7 +173,7 @@ OPENAI_API_BASE=https://your-proxy.com/v1
 | `deepseek/ocr-2` | DeepSeek-OCR-2 | 高精度 grounding OCR |
 | `deepseek` | DeepSeek-OCR-2 | 简写形式 |
 
-**GPU 选择**：`OCRConfig.gpu_id`（默认 `"1"`）统一控制两个引擎使用的 GPU。前端创建任务时可选择 GPU，也可通过环境变量 `PPOCR_GPU_ID` 设置默认值。
+**GPU 选择**：`OCRConfig.gpu_id`（默认 `None`）统一控制两个引擎使用的 GPU。未显式指定时，后端在启动 ppocr-server 前调用 `docrestore.ocr.gpu_detect.pick_best_gpu()`，按显存降序自动挑选可用 GPU；前端任务表单会调用 `GET /api/v1/gpus` 拉取列表并允许用户在下拉中切换；也可通过环境变量 `PPOCR_GPU_ID` 显式指定。
 
 ### 4.2 PaddleOCR 配置
 
@@ -234,7 +234,7 @@ huggingface-cli download deepseek-ai/DeepSeek-OCR-2 \
 ```yaml
 llm:
   provider: "cloud"          # "cloud" 或 "local"
-  model: "openai/gemini-3.1-flash-lite-preview"
+  model: "openai/gemini-3-flash-preview-nothinking"
   api_base: "https://poloai.top/v1"
   api_key: ""                # 为空时从环境变量自动读取
 ```
@@ -311,7 +311,8 @@ After=network.target
 Type=simple
 User=docrestore
 Environment="PATH=/path/to/conda/envs/ppocr_vlm/bin"
-Environment="CUDA_VISIBLE_DEVICES=1"
+# 需要固定到某张 GPU 再设置（留空则让 vLLM 自行枚举所有可见 GPU）
+# Environment="CUDA_VISIBLE_DEVICES=0"
 ExecStart=/path/to/conda/envs/ppocr_vlm/bin/paddleocr genai_server --model_name PaddleOCR-VL-1.5-0.9B --backend vllm --port 8119
 Restart=always
 

@@ -484,6 +484,11 @@ body {
   color: var(--color-text-secondary);
 }
 
+/* TaskDetail 中嵌入的实时进度段落 —— 与新建任务的 section-progress 视觉一致 */
+.task-detail-progress {
+  margin-bottom: 1.25rem;
+}
+
 .task-detail-error {
   padding: 2rem;
   text-align: center;
@@ -1824,6 +1829,17 @@ body {
   background: var(--color-primary-glow);
 }
 
+/* "继续"是失败态主操作（跳过已 OCR 图，省时间），视觉上突出 */
+.btn-resume {
+  color: var(--color-success);
+  border-color: var(--color-success);
+  font-weight: 600;
+}
+
+.btn-resume:hover {
+  background: var(--color-success-glow, rgb(0 0 0 / 0.04));
+}
+
 .action-link {
   padding: 0.25rem 0.6rem;
   font-size: 0.75rem;
@@ -1934,6 +1950,71 @@ body {
   color: var(--color-primary);
   border-bottom-color: var(--color-primary);
   font-weight: 600;
+}
+
+/* 多文档 tab 的成功/失败徽章 */
+.doc-tab-badge {
+  display: inline-block;
+  margin-right: 0.4rem;
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+
+.doc-tab--ok .doc-tab-badge {
+  color: var(--color-success);
+}
+
+.doc-tab--failed {
+  color: var(--color-danger, #c0392b);
+}
+
+.doc-tab--failed .doc-tab-badge {
+  color: var(--color-danger, #c0392b);
+}
+
+.doc-tab--failed.active {
+  color: var(--color-danger, #c0392b);
+  border-bottom-color: var(--color-danger, #c0392b);
+}
+
+/* 多文档概览条（如 "已完成 3/5，2 个失败"） */
+.doc-summary {
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+  margin-bottom: 0.5rem;
+}
+
+/* 失败子文档预览面板 */
+.doc-failed-panel {
+  flex: 1;
+  padding: 1.25rem;
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+
+.doc-failed-panel h4 {
+  margin: 0 0 0.75rem;
+  color: var(--color-danger, #c0392b);
+  font-size: 1rem;
+}
+
+.doc-failed-message {
+  font-family: monospace;
+  font-size: 0.85rem;
+  color: var(--color-text);
+  background: var(--color-surface);
+  padding: 0.75rem;
+  border-radius: 4px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.doc-failed-hint {
+  margin: 0.75rem 0 0;
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
 }
 
 /* 编辑/预览切换 + 保存按钮 */
@@ -2684,7 +2765,7 @@ body {
   line-height: 1.4;
 }
 
-/* API Key 输入行（未保存） */
+/* API Key 输入行：input + 显示/隐藏 toggle */
 .api-key-input {
   display: flex;
   gap: 0.5rem;
@@ -2695,46 +2776,7 @@ body {
   min-width: 0;
 }
 
-.btn-save-key {
-  padding: 0.5rem 0.75rem;
-  background: var(--color-primary-dark);
-  color: var(--color-on-primary);
-  border: none;
-  border-radius: 4px;
-  font-size: 0.82rem;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.2s;
-}
-
-.btn-save-key:hover:not(:disabled) {
-  background: var(--color-primary);
-}
-
-.btn-save-key:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-/* API Key 已保存行（掩码显示） */
-.api-key-saved {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.api-key-mask {
-  flex: 1;
-  padding: 0.5rem 0.625rem;
-  background: var(--color-bg);
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  font-size: 0.85rem;
-  color: var(--color-text-secondary);
-  letter-spacing: 0.05em;
-}
-
-.btn-clear-key {
+.btn-toggle-key {
   padding: 0.5rem 0.75rem;
   background: none;
   border: 1px solid var(--color-border);
@@ -2745,12 +2787,12 @@ body {
   white-space: nowrap;
 }
 
-.btn-clear-key:hover:not(:disabled) {
-  border-color: var(--color-error);
-  color: var(--color-error);
+.btn-toggle-key:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
 }
 
-.btn-clear-key:disabled {
+.btn-toggle-key:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }

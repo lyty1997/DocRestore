@@ -22,21 +22,27 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import re
+import time
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import aiofiles
 
 from docrestore.llm.base import BaseLLMRefiner, LLMRefiner
+from docrestore.llm.cache import LLMCache
 from docrestore.llm.cloud import CloudLLMRefiner
 from docrestore.llm.prompts import (
     extract_first_heading,
     parse_doc_boundaries,
     parse_gaps,
 )
-from docrestore.processing.segmenter import DocumentSegmenter
+from docrestore.processing.segmenter import (
+    DocumentSegmenter,
+    StreamSegmentExtractor,
+)
 from docrestore.models import (
     DocBoundary,
     Gap,
@@ -67,10 +73,15 @@ from docrestore.pipeline.profiler import (
     reset_current_profiler,
     set_current_profiler,
 )
+from docrestore.pipeline.rate_controller import RateController
 from docrestore.privacy.redactor import EntityLexicon, PIIRedactor
 from docrestore.processing.cleaner import OCRCleaner
-from docrestore.processing.dedup import PageDeduplicator, strip_repeated_lines
+from docrestore.processing.dedup import IncrementalMerger
 from docrestore.utils.paths import sanitize_dirname
+
+
+#: 流式 Pipeline 延迟 PII 实体检测的页面阈值（见 streaming-pipeline §6）。
+_PII_DETECT_THRESHOLD = 5
 
 # 进度回调类型
 ReportFn = Callable[[str, int, int, str], None]
@@ -281,14 +292,12 @@ class Pipeline:
         pii: PIIConfig | None = None,
         ocr: OCRConfig | None = None,
     ) -> list[PipelineResult]:
-        """统一入口：自动处理子目录结构和 LLM 文档聚类。
+        """统一入口：处理叶子目录，或多子目录 → warmup cold start 并发。
 
-        - 输入目录本身含图片（叶子目录）→ process_many()（LLM 聚类）
-        - 输入目录含多个子目录 → 逐子目录 process_many()，聚合结果
-        - 每个子目录内部仍可通过 LLM 聚类进一步拆分
-
-        llm/ocr/pii 为 None 时使用 `self.config` 内的默认配置；非空时
-        视为本次请求的完整配置快照（由上游合成，pipeline 内部不再合并）。
+        - 输入目录本身含图片 → 直接 `process_many()`（单文档）
+        - 含多个子目录 → 按页数降序，最长子目录先串行 warmup（让
+          `RateController` 完成冷启动采样），再并发剩余子目录
+        - 返回 `list[PipelineResult]`，每个子目录一份（单目录 list 长度 1）
         """
         async with self._task_profiler(output_dir) as (profiler, _is_root):
             with profiler.stage(
@@ -303,37 +312,98 @@ class Pipeline:
                     msg = f"未找到图片文件: {image_dir}"
                     raise FileNotFoundError(msg)
 
-                # 单目录：直接委托 process_many（复用当前 profiler）
+                # 单目录：直接委托 process_many（无需 warmup）
                 if (
                     len(leaf_dirs) == 1 and leaf_dirs[0] == image_dir
                 ):
-                    return await self.process_many(
+                    result = await self.process_many(
                         image_dir, output_dir, on_progress,
                         llm, gpu_lock, pii, ocr,
                     )
+                    return [result]
 
-                # 多子目录：并行处理，聚合结果。
-                # asyncio.gather 让多个子目录的 OCR/PII/LLM 阶段按锁粒度交错：
-                # - gpu_lock 保证 OCR 串行
-                # - llm_semaphore 限流 LLM API
-                # - CPU/regex/IO 阶段真正并行
-                # 任一子目录失败即 raise（整个任务 FAILED），语义与串行一致。
-                #
-                # LPT 排序：按页数降序派发，最长子目录先抢 gpu_lock，它的 LLM
-                # 可与后续目录 OCR 重叠；最后一个出队的子目录 LLM 时长最短，
-                # 决定关键路径 = Σ OCR + min(LLM)。相比朴素顺序可省 10–20%。
-                leaf_dirs = await asyncio.to_thread(
-                    _sort_leaves_lpt, leaf_dirs,
+                # 多子目录：warmup cold start + 并发剩余
+                # - leaves 按页数降序（最长子目录作 warmup 样本源最稳）
+                # - RateController 全局共享：warmup 期间采集 3+ 个 LLM 样本，
+                #   剩余子目录读到的 target_segment_chars() 已是解析解 L*
+                # - 严格"先串行 warmup → 等 cold_start_done → 再 gather 剩余"
+                #   不再 LPT（LPT 在 gather 下 acquire 顺序被 async IO race 污染）
+                leaves_sorted = sorted(
+                    leaf_dirs,
+                    key=lambda p: (-_count_images(p), str(p)),
                 )
-                sub_results_list = await asyncio.gather(*[
+                controller = RateController(self._config.llm)
+                warmup_leaf, *rest = leaves_sorted
+
+                warmup_task = asyncio.create_task(
                     self._process_leaf(
-                        i, leaf, image_dir, output_dir,
+                        0, warmup_leaf, image_dir, output_dir,
                         on_progress, llm, gpu_lock, pii, ocr,
-                        total=len(leaf_dirs),
+                        total=len(leaves_sorted),
+                        controller=controller,
+                    ),
+                    name=f"warmup-leaf-{warmup_leaf.name}",
+                )
+                try:
+                    await controller.wait_cold_start()
+                except BaseException:
+                    warmup_task.cancel()
+                    with contextlib.suppress(
+                        asyncio.CancelledError, Exception,
+                    ):
+                        await warmup_task
+                    raise
+
+                rest_tasks = [
+                    asyncio.create_task(
+                        self._process_leaf(
+                            i + 1, leaf, image_dir, output_dir,
+                            on_progress, llm, gpu_lock, pii, ocr,
+                            total=len(leaves_sorted),
+                            controller=controller,
+                        ),
+                        name=f"leaf-{leaf.name}",
                     )
-                    for i, leaf in enumerate(leaf_dirs)
-                ])
-                return [r for sub in sub_results_list for r in sub]
+                    for i, leaf in enumerate(rest)
+                ]
+                # 容错：某个子目录失败不拖垮其他，异常转占位 PipelineResult，
+                # 上层（TaskManager）据 result.error 决定 task 最终 COMPLETED /
+                # FAILED，并把已成功 doc 的 markdown 保留给前端预览。
+                # asyncio.CancelledError 不吞：外层 cancel（shutdown / 用户取消）
+                # 应该一路传播，不能被转成"doc 失败"。
+                raw = await asyncio.gather(
+                    warmup_task, *rest_tasks, return_exceptions=True,
+                )
+                leaves_in_order = [warmup_leaf, *rest]
+                results: list[PipelineResult] = []
+                for leaf, item in zip(
+                    leaves_in_order, raw, strict=True,
+                ):
+                    if isinstance(item, asyncio.CancelledError):
+                        raise item
+                    if isinstance(item, BaseException):
+                        rel = leaf.relative_to(image_dir)
+                        logger.warning(
+                            "子目录 %s 处理失败（记为部分失败）: %s",
+                            rel, item,
+                            exc_info=item,
+                        )
+                        results.append(
+                            PipelineResult(
+                                output_path=(
+                                    output_dir / rel / "document.md"
+                                ),
+                                markdown="",
+                                doc_dir=str(rel),
+                                error=(
+                                    f"{type(item).__name__}: "
+                                    f"{str(item)[:200]}"
+                                ),
+                            ),
+                        )
+                    else:
+                        results.append(item)
+                return results
 
     async def _process_leaf(
         self,
@@ -348,8 +418,12 @@ class Pipeline:
         ocr: OCRConfig | None,
         *,
         total: int,
-    ) -> list[PipelineResult]:
-        """process_tree 并行分支：处理单个叶子目录并补全 doc_dir。"""
+        controller: RateController | None = None,
+    ) -> PipelineResult:
+        """process_tree 并行分支：处理单个叶子目录并补全 doc_dir。
+
+        `controller` 非空时使用共享实例（warmup cold start 复用）。
+        """
         profiler = current_profiler()
         rel = leaf.relative_to(image_dir)
         sub_output = output_dir / rel
@@ -368,17 +442,16 @@ class Pipeline:
             index=index + 1,
             total=total,
         ):
-            sub_results = await self.process_many(
+            result = await self.process_many(
                 leaf, sub_output, wrapped_progress,
                 llm, gpu_lock, pii, ocr,
+                controller=controller,
             )
 
-        for result in sub_results:
-            if result.doc_dir:
-                result.doc_dir = str(rel / result.doc_dir)
-            else:
-                result.doc_dir = str(rel)
-        return sub_results
+        result.doc_dir = (
+            str(rel / result.doc_dir) if result.doc_dir else str(rel)
+        )
+        return result
 
     @staticmethod
     def _wrap_progress(
@@ -405,7 +478,7 @@ class Pipeline:
 
         return wrapped
 
-    async def process_many(  # noqa: C901
+    async def process_many(
         self,
         image_dir: Path,
         output_dir: Path,
@@ -415,12 +488,15 @@ class Pipeline:
         gpu_lock: asyncio.Lock | None = None,
         pii: PIIConfig | None = None,
         ocr: OCRConfig | None = None,
-    ) -> list[PipelineResult]:
-        """完整处理流程，支持多文档拆分。
+        controller: RateController | None = None,
+    ) -> PipelineResult:
+        """单文档流式处理：OCR Producer + Stream Processor。
 
-        OCR → clean → dedup → PII → refine → reassemble
-        → 拆分子文档 → 每篇独立 gap fill / final refine / render。
-        返回 list[PipelineResult]（单文档退化为长度 1）。
+        OCR 边产出，LLM 边消费；RateController 运行时自适应段长。
+        一个目录视为一篇文档（不做 LLM 文档聚合拆分）。
+
+        `controller` 非空时跨 process_many 调用共享（process_tree 并行分支
+        warmup cold start 使用），否则本次内部临时创建。
         """
         async with self._task_profiler(output_dir) as (profiler, is_root):
             root_stage = profiler.stage(
@@ -429,12 +505,12 @@ class Pipeline:
                 mode="many",
             ) if is_root else contextlib.nullcontext()
             with root_stage:
-                return await self._process_many_body(
+                return await self._stream_pipeline(
                     image_dir, output_dir, on_progress,
-                    llm, gpu_lock, pii, ocr,
+                    llm, gpu_lock, pii, ocr, controller,
                 )
 
-    async def _process_many_body(  # noqa: C901
+    async def _stream_pipeline(
         self,
         image_dir: Path,
         output_dir: Path,
@@ -443,11 +519,11 @@ class Pipeline:
         gpu_lock: asyncio.Lock | None,
         pii: PIIConfig | None,
         ocr: OCRConfig | None,
-    ) -> list[PipelineResult]:
-        """process_many 的实际实现（profiler 已由外层 _task_profiler 绑定）。"""
-        profiler = current_profiler()
+        controller: RateController | None,
+    ) -> PipelineResult:
+        """process_many 的实际实现：启动 OCR Producer + Stream Processor。"""
         await asyncio.to_thread(
-            output_dir.mkdir, parents=True, exist_ok=True
+            output_dir.mkdir, parents=True, exist_ok=True,
         )
 
         def _report(
@@ -460,189 +536,388 @@ class Pipeline:
                 percent = (
                     (current / total * 100) if total > 0 else 0
                 )
-                on_progress(
-                    TaskProgress(
-                        stage=stage,
-                        current=current,
-                        total=total,
-                        percent=round(percent, 1),
-                        message=message,
-                    )
-                )
+                on_progress(TaskProgress(
+                    stage=stage, current=current, total=total,
+                    percent=round(percent, 1), message=message,
+                ))
 
-        # 扫描图片
         images = await asyncio.to_thread(scan_images, image_dir)
         if not images:
             msg = f"未找到图片文件: {image_dir}"
             raise FileNotFoundError(msg)
-
         if self._engine_manager is None and self._ocr_engine is None:
             msg = "OCR 引擎未初始化"
             raise RuntimeError(msg)
 
-        # OCR + 清洗
-        with profiler.stage("ocr.phase", num_images=len(images)):
-            pages = await self._ocr_and_clean(
-                images, output_dir, gpu_lock, _report, ocr,
-            )
+        if controller is None:
+            controller = RateController(self._config.llm)
 
-        # 跨页频率过滤：移除侧栏等高频重复行
-        with profiler.stage("dedup.strip_repeated", num_pages=len(pages)):
-            strip_repeated_lines(pages, self._config.dedup)
-
-        # 去重合并
-        with profiler.stage("dedup.merge", num_pages=len(pages)):
-            dedup = PageDeduplicator(self._config.dedup)
-            merged = dedup.merge_all_pages(pages)
-        await self._save_debug(
-            output_dir, "merged_raw.md", merged.markdown
-        )
-
-        # PII 脱敏（全局启用 或 有自定义敏感词时自动启用）
-        redaction_records: list[RedactionRecord] = []
-        entity_lexicon: EntityLexicon | None = None
-        cloud_blocked = False
+        page_queue: asyncio.Queue[PageOCR | None] = asyncio.Queue()
+        pages_ref: list[PageOCR] = []
         pii_cfg = pii or self._config.pii
-        if pii_cfg.enable or pii_cfg.custom_sensitive_words:
-            with profiler.stage("pii.phase"):
-                (
-                    merged, redaction_records,
-                    entity_lexicon, cloud_blocked,
-                ) = await self._redact_pii(
-                    merged, llm, pii_cfg,
-                    output_dir, _report,
-                )
 
-        # 文档边界检测（在分段精修前）
-        doc_boundaries: list[DocBoundary] = []
-        if not cloud_blocked:
-            with profiler.stage("llm.doc_boundary"):
-                doc_boundaries = await self._detect_doc_boundaries(
-                    merged, llm, _report,
-                )
-                if doc_boundaries:
-                    merged = self._insert_doc_boundaries(
-                        merged, doc_boundaries,
-                    )
-
-        # LLM 精修
-        if cloud_blocked:
-            refined_results: list[RefinedResult] = []
-            all_gaps: list[Gap] = []
-        else:
-            with profiler.stage("llm.refine_phase"):
-                refined_results, all_gaps = (
-                    await self._refine_segments(
-                        merged, output_dir, llm, _report,
-                    )
-                )
-
-        # 重组
-        with profiler.stage("reassemble"):
-            reassembled = self._reassemble(refined_results, merged)
-        await self._save_debug(
-            output_dir, "reassembled.md", reassembled.markdown,
+        ocr_task = asyncio.create_task(
+            self._ocr_producer(
+                images, output_dir, gpu_lock, page_queue,
+                pages_ref, controller, _report, ocr, pii_cfg,
+            ),
+            name=f"ocr-producer-{image_dir.name}",
         )
-
-        # 按文档边界拆分
-        with profiler.stage("doc_split"):
-            sub_docs = self._split_by_doc_boundaries(
-                reassembled, pages,
+        try:
+            return await self._stream_process(
+                page_queue, pages_ref, output_dir,
+                llm, gpu_lock, pii_cfg, controller, _report,
             )
-        _report(
-            "doc_split", 0, 1,
-            f"检测到 {len(sub_docs)} 篇文档",
+        finally:
+            await ocr_task
+
+    async def _resolve_ocr_engine(
+        self,
+        ocr: OCRConfig | None,
+        report_fn: ReportFn,
+    ) -> OCREngine:
+        """EngineManager 优先；无则用已注入的 `self._ocr_engine`（测试场景）。"""
+        if self._engine_manager is not None:
+            def _init_progress(msg: str) -> None:
+                report_fn("init", 0, 0, msg)
+            return await self._engine_manager.ensure(
+                ocr, on_progress=_init_progress,
+            )
+        if self._ocr_engine is not None:
+            return self._ocr_engine
+        msg = "OCR 引擎未初始化"
+        raise RuntimeError(msg)
+
+    async def _ocr_producer(
+        self,
+        images: list[Path],
+        output_dir: Path,
+        gpu_lock: asyncio.Lock | None,
+        queue: asyncio.Queue[PageOCR | None],
+        pages_ref: list[PageOCR],
+        controller: RateController,
+        report_fn: ReportFn,
+        ocr: OCRConfig | None,
+        pii_cfg: PIIConfig,
+    ) -> None:
+        """OCR 生产者：逐张 OCR → 清洗 → 可选 regex-only PII → 入队。
+
+        异常路径也必须发哨兵（finally），避免 _stream_process 永远阻塞在
+        `await queue.get()`。
+        """
+        profiler = current_profiler()
+        total = len(images)
+        try:
+            engine = await self._resolve_ocr_engine(ocr, report_fn)
+            cleaner = OCRCleaner()
+            redactor = (
+                PIIRedactor(pii_cfg) if pii_cfg.enable else None
+            )
+            for i, img in enumerate(images):
+                t0 = time.perf_counter()
+                with profiler.stage("ocr.single", stem=img.stem):
+                    if gpu_lock is not None:
+                        async with gpu_lock:
+                            page = await engine.ocr(img, output_dir)
+                    else:
+                        page = await engine.ocr(img, output_dir)
+                with profiler.stage(
+                    "cleaner.page", stem=page.image_path.stem,
+                ):
+                    await cleaner.clean(page)
+
+                if redactor is not None:
+                    page.cleaned_text, _ = redactor.redact_regex_only(
+                        page.cleaned_text,
+                    )
+
+                await self._save_debug(
+                    output_dir,
+                    f"{page.image_path.stem}_cleaned.md",
+                    page.cleaned_text,
+                )
+
+                controller.record_ocr(
+                    time.perf_counter() - t0,
+                    chars=len(page.cleaned_text),
+                )
+                pages_ref.append(page)
+                await queue.put(page)
+                controller.set_queue_depth(queue.qsize())
+                report_fn(
+                    "ocr", i + 1, total,
+                    f"OCR {i + 1}/{total}...",
+                )
+        finally:
+            await queue.put(None)
+
+    async def _stream_process(  # noqa: C901
+        self,
+        page_queue: asyncio.Queue[PageOCR | None],
+        pages_ref: list[PageOCR],
+        output_dir: Path,
+        llm: LLMConfig | None,
+        gpu_lock: asyncio.Lock | None,
+        pii_cfg: PIIConfig,
+        controller: RateController,
+        report_fn: ReportFn,
+    ) -> PipelineResult:
+        """消费 OCR 队列：增量合并 → 按 L* 切段 → LLM 精修 → 收齐终结化。"""
+        profiler = current_profiler()
+        merger = IncrementalMerger(self._config.dedup)
+        extractor = StreamSegmentExtractor(
+            overlap_lines=self._config.llm.segment_overlap_lines,
+        )
+        refiner = self._get_refiner(llm)
+        llm_cfg = llm if llm is not None else self._config.llm
+        # LLM 精修缓存：resume 任务复用 output_dir → 直接命中已精修段，省时间
+        cache = LLMCache(
+            output_dir / ".llm_cache",
+            enabled=llm_cfg.enable_cache,
         )
 
-        # 每个子文档独立后处理
-        results: list[PipelineResult] = []
-        for di, (title, page_names, sub_doc) in enumerate(sub_docs):
+        segmented_offset = 0
+        segment_index = 0
+        refined_results: list[RefinedResult] = []
+        all_gaps: list[Gap] = []
+        entity_lexicon: EntityLexicon | None = None
+        pii_entity_done = False
+
+        with profiler.stage("stream.consume"):
+            while True:
+                page = await page_queue.get()
+                if page is None:
+                    break
+                merger.add_page(page)
+
+                if (
+                    pii_cfg.enable
+                    and not pii_entity_done
+                    and merger.page_count >= _PII_DETECT_THRESHOLD
+                ):
+                    entity_lexicon = await self._delayed_pii_detect(
+                        merger, llm, pii_cfg,
+                    )
+                    pii_entity_done = True
+
+                segmented_offset, segment_index = (
+                    await self._try_extract_and_refine(
+                        merger, extractor, refiner, controller,
+                        segmented_offset, segment_index,
+                        refined_results, all_gaps, report_fn,
+                        cache, llm_cfg,
+                    )
+                )
+
+        # 处理剩余文本（最后一段）
+        md = merger.get_markdown()
+        if segmented_offset < len(md):
+            remaining, _ = extractor.extract_remaining(
+                md, segmented_offset,
+            )
+            if remaining.strip():
+                t0 = time.perf_counter()
+                with profiler.stage(
+                    "llm.refine_one", index=segment_index, tail=True,
+                ):
+                    result, used_refiner = (
+                        await self._refine_segment_with_cache(
+                            refiner, remaining, segment_index, 0,
+                            cache, llm_cfg,
+                        )
+                    )
+                if used_refiner:
+                    controller.record_llm(
+                        len(remaining), time.perf_counter() - t0,
+                    )
+                refined_results.append(result)
+                all_gaps.extend(result.gaps)
+                segment_index += 1
+                report_fn(
+                    "refine", segment_index, 0,
+                    f"精修段 {segment_index}",
+                )
+
+        await self._save_debug(
+            output_dir, "merged_raw.md", merger.get_markdown(),
+        )
+        await self._save_debug(
+            output_dir,
+            "rate_controller.json",
+            json.dumps(controller.snapshot(), indent=2),
+        )
+
+        return await self._finalize_single_doc(
+            merger, pages_ref, refined_results, all_gaps,
+            output_dir, llm, gpu_lock, report_fn, entity_lexicon,
+            cache, llm_cfg,
+        )
+
+    async def _try_extract_and_refine(
+        self,
+        merger: IncrementalMerger,
+        extractor: StreamSegmentExtractor,
+        refiner: LLMRefiner | None,
+        controller: RateController,
+        segmented_offset: int,
+        segment_index: int,
+        refined_results: list[RefinedResult],
+        all_gaps: list[Gap],
+        report_fn: ReportFn,
+        cache: LLMCache,
+        llm_cfg: LLMConfig,
+    ) -> tuple[int, int]:
+        """合并器有新文本时按 controller.target L* 尝试切段精修。"""
+        profiler = current_profiler()
+        md = merger.get_markdown()
+        logger.info(
+            "_try_extract_and_refine: md_len=%d offset=%d pages=%d",
+            len(md), segmented_offset, merger.page_count,
+        )
+        while True:
+            target = controller.target_segment_chars()
+            seg = extractor.try_extract(md, segmented_offset, target)
+            if seg is None:
+                logger.info(
+                    "try_extract 返回 None (offset=%d target=%d md_len=%d)",
+                    segmented_offset, target, len(md),
+                )
+                break
+            seg_text, new_offset = seg
+            logger.info(
+                "refine 开始: seg_index=%d chars=%d",
+                segment_index, len(seg_text),
+            )
+            t0 = time.perf_counter()
             with profiler.stage(
-                "doc.postprocess",
-                doc_index=di + 1,
-                doc_total=len(sub_docs),
-                title=title,
+                "llm.refine_one", index=segment_index,
+                chars=len(seg_text), target=target,
             ):
-                sub_output = self._resolve_sub_output_dir(
-                    output_dir, title, di, len(sub_docs),
-                )
-                await asyncio.to_thread(
-                    sub_output.mkdir, parents=True, exist_ok=True,
-                )
-
-                # 过滤该子文档的 pages 和 gaps
-                page_name_set = set(page_names)
-                sub_pages = [
-                    p for p in pages
-                    if p.image_path.name in page_name_set
-                ]
-                sub_gaps = [
-                    g for g in all_gaps
-                    if g.after_image in page_name_set
-                ]
-
-                sub_truncated = False
-                if not cloud_blocked:
-                    with profiler.stage(
-                        "llm.gap_fill_phase",
-                        num_gaps=len(sub_gaps),
-                    ):
-                        sub_doc = await self._maybe_fill_gaps(
-                            sub_doc, sub_gaps, sub_pages,
-                            sub_output, llm, gpu_lock,
-                            _report, entity_lexicon,
-                        )
-                    with profiler.stage("llm.final_refine"):
-                        sub_doc, sub_truncated = (
-                            await self._do_final_refine(
-                                sub_doc, sub_output, llm, _report,
-                            )
-                        )
-
-                _, extra_gaps = parse_gaps(sub_doc.markdown)
-                sub_gaps.extend(extra_gaps)
-
-                # 输出
-                label = (
-                    f" ({di + 1}/{len(sub_docs)})"
-                    if len(sub_docs) > 1 else ""
-                )
-                _report(
-                    "render", di + 1, len(sub_docs),
-                    f"渲染输出{label}...",
-                )
-                with profiler.stage("render.write"):
-                    renderer = Renderer(self._config.output)
-                    doc_path = await renderer.render(
-                        sub_doc, sub_output, ocr_root_dir=output_dir,
+                result, used_refiner = (
+                    await self._refine_segment_with_cache(
+                        refiner, seg_text, segment_index, 0,
+                        cache, llm_cfg,
                     )
-
-                # 聚合警告
-                warnings = self._collect_warnings(
-                    refined_results, sub_gaps, sub_truncated,
                 )
-                if cloud_blocked:
-                    warnings.append(
-                        "PII 实体检测失败，已阻断云端 LLM 调用",
-                    )
+            elapsed = time.perf_counter() - t0
+            logger.info(
+                "refine 完成: seg_index=%d chars=%d duration=%.2fs%s",
+                segment_index, len(seg_text), elapsed,
+                " (cached)" if not used_refiner else "",
+            )
+            # 缓存命中/refiner=None 不喂 RateController，避免低估 LLM 成本
+            if used_refiner:
+                controller.record_llm(len(seg_text), elapsed)
+            refined_results.append(result)
+            all_gaps.extend(result.gaps)
+            segmented_offset = new_offset
+            segment_index += 1
+            report_fn(
+                "refine", segment_index, 0,
+                f"精修段 {segment_index}",
+            )
+        return segmented_offset, segment_index
 
-                doc_dir = (
-                    "" if sub_output == output_dir
-                    else sub_output.name
-                )
-                final_md = doc_path.read_text(encoding="utf-8")
-                results.append(PipelineResult(
-                    output_path=doc_path,
-                    markdown=final_md,
-                    images=sub_doc.images,
-                    gaps=sub_gaps,
-                    warnings=warnings,
-                    redaction_records=redaction_records,
-                    doc_title=title,
-                    doc_dir=doc_dir,
-                ))
+    async def _finalize_single_doc(
+        self,
+        merger: IncrementalMerger,
+        pages_ref: list[PageOCR],
+        refined_results: list[RefinedResult],
+        all_gaps: list[Gap],
+        output_dir: Path,
+        llm: LLMConfig | None,
+        gpu_lock: asyncio.Lock | None,
+        report_fn: ReportFn,
+        entity_lexicon: EntityLexicon | None,
+        cache: LLMCache,
+        llm_cfg: LLMConfig,
+    ) -> PipelineResult:
+        """单文档终结化：reassemble → gap fill → final refine → render。"""
+        profiler = current_profiler()
 
-        return results
+        base = MergedDocument(
+            markdown="",
+            images=merger.get_all_images(),
+            gaps=[],
+        )
+        with profiler.stage("reassemble"):
+            doc = self._reassemble(refined_results, base)
+        await self._save_debug(
+            output_dir, "reassembled.md", doc.markdown,
+        )
+
+        truncated = False
+        with profiler.stage(
+            "llm.gap_fill_phase", num_gaps=len(all_gaps),
+        ):
+            doc = await self._maybe_fill_gaps(
+                doc, all_gaps, pages_ref, output_dir,
+                llm, gpu_lock, report_fn, entity_lexicon,
+            )
+        with profiler.stage("llm.final_refine"):
+            doc, truncated = await self._do_final_refine(
+                doc, output_dir, llm, report_fn, cache, llm_cfg,
+            )
+
+        _, extra_gaps = parse_gaps(doc.markdown)
+        final_gaps = list(all_gaps)
+        final_gaps.extend(extra_gaps)
+
+        report_fn("render", 1, 1, "渲染输出...")
+        with profiler.stage("render.write"):
+            renderer = Renderer(self._config.output)
+            doc_path = await renderer.render(doc, output_dir)
+        final_md = await asyncio.to_thread(
+            doc_path.read_text, encoding="utf-8",
+        )
+
+        warnings = self._collect_warnings(
+            refined_results, final_gaps, truncated,
+        )
+        title = extract_first_heading(doc.markdown)
+
+        return PipelineResult(
+            output_path=doc_path,
+            markdown=final_md,
+            images=doc.images,
+            gaps=final_gaps,
+            warnings=warnings,
+            redaction_records=[],
+            doc_title=title,
+            doc_dir="",
+        )
+
+    async def _delayed_pii_detect(
+        self,
+        merger: IncrementalMerger,
+        llm: LLMConfig | None,
+        pii_cfg: PIIConfig,
+    ) -> EntityLexicon | None:
+        """积累到阈值后做一次 LLM 实体检测获取 lexicon。
+
+        成功：返回 EntityLexicon（后续 gap fill 的 re-OCR 文本可复用）；
+        失败：返回 None，仅靠 regex PII 保护（不阻断云端 LLM 精修）。
+        """
+        if not (
+            pii_cfg.redact_person_name or pii_cfg.redact_org_name
+        ):
+            return None
+        refiner = self._get_refiner(llm)
+        if refiner is None:
+            return None
+        try:
+            person_names, org_names = (
+                await refiner.detect_pii_entities(merger.get_markdown())
+            )
+        except Exception:
+            logger.warning(
+                "流式模式 PII 实体检测失败", exc_info=True,
+            )
+            return None
+        return EntityLexicon(
+            person_names=tuple(person_names),
+            org_names=tuple(org_names),
+        )
 
     async def _ocr_and_clean(
         self,
@@ -848,6 +1123,64 @@ class Pipeline:
                 exc_info=True,
             )
             return RefinedResult(markdown=text)
+
+    @staticmethod
+    async def _refine_segment_with_cache(
+        refiner: LLMRefiner | None,
+        text: str,
+        index: int,
+        total: int,
+        cache: LLMCache,
+        llm_cfg: LLMConfig,
+    ) -> tuple[RefinedResult, bool]:
+        """段级精修带磁盘缓存。返回 `(result, used_refiner)`。
+
+        `used_refiner=False` 表示走了缓存命中或 refiner=None 的 fallback，
+        调用方据此决定是否把本次 elapsed 喂给 RateController（缓存命中的
+        "伪时延"会严重低估 LLM 成本，污染 L* 估算）。
+
+        异常 fallback 不写缓存（put 只在 refine 成功分支后调用），下次
+        resume 仍会重试该段。truncated=True 由 LLMCache.put 内部过滤。
+        """
+        if cache.enabled:
+            cached = cache.get_segment(
+                model=llm_cfg.model,
+                api_base=llm_cfg.api_base,
+                text=text,
+            )
+            if cached is not None:
+                logger.info(
+                    "LLM 段级缓存命中 index=%d len=%d",
+                    index + 1, len(text),
+                )
+                return cached, False
+
+        if refiner is None:
+            return RefinedResult(markdown=text), False
+        ctx = RefineContext(
+            segment_index=index + 1,
+            total_segments=total,
+            overlap_before="",
+            overlap_after="",
+        )
+        try:
+            result = await refiner.refine(text, ctx)
+        except Exception:
+            logger.warning(
+                "段 %d 精修失败，回退到原文",
+                index + 1,
+                exc_info=True,
+            )
+            return RefinedResult(markdown=text), True
+
+        # refine 返回，尚未判 truncated — put 内部会按 truncated 过滤
+        cache.put_segment(
+            model=llm_cfg.model,
+            api_base=llm_cfg.api_base,
+            text=text,
+            result=result,
+        )
+        return result, True
 
     async def shutdown(self) -> None:
         """释放所有资源"""
@@ -1293,6 +1626,8 @@ class Pipeline:
         output_dir: Path,
         llm: LLMConfig | None,
         report_fn: ReportFn,
+        cache: LLMCache,
+        llm_cfg: LLMConfig,
     ) -> tuple[MergedDocument, bool]:
         """整篇文档级精修（去跨段重复 + 页眉水印）。"""
         refiner = self._get_refiner(llm)
@@ -1303,7 +1638,7 @@ class Pipeline:
             return doc, False
 
         return await self._final_refine(
-            refiner, doc, output_dir, report_fn,
+            refiner, doc, output_dir, report_fn, cache, llm_cfg,
         )
 
     async def _final_refine(
@@ -1312,10 +1647,33 @@ class Pipeline:
         doc: MergedDocument,
         output_dir: Path,
         report_fn: ReportFn,
+        cache: LLMCache,
+        llm_cfg: LLMConfig,
     ) -> tuple[MergedDocument, bool]:
-        """整篇文档级精修，失败时回退到原文。返回 (文档, 是否截断)。"""
+        """整篇文档级精修，失败时回退到原文。返回 (文档, 是否截断)。
+
+        带磁盘缓存：命中直接返回，miss 才真正调 LLM 并落盘。
+        """
         if not hasattr(refiner, "final_refine"):
             return doc, False
+
+        # 先查缓存 — 整文档级精修通常是最昂贵的一步
+        if cache.enabled:
+            cached = cache.get_final(
+                model=llm_cfg.model,
+                api_base=llm_cfg.api_base,
+                markdown=doc.markdown,
+            )
+            if cached is not None:
+                logger.info(
+                    "LLM 整文档精修缓存命中 input_len=%d",
+                    len(doc.markdown),
+                )
+                return MergedDocument(
+                    markdown=cached.markdown,
+                    images=doc.images,
+                    gaps=doc.gaps + cached.gaps,
+                ), False
 
         report_fn(
             "final_refine", 0, 1, "整篇文档级精修...",
@@ -1335,6 +1693,13 @@ class Pipeline:
                     "整篇文档级精修疑似截断，回退到原文",
                 )
                 return doc, True
+            # 真正成功才写缓存（put 对 truncated=True 也会拦截）
+            cache.put_final(
+                model=llm_cfg.model,
+                api_base=llm_cfg.api_base,
+                markdown=doc.markdown,
+                result=result,
+            )
             return MergedDocument(
                 markdown=result.markdown,
                 images=doc.images,

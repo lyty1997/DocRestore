@@ -147,6 +147,41 @@ class TestRedactSnippet:
         assert "张三" in result
 
 
+class TestRedactRegexOnly:
+    """redact_regex_only 为流式 Pipeline 提供的无 LLM 依赖入口"""
+
+    def test_equivalent_to_snippet_without_lexicon(self) -> None:
+        cfg = PIIConfig(enable=True)
+        redactor = PIIRedactor(cfg)
+        text = "张三电话 13812345678，邮箱 a@b.com"
+        result_regex, records_regex = redactor.redact_regex_only(text)
+        result_snippet, records_snippet = redactor.redact_snippet(
+            text, None,
+        )
+        assert result_regex == result_snippet
+        assert [r.kind for r in records_regex] == [
+            r.kind for r in records_snippet
+        ]
+        # 确认结构化 PII 被替换，人名保留（无 lexicon）
+        assert "13812345678" not in result_regex
+        assert "a@b.com" not in result_regex
+        assert "张三" in result_regex
+
+    def test_with_custom_words(self) -> None:
+        cfg = PIIConfig(
+            enable=True,
+            custom_sensitive_words=[CustomWord(word="秘密项目")],
+            custom_words_placeholder="[X]",
+        )
+        redactor = PIIRedactor(cfg)
+        result, records = redactor.redact_regex_only(
+            "这是秘密项目的文档",
+        )
+        assert "秘密项目" not in result
+        assert "[X]" in result
+        assert any(r.kind == "custom_word" for r in records)
+
+
 class TestCustomSensitiveWords:
     """自定义敏感词 → 可选代号替换"""
 

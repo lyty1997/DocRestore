@@ -350,3 +350,64 @@ class PageDeduplicator:
             f'src="{ocr_dirname}/images/',
             text,
         )
+
+
+class IncrementalMerger:
+    """流式增量合并器：逐页 `add_page()` 后可 `get_markdown()` 查看累积文本。
+
+    设计约束（见 streaming-pipeline.md §4.1）：
+    - 对相同输入，`IncrementalMerger` 逐页 `add_page(p)` 后 `get_markdown()`
+      必须与 `PageDeduplicator.merge_all_pages(pages).markdown` 完全一致。
+    - 底层直接复用 `PageDeduplicator.merge_two_pages()` 和 `_rewrite_image_refs`。
+    - 不维护页面归属查询（get_page_names_up_to 等）—— 单文档简化后不需要。
+    """
+
+    def __init__(self, config: DedupConfig) -> None:
+        self._dedup = PageDeduplicator(config)
+        self._merged_markdown: str = ""
+        self._page_names: list[str] = []
+        self._all_regions: list[Region] = []
+
+    def add_page(self, page: PageOCR) -> None:
+        """合并新页到累积文本，更新 page_names / regions 记录。"""
+        marker = f"<!-- page: {page.image_path.name} -->"
+        body = self._dedup._rewrite_image_refs(page)  # noqa: SLF001
+        new_page_text = f"{marker}\n{body}"
+
+        if not self._merged_markdown:
+            self._merged_markdown = new_page_text
+        else:
+            result = self._dedup.merge_two_pages(
+                self._merged_markdown, new_page_text,
+            )
+            self._merged_markdown = result.text
+
+        self._page_names.append(page.image_path.name)
+        self._all_regions.extend(page.regions)
+
+    def get_markdown(self) -> str:
+        """返回当前合并的 markdown（与 merge_all_pages 一致，末尾去换行）。"""
+        return self._merged_markdown.rstrip("\n")
+
+    def get_text_after(self, offset: int) -> str:
+        """返回 get_markdown()[offset:]。"""
+        return self.get_markdown()[offset:]
+
+    def get_all_images(self) -> list[Region]:
+        """返回所有已合并页面的 Region 汇总。"""
+        return list(self._all_regions)
+
+    @property
+    def total_length(self) -> int:
+        """当前合并 markdown 的字符数。"""
+        return len(self.get_markdown())
+
+    @property
+    def page_count(self) -> int:
+        """已合并的页面数。"""
+        return len(self._page_names)
+
+    @property
+    def all_page_names(self) -> list[str]:
+        """所有已合并页面的文件名（按添加顺序）。"""
+        return list(self._page_names)

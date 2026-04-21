@@ -112,6 +112,17 @@ class PIIRedactor:
 
         return text, records, lexicon
 
+    def redact_regex_only(
+        self,
+        text: str,
+    ) -> tuple[str, list[RedactionRecord]]:
+        """仅做结构化 regex（手机/邮箱/身份证/银行卡）+ 自定义敏感词。
+
+        不调用 LLM，不依赖 EntityLexicon。用于流式 Pipeline 的 OCR Producer
+        逐页调用（此时实体检测尚未发生，lexicon 还没拿到）。
+        """
+        return self.redact_snippet(text, lexicon=None)
+
     def redact_snippet(
         self,
         text: str,

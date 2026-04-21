@@ -170,6 +170,7 @@ function App(): React.JSX.Element {
               refreshTaskList();
             }}
             onTaskListRefresh={refreshTaskList}
+            onSelectTask={handleSelectTask}
           />
         )}
       </main>

@@ -62,14 +62,13 @@ class TestPipelineE2E:
         await pipeline.initialize()
 
         progress_stages: list[str] = []
-        results = await pipeline.process_many(
+        result = await pipeline.process_many(
             image_dir=input_dir,
             output_dir=output_dir,
             on_progress=lambda p: progress_stages.append(
                 p.stage
             ),
         )
-        result = results[0]
 
         await pipeline.shutdown()
 
@@ -103,7 +102,7 @@ class TestPipelineE2E:
     async def test_pipeline_returns_result(
         self, pipeline_work_dir: Path
     ) -> None:
-        """process_many() 返回 PipelineResult 列表"""
+        """process_many() 返回单一 PipelineResult（单文档流式）"""
         input_dir = pipeline_work_dir / "input"
         output_dir = pipeline_work_dir / "output"
 
@@ -113,15 +112,15 @@ class TestPipelineE2E:
         pipeline.set_ocr_engine(engine)
         await pipeline.initialize()
 
-        results = await pipeline.process_many(
+        result = await pipeline.process_many(
             image_dir=input_dir,
             output_dir=output_dir,
         )
 
         await pipeline.shutdown()
 
-        assert len(results) >= 1
-        assert results[0].output_path.exists()
+        assert result.output_path.exists()
+        assert result.markdown != ""
 
     @pytest.mark.asyncio
     async def test_pipeline_no_images(
@@ -263,14 +262,13 @@ class TestPipelineWithLLM:
         progress_stages: list[str] = []
 
         try:
-            results = await pipeline.process_many(
+            result = await pipeline.process_many(
                 image_dir=input_dir,
                 output_dir=output_dir,
                 on_progress=lambda p: progress_stages.append(
                     p.stage
                 ),
             )
-            result = results[0]
         except Exception as e:
             # API key 无效时跳过测试
             if "AuthenticationError" in str(type(e).__name__):

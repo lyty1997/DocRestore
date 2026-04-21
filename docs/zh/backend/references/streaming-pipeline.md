@@ -23,6 +23,27 @@ limitations under the License.
 > 理解为 `llm: LLMConfig | None`（以及 `ocr` / `pii`）。设计思路不变，
 > 只是传参类型由 dict 升级为完整 Config 快照。
 
+> **方向调整（2026-04-19）**：本轮实施在原设计基础上做三处关键精简与加强：
+>
+> 1. **放弃 LLM 文档聚合**。图片还原场景下一个子目录即一篇文档，`process_many`
+>    不再检测 `DOC_BOUNDARY` / 拆分多文档 / 终结化并行。保留
+>    `parse_doc_boundaries` / `_split_by_doc_boundaries` 代码和测试给下一版
+>    代码还原场景使用。删除 `DocumentState`，`process_many` 返回单一
+>    `PipelineResult`（上层 `process_tree` 聚合成 list）。
+> 2. **移除 LPT 排序**。多子目录 gpu_lock 实际 acquire 顺序被前置 async IO
+>    （mkdir / scan_images / engine_manager.ensure）的 race 污染，LPT 索引
+>    排序不等于实际串行顺序，收益无法兑现。改用 `process_tree` warmup
+>    cold start：按页数降序，**最长子目录先串行跑**到 `RateController`
+>    采样就绪，再 `asyncio.gather` 剩余子目录并发。
+> 3. **RateController 自适应段长**。抛弃固定 `max_chars_per_segment` 常量，
+>    运行时用 EMA + 线性回归实时估计 `T_ocr / overhead / k`，解析解 `L*`
+>    匹配 OCR/LLM 吞吐。冷启动走动态采样序列（1500 → 3000 → 6000），
+>    样本 ≥ 3 进入自适应。不同机器 / 不同 LLM provider 自动个性化。
+>
+> 阅读本文档时，Section 2（决策）、Section 4.1 IncrementalMerger（移除
+> 页面归属查询方法）、Section 4.3 DocumentState（已删除）、Section 5
+> Pipeline 重构（单文档流式 + RateController）都已按上述调整更新。
+
 ## 1. 背景与目标
 
 ### 1.1 问题
@@ -56,63 +77,72 @@ OCR（GPU 密集）和 LLM 精修（网络 I/O 密集）资源不重叠，但被
 
 | 决策 | 结论 | 原因 |
 |------|------|------|
-| LLM 段间并发 | **串行** | DOC_BOUNDARY 检测需有序处理，乱序会导致文档归属错误 |
-| 终结化并行 | **继续消费** | doc N 终结化期间 OCR 和下一篇 LLM 不停，最大化吞吐 |
+| LLM 段间并发 | **串行** | 段间顺序与页面顺序一致；简单稳健，收益 / 复杂度不划算 |
+| 文档聚合 | **放弃**（代码保留） | 图片还原场景：一目录 = 一篇文档；避免 LLM boundary 假正例引发跨文档污染。代码还原版需要时再回退启用 |
+| 多子目录调度 | **warmup cold start + gather** | `asyncio.gather` 下 gpu_lock 实际 acquire 顺序被前置 async IO race 污染，LPT 排序不稳；最长子目录串行独跑作 warmup，`RateController` 就绪后剩余子目录并发 |
+| 段长参数 | **`RateController` 运行时自适应** | 不同机器 / LLM provider 性能差异大，写死常量偏差不可控；EMA + 线性回归估计 `T_ocr / overhead / k`，解析解 `L*` 匹配吞吐 |
+| 冷启动段长 | **动态序列**（1500 → 3000 → 6000） | 每段都真 refine 不浪费；样本 ≥ 3 切自适应 |
 | PII 策略 | **Regex 先行 + 延迟实体检测** | 前 5 页积累后获取 lexicon，后续复用 |
 | 进度模型 | **单通道不变** | OCR/refine 交替报告，前端无需改动 |
-| 单文档兼容 | **先写子目录，最后移回** | 终结化时总文档数未知，全部完成后调整 |
 
 ## 3. 架构总览
 
 ### 3.1 组件关系
 
 ```
-┌──────────────┐    Queue[PageOCR|None]    ┌──────────────────────┐
-│ OCR Producer │ ────────────────────────▶ │   Stream Processor    │
-│  (gpu_lock)  │                           │                       │
-└──────────────┘                           │ ┌───────────────────┐ │
-    逐张 OCR+清洗                           │ │IncrementalMerger  │ │
-    不等 LLM                                │ │ (增量合并+追踪)    │ │
+┌──────────────┐    Queue[PageOCR|None]    ┌──────────────────────┐       ┌─────────────┐
+│ OCR Producer │ ────────────────────────▶ │   Stream Processor    │ ◀────▶│ RateController│
+│  (gpu_lock)  │                           │                       │       │ EMA + 回归   │
+└──────────────┘                           │ ┌───────────────────┐ │       │ 输出 L*     │
+    逐张 OCR+清洗                           │ │IncrementalMerger  │ │       └─────────────┘
+    不等 LLM                                │ │  (增量合并)        │ │         ▲    ▲
+    埋点 record_ocr                         │ └────────┬──────────┘ │         │    │
+                                           │          ↓            │ record_ocr  record_llm
+                                           │  有新文本时              │         │    │
+                                           │          ↓            │         │    │
+                                           │ ┌───────────────────┐ │         │    │
+                                           │ │StreamSegExtractor │ │ ◀─ L* ──┘    │
+                                           │ │ (按 L* 切段)       │ │              │
+                                           │ └────────┬──────────┘ │              │
+                                           │          ↓            │              │
+                                           │ ┌───────────────────┐ │              │
+                                           │ │  LLM Refine (段间) │─────埋点──────┘
                                            │ └────────┬──────────┘ │
                                            │          ↓            │
-                                           │  积累 >= segment_size │
-                                           │          ↓            │
-                                           │ ┌───────────────────┐ │
-                                           │ │StreamSegExtractor │ │
-                                           │ │ (提取 segment)     │ │
-                                           │ └────────┬──────────┘ │
-                                           │          ↓            │
-                                           │ ┌───────────────────┐ │
-                                           │ │  LLM Refine (串行)│ │
-                                           │ └────────┬──────────┘ │
-                                           │          ↓            │
-                                           │   DOC_BOUNDARY?       │
-                                           │     ├─ Yes → launch ──│──▶ asyncio.Task
-                                           │     │   finalize()    │    (reassemble →
-                                           │     │   reset state   │     gap fill →
-                                           │     └─ No → continue  │     final refine →
-                                           └──────────────────────┘     render)
+                                           │  收集 RefinedResult    │
+                                           │  （全部段完成后）       │
+                                           └──────────────────────┘
+                                                      ↓
+                                      reassemble → gap fill →
+                                      final refine → render
+                                                      ↓
+                                              PipelineResult (单篇)
 ```
 
 ### 3.2 并行时序
 
 ```
 时间 ──────────────────────────────────────────────────▶
-OCR:  [p1][p2][p3] [p4][p5][p6] [p7][p8][p9][p10]
-             ↓           ↓                 ↓
-LLM:     [seg1]    [seg2+BOUND]      [seg3]  [seg4]
-                        ↓                       ↓
-Final:            [Doc1: gap→refine→render]  [Doc2: gap→refine→render]
+OCR:  [p1][p2][p3][p4][p5] [p6][p7][p8][p9][p10] [p11..pN]
+             ↓                     ↓                    ↓
+LLM:       [seg1]               [seg2]               [seg3] [seg4..]
+段长 L:    (冷1500)           (冷3000)            (L*=?)
+                                                              ↓（OCR/LLM 全部结束）
+                                                  reassemble → gap fill →
+                                                  final refine → render
+                                                              ↓
+                                                        PipelineResult
 ```
 
-- OCR 逐张产出 PageOCR 放入 asyncio.Queue
-- Stream Processor 消费页面，增量合并，积累够一段就送 LLM
-- LLM 返回含 DOC_BOUNDARY → 后台 `asyncio.create_task` 终结化
-- 终结化期间流处理器继续消费后续页面
+- OCR 逐张产出 PageOCR 放入 asyncio.Queue，每张完成后 `controller.record_ocr(duration)`
+- Stream Processor 消费页面 → 增量合并 → 向 controller 拿 `L*` → extractor 按 L* 切段
+- 每段 LLM 精修完成后 `controller.record_llm(chars, duration)` 更新回归
+- 所有段完成 + OCR 哨兵到达 → reassemble → gap fill → final refine → render
+- **无 DOC_BOUNDARY 检测、无终结化并行**：单目录单文档，全部段收齐再终结化
 
 ### 3.3 GPU 锁竞争
 
-终结化的 gap fill 需要 `reocr_page`（GPU），与 OCR Producer 竞争 `gpu_lock`。两者都用 `async with gpu_lock` 安全串行，不会死锁。OCR Producer 在等锁期间 await 挂起，不阻塞事件循环。
+Gap fill 的 `reocr_page` 与 OCR Producer 竞争 `gpu_lock`。但由于全部段收齐后才进入 gap fill（此时 OCR Producer 已结束、哨兵已发），gap fill 期间 gpu_lock 无竞争。多子目录并发场景下，子目录间的 OCR Producer / Gap fill 由 `gpu_lock` 互斥串行，安全无死锁。
 
 ## 4. 组件详细设计
 
@@ -169,22 +199,8 @@ class IncrementalMerger:
     def get_text_after(self, char_offset: int) -> str:
         """返回 get_markdown()[char_offset:]。"""
 
-    def get_page_names_up_to(self, page_name: str) -> list[str]:
-        """返回从开头到 page_name（含）的所有页面文件名列表。
-
-        用途：DOC_BOUNDARY after_page 确定当前文档包含哪些页。
-        如果 page_name 不存在，返回空列表。
-        """
-
-    def get_page_names_after(self, page_name: str) -> list[str]:
-        """返回 page_name 之后（不含）的所有页面文件名列表。
-
-        用途：确定下一篇文档包含哪些页。
-        如果 page_name 不存在，返回全部页面名。
-        """
-
-    def get_images_for_pages(self, page_names: set[str]) -> list[Region]:
-        """返回指定页面集合的所有 Region。"""
+    def get_all_images(self) -> list[Region]:
+        """返回所有已合并页面的 Region 汇总（供终结化使用）。"""
 
     @property
     def total_length(self) -> int:
@@ -198,6 +214,10 @@ class IncrementalMerger:
     def all_page_names(self) -> list[str]:
         """所有已合并页面的文件名列表（按合并顺序）。"""
 ```
+
+> 2026-04-19 调整：单文档场景不再需要"按 page_name 查询归属页/归属图片"，
+> `get_page_names_up_to` / `get_page_names_after` / `get_images_for_pages`
+> 三个方法从设计中移除。保留 `get_all_images()` 供终结化 reassemble 使用。
 
 **关键约束**：
 - `_raw_text` 不含 page marker，避免 marker 干扰 `SequenceMatcher` 的重叠检测
@@ -266,354 +286,405 @@ class StreamSegmentExtractor:
 - 第一段：无 overlap，直接返回 actual_segment
 - Forward overlap 不支持（流式模式下未来文本未知），质量影响可忽略（现有 Pipeline 的 `RefineContext.overlap_before/after` 本就为空字符串）
 
-### 4.3 DocumentState
+### 4.3 DocumentState （已删除）
 
-**文件**：`backend/docrestore/models.py`（新增 dataclass）
-
-```python
-@dataclass
-class DocumentState:
-    """流式处理中单篇文档的累积状态。
-
-    由 _stream_process 维护。DOC_BOUNDARY 检测到时，
-    当前 DocumentState 传给 _finalize_document，然后创建新的。
-    """
-    doc_index: int                                          # 文档序号（0-based）
-    title: str = ""                                         # 标题
-    refined_segments: list[RefinedResult] = field(default_factory=list)
-    page_names: list[str] = field(default_factory=list)     # 属于此文档的页面
-    images: list[Region] = field(default_factory=list)      # 属于此文档的图片
-    gaps: list[Gap] = field(default_factory=list)           # 属于此文档的 gap
-```
+> 2026-04-19 调整：单文档简化后 `DocumentState` 不再需要。`_stream_process`
+> 直接维护 `list[RefinedResult]` + `list[Gap]` 局部变量即可。代码还原场景
+> 恢复文档聚合时再引入。
 
 ## 5. Pipeline 重构详细设计
 
 **文件**：`backend/docrestore/pipeline/pipeline.py`
 
-### 5.1 process_many() 入口改造
+### 5.1 process_many() 简化为单文档流式
 
-删除原有串行逻辑，改为启动 OCR 生产者 + 流式处理器。
+删除原串行逻辑，改为启动 OCR 生产者 + 流式处理器。**返回单一 `PipelineResult`**
+（不再 list），上层 `process_tree` 聚合多子目录为 list。
 
 ```python
-async def process_many(self, image_dir, output_dir, on_progress, llm_override, gpu_lock):
-    # 1. 扫描图片、创建输出目录（不变）
-    await asyncio.to_thread(output_dir.mkdir, parents=True, exist_ok=True)
-    images = await asyncio.to_thread(scan_images, image_dir)
-    if not images:
-        raise FileNotFoundError(f"未找到图片文件: {image_dir}")
+async def process_many(
+    self,
+    image_dir: Path,
+    output_dir: Path,
+    on_progress: Callable[[TaskProgress], None] | None = None,
+    llm: LLMConfig | None = None,
+    gpu_lock: asyncio.Lock | None = None,
+    pii: PIIConfig | None = None,
+    ocr: OCRConfig | None = None,
+    controller: RateController | None = None,
+) -> PipelineResult:
+    """OCR Producer + Stream Processor 单文档流式。
 
-    # 2. 创建页面队列（无限缓冲，OCR 不被阻塞）
-    page_queue: asyncio.Queue[PageOCR | None] = asyncio.Queue()
+    `controller` 非空时使用共享实例（`process_tree` 跨子目录复用），
+    否则本次 process_many 内部临时创建。
+    """
+    async with self._task_profiler(output_dir) as (profiler, _):
+        await asyncio.to_thread(output_dir.mkdir, parents=True, exist_ok=True)
+        images = await asyncio.to_thread(scan_images, image_dir)
+        if not images:
+            raise FileNotFoundError(f"未找到图片文件: {image_dir}")
 
-    # 3. 启动 OCR 生产者（后台协程）
-    ocr_task = asyncio.create_task(
-        self._ocr_producer(images, output_dir, gpu_lock, page_queue, _report)
-    )
+        if controller is None:
+            controller = RateController(self._config.llm)
 
-    # 4. 流式处理主循环
-    try:
-        results = await self._stream_process(
-            page_queue, len(images), output_dir,
-            llm_override, gpu_lock, _report,
+        page_queue: asyncio.Queue[PageOCR | None] = asyncio.Queue()
+        pages_ref: list[PageOCR] = []  # gap fill 终结化用
+
+        ocr_task = asyncio.create_task(
+            self._ocr_producer(
+                images, output_dir, gpu_lock, page_queue,
+                pages_ref, controller, _report, ocr,
+            ),
+            name=f"ocr-producer-{image_dir.name}",
         )
-    finally:
-        await ocr_task  # 确保 OCR 协程完成（异常时也要 await）
-
-    # 5. 单文档兼容：如果只有 1 篇，将子目录内容移到根目录
-    if len(results) == 1 and results[0].doc_dir:
-        results[0] = await self._move_to_root(results[0], output_dir)
-
-    return results if results else [self._empty_result(output_dir)]
+        try:
+            return await self._stream_process(
+                page_queue, pages_ref, image_dir, output_dir,
+                llm, gpu_lock, pii, controller, _report,
+            )
+        finally:
+            await ocr_task
 ```
 
 ### 5.2 _ocr_producer()
 
-从现有 `_ocr_and_clean` 提取，改为往队列放。
+逐张 OCR → 清洗 → 可选 regex-only PII → 放入队列。埋点记录 OCR 单张耗时。
+异常路径也要发哨兵，避免消费者永久阻塞。
 
 ```python
-async def _ocr_producer(self, images, output_dir, gpu_lock, queue, report_fn):
-    """OCR 生产者：逐张 OCR + 清洗，放入队列。OCR 完成后放入 None 哨兵。"""
+async def _ocr_producer(
+    self,
+    images: list[Path],
+    output_dir: Path,
+    gpu_lock: asyncio.Lock | None,
+    queue: asyncio.Queue[PageOCR | None],
+    pages_ref: list[PageOCR],
+    controller: RateController,
+    report_fn: ReportFn,
+    ocr: OCRConfig | None = None,
+) -> None:
+    """OCR 生产者：逐张 OCR + 清洗 → 埋点 + 入队 + 追加到 pages_ref。"""
+    engine = await self._resolve_engine(ocr, report_fn)
     cleaner = OCRCleaner()
-    for i, img in enumerate(images):
-        # OCR（带 gpu_lock 保护）
-        if gpu_lock is not None:
-            async with gpu_lock:
-                page = await self._ocr_engine.ocr(img, output_dir)
-        else:
-            page = await self._ocr_engine.ocr(img, output_dir)
+    pii_cfg = self._config.pii
+    redactor = PIIRedactor(pii_cfg) if pii_cfg.enable else None
 
-        # 清洗
-        await cleaner.clean(page)
-        await self._save_debug(output_dir, f"{page.image_path.stem}_cleaned.md", page.cleaned_text)
+    try:
+        for i, img in enumerate(images):
+            t0 = time.perf_counter()
+            if gpu_lock is not None:
+                async with gpu_lock:
+                    page = await engine.ocr(img, output_dir)
+            else:
+                page = await engine.ocr(img, output_dir)
+            await cleaner.clean(page)
 
-        # Regex PII（逐页，轻量，不等 LLM）
-        if self._config.pii.enable:
-            redactor = PIIRedactor(self._config.pii)
-            page.cleaned_text, _ = redactor.redact_regex_only(page.cleaned_text)
+            if redactor is not None:
+                page.cleaned_text, _ = redactor.redact_regex_only(
+                    page.cleaned_text,
+                )
 
-        await queue.put(page)
-        report_fn("ocr", i + 1, len(images), f"OCR {i+1}/{len(images)}")
+            await self._save_debug(
+                output_dir,
+                f"{page.image_path.stem}_cleaned.md",
+                page.cleaned_text,
+            )
 
-    await queue.put(None)  # 哨兵：所有 OCR 完成
+            controller.record_ocr(time.perf_counter() - t0)
+            pages_ref.append(page)
+            await queue.put(page)
+            controller.set_queue_depth(queue.qsize())
+            report_fn(
+                "ocr", i + 1, len(images),
+                f"OCR {i + 1}/{len(images)}",
+            )
+    finally:
+        await queue.put(None)  # 任何异常路径都要发哨兵
 ```
 
-**注意**：`PIIRedactor.redact_regex_only()` 是新增方法——只做结构化 regex（手机/邮箱/身份证/银行卡），不做实体检测。现有 `redact_snippet` 需要 lexicon 参数，这里 lexicon 尚未获取。
+**新增方法**：`PIIRedactor.redact_regex_only(text) -> tuple[str, list[RedactionRecord]]`
+只做结构化 regex（手机/邮箱/身份证/银行卡 + 自定义敏感词），不依赖 LLM lexicon。
 
-### 5.3 _stream_process()（核心流式处理器）
+### 5.3 _stream_process()（单文档简化版）
 
 ```python
-async def _stream_process(self, page_queue, total_images, output_dir,
-                           llm_override, gpu_lock, report_fn):
-    """消费 OCR 页面队列，增量合并 + 分段精修 + 文档拆分。
-
-    返回 list[PipelineResult]（按 doc_index 排序）。
-    """
-    llm_cfg = self._resolve_llm_config(llm_override)
+async def _stream_process(
+    self,
+    page_queue: asyncio.Queue[PageOCR | None],
+    pages_ref: list[PageOCR],
+    image_dir: Path,
+    output_dir: Path,
+    llm: LLMConfig | None,
+    gpu_lock: asyncio.Lock | None,
+    pii: PIIConfig | None,
+    controller: RateController,
+    report_fn: ReportFn,
+) -> PipelineResult:
+    """消费 OCR 队列：增量合并 → 按 L* 切段 → LLM 精修 → 收齐终结化。"""
     merger = IncrementalMerger(self._config.dedup)
     extractor = StreamSegmentExtractor(
-        max_chars=llm_cfg.max_chars_per_segment,
-        overlap_lines=llm_cfg.segment_overlap_lines,
+        overlap_lines=self._config.llm.segment_overlap_lines,
     )
-    refiner = self._get_refiner(llm_override)
+    refiner = self._get_refiner(llm)
 
-    segmented_offset = 0          # 已提取 segment 的 markdown 偏移
-    segment_index = 0             # 全局段序号
-    current_doc = DocumentState(doc_index=0)
-    finalize_tasks: list[asyncio.Task[PipelineResult]] = []
-    assigned_pages: set[str] = set()  # 已分配给前序文档的页面
+    segmented_offset = 0
+    segment_index = 0
+    refined_segments: list[RefinedResult] = []
+    all_gaps: list[Gap] = []
     entity_lexicon: EntityLexicon | None = None
     pii_entity_done = False
+    pii_cfg = pii or self._config.pii
 
-    # === 主循环：消费 OCR 页面 ===
     while True:
         page = await page_queue.get()
         if page is None:
             break
-
         merger.add_page(page)
 
-        # PII 延迟实体检测（前 N 页后做一次）
-        if (self._config.pii.enable
-            and self._config.pii.redact_person_name
-            and not pii_entity_done
-            and merger.page_count >= _PII_DETECT_THRESHOLD):
-            entity_lexicon = await self._delayed_pii_detect(merger, llm_override)
+        if (pii_cfg.enable
+                and not pii_entity_done
+                and merger.page_count >= _PII_DETECT_THRESHOLD):
+            entity_lexicon = await self._delayed_pii_detect(merger, llm)
             pii_entity_done = True
 
-        # 尝试提取 segment 并精修
-        segmented_offset, segment_index, current_doc = await self._try_extract_and_refine(
-            merger, extractor, refiner, segmented_offset, segment_index,
-            current_doc, finalize_tasks, assigned_pages,
-            output_dir, llm_override, gpu_lock, report_fn, entity_lexicon,
+        segmented_offset, segment_index = await self._try_extract_and_refine(
+            merger, extractor, refiner, controller,
+            segmented_offset, segment_index,
+            refined_segments, all_gaps, report_fn,
         )
 
-    # === 处理剩余文本 ===
+    # 最后段：OCR 全部结束后的剩余文本
     md = merger.get_markdown()
     if segmented_offset < len(md):
-        remaining, new_offset = extractor.extract_remaining(md, segmented_offset)
+        remaining, _ = extractor.extract_remaining(md, segmented_offset)
         if remaining.strip():
-            result = await self._refine_one_segment(refiner, remaining, segment_index, 0)
+            t0 = time.perf_counter()
+            result = await self._refine_one_segment(
+                refiner, remaining, segment_index, 0,
+            )
+            controller.record_llm(
+                len(remaining), time.perf_counter() - t0,
+            )
+            refined_segments.append(result)
+            all_gaps.extend(result.gaps)
             segment_index += 1
-            # 处理可能的 boundary（复用同一逻辑）
-            current_doc = self._handle_refined_result(
-                result, current_doc, merger, extractor,
-                finalize_tasks, assigned_pages,
-                output_dir, llm_override, gpu_lock, report_fn, entity_lexicon,
+            report_fn(
+                "refine", segment_index, 0, f"精修段 {segment_index}",
             )
 
-    # === 终结化最后一篇 ===
-    remaining_pages = [n for n in merger.all_page_names if n not in assigned_pages]
-    current_doc.page_names = remaining_pages
-    current_doc.images = merger.get_images_for_pages(set(remaining_pages))
-    if not current_doc.title:
-        assembled = "\n".join(r.markdown for r in current_doc.refined_segments)
-        current_doc.title = extract_first_heading(assembled)
-
-    last_result = await self._finalize_document(
-        current_doc, output_dir, llm_override, gpu_lock, report_fn, entity_lexicon,
+    return await self._finalize_single_doc(
+        merger, pages_ref, refined_segments, all_gaps,
+        output_dir, llm, gpu_lock, report_fn, entity_lexicon,
     )
-
-    # === 收集所有结果 ===
-    bg_results: list[PipelineResult] = []
-    if finalize_tasks:
-        bg_results = list(await asyncio.gather(*finalize_tasks))
-
-    all_results = bg_results + [last_result]
-    # 按 doc_index 排序（PipelineResult 需要携带 doc_index）
-    all_results.sort(key=lambda r: r._doc_index)
-    return all_results
 ```
 
-### 5.4 _try_extract_and_refine()（提取 + 精修循环）
-
-从 `_stream_process` 提取的内循环，降低复杂度。
+### 5.4 _try_extract_and_refine()（按动态 L* 切段精修）
 
 ```python
 async def _try_extract_and_refine(
-    self, merger, extractor, refiner, segmented_offset, segment_index,
-    current_doc, finalize_tasks, assigned_pages,
-    output_dir, llm_override, gpu_lock, report_fn, entity_lexicon,
-):
-    """在 merger 有新文本后，尝试提取 segment 并精修。可能触发文档终结化。
+    self,
+    merger: IncrementalMerger,
+    extractor: StreamSegmentExtractor,
+    refiner: LLMRefiner | None,
+    controller: RateController,
+    segmented_offset: int,
+    segment_index: int,
+    refined_segments: list[RefinedResult],
+    all_gaps: list[Gap],
+    report_fn: ReportFn,
+) -> tuple[int, int]:
+    """在 merger 有新文本后，按 controller.target L* 尝试切段精修。
 
-    返回更新后的 (segmented_offset, segment_index, current_doc)。
+    返回更新后的 (segmented_offset, segment_index)。无 boundary 检测、
+    无终结化派发；全部段收齐后由 _stream_process 调 _finalize_single_doc。
     """
     md = merger.get_markdown()
     while True:
-        seg = extractor.try_extract(md, segmented_offset)
+        target = controller.target_segment_chars()
+        seg = extractor.try_extract(md, segmented_offset, target)
         if seg is None:
             break
         seg_text, new_offset = seg
 
-        result = await self._refine_one_segment(refiner, seg_text, segment_index, 0)
-        report_fn("refine", segment_index + 1, 0, f"精修段 {segment_index + 1}")
-
-        current_doc = self._handle_refined_result(
-            result, current_doc, merger, extractor,
-            finalize_tasks, assigned_pages,
-            output_dir, llm_override, gpu_lock, report_fn, entity_lexicon,
+        t0 = time.perf_counter()
+        result = await self._refine_one_segment(
+            refiner, seg_text, segment_index, 0,
         )
-
+        controller.record_llm(
+            len(seg_text), time.perf_counter() - t0,
+        )
+        refined_segments.append(result)
+        all_gaps.extend(result.gaps)
         segmented_offset = new_offset
         segment_index += 1
+        report_fn(
+            "refine", segment_index, 0, f"精修段 {segment_index}",
+        )
 
-    return segmented_offset, segment_index, current_doc
+    return segmented_offset, segment_index
 ```
 
-### 5.5 _handle_refined_result()（处理精修结果 + boundary 检测）
+### 5.5 _finalize_single_doc()（全部段收齐后终结化）
 
 ```python
-def _handle_refined_result(
-    self, result, current_doc, merger, extractor,
-    finalize_tasks, assigned_pages,
-    output_dir, llm_override, gpu_lock, report_fn, entity_lexicon,
-) -> DocumentState:
-    """处理单个 segment 的精修结果。检测 DOC_BOUNDARY 并可能触发终结化。
-
-    返回当前/新的 DocumentState。
-    """
-    cleaned_md, boundaries = parse_doc_boundaries(result.markdown)
-    cleaned_result = RefinedResult(markdown=cleaned_md, gaps=result.gaps, truncated=result.truncated)
-
-    if not boundaries:
-        current_doc.refined_segments.append(cleaned_result)
-        current_doc.gaps.extend(result.gaps)
-        return current_doc
-
-    # 有 DOC_BOUNDARY
-    boundary = boundaries[0]
-    before, after = self._split_refined_at_boundary(cleaned_md, boundary)
-
-    # 完成当前文档
-    if before.strip():
-        current_doc.refined_segments.append(RefinedResult(markdown=before, gaps=result.gaps))
-    current_doc.page_names = merger.get_page_names_up_to(boundary.after_page)
-    current_doc.images = merger.get_images_for_pages(set(current_doc.page_names))
-    assigned_pages.update(current_doc.page_names)
-    if not current_doc.title:
-        assembled = "\n".join(r.markdown for r in current_doc.refined_segments)
-        current_doc.title = extract_first_heading(assembled)
-
-    # 后台终结化
-    task = asyncio.create_task(
-        self._finalize_document(current_doc, output_dir, llm_override, gpu_lock, report_fn, entity_lexicon)
-    )
-    finalize_tasks.append(task)
-    report_fn("finalize", current_doc.doc_index + 1, 0, f"终结化文档 {current_doc.doc_index + 1}")
-
-    # 创建新文档
-    new_doc = DocumentState(doc_index=current_doc.doc_index + 1, title=boundary.new_title)
-    extractor.reset()  # 清除 overlap 历史
-    if after.strip():
-        new_doc.refined_segments.append(RefinedResult(markdown=after))
-    return new_doc
-```
-
-### 5.6 _split_refined_at_boundary()
-
-```python
-@staticmethod
-def _split_refined_at_boundary(
-    cleaned_md: str,
-    boundary: DocBoundary,
-) -> tuple[str, str]:
-    """将已精修的 segment 在 boundary 处一分为二。
-
-    策略：找到 boundary.after_page 对应的 page marker，
-    再找到紧随其后的下一个 page marker 位置，在该位置切分。
-
-    返回 (before_text, after_text)。
-    如果找不到对应 page marker，返回 (cleaned_md, "")。
-    """
-    markers = list(_PAGE_MARKER_RE.finditer(cleaned_md))
-    # 找 after_page 对应的 marker
-    after_idx = None
-    for i, m in enumerate(markers):
-        if m.group(1).strip() == boundary.after_page:
-            after_idx = i
-    if after_idx is None:
-        return cleaned_md, ""
-
-    # 找下一个 page marker
-    if after_idx + 1 < len(markers):
-        split_pos = markers[after_idx + 1].start()
-        return cleaned_md[:split_pos], cleaned_md[split_pos:]
-
-    # after_page 是最后一页 → 全部属于当前文档
-    return cleaned_md, ""
-```
-
-### 5.7 _finalize_document()
-
-```python
-async def _finalize_document(
-    self, doc_state: DocumentState, output_dir: Path,
-    llm_override, gpu_lock, report_fn, entity_lexicon,
+async def _finalize_single_doc(
+    self,
+    merger: IncrementalMerger,
+    pages_ref: list[PageOCR],
+    refined_segments: list[RefinedResult],
+    all_gaps: list[Gap],
+    output_dir: Path,
+    llm: LLMConfig | None,
+    gpu_lock: asyncio.Lock | None,
+    report_fn: ReportFn,
+    entity_lexicon: EntityLexicon | None,
 ) -> PipelineResult:
-    """终结化单篇文档：reassemble → gap fill → final refine → render。
+    """单文档：reassemble → gap fill → final refine → render。"""
+    doc = self._reassemble(refined_segments, MergedDocument(
+        markdown="", images=merger.get_all_images(), gaps=[],
+    ))
+    await self._save_debug(output_dir, "reassembled.md", doc.markdown)
 
-    可在后台 asyncio.Task 中执行（与 OCR/LLM 并发）。
-    gap fill 的 reocr_page 使用 gpu_lock 与 OCR Producer 安全竞争。
-    """
-    # 重组
-    reassembled_md = "\n".join(r.markdown for r in doc_state.refined_segments)
-    sub_doc = MergedDocument(markdown=reassembled_md, images=doc_state.images)
+    doc = await self._maybe_fill_gaps(
+        doc, all_gaps, pages_ref, output_dir, llm, gpu_lock,
+        report_fn, entity_lexicon,
+    )
+    doc, truncated = await self._do_final_refine(
+        doc, output_dir, llm, report_fn,
+    )
 
-    # 输出目录（始终写子目录，单文档兼容由 process_many 最后处理）
-    dirname = sanitize_dirname(doc_state.title) or f"文档_{doc_state.doc_index + 1}"
-    sub_output = output_dir / dirname
-    await asyncio.to_thread(sub_output.mkdir, parents=True, exist_ok=True)
-
-    # Gap fill + final refine（复用现有方法）
-    pages_for_gap = ...  # 从 doc_state.page_names 构造 sub_pages
-    sub_doc = await self._maybe_fill_gaps(sub_doc, doc_state.gaps, pages_for_gap, ...)
-    sub_doc, truncated = await self._do_final_refine(sub_doc, sub_output, ...)
-
-    # 渲染
     renderer = Renderer(self._config.output)
-    doc_path = await renderer.render(sub_doc, sub_output)
-    final_md = await asyncio.to_thread(doc_path.read_text, encoding="utf-8")
+    doc_path = await renderer.render(doc, output_dir)
+    final_md = await asyncio.to_thread(
+        doc_path.read_text, encoding="utf-8",
+    )
 
-    doc_dir = sub_output.name
     return PipelineResult(
-        output_path=doc_path, markdown=final_md,
-        images=sub_doc.images, gaps=doc_state.gaps,
-        doc_title=doc_state.title, doc_dir=doc_dir,
-        warnings=self._collect_warnings(doc_state.refined_segments, doc_state.gaps, truncated),
-        _doc_index=doc_state.doc_index,  # 排序用，不暴露给 API
+        output_path=doc_path,
+        markdown=final_md,
+        images=doc.images,
+        gaps=all_gaps,
+        doc_title=extract_first_heading(doc.markdown),
+        doc_dir="",  # 单文档直接落 output_dir 根，不再建子目录
+        warnings=self._collect_warnings(
+            refined_segments, all_gaps, truncated,
+        ),
     )
 ```
 
-### 5.8 _move_to_root()（单文档兼容）
+### 5.6 RateController（自适应段长）
+
+**文件**：`backend/docrestore/pipeline/rate_controller.py`（新增）
 
 ```python
-async def _move_to_root(self, result: PipelineResult, output_dir: Path) -> PipelineResult:
-    """将单文档从子目录移到根目录（兼容旧输出结构）。
+class RateController:
+    """运行时估计 T_ocr / overhead / k，输出目标段长 L*。
 
-    移动 document.md 和 images/ 到 output_dir，删除空子目录。
-    更新 PipelineResult 的 output_path 和 doc_dir。
+    数据模型：
+      R_ocr = chars_per_page / T_ocr         # OCR 吞吐（chars/s）
+      R_llm(L) = L / (overhead + k · L)      # LLM 吞吐（chars/s）
+      令两者相等 → L* = R_ocr · overhead / (1 - R_ocr · k)
+      R_ocr·k ≥ 1（LLM 再大也跟不上）→ L* = MAX，摊薄 overhead
+
+    接口：
+      record_ocr(duration: float) → None
+          每张 OCR 完成时埋点，EMA 更新 T_ocr 和 chars_per_page。
+      record_llm(chars: int, duration: float) → None
+          每段 LLM 完成时埋点 (chars, duration)，滑窗最小二乘回归 overhead/k。
+      target_segment_chars() → int
+          冷启动（样本 < 3）→ 动态序列 [1500, 3000, 6000][sample_count]
+          自适应（样本 ≥ 3）→ 解析解 L*，clamp [1500, 12000]，±30% 变化率限幅
+      set_queue_depth(n: int) → None
+          观测指标（仅用于复盘 profile.json，不做反馈控制）
+      wait_cold_start() → None
+          await 直到样本 ≥ 3 或 60s 超时，用于 process_tree warmup 同步
+      cold_start_done: asyncio.Event
+
+    冷启动 fallback（60s 超时）：
+      已有 1-2 个 LLM 样本 → 用 duration/chars 作为 k 估算、overhead=0，进入自适应
+      0 个样本 → 保持 MIN_CHARS，cold_start_done 强制 set；其他子目录照常开跑，
+               内部继续采样直到回归可用。
+
+    线程/并发：
+      内部用 asyncio 锁保护回归样本列表；EMA 可无锁（单写入协程/顺序更新）。
+      多子目录并发时，record_* 接口被多协程调用，必须加锁保护样本 append/EMA。
+
+    可观测性：
+      状态快照写入 profile.json：
+        ocr_avg_ms / chars_per_page_avg / llm_overhead_ms / llm_per_char_ms
+        samples_llm / cold_start_elapsed_s / final_target_chars
     """
 ```
+
+### 5.7 process_tree 并行分支（warmup cold start）
+
+**文件**：`backend/docrestore/pipeline/pipeline.py`
+
+```python
+async def process_tree(
+    self,
+    image_dir: Path,
+    output_dir: Path,
+    on_progress: Callable[[TaskProgress], None] | None = None,
+    llm: LLMConfig | None = None,
+    gpu_lock: asyncio.Lock | None = None,
+    pii: PIIConfig | None = None,
+    ocr: OCRConfig | None = None,
+) -> list[PipelineResult]:
+    leaf_dirs = await asyncio.to_thread(find_image_dirs, image_dir)
+    if not leaf_dirs:
+        raise FileNotFoundError(f"未找到图片文件: {image_dir}")
+
+    # 单目录：直接委托，不做 warmup
+    if len(leaf_dirs) == 1 and leaf_dirs[0] == image_dir:
+        result = await self.process_many(
+            image_dir, output_dir, on_progress,
+            llm, gpu_lock, pii, ocr,
+        )
+        return [result]
+
+    # 多子目录：warmup 最长子目录 → 并发剩余
+    controller = RateController(self._config.llm)
+    leaves_sorted = sorted(
+        leaf_dirs, key=lambda p: (-_count_images(p), str(p)),
+    )
+    warmup_leaf, *rest = leaves_sorted
+
+    warmup_task = asyncio.create_task(
+        self._process_leaf(
+            0, warmup_leaf, image_dir, output_dir,
+            on_progress, llm, gpu_lock, pii, ocr,
+            total=len(leaves_sorted), controller=controller,
+        ),
+        name=f"warmup-leaf-{warmup_leaf.name}",
+    )
+
+    # 等 controller 冷启动就绪（样本 ≥ 3 或 60s 超时）
+    await controller.wait_cold_start()
+
+    # 并发启动剩余子目录，读 controller 当前 L*
+    rest_tasks = [
+        asyncio.create_task(
+            self._process_leaf(
+                i + 1, leaf, image_dir, output_dir,
+                on_progress, llm, gpu_lock, pii, ocr,
+                total=len(leaves_sorted), controller=controller,
+            ),
+            name=f"leaf-{leaf.name}",
+        )
+        for i, leaf in enumerate(rest)
+    ]
+
+    results = list(await asyncio.gather(warmup_task, *rest_tasks))
+    return results
+```
+
+**关键点**：
+- 移除 `_sort_leaves_lpt`：新排序仅用于"选最长目录做 warmup"，不再假装 LPT 调度。
+- warmup 期间其他子目录**完全不启动**（不抢 gpu_lock、无采样干扰，回归样本干净）。
+- 其他子目录启动后读到的 `target_segment_chars()` 是基于 warmup 样本的解析解 L*。
+- 异常语义：任一 leaf 失败 → `asyncio.gather` fail-fast → 整个 task FAILED（与原语义一致）。
+- 共享 `controller` 让所有子目录的 `record_ocr/record_llm` 埋点统一入栈，稳态估计越跑越准。
 
 ## 6. PII 延迟实体检测
 
@@ -634,19 +705,10 @@ async def _delayed_pii_detect(self, merger, llm_override) -> EntityLexicon | Non
 - 不需要 EntityLexicon
 - 在 `_ocr_producer` 中逐页调用
 
-## 7. PipelineResult 临时排序字段
+## 7. PipelineResult 临时排序字段（已删除）
 
-`PipelineResult` 新增内部字段用于终结化后排序：
-
-```python
-@dataclass
-class PipelineResult:
-    # ... 现有字段
-    _doc_index: int = 0  # 内部排序用，不序列化到 API
-```
-
-或者用 `dataclasses.field(repr=False, compare=False)` 隐藏。
-API schema 不暴露此字段。
+> 2026-04-19 调整：单文档简化后不再需要 `_doc_index`。上层 `process_tree`
+> 直接按子目录顺序（按页数降序）保留 `gather` 返回的 list，无需再排序。
 
 ## 8. 进度报告
 
@@ -656,59 +718,69 @@ API schema 不暴露此字段。
 |-------|---------|-------|------|
 | `ocr` | i | N（已知） | 每张 OCR 完成 |
 | `refine` | seg_idx | 0（未知） | 每段精修完成 |
-| `finalize` | doc_idx | 0（未知） | 启动文档终结化 |
 | `gap_fill` | gi | len(gaps) | gap fill 中（复用现有） |
 | `final_refine` | 0 | 1 | 整篇精修（复用现有） |
 | `render` | 1 | 1 | 渲染完成（复用现有） |
 
-前端只显示最新 stage，无需改动。
+- 去掉 `finalize` stage（不再有"终结化并行"的语义）。
+- `process_tree` 的 `_wrap_progress` 继续在 message 前缀加 `[i/N {subdir}]`，
+  前端按 subtask 分轨展示（与现有逻辑一致）。
 
 ## 9. 被删除/替代的代码
 
 | 旧方法 | 处理 |
 |--------|------|
 | `_ocr_and_clean()` | 由 `_ocr_producer()` 替代 |
-| `_refine_segments()` | 由 `_stream_process` 内循环替代 |
-| `_reassemble()` | 由 `_finalize_document` 内联 `"\n".join()` 替代 |
-| `_split_by_doc_boundaries()` | **保留**（已有测试依赖），但 process_many 不再调用 |
-
-保留 `_split_by_doc_boundaries` 的原因：6 个单元测试依赖它，且它可作为非流式 fallback。
+| `_refine_segments()` | 由 `_stream_process` 主循环 + `_try_extract_and_refine` 替代 |
+| `_sort_leaves_lpt()` | **删除**。`process_tree` 改用"最长子目录做 warmup" + 普通排序 |
+| `_redact_pii()`（全局批量版） | 拆为 (a) `_ocr_producer` 内逐页 `redact_regex_only`；(b) `_delayed_pii_detect` 在 merger.page_count ≥ 5 时异步获取 lexicon |
+| `_detect_doc_boundaries()` / `_insert_doc_boundaries()` / `_split_by_doc_boundaries()` / `_handle_refined_result()` / `_split_refined_at_boundary()` | **保留代码**（单元测试仍依赖），但 `process_many` 不再调用。下一版代码还原场景重新启用 |
+| `_reassemble()` | 继续复用（由 `_finalize_single_doc` 调） |
+| `_finalize_document()` / `_move_to_root()` | 不需要（单文档直接落 `output_dir` 根） |
 
 ## 10. 需要修改的文件
 
 | 文件 | 操作 | 说明 |
 |------|------|------|
-| `backend/docrestore/processing/dedup.py` | 新增类 | `IncrementalMerger` |
-| `backend/docrestore/processing/segmenter.py` | 新增类 | `StreamSegmentExtractor` |
-| `backend/docrestore/models.py` | 新增 | `DocumentState`；`PipelineResult` 加 `_doc_index` |
-| `backend/docrestore/pipeline/pipeline.py` | **重构** | `process_many` → 流式；新增 5+ 方法 |
-| `backend/docrestore/privacy/redactor.py` | 新增方法 | `redact_regex_only()` |
-| `tests/processing/test_incremental_merger.py` | 新增 | 一致性测试 |
-| `tests/llm/test_stream_segmenter.py` | 新增 | 切点/overlap/边界 |
-| `tests/pipeline/test_streaming_pipeline.py` | 新增 | 流式集成测试 |
-| `docs/modules/pipeline.md` | 更新 | 流式架构描述 |
-| `docs/progress.md` | 更新 | — |
+| `backend/docrestore/pipeline/rate_controller.py` | **新增** | `RateController` 类（EMA + 回归 + L\* + 冷启动序列 + `wait_cold_start`）|
+| `backend/docrestore/processing/dedup.py` | 新增类 | `IncrementalMerger`（含 `add_page` / `get_markdown` / `get_all_images` / `page_count` / `all_page_names`）|
+| `backend/docrestore/processing/segmenter.py` | 新增类 | `StreamSegmentExtractor`（`try_extract(text, offset, max_chars)` / `extract_remaining` / `reset`）|
+| `backend/docrestore/privacy/redactor.py` | 新增方法 | `PIIRedactor.redact_regex_only()` |
+| `backend/docrestore/pipeline/pipeline.py` | **重构** | `process_many` → 单文档流式；`process_tree` 并行分支 → warmup cold start；移除 `_sort_leaves_lpt` |
+| `backend/docrestore/pipeline/config.py` | 更新 | `LLMConfig` 移除 `max_chars_per_segment` 硬默认（或改为冷启动序列终值兜底） |
+| `backend/docrestore/models.py` | 无改动 | `PipelineResult` 字段不新增（无 `_doc_index`） |
+| `tests/pipeline/test_rate_controller.py` | 新增 | EMA / 回归 / 冷启动序列 / 超时 fallback |
+| `tests/processing/test_incremental_merger.py` | 新增 | 逐页 `add_page` 后 `get_markdown()` 与 `merge_all_pages(pages).markdown` 完全一致 |
+| `tests/processing/test_stream_segmenter.py` | 新增 | 切点优先级、动态 `max_chars`、backward overlap、`< max_chars` 返回 None |
+| `tests/pipeline/test_process_tree_parallel.py` | 更新断言 | 移除 LPT 期望；验证"warmup 先跑、其他目录等 cold start 再开"的时序 |
+| `tests/pipeline/test_pipeline.py` | 更新断言 | `process_many` 返回单 `PipelineResult`（不再 list）；相关断言跟随改动 |
+| `tests/pipeline/test_boundary_gap_combo.py` / `tests/llm/test_doc_boundary.py` | 标 skip | 单元测试保留，pipeline 层集成 skip（代码还原版解 skip）|
+| `docs/zh/backend/pipeline.md` / `docs/zh/progress.md` | 更新 | 流式架构 + 进度记录 |
 
 ## 11. 实施顺序
 
-| 步骤 | 内容 | 测试要求 |
-|------|------|---------|
-| 1 | `IncrementalMerger` | 逐页 add 后 get_markdown() 与 merge_all_pages 结果完全一致 |
-| 2 | `StreamSegmentExtractor` | 切点优先级正确；overlap 正确；< max 返回 None |
-| 3 | `DocumentState` + `PipelineResult._doc_index` | 随 pipeline 测试 |
-| 4 | `PIIRedactor.redact_regex_only()` | 单元测试 |
-| 5 | Pipeline 重构（_ocr_producer + _stream_process + _finalize_document） | 集成测试 |
-| 6 | 单文档 _move_to_root 兼容 | 测试单/多文档输出目录结构 |
-| 7 | 现有 236 个测试全部通过 | 回归验证 |
-| 8 | 文档更新 | — |
+| 步骤 | 内容 | 验收 |
+|------|------|------|
+| 1 | 撤回上次诊断日志（routes.py / pipeline.py）| 已完成 |
+| 2 | `RateController` + 单元测试 | EMA / 回归 / 冷启动序列 / 超时 fallback 均覆盖 |
+| 3 | `IncrementalMerger` + 单元测试 | 对 parallel_test/ 某真实子目录，增量合并结果与 `merge_all_pages` 完全一致 |
+| 4 | `StreamSegmentExtractor` + 单元测试 | 动态 max_chars 下切点与 overlap 正确 |
+| 5 | `PIIRedactor.redact_regex_only` | 结构化 regex + 自定义敏感词替换都 ok |
+| 6 | `process_many` 重构为流式（单文档）| 原 `_refine_segments` / DOC_BOUNDARY 路径全走旁路；mock 测试通过 |
+| 7 | `process_tree` 并行分支 warmup cold start + 移除 LPT | `test_process_tree_parallel.py` 改断言，新期望"warmup 完成后剩余并发"通过 |
+| 8 | 现有测试全量回归 | 标 skip 的 2 个文件外全部通过 |
+| 9 | `parallel_test/基础系统` E2E 对比基线（289s） | 新实现 wall-time ≤ 基线 * 0.75；`profile.json` 中可见 controller 稳态 L\* |
+| 10 | `docs/zh/progress.md` 记录实测数据 | —— |
 
 ## 12. 风险与应对
 
 | 风险 | 应对 |
 |------|------|
-| 增量合并与批量合并结果不一致 | 严格复用 `merge_two_pages` + 一致性对比测试 |
-| DOC_BOUNDARY 跨 segment 边界（LLM 只看到一半上下文） | 切点优先选 page marker，降低截断概率；overlap 覆盖转折处 |
-| 终结化与 OCR 竞争 gpu_lock | 两者都用 `async with gpu_lock` 安全串行 |
-| 单文档兼容（目录结构） | 最后 `_move_to_root` 调整 |
-| 后台终结化异常 | `asyncio.gather` 收集异常，不影响其他文档 |
-| OCR Producer 异常 | 需确保哨兵仍被放入队列（用 try/finally） |
+| 增量合并与批量合并结果不一致 | 严格复用 `merge_two_pages` + 一致性对比测试（步骤 3） |
+| RateController 估计震荡 / 跑飞 | 解析解 L\* 是观测量收敛函数；±30% 变化率限幅；clamp [1500, 12000] 硬护栏 |
+| LLM 吞吐 < OCR（`R_ocr·k ≥ 1`）| fallback L\* = MAX（摊薄 overhead）+ warning；总耗时 ≈ 总 chars / (1/k) 由 LLM 决定 |
+| warmup 子目录本身太短攒不够 3 样本 | 动态序列缩进（剩余 chars 不足下个目标时合并到下段）；2 样本时用简易 (duration, chars) 估算进入自适应 |
+| Cold start LLM 全挂 | 60s 超时 fallback（保守 L = 1500），warning 记录 `cold_start_failed` |
+| OCR Producer 异常 | `try/finally` 保证哨兵入队；`process_many` `finally` 里 `await ocr_task` 让 exception 传出 |
+| gap fill 与 OCR Producer 竞争 gpu_lock | gap fill 在 OCR 全部结束之后发生（单文档流程），无竞争；多子目录并发场景下同子目录无冲突，跨子目录由 `gpu_lock` 互斥串行 |
+| 停用 DOC_BOUNDARY 回归覆盖 | `parse_doc_boundaries` / `_split_by_doc_boundaries` 单元测试保留；集成级 `test_boundary_gap_combo.py` 标 `@pytest.mark.skip(reason="流式版停用文档聚合，下一版解锁")` |

@@ -48,3 +48,12 @@ package.json
 data/
 screenshots/
 test_images/TMedia_source_code
+
+# 运行时日志
+logs/
+
+# 本地调试输出（OCR 截图等）
+debug_image/
+
+# 并行测试数据集
+test_images/parallel_test/

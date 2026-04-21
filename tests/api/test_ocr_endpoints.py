@@ -24,13 +24,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from docrestore.api.routes import router, set_task_manager
+from docrestore.ocr.gpu_detect import GPUInfo
 from docrestore.pipeline.config import PipelineConfig
 from docrestore.pipeline.pipeline import Pipeline
 from docrestore.pipeline.task_manager import TaskManager
@@ -43,7 +44,8 @@ API_PREFIX = "/api/v1"
 def _make_engine_manager_mock(
     *,
     model: str = "paddle-ocr/ppocr-v4",
-    gpu: str = "1",
+    gpu: str = "0",
+    gpu_name: str = "",
     is_ready: bool = True,
     is_switching: bool = False,
 ) -> MagicMock:
@@ -51,6 +53,7 @@ def _make_engine_manager_mock(
     em = MagicMock(name="EngineManager")
     em.current_model = model
     em.current_gpu = gpu
+    em.current_gpu_name = gpu_name
     em.is_ready = is_ready
     em.is_switching = is_switching
     em.ensure = AsyncMock()
@@ -113,6 +116,7 @@ class TestOcrStatus:
         client, em = ocr_client_with_em
         em.current_model = "deepseek-ocr-2"
         em.current_gpu = "0"
+        em.current_gpu_name = "NVIDIA GeForce RTX 4070 SUPER"
         em.is_ready = False
         em.is_switching = True
 
@@ -122,6 +126,7 @@ class TestOcrStatus:
         body: dict[str, Any] = resp.json()
         assert body["current_model"] == "deepseek-ocr-2"
         assert body["current_gpu"] == "0"
+        assert body["current_gpu_name"] == "NVIDIA GeForce RTX 4070 SUPER"
         assert body["is_ready"] is False
         assert body["is_switching"] is True
 
@@ -211,3 +216,93 @@ class TestOcrWarmup:
         called_config = em.ensure.await_args.args[0]
         assert called_config.model == "deepseek-ocr-2"
         assert called_config.gpu_id == "0"
+
+    @pytest.mark.asyncio
+    async def test_warmup_without_gpu_id_uses_pick_best(
+        self,
+        ocr_client_with_em: tuple[AsyncClient, MagicMock],
+    ) -> None:
+        """请求不带 gpu_id → 路由调 pick_best_gpu，传给 ensure 的 config 带上落地后的索引。"""  # noqa: E501
+        client, em = ocr_client_with_em
+        em.current_model = ""
+        em.current_gpu = ""
+        em.is_ready = False
+        em.is_switching = False
+
+        with patch(
+            "docrestore.api.routes.pick_best_gpu", return_value="3",
+        ):
+            resp = await client.post(
+                f"{API_PREFIX}/ocr/warmup",
+                json={"model": "paddle-ocr/ppocr-v4"},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "accepted"
+
+        for _ in range(20):
+            if em.ensure.await_count >= 1:
+                break
+            await asyncio.sleep(0.01)
+
+        em.ensure.assert_awaited_once()
+        called_config = em.ensure.await_args.args[0]
+        assert called_config.gpu_id == "3"
+
+
+class TestGpuListing:
+    """GET /gpus 枚举可用 GPU + 推荐索引"""
+
+    @pytest.mark.asyncio
+    async def test_returns_gpus_and_recommended(
+        self,
+        ocr_client_with_em: tuple[AsyncClient, MagicMock],
+    ) -> None:
+        """list_gpus / pick_best_gpu 结果透传到响应体。"""
+        client, _em = ocr_client_with_em
+        fake_gpus = [
+            GPUInfo(index="0", name="NVIDIA A2", memory_total_mb=15360),
+            GPUInfo(
+                index="1", name="NVIDIA RTX 4070 SUPER",
+                memory_total_mb=12282, memory_free_mb=11000,
+                compute_capability="8.9",
+            ),
+        ]
+
+        with (
+            patch(
+                "docrestore.api.routes.list_gpus", return_value=fake_gpus,
+            ),
+            patch(
+                "docrestore.api.routes.pick_best_gpu", return_value="0",
+            ),
+        ):
+            resp = await client.get(f"{API_PREFIX}/gpus")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["recommended"] == "0"
+        assert len(body["gpus"]) == 2
+        assert body["gpus"][0]["name"] == "NVIDIA A2"
+        assert body["gpus"][1]["memory_free_mb"] == 11000
+        assert body["gpus"][1]["compute_capability"] == "8.9"
+
+    @pytest.mark.asyncio
+    async def test_empty_gpus(
+        self,
+        ocr_client_with_em: tuple[AsyncClient, MagicMock],
+    ) -> None:
+        """探测为空 → gpus 空数组 + recommended null，不报错。"""
+        client, _em = ocr_client_with_em
+        with (
+            patch("docrestore.api.routes.list_gpus", return_value=[]),
+            patch(
+                "docrestore.api.routes.pick_best_gpu", return_value=None,
+            ),
+        ):
+            resp = await client.get(f"{API_PREFIX}/gpus")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["gpus"] == []
+        assert body["recommended"] is None

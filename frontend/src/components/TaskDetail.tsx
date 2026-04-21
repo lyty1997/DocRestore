@@ -16,14 +16,17 @@ import {
   getTask,
   getTaskResults,
   listSourceImages,
+  resumeTask,
   retryTask,
   updateResultMarkdown,
 } from "../api/client";
 import type { TaskListItem, TaskResultResponse } from "../api/schemas";
 import { preprocessMarkdown } from "../features/task/markdown";
+import { useTaskProgress } from "../features/task/useTaskProgress";
 import { useTranslation } from "../i18n";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { SourceImagePanel } from "./SourceImagePanel";
+import { TaskProgress } from "./TaskProgress";
 
 /** 格式化时间（locale 由 i18n 提供） */
 function formatTime(iso: string, locale: string): string {
@@ -41,6 +44,11 @@ interface TaskDetailProps {
   readonly onDeleted: () => void;
   /** 侧边栏任务列表刷新回调 */
   readonly onTaskListRefresh: () => void;
+  /**
+   * 切换到另一个 task 的回调（resume/retry 返回的新 task_id 用它跳转）。
+   * 父组件通常绑到 App.setSelectedTaskId。
+   */
+  readonly onSelectTask: (taskId: string) => void;
 }
 
 /** 确认弹窗状态 */
@@ -54,6 +62,7 @@ export function TaskDetail({
   taskId,
   onDeleted,
   onTaskListRefresh,
+  onSelectTask,
 }: TaskDetailProps): React.JSX.Element {
   const { t } = useTranslation();
   /* 任务元信息 */
@@ -77,6 +86,15 @@ export function TaskDetail({
   const [confirm, setConfirm] = useState<ConfirmState | undefined>();
 
   const selectedDoc = docResults[selectedDocIdx];
+  /**
+   * 选中的子文档是否失败。失败 tab 不允许编辑、不展示 markdown 预览，
+   * 只展示 error 文本；成功 tab 行为与历史版本一致。
+   * zod 层 default("") 保证 error 始终为 string，这里直接比较空串即可。
+   */
+  const selectedDocFailed =
+    selectedDoc !== undefined && selectedDoc.error !== "";
+  const failedDocs = docResults.filter((d) => d.error !== "");
+  const completedDocCount = docResults.length - failedDocs.length;
   const dirty =
     editMode &&
     selectedDoc !== undefined &&
@@ -137,6 +155,28 @@ export function TaskDetail({
     void fetchResults();
   }, [fetchTaskInfo, fetchResults]);
 
+  /* 实时进度订阅：pending/processing 时建 WS，终态自动停 + 刷新任务信息/结果 */
+  const taskStatus = task?.status ?? "unknown";
+  const isLive = taskStatus === "pending" || taskStatus === "processing";
+  const handleTerminal = useCallback(
+    (_kind: "completed" | "failed"): void => {
+      /* 收到终态 → 重新拉任务元信息 + 结果 + 刷新侧边栏（状态徽章要更新） */
+      void fetchTaskInfo();
+      void fetchResults();
+      onTaskListRefresh();
+    },
+    [fetchTaskInfo, fetchResults, onTaskListRefresh],
+  );
+  const {
+    progresses,
+    wsState,
+    pollingEnabled,
+  } = useTaskProgress({
+    taskId,
+    enabled: isLive,
+    onTerminal: handleTerminal,
+  });
+
   /* 编辑相关 */
   const enterEdit = (): void => {
     if (selectedDoc !== undefined) {
@@ -187,11 +227,22 @@ export function TaskDetail({
 
   const handleRetry = async (): Promise<void> => {
     try {
-      await retryTask(taskId);
+      const resp = await retryTask(taskId);
       onTaskListRefresh();
-      void fetchTaskInfo();
+      /* 切到新建的 task，让详情页自动订阅进度 */
+      onSelectTask(resp.task_id);
     } catch {
       setTaskError(t("taskDetail.retryFailed"));
+    }
+  };
+
+  const handleResume = async (): Promise<void> => {
+    try {
+      const resp = await resumeTask(taskId);
+      onTaskListRefresh();
+      onSelectTask(resp.task_id);
+    } catch {
+      setTaskError(t("taskDetail.resumeFailed"));
     }
   };
 
@@ -282,8 +333,17 @@ export function TaskDetail({
             <>
               <button
                 type="button"
+                className="action-btn btn-resume"
+                onClick={() => void handleResume()}
+                title={t("taskDetail.resumeHint")}
+              >
+                {t("taskDetail.resumeTask")}
+              </button>
+              <button
+                type="button"
                 className="action-btn btn-retry"
                 onClick={() => void handleRetry()}
+                title={t("taskDetail.retryHint")}
               >
                 {t("common.retry")}
               </button>
@@ -313,6 +373,18 @@ export function TaskDetail({
         </div>
       )}
 
+      {/* 运行中任务的实时进度（含 process_tree 多子目录分轨） */}
+      {isLive && (
+        <section className="task-detail-progress">
+          <TaskProgress
+            taskId={taskId}
+            progresses={progresses}
+            wsState={wsState}
+            pollingEnabled={pollingEnabled}
+          />
+        </section>
+      )}
+
       {/* 结果加载中 */}
       {resultsLoading && (
         <div className="task-detail-loading">{t("taskDetail.loadingResults")}</div>
@@ -324,66 +396,114 @@ export function TaskDetail({
           <div className="preview-header">
             <h3>{t("taskDetail.docPreview")}</h3>
             <div className="preview-actions">
-              <div className="edit-preview-toggle">
-                <button
-                  type="button"
-                  className={`toggle-btn ${editMode ? "" : "active"}`}
-                  onClick={() => {
-                    setEditMode(false);
-                  }}
-                >
-                  {t("common.preview")}
-                </button>
-                <button
-                  type="button"
-                  className={`toggle-btn ${editMode ? "active" : ""}`}
-                  onClick={enterEdit}
-                >
-                  {t("common.edit")}
-                </button>
-              </div>
-              {editMode && (
-                <button
-                  type="button"
-                  className="save-btn"
-                  disabled={saving || !dirty}
-                  onClick={() => {
-                    void handleSave();
-                  }}
-                >
-                  {saving ? t("common.saving") : t("common.save")}
-                </button>
-              )}
-              {saveError !== undefined && (
-                <span className="save-error">{saveError}</span>
+              {!selectedDocFailed && (
+                <>
+                  <div className="edit-preview-toggle">
+                    <button
+                      type="button"
+                      className={`toggle-btn ${editMode ? "" : "active"}`}
+                      onClick={() => {
+                        setEditMode(false);
+                      }}
+                    >
+                      {t("common.preview")}
+                    </button>
+                    <button
+                      type="button"
+                      className={`toggle-btn ${editMode ? "active" : ""}`}
+                      onClick={enterEdit}
+                    >
+                      {t("common.edit")}
+                    </button>
+                  </div>
+                  {editMode && (
+                    <button
+                      type="button"
+                      className="save-btn"
+                      disabled={saving || !dirty}
+                      onClick={() => {
+                        void handleSave();
+                      }}
+                    >
+                      {saving ? t("common.saving") : t("common.save")}
+                    </button>
+                  )}
+                  {saveError !== undefined && (
+                    <span className="save-error">{saveError}</span>
+                  )}
+                </>
               )}
             </div>
           </div>
 
-          {/* 多文档切换 */}
+          {/* 多文档进度汇总（仅多文档场景） */}
+          {docResults.length > 1 && (
+            <div className="doc-summary">
+              {failedDocs.length > 0
+                ? t("taskDetail.docSummaryPartial", {
+                    done: completedDocCount,
+                    total: docResults.length,
+                    failed: failedDocs.length,
+                  })
+                : t("taskDetail.docSummaryAll", {
+                    total: docResults.length,
+                  })}
+            </div>
+          )}
+
+          {/* 多文档切换；失败子文档带 ✗ 徽章 */}
           {docResults.length > 1 && (
             <div className="doc-tabs">
-              {docResults.map((doc, idx) => (
-                <button
-                  key={doc.doc_dir ?? idx.toString()}
-                  type="button"
-                  className={`doc-tab ${idx === selectedDocIdx ? "active" : ""}`}
-                  onClick={() => {
-                    if (editMode) setEditMode(false);
-                    setSelectedDocIdx(idx);
-                  }}
-                >
-                  {doc.doc_title !== undefined && doc.doc_title !== ""
-                    ? doc.doc_title
-                    : t("taskResult.docTab", { index: idx + 1 })}
-                </button>
-              ))}
+              {docResults.map((doc, idx) => {
+                const isFailed = doc.error !== "";
+                /* 优先展示 doc_title；缺失 → doc_dir；两者都空 → "文档 N" */
+                let label: string;
+                if (doc.doc_title !== undefined && doc.doc_title !== "") {
+                  label = doc.doc_title;
+                } else if (
+                  doc.doc_dir !== undefined && doc.doc_dir !== ""
+                ) {
+                  label = doc.doc_dir;
+                } else {
+                  label = t("taskResult.docTab", { index: idx + 1 });
+                }
+                return (
+                  <button
+                    key={doc.doc_dir ?? idx.toString()}
+                    type="button"
+                    className={
+                      "doc-tab "
+                      + (idx === selectedDocIdx ? "active " : "")
+                      + (isFailed ? "doc-tab--failed" : "doc-tab--ok")
+                    }
+                    onClick={() => {
+                      if (editMode) setEditMode(false);
+                      setSelectedDocIdx(idx);
+                    }}
+                    title={isFailed ? doc.error : ""}
+                  >
+                    <span className="doc-tab-badge" aria-hidden="true">
+                      {isFailed ? "✗" : "✓"}
+                    </span>
+                    {label}
+                  </button>
+                );
+              })}
             </div>
           )}
 
           <div className="preview-split">
             <SourceImagePanel taskId={taskId} images={filteredImages} />
-            {editMode ? (
+            {selectedDocFailed && (
+              <div className="doc-failed-panel">
+                <h4>{t("taskDetail.docFailedTitle")}</h4>
+                <pre className="doc-failed-message">{selectedDoc.error}</pre>
+                <p className="doc-failed-hint">
+                  {t("taskDetail.docFailedHint")}
+                </p>
+              </div>
+            )}
+            {!selectedDocFailed && editMode && (
               <div className="markdown-editor">
                 <textarea
                   value={editText}
@@ -393,7 +513,8 @@ export function TaskDetail({
                   spellCheck={false}
                 />
               </div>
-            ) : (
+            )}
+            {!selectedDocFailed && !editMode && (
               <div className="markdown-preview">
                 <Markdown
                   remarkPlugins={[remarkGfm]}

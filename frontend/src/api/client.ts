@@ -20,6 +20,7 @@ import {
   UploadSessionResponseSchema,
   OcrStatusResponseSchema,
   OcrWarmupResponseSchema,
+  GpuListResponseSchema,
   type ActionResponse,
   type BrowseDirsResponse,
   type CreateTaskResponse,
@@ -37,6 +38,7 @@ import {
   type UploadSessionResponse,
   type OcrStatusResponse,
   type OcrWarmupResponse,
+  type GpuListResponse,
 } from "./schemas";
 import { appendTokenToUrl, getAuthHeaders, loadApiToken } from "./auth";
 
@@ -165,6 +167,15 @@ export async function cleanupTasks(
 /** 重试任务（从头跑） */
 export async function retryTask(taskId: string): Promise<ActionResponse> {
   const response = await fetch(`${API_BASE}/tasks/${taskId}/retry`, {
+    method: "POST",
+    headers: apiHeaders(),
+  });
+  return handleResponse(response, ActionResponseSchema);
+}
+
+/** 继续失败任务（复用 output_dir，OCR 跳过已完成图） */
+export async function resumeTask(taskId: string): Promise<ActionResponse> {
+  const response = await fetch(`${API_BASE}/tasks/${taskId}/resume`, {
     method: "POST",
     headers: apiHeaders(),
   });
@@ -334,15 +345,25 @@ export async function getOcrStatus(): Promise<OcrStatusResponse> {
   return handleResponse(response, OcrStatusResponseSchema);
 }
 
-/** 预热 OCR 引擎 */
+/** 预热 OCR 引擎；gpuId 为空字符串 → 后端 pick_best_gpu 自动选 */
 export async function warmupOcrEngine(
   model: string,
   gpuId: string,
 ): Promise<OcrWarmupResponse> {
+  const body: { model: string; gpu_id?: string } = { model };
+  if (gpuId !== "") body.gpu_id = gpuId;
   const response = await fetch(`${API_BASE}/ocr/warmup`, {
     method: "POST",
     headers: apiHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ model, gpu_id: gpuId }),
+    body: JSON.stringify(body),
   });
   return handleResponse(response, OcrWarmupResponseSchema);
+}
+
+/** 枚举系统可见的 GPU + 推荐索引 */
+export async function listGpus(): Promise<GpuListResponse> {
+  const response = await fetch(`${API_BASE}/gpus`, {
+    headers: apiHeaders(),
+  });
+  return handleResponse(response, GpuListResponseSchema);
 }

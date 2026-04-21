@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# mypy: ignore-errors
+# 本文件测试已 skip（流式版停用 DOC_BOUNDARY 聚合），类型签名与新接口不匹配
 """DocBoundary + GapFill 组合端到端测试（纯 mock，CI 友好）
 
 验证同时开启文档边界检测与缺口补充时：
@@ -108,6 +110,10 @@ def _build_image_dir(root: Path, names: list[str]) -> Path:
     return img_dir
 
 
+@pytest.mark.skip(
+    reason="流式 Pipeline 停用 DOC_BOUNDARY 聚合（streaming-pipeline §10）；"
+    "下一版代码照片还原恢复聚合时再启用",
+)
 class TestBoundaryAndGapFillTogether:
     """同一次 process_many 同时触发 DocBoundary 拆分 + GapFill 补充"""
 

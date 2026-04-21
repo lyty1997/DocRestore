@@ -97,13 +97,18 @@ class TaskResponse(BaseModel):
 
 
 class TaskResultResponse(BaseModel):
-    """任务结果响应（单篇文档）"""
+    """任务结果响应（单篇文档）
+
+    error 非空时表示该子文档处理失败：markdown 可能为空或残缺，前端应显示
+    错误文本而非 markdown 预览。成功子文档 error=""。
+    """
 
     task_id: str
     output_path: str
     markdown: str
     doc_title: str = ""
     doc_dir: str = ""
+    error: str = ""
 
 
 class TaskResultsResponse(BaseModel):
@@ -270,10 +275,13 @@ class UploadCompleteResponse(BaseModel):
 
 
 class OCRWarmupRequest(BaseModel):
-    """OCR 引擎预热请求"""
+    """OCR 引擎预热请求
+
+    gpu_id 为 None 时由后端自动探测（`gpu_detect.pick_best_gpu`）。
+    """
 
     model: str = "paddle-ocr/ppocr-v4"
-    gpu_id: str = "1"
+    gpu_id: str | None = None
 
 
 class OCRStatusResponse(BaseModel):
@@ -281,5 +289,26 @@ class OCRStatusResponse(BaseModel):
 
     current_model: str
     current_gpu: str
+    current_gpu_name: str = ""  # 人类可读型号，便于 UI 区分同机多卡
     is_ready: bool
     is_switching: bool
+
+
+# ── GPU 列表 ──────────────────────────────────────────────
+
+
+class GPUInfoResponse(BaseModel):
+    """单张 GPU 的可展示信息（透传 gpu_detect.GPUInfo）。"""
+
+    index: str
+    name: str
+    memory_total_mb: int
+    memory_free_mb: int | None = None
+    compute_capability: str | None = None
+
+
+class GPUListResponse(BaseModel):
+    """GET /gpus 响应：GPU 列表 + 推荐索引。"""
+
+    gpus: list[GPUInfoResponse]
+    recommended: str | None = None

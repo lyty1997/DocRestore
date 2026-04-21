@@ -226,7 +226,11 @@ class TestOCRConfigExtra:
         assert cfg.column_filter_min_sidebar == 10
 
     def test_gpu_id_default(self) -> None:
-        assert OCRConfig().gpu_id == "1"
+        # 默认 None → engine_manager 启动时调 gpu_detect.pick_best_gpu 选显存最大的
+        assert OCRConfig().gpu_id is None
+
+    def test_gpu_id_explicit(self) -> None:
+        assert OCRConfig(gpu_id="0").gpu_id == "0"
 
     def test_paddle_server_url_default_empty(self) -> None:
         assert OCRConfig().paddle_server_url == ""
