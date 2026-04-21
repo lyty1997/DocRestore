@@ -62,6 +62,11 @@ function App(): React.JSX.Element {
     taskListRef.current?.refresh();
   }, []);
 
+  /** 侧边栏删除任务回调：若被删的是当前选中的任务，退回新建模式 */
+  const handleTaskDeleted = useCallback((tid: string) => {
+    setSelectedTaskId((current) => (current === tid ? undefined : current));
+  }, []);
+
   /** 任务完成/失败后刷新侧边栏 */
   const isTerminal = status === "completed" || status === "failed";
   const prevTerminalRef = useRef(false);
@@ -86,6 +91,7 @@ function App(): React.JSX.Element {
         selectedTaskId={selectedTaskId}
         onSelectTask={handleSelectTask}
         onNewTask={handleNewTask}
+        onTaskDeleted={handleTaskDeleted}
         onWidthChange={handleWidthChange}
         onTokenSettings={() => { setShowTokenSettings(true); }}
         theme={theme}

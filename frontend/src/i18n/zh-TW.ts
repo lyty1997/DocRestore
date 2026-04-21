@@ -48,6 +48,15 @@ export const zhTW: Record<TranslationKey, string> = {
   "taskList.title": "任務列表",
   "taskList.empty": "暫無任務",
   "taskList.loadMore": "載入更多",
+  "taskList.deleteItem": "刪除此任務",
+  "taskList.cannotDeleteRunning": "任務執行中，請先取消再刪除",
+  "taskList.deleteConfirmTitle": "刪除任務",
+  "taskList.deleteConfirmMessage": "確定刪除任務 {id} 及其全部產物嗎？此操作不可恢復。",
+  "taskList.clearFinished": "清理已結束",
+  "taskList.clearFinishedTitle": "清理已結束任務",
+  "taskList.clearFinishedMessage": "將刪除 {count} 個已完成/失敗的任務及其產物。此操作不可恢復，繼續嗎？",
+  "taskList.deleteFailed": "刪除失敗",
+  "taskList.clearFinishedResult": "已刪除 {ok} 個，失敗 {fail} 個",
 
   // ── 任務表單 ──
   "taskForm.sourceLabel": "圖片來源",

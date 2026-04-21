@@ -16,6 +16,46 @@ limitations under the License.
 
 # DocRestore 开发进度
 
+## 2026-04-21 五补：任务列表单项删除 + 批量清理终态任务
+
+### 背景
+
+生产环境积累了 100+ 历史任务，但之前删除入口仅存在于 TaskDetail 页（需要先点进详情再删除），
+对"我只想把旧任务全扫掉"的场景非常不友好，用户反馈"既不能访问也不能清理"。
+
+### 落地
+
+**后端**
+- `TaskManager.cleanup_tasks(statuses) -> (deleted_ids, errors)`：内存 + DB 合并去重，
+  逐个复用已有 `delete_task` 的状态机校验；`_collect_cleanup_targets` 拆出以压 C901 复杂度
+- `POST /tasks/cleanup` 路由：仅接受 `completed`/`failed` 两种状态（校验在路由层做，
+  兜底防止运行中任务被误删）；响应 `{deleted, failed, deleted_ids, errors}`
+
+**前端**
+- `SidebarTaskList.tsx` 结构从 `<button>` 单项 → `<div.stl-item-row>` 包住选择 `<button>`
+  + 删除 `<button>`（嵌套 button 是无效 HTML，必须拆开）；悬停露出 "×"
+- 头部渲染 "清理已结束" 按钮（当本地已加载任务中含终态任务时），一键调用 cleanup 接口
+- 删除后通过 `onDeleted(tid)` 冒泡，`App` 若选中的正是被删任务则回到新建模式
+- 双确认走复用的 `ConfirmDialog`，提示消息通过 i18n 带上 `{id}`/`{count}` 占位符
+- i18n 三语补齐 `taskList.deleteItem` / `deleteConfirmMessage` / `clearFinished` / `clearFinishedMessage` / `clearFinishedResult` / `cannotDeleteRunning`
+
+**测试**
+- `tests/api/test_task_actions.py::TestCleanupTasks` 四用例（空入参 400、非终态状态 400、
+  只清 completed+failed、无匹配 noop）
+
+### 关键不变式
+
+1. cleanup 永远只清 completed+failed；非终态状态 → 400（路由层先校验，manager 层也再过滤）
+2. 已在运行的任务：单项删除按钮 `disabled`，批量清理走不到
+3. 删除是逐个 `delete_task`，某条失败不影响其他（失败收集在 errors 数组返回）
+
+### 验证
+
+tsc + eslint + vitest（5 通过）前端全绿；mypy --strict + ruff + 23 个任务操作测试后端全绿。
+
+---
+
+
 ## 2026-04-17 补：PII JSON 解析容错 + 精修截断一律回退原文
 
 ### 背景

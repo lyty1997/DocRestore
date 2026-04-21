@@ -44,6 +44,15 @@ export const zhCN = {
   "taskList.title": "任务列表",
   "taskList.empty": "暂无任务",
   "taskList.loadMore": "加载更多",
+  "taskList.deleteItem": "删除此任务",
+  "taskList.cannotDeleteRunning": "任务运行中，请先取消再删除",
+  "taskList.deleteConfirmTitle": "删除任务",
+  "taskList.deleteConfirmMessage": "确定删除任务 {id} 及其全部产物吗？此操作不可恢复。",
+  "taskList.clearFinished": "清理已结束",
+  "taskList.clearFinishedTitle": "清理已结束任务",
+  "taskList.clearFinishedMessage": "将删除 {count} 个已完成/失败的任务及其产物。此操作不可恢复，继续吗？",
+  "taskList.deleteFailed": "删除失败",
+  "taskList.clearFinishedResult": "已删除 {ok} 个，失败 {fail} 个",
 
   // ── 任务表单 ──
   "taskForm.sourceLabel": "图片来源",

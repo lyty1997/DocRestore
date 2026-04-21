@@ -144,6 +144,25 @@ class TaskListResponse(BaseModel):
     page_size: int
 
 
+class TaskCleanupRequest(BaseModel):
+    """批量清理任务请求。
+
+    出于安全考虑，仅允许清理终态任务（completed / failed），禁止传入
+    pending / processing，避免误删运行中的任务。
+    """
+
+    statuses: list[str]
+
+
+class TaskCleanupResponse(BaseModel):
+    """批量清理任务响应"""
+
+    deleted: int = 0
+    failed: int = 0
+    deleted_ids: list[str] = []
+    errors: list[str] = []
+
+
 # ── 文件上传 ──────────────────────────────────────────
 
 

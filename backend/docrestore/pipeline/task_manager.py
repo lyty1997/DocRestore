@@ -597,6 +597,71 @@ class TaskManager:
 
         return ""
 
+    async def _collect_cleanup_targets(
+        self,
+        statuses: list[str],
+    ) -> list[str]:
+        """收集待清理的 task_id。内存 + DB 合并去重排序。"""
+        target_ids: set[str] = set()
+        async with self._lock:
+            target_ids.update(
+                task.task_id
+                for task in self._tasks.values()
+                if task.status.value in statuses
+            )
+
+        if self._db is not None:
+            # 分页拿全量（page_size 上限较大，一次尽量拿多）
+            for status in statuses:
+                page = 1
+                while True:
+                    result = await self._db.list_tasks(
+                        status=status, page=page, page_size=200,
+                    )
+                    target_ids.update(t.task_id for t in result.tasks)
+                    if len(result.tasks) < 200:
+                        break
+                    page += 1
+        return sorted(target_ids)
+
+    async def cleanup_tasks(
+        self,
+        statuses: list[str],
+    ) -> tuple[list[str], list[tuple[str, str]]]:
+        """批量清理指定状态的任务及其产物。
+
+        参数：
+        - statuses：需要清理的任务状态，仅允许 "completed" / "failed"
+
+        返回：
+        - (已删除的 task_id 列表, [(失败的 task_id, 原因)] 列表)
+
+        允许状态外的 status 会被直接忽略（不抛异常），
+        调用方应在更外层（API 路由）做入参校验。
+        """
+        allowed = {TaskStatus.COMPLETED.value, TaskStatus.FAILED.value}
+        normalized = [s for s in statuses if s in allowed]
+        if not normalized:
+            return [], []
+
+        target_ids = await self._collect_cleanup_targets(normalized)
+
+        deleted: list[str] = []
+        errors: list[tuple[str, str]] = []
+        for tid in target_ids:
+            try:
+                err = await self.delete_task(tid)
+            except Exception as exc:  # noqa: BLE001
+                errors.append((tid, str(exc)))
+                continue
+            if err is None:
+                errors.append((tid, "任务不存在"))
+            elif err:
+                errors.append((tid, err))
+            else:
+                deleted.append(tid)
+        return deleted, errors
+
     async def retry_task(self, task_id: str) -> Task | str | None:
         """重试失败的任务，返回新任务。
 

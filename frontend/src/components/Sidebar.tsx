@@ -29,6 +29,11 @@ interface SidebarProps {
   readonly onSelectTask: (taskId: string) => void;
   /** 点击"新建任务"回调 */
   readonly onNewTask: () => void;
+  /**
+   * 任务被删除时的回调。批量删除会对每个删除的 task_id 调用一次。
+   * 父组件需据此清理 selectedTaskId（若被选中的任务正好被删）。
+   */
+  readonly onTaskDeleted: (taskId: string) => void;
   readonly onWidthChange: (width: number) => void;
   readonly onTokenSettings: () => void;
   readonly theme: Theme;
@@ -41,6 +46,7 @@ export function Sidebar({
   selectedTaskId,
   onSelectTask,
   onNewTask,
+  onTaskDeleted,
   onWidthChange,
   onTokenSettings,
   theme,
@@ -154,6 +160,7 @@ export function Sidebar({
         ref={taskListRef}
         selectedTaskId={selectedTaskId}
         onSelect={onSelectTask}
+        onDeleted={onTaskDeleted}
         collapsed={collapsed}
       />
 

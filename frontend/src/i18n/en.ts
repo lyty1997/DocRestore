@@ -49,6 +49,15 @@ export const en: Record<TranslationKey, string> = {
   "taskList.title": "Tasks",
   "taskList.empty": "No tasks yet",
   "taskList.loadMore": "Load More",
+  "taskList.deleteItem": "Delete this task",
+  "taskList.cannotDeleteRunning": "Task is running — cancel it first",
+  "taskList.deleteConfirmTitle": "Delete task",
+  "taskList.deleteConfirmMessage": "Delete task {id} and all its artifacts? This cannot be undone.",
+  "taskList.clearFinished": "Clear finished",
+  "taskList.clearFinishedTitle": "Clear finished tasks",
+  "taskList.clearFinishedMessage": "This will delete {count} completed/failed task(s) and their artifacts. This cannot be undone. Continue?",
+  "taskList.deleteFailed": "Delete failed",
+  "taskList.clearFinishedResult": "Deleted {ok}, failed {fail}",
 
   // ── Task form ──
   "taskForm.sourceLabel": "Image Source",

@@ -291,3 +291,82 @@ class TestRetryTask:
         new_task = routes._task_manager._tasks.get(new_id)  # type: ignore[union-attr]
         assert new_task is not None
         assert new_task.image_dir == old.image_dir
+
+
+class TestCleanupTasks:
+    """POST /tasks/cleanup — 批量清理终态任务"""
+
+    @pytest.mark.asyncio
+    async def test_cleanup_rejects_empty_statuses(
+        self, api_client: AsyncClient,
+    ) -> None:
+        resp = await api_client.post(
+            "/api/v1/tasks/cleanup", json={"statuses": []},
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_cleanup_rejects_non_terminal_status(
+        self, api_client: AsyncClient,
+    ) -> None:
+        """拒绝清理 pending / processing（安全兜底，防止误删运行中任务）。"""
+        resp = await api_client.post(
+            "/api/v1/tasks/cleanup",
+            json={"statuses": ["pending", "completed"]},
+        )
+        assert resp.status_code == 400
+        assert "pending" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_cleanup_deletes_completed_and_failed(
+        self, api_client: AsyncClient, tmp_path: Path,
+    ) -> None:
+        """清理 completed + failed，pending/processing 一个都不能被删。"""
+        t_done = _inject_task(
+            "t-clean-done", TaskStatus.COMPLETED, tmp_path,
+            with_output_file=True,
+        )
+        t_failed = _inject_task(
+            "t-clean-failed", TaskStatus.FAILED, tmp_path,
+            with_output_file=True,
+        )
+        _inject_task("t-clean-pending", TaskStatus.PENDING, tmp_path)
+        _inject_task("t-clean-proc", TaskStatus.PROCESSING, tmp_path)
+
+        resp = await api_client.post(
+            "/api/v1/tasks/cleanup",
+            json={"statuses": ["completed", "failed"]},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["deleted"] == 2
+        assert body["failed"] == 0
+        assert set(body["deleted_ids"]) == {
+            "t-clean-done", "t-clean-failed",
+        }
+
+        tasks = routes._task_manager._tasks  # type: ignore[union-attr]
+        # 终态任务被删
+        assert "t-clean-done" not in tasks
+        assert "t-clean-failed" not in tasks
+        # 非终态任务保留
+        assert "t-clean-pending" in tasks
+        assert "t-clean-proc" in tasks
+        # 输出目录被清理
+        assert not Path(t_done.output_dir).exists()  # noqa: ASYNC240
+        assert not Path(t_failed.output_dir).exists()  # noqa: ASYNC240
+
+    @pytest.mark.asyncio
+    async def test_cleanup_noop_when_nothing_matches(
+        self, api_client: AsyncClient, tmp_path: Path,
+    ) -> None:
+        _inject_task("t-clean-alone", TaskStatus.PENDING, tmp_path)
+        resp = await api_client.post(
+            "/api/v1/tasks/cleanup",
+            json={"statuses": ["completed", "failed"]},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["deleted"] == 0
+        assert body["failed"] == 0
+        assert body["deleted_ids"] == []

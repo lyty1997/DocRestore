@@ -233,6 +233,7 @@ Endpoint overview:
 | `POST` | `/tasks/{id}/cancel` | Cancel a running task |
 | `POST` | `/tasks/{id}/retry` | Retry a failed task (creates a new task) |
 | `DELETE` | `/tasks/{id}` | Delete task record and artifacts |
+| `POST` | `/tasks/cleanup` | Bulk-delete terminal tasks (`completed` / `failed` only) |
 | `WS` | `/tasks/{id}/progress` | WebSocket progress push (protected by `require_auth_ws`) |
 | `GET` | `/filesystem/dirs?path=&include_files=` | Server directory browsing |
 | `POST` | `/sources/server` | Stage server files as `image_dir` (symlinks, max 5000) |
@@ -381,6 +382,16 @@ doc-2/images/...
 - `cancel`: Cancels a running task; returns 409 for non-running states
 - `retry`: Copies a failed task's `image_dir / output_dir / config snapshot` into a new task and starts it; the response `task_id` is the new task's ID
 - `DELETE`: Deletes the task record and artifact directory; returns 409 if the task is still running
+
+#### POST /api/v1/tasks/cleanup -- Bulk cleanup of terminal tasks
+
+- Request: `TaskCleanupRequest { statuses: list[str] }`; only `"completed"` / `"failed"` are accepted.
+  Passing anything else (e.g. `pending`/`processing`) or an empty list returns 400 (running tasks
+  cannot be cleaned up, enforced as a safety net).
+- Response: `TaskCleanupResponse { deleted: int, failed: int, deleted_ids: list[str], errors: list[str] }`
+- Implementation: `TaskManager.cleanup_tasks` unions the target set from in-memory and DB views,
+  then invokes `delete_task` on each id; individual failures are collected into `errors`
+  (formatted as `"<task_id>: <reason>"`) without aborting the rest.
 
 #### GET /api/v1/filesystem/dirs -- Server Directory Browsing
 

@@ -233,6 +233,7 @@ class OCRStatusResponse(BaseModel):
 | `POST` | `/tasks/{id}/cancel` | 取消运行中的任务 |
 | `POST` | `/tasks/{id}/retry` | 重试失败的任务（创建新任务） |
 | `DELETE` | `/tasks/{id}` | 删除任务及产物 |
+| `POST` | `/tasks/cleanup` | 批量清理终态任务（仅允许 `completed` / `failed`）|
 | `WS` | `/tasks/{id}/progress` | WebSocket 进度推送（受 `require_auth_ws` 保护） |
 | `GET` | `/filesystem/dirs?path=&include_files=` | 服务器目录浏览 |
 | `POST` | `/sources/server` | 将服务器文件 stage 为 `image_dir`（符号链接，上限 5000） |
@@ -379,6 +380,14 @@ doc-2/images/...
 - `cancel`：取消运行中的任务；非运行态返回 409
 - `retry`：将失败任务的 `image_dir / output_dir / config snapshot` 复制为新任务并启动，响应 `task_id` 为新任务 ID
 - `DELETE`：删除任务记录与产物目录；任务仍在运行时返回 409
+
+#### POST /api/v1/tasks/cleanup — 批量清理终态任务
+
+- 请求：`TaskCleanupRequest { statuses: list[str] }`，仅允许 `"completed"` / `"failed"`；
+  传入其他状态（如 `pending`/`processing`）或空数组 → 400（运行中的任务不可清理，安全兜底）
+- 响应：`TaskCleanupResponse { deleted: int, failed: int, deleted_ids: list[str], errors: list[str] }`
+- 实现：`TaskManager.cleanup_tasks` 合并内存 + DB 的目标集合后逐个调用 `delete_task`，
+  单个失败记入 `errors`（形如 `"<task_id>: <原因>"`）不影响其他条目
 
 #### GET /api/v1/filesystem/dirs — 服务器目录浏览
 

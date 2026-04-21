@@ -86,6 +86,15 @@ export const ActionResponseSchema = z.object({
 });
 export type ActionResponse = z.infer<typeof ActionResponseSchema>;
 
+/** 批量清理任务响应 */
+export const TaskCleanupResponseSchema = z.object({
+  deleted: z.number().default(0),
+  failed: z.number().default(0),
+  deleted_ids: z.array(z.string()).default([]),
+  errors: z.array(z.string()).default([]),
+});
+export type TaskCleanupResponse = z.infer<typeof TaskCleanupResponseSchema>;
+
 /** WS 推送的进度消息（与 TaskProgress 一致） */
 export const TaskProgressSchema = ProgressResponseSchema;
 export type TaskProgress = ProgressResponse;

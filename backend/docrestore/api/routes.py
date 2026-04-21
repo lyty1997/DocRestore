@@ -43,6 +43,8 @@ from docrestore.api.schemas import (
     SourceImagesResponse,
     StageServerSourceRequest,
     StageServerSourceResponse,
+    TaskCleanupRequest,
+    TaskCleanupResponse,
     TaskListItem,
     TaskListResponse,
     TaskResponse,
@@ -603,6 +605,33 @@ async def delete_task(task_id: str) -> ActionResponse:
     return ActionResponse(
         task_id=task_id,
         message="任务及产物已删除",
+    )
+
+
+@router.post("/tasks/cleanup", response_model=TaskCleanupResponse)
+async def cleanup_tasks(req: TaskCleanupRequest) -> TaskCleanupResponse:
+    """批量清理指定状态的任务（仅允许 completed / failed）。
+
+    对 100+ 历史任务场景，逐个调用 DELETE /tasks/{id} 会产生大量往返，
+    此接口一次性清理并返回汇总结果。
+    """
+    allowed = {"completed", "failed"}
+    invalid = [s for s in req.statuses if s not in allowed]
+    if invalid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"仅允许清理终态任务（completed / failed），非法状态: {invalid}",
+        )
+    if not req.statuses:
+        raise HTTPException(status_code=400, detail="statuses 不能为空")
+
+    manager = _get_manager()
+    deleted_ids, errors = await manager.cleanup_tasks(req.statuses)
+    return TaskCleanupResponse(
+        deleted=len(deleted_ids),
+        failed=len(errors),
+        deleted_ids=deleted_ids,
+        errors=[f"{tid}: {msg}" for tid, msg in errors],
     )
 
 

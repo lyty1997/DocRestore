@@ -8,6 +8,7 @@ import {
   CreateTaskResponseSchema,
   SourceImagesResponseSchema,
   StageServerSourceResponseSchema,
+  TaskCleanupResponseSchema,
   TaskListResponseSchema,
   TaskResponseSchema,
   TaskResultResponseSchema,
@@ -24,6 +25,7 @@ import {
   type CreateTaskResponse,
   type SourceImagesResponse,
   type StageServerSourceResponse,
+  type TaskCleanupResponse,
   type TaskListResponse,
   type TaskResponse,
   type TaskResultResponse,
@@ -144,7 +146,23 @@ export async function deleteTask(taskId: string): Promise<ActionResponse> {
   return handleResponse(response, ActionResponseSchema);
 }
 
-/** 重试任务 */
+/**
+ * 批量清理指定状态的任务（仅允许 completed / failed）。
+ *
+ * 返回 {deleted, failed, deleted_ids, errors}；调用方据此给用户反馈。
+ */
+export async function cleanupTasks(
+  statuses: readonly ("completed" | "failed")[],
+): Promise<TaskCleanupResponse> {
+  const response = await fetch(`${API_BASE}/tasks/cleanup`, {
+    method: "POST",
+    headers: { ...apiHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ statuses }),
+  });
+  return handleResponse(response, TaskCleanupResponseSchema);
+}
+
+/** 重试任务（从头跑） */
 export async function retryTask(taskId: string): Promise<ActionResponse> {
   const response = await fetch(`${API_BASE}/tasks/${taskId}/retry`, {
     method: "POST",
