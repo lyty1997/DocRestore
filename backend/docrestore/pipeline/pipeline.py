@@ -92,6 +92,88 @@ _PAGE_MARKER_RE = re.compile(r"<!--\s*page:\s*(.+?)\s*-->")
 logger = logging.getLogger(__name__)
 
 
+def _pick_cut_points(
+    marker_starts: list[int],
+    target_positions: list[int],
+    total: int,
+) -> list[int] | None:
+    """从 marker 候选里给每个目标位置挑最近的切点。
+
+    返回 None 表示找不到 N-1 个有效切点（含 marker_starts 耗尽或切点重叠）。
+    """
+    cut_points: list[int] = []
+    used: set[int] = set()
+    for target in target_positions:
+        best = -1
+        best_dist = total + 1
+        for idx, pos in enumerate(marker_starts):
+            if idx in used or pos == 0:
+                continue
+            d = abs(pos - target)
+            if d < best_dist:
+                best_dist = d
+                best = idx
+        if best < 0:
+            return None
+        used.add(best)
+        cut_points.append(marker_starts[best])
+    cut_points.sort()
+    # 去重/乱序校验：相邻切点必须严格递增
+    for i in range(1, len(cut_points)):
+        if cut_points[i] <= cut_points[i - 1]:
+            return None
+    return cut_points
+
+
+def _split_by_page_markers(markdown: str, n_chunks: int) -> list[str]:
+    """按 <!-- page: --> 边界把 markdown 切成近似等长的 N 块。
+
+    策略：
+    - 枚举所有 page marker 的起始位置作为候选切点
+    - 目标切点 = 字符数均匀划分位置，取最接近的 page marker 起点
+    - 切分后任何一块为空或切点不足 N-1 个 → 返回 [markdown] 让调用方回退
+
+    返回的块之间无重叠，拼接起来等于原文（保序）。
+    """
+    if n_chunks <= 1:
+        return [markdown]
+    markers = list(_PAGE_MARKER_RE.finditer(markdown))
+    if len(markers) < n_chunks:
+        return [markdown]
+
+    total = len(markdown)
+    marker_starts = [m.start() for m in markers]
+    target_positions = [
+        total * (i + 1) // n_chunks for i in range(n_chunks - 1)
+    ]
+    cut_points = _pick_cut_points(marker_starts, target_positions, total)
+    if cut_points is None:
+        return [markdown]
+
+    chunks: list[str] = []
+    prev = 0
+    for cp in cut_points:
+        chunks.append(markdown[prev:cp])
+        prev = cp
+    chunks.append(markdown[prev:])
+    if any(not c.strip() for c in chunks):
+        return [markdown]
+    return chunks
+
+
+def _stitch_final_chunks(chunks: list[str]) -> str:
+    """拼接分块 final_refine 的结果。
+
+    - 普通场景每块以 page marker 开头（切分点落在 marker 处），直接 join
+    - 末尾清理连续多空行为单空行
+    """
+    if not chunks:
+        return ""
+    joined = "\n".join(c.rstrip() for c in chunks)
+    # 压多空行
+    return re.sub(r"\n{3,}", "\n\n", joined)
+
+
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 
 
@@ -1653,11 +1735,13 @@ class Pipeline:
         """整篇文档级精修，失败时回退到原文。返回 (文档, 是否截断)。
 
         带磁盘缓存：命中直接返回，miss 才真正调 LLM 并落盘。
+        大文档按 <!-- page: --> 边界切成多块并行调用，降低墙钟。
         """
         if not hasattr(refiner, "final_refine"):
             return doc, False
 
         # 先查缓存 — 整文档级精修通常是最昂贵的一步
+        # cache key 以完整 markdown 为准，分块是纯实现细节、对缓存透明
         if cache.enabled:
             cached = cache.get_final(
                 model=llm_cfg.model,
@@ -1675,42 +1759,86 @@ class Pipeline:
                     gaps=doc.gaps + cached.gaps,
                 ), False
 
+        # 决定是否分块：文档够大 + 配置允许
+        n_chunks = max(1, int(llm_cfg.final_refine_chunks))
+        if (
+            n_chunks <= 1
+            or len(doc.markdown) < llm_cfg.final_refine_min_chars
+        ):
+            chunks = [doc.markdown]
+        else:
+            chunks = _split_by_page_markers(doc.markdown, n_chunks)
+            # 切分失败（页边界不足以支撑 N 块）则回退单次
+            if len(chunks) <= 1:
+                chunks = [doc.markdown]
+
         report_fn(
-            "final_refine", 0, 1, "整篇文档级精修...",
+            "final_refine", 0, len(chunks),
+            f"整篇文档级精修...（{len(chunks)} 块并行）"
+            if len(chunks) > 1 else "整篇文档级精修...",
         )
+
         try:
-            result: RefinedResult = (
-                await refiner.final_refine(doc.markdown)
-            )
-            await self._save_debug(
-                output_dir,
-                "final_refined.md",
-                result.markdown,
-            )
-            # 截断时回退原文：result.markdown 只到一半反而丢数据
-            if result.truncated:
-                logger.warning(
-                    "整篇文档级精修疑似截断，回退到原文",
+            total = len(chunks)
+            # 并行调用；任意一块失败或截断由后处理统一回退到原文
+            results: list[RefinedResult | BaseException] = (
+                await asyncio.gather(
+                    *(
+                        refiner.final_refine(
+                            c, chunk_index=i + 1, total_chunks=total,
+                        )
+                        for i, c in enumerate(chunks)
+                    ),
+                    return_exceptions=True,
                 )
-                return doc, True
-            # 真正成功才写缓存（put 对 truncated=True 也会拦截）
-            cache.put_final(
-                model=llm_cfg.model,
-                api_base=llm_cfg.api_base,
-                markdown=doc.markdown,
-                result=result,
             )
-            return MergedDocument(
-                markdown=result.markdown,
-                images=doc.images,
-                gaps=doc.gaps + result.gaps,
-            ), False
         except Exception:
             logger.warning(
-                "整篇文档级精修失败，回退到原文",
-                exc_info=True,
+                "整篇文档级精修调度失败，回退到原文", exc_info=True,
             )
             return doc, False
+
+        # 汇总：任一块异常/截断 → 保守回退原文
+        merged_parts: list[str] = []
+        merged_gaps: list[Gap] = []
+        any_truncated = False
+        for i, r in enumerate(results):
+            if isinstance(r, BaseException):
+                logger.warning(
+                    "整篇精修第 %d/%d 块失败，回退到原文: %s",
+                    i + 1, len(chunks), r,
+                )
+                return doc, False
+            if r.truncated:
+                logger.warning(
+                    "整篇精修第 %d/%d 块疑似截断，回退到原文",
+                    i + 1, len(chunks),
+                )
+                return doc, True
+            merged_parts.append(r.markdown)
+            merged_gaps.extend(r.gaps)
+
+        merged_markdown = _stitch_final_chunks(merged_parts)
+        final_result = RefinedResult(
+            markdown=merged_markdown,
+            gaps=merged_gaps,
+            truncated=False,
+        )
+        await self._save_debug(
+            output_dir, "final_refined.md", merged_markdown,
+        )
+        # 真正成功才写缓存
+        cache.put_final(
+            model=llm_cfg.model,
+            api_base=llm_cfg.api_base,
+            markdown=doc.markdown,
+            result=final_result,
+        )
+        return MergedDocument(
+            markdown=merged_markdown,
+            images=doc.images,
+            gaps=doc.gaps + merged_gaps,
+        ), any_truncated
 
     @staticmethod
     def _collect_warnings(

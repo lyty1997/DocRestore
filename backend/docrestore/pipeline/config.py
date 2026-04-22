@@ -194,6 +194,14 @@ class LLMConfig(BaseModel):
     max_retries: int = 2
     timeout: int = 600  # 单次请求超时（秒），慢速中转站需要更大值
     enable_final_refine: bool = True  # 分段精修后是否做整篇文档级精修
+    # 整篇精修分块：文档超过 final_refine_min_chars 时切成 final_refine_chunks 块
+    # 并行调用；块数 ≤1 退化为单次整篇调用。每块按 <!-- page: --> 边界切分。
+    final_refine_chunks: int = 3
+    final_refine_min_chars: int = 20000
+    # OpenAI Predicted Outputs (prediction 参数)：对 refine/final_refine 这类
+    # 输出 ≈ 输入的改写任务可提速 2-4×。仅 gpt-4o 系支持，gpt-5 全系不支持。
+    # 默认关闭；切换到支持模型时置 True 即可生效。
+    enable_prediction: bool = False
     enable_gap_fill: bool = True  # 检测到 gap 时是否尝试 re-OCR 自动补充
     # 截断检测：输出行数少于输入 * (1 - ratio) 时视为可能被截断
     truncation_ratio_threshold: float = 0.3

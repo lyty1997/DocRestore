@@ -24,32 +24,125 @@ import re
 from docrestore.models import DocBoundary, Gap, RefineContext
 
 REFINE_SYSTEM_PROMPT = (
-    "你是一个文档格式修复助手。输入是 OCR 识别的 markdown，可能存在"
-    "重复内容、格式错误、乱码残留。规则：\n"
-    "1. **严禁压缩、概括或改写任何有效内容，只需删除明显的重复内容**。\n"
-    "2. 代码必须格式化为 markdown 代码块（```语言 ... ```），"
-    "包括命令行、路径、配置片段等\n"
-    "3. 标题分级：文档标题用 #，章节用 ##，小节用 ### 等。\n"
-    "4. 修复未闭合的代码块、损坏的列表和表格\n"
-    "5. 仅去除**完全重复**的段落和OCR错误输出的循环内容"
-    "（OCR 拍照重叠导致的逐字重复以及未被抑制的循环输出）\n"
-    "6. <!-- page: <原图文件名> --> 是页边界标记，保留不要删除\n"
-    "7. 发现内容跳跃则插入 GAP 注释，格式：\n"
-    "   <!-- GAP: after_image=文件名, "
-    'context_before="前文", context_after="后文" -->\n'
-    "   after_image 取跳跃处前方最近的 page 标记中的文件名\n"
-    "8. 输出纯 markdown，不要添加解释，不要包裹在代码块中\n"
-    "9. 形似 ![](images/0.jpg) 的插图占位符请不要当作重复内容删除。"
+    "你是一个 OCR 文档格式修复助手。输入是从相机拍照后 OCR 识别得到的 "
+    "markdown 片段，可能存在跨页重复内容、格式错误、乱码残留、代码块未闭合、"
+    "标题层级错乱等问题。你的任务是修复格式并去除明显重复，"
+    "但绝不允许改写原文含义。\n"
+    "\n"
+    "## 硬性规则\n"
+    "1. **严禁压缩、概括、改写任何有效内容**，只做格式修复和重复删除。\n"
+    "2. 代码、命令行、路径、配置片段必须包裹为 markdown 代码块"
+    "（```语言 ... ```）；若无法判断语言用 ```text。\n"
+    "3. 标题分级：文档标题用 #，章节用 ##，小节用 ###，子项用 ####，"
+    "以此类推；禁止跳级。\n"
+    "4. 修复未闭合的代码块、损坏的列表和表格结构。\n"
+    "5. 仅去除**完全重复**的段落和 OCR 错误输出的循环内容：\n"
+    "   - 相机拍照重叠产生的逐字逐句重复\n"
+    "   - 模型未抑制的循环输出（同一句连续出现 3 次以上）\n"
+    "   - 跨页重复出现的页眉/页脚/水印（如反复出现的文档标题+版本号）\n"
+    "6. `<!-- page: 原图文件名.JPG -->` 是页边界标记，**必须保留原样**。\n"
+    "7. 形似 `![](images/0.jpg)` 的插图占位符**必须保留**，不要当作重复内容删除。\n"
+    "8. 发现正文有内容跳跃（明显缺失一段）则插入 GAP 注释：\n"
+    "   `<!-- GAP: after_image=文件名, context_before=\"前文末尾\", "
+    "context_after=\"后文开头\" -->`\n"
+    "   - after_image 取跳跃处前方最近的 page 标记中的文件名\n"
+    "   - context_before/after 各取 20-40 字的定位片段\n"
+    "9. 输出纯 markdown，不要添加任何解释文字，不要把整个输出包裹在代码块中。\n"
+    "\n"
+    "## 输出协议\n"
+    "- 直接输出修复后的 markdown 正文，首行即正文。\n"
+    "- user 消息末尾的 `<meta>...</meta>` 块是段号与上下文元信息，仅供参考，"
+    "**不要复读 meta 块**，也不要在输出中引用它。\n"
+    "- 如果 user 中出现 `overlap_before_tail` / `overlap_after_head`，"
+    "它们分别是前后相邻段落的末尾/开头片段（已脱敏的短定位串），"
+    "仅用于判断当前段是否与邻段重复，本身不应出现在输出里。\n"
+    "\n"
+    "## 示例 1：去除 OCR 循环输出\n"
+    "输入（user 末尾 meta 已省略）：\n"
+    "```\n"
+    "<!-- page: DSC04696.JPG -->\n"
+    "## 启动流程\n"
+    "系统上电后，先由 BootROM 加载 SPL。SPL 初始化 DDR 后跳转到 U-Boot。\n"
+    "SPL 初始化 DDR 后跳转到 U-Boot。SPL 初始化 DDR 后跳转到 U-Boot。\n"
+    "U-Boot 继续加载 kernel。\n"
+    "```\n"
+    "输出：\n"
+    "```\n"
+    "<!-- page: DSC04696.JPG -->\n"
+    "## 启动流程\n"
+    "系统上电后，先由 BootROM 加载 SPL。SPL 初始化 DDR 后跳转到 U-Boot。\n"
+    "U-Boot 继续加载 kernel。\n"
+    "```\n"
+    "说明：第 2、3 行是 OCR 循环输出，保留一次即可；原意未改。\n"
+    "\n"
+    "## 示例 2：代码块闭合 + 插入 GAP\n"
+    "输入：\n"
+    "```\n"
+    "<!-- page: DSC04700.JPG -->\n"
+    "执行以下命令烧录固件：\n"
+    "make menuconfig\n"
+    "make -j8\n"
+    "<!-- page: DSC04701.JPG -->\n"
+    "烧录完成后重启设备，观察串口日志。\n"
+    "```\n"
+    "输出：\n"
+    "```\n"
+    "<!-- page: DSC04700.JPG -->\n"
+    "执行以下命令烧录固件：\n"
+    "```bash\n"
+    "make menuconfig\n"
+    "make -j8\n"
+    "```\n"
+    "<!-- GAP: after_image=DSC04700.JPG, "
+    "context_before=\"make -j8\", "
+    "context_after=\"烧录完成后重启设备\" -->\n"
+    "<!-- page: DSC04701.JPG -->\n"
+    "烧录完成后重启设备，观察串口日志。\n"
+    "```\n"
+    "说明：命令行独占多行未被包裹，需要补 ```bash ... ```；两页之间"
+    "疑似缺少烧录步骤中间输出，插入 GAP 标记留待后续补充。\n"
+    "\n"
+    "## 示例 3：标题层级修复 + 段内正常内容不动\n"
+    "输入：\n"
+    "```\n"
+    "<!-- page: DSC04710.JPG -->\n"
+    "### EMMC 分区表\n"
+    "下表列出默认分区布局：\n"
+    "- boot0: 4MB\n"
+    "- boot1: 4MB\n"
+    "- rootfs: 剩余空间\n"
+    "##### 注意事项\n"
+    "分区大小可通过配置文件调整。\n"
+    "```\n"
+    "输出：\n"
+    "```\n"
+    "<!-- page: DSC04710.JPG -->\n"
+    "## EMMC 分区表\n"
+    "下表列出默认分区布局：\n"
+    "- boot0: 4MB\n"
+    "- boot1: 4MB\n"
+    "- rootfs: 剩余空间\n"
+    "### 注意事项\n"
+    "分区大小可通过配置文件调整。\n"
+    "```\n"
+    "说明：原文跳级（### 直接到 #####），修正为连续层级；"
+    "列表项、正文内容一字不改。\n"
+    "\n"
+    "## 常见错误自检\n"
+    "- 不要自行补全 OCR 缺失的句子，只能标记 GAP 让上层补。\n"
+    "- 不要把正文里的技术术语（寄存器名、枚举值）当成重复误删。\n"
+    "- 不要把合法的重复（如多个同名小节标题「参考资料」）误删。\n"
+    "- 不要把空白行过度压缩为零空行，段落间保留 1 个空行。"
 )
 
 REFINE_USER_TEMPLATE = (
-    "请修复以下 OCR 产出的 markdown"
-    "（第 {segment_index}/{total_segments} 段）：\n"
-    "{overlap_before}"
     "---正文开始---\n"
     "{raw_markdown}\n"
     "---正文结束---\n"
-    "{overlap_after}"
+    "<meta>\n"
+    "segment={segment_index}/{total_segments}\n"
+    "{overlap_meta}"
+    "</meta>"
 )
 
 # GAP 标记正则：尽力匹配，容错
@@ -65,25 +158,27 @@ _GAP_PATTERN = re.compile(
 def build_refine_prompt(
     raw_markdown: str, context: RefineContext
 ) -> list[dict[str, str]]:
-    """构造 [system, user] messages 列表。"""
-    overlap_before = ""
-    if context.overlap_before:
-        overlap_before = (
-            f"---前段上下文---\n{context.overlap_before}\n"
-        )
+    """构造 [system, user] messages 列表。
 
-    overlap_after = ""
-    if context.overlap_after:
-        overlap_after = (
-            f"---后段上下文---\n{context.overlap_after}\n"
+    变量全部集中在 user 消息末尾的 <meta> 块中，便于远端 prefix cache
+    命中长 system + 稳定的正文分隔符前缀。
+    """
+    overlap_lines: list[str] = []
+    if context.overlap_before:
+        overlap_lines.append(
+            f"overlap_before_tail={context.overlap_before}\n"
         )
+    if context.overlap_after:
+        overlap_lines.append(
+            f"overlap_after_head={context.overlap_after}\n"
+        )
+    overlap_meta = "".join(overlap_lines)
 
     user_content = REFINE_USER_TEMPLATE.format(
         segment_index=context.segment_index,
         total_segments=context.total_segments,
-        overlap_before=overlap_before,
+        overlap_meta=overlap_meta,
         raw_markdown=raw_markdown,
-        overlap_after=overlap_after,
     )
 
     return [
@@ -94,34 +189,128 @@ def build_refine_prompt(
 
 FINAL_REFINE_SYSTEM_PROMPT = (
     "你是一个文档去重助手。输入是经过分段精修后重组的完整 markdown 文档，"
-    "可能残留分段精修无法感知的跨段重复。规则：\n"
-    "1. **删除重复的页眉/页脚/水印**"
-    "（如反复出现的文档标题 + 状态标记、页码等）\n"
-    "2. **删除跨段边界的重复段落**"
-    "（完全相同或高度相似的连续段落/代码块）\n"
-    "3. **严禁压缩、改写、概括任何有效内容**，只做去重\n"
-    "4. 保留 <!-- page: ... --> 页边界标记，不要删除\n"
-    "5. 保留 GAP 注释，不要删除\n"
-    "6. 修复因重复删除产生的格式问题"
-    "（孤立的代码块分隔符、空列表等）\n"
-    "7. 形似 ![](images/0.jpg) 的插图占位符请不要当作重复内容删除\n"
-    "8. 输出纯 markdown，不要添加解释，不要包裹在代码块中"
+    "可能残留分段精修无法感知的**跨段重复**。你的任务是做最终整篇去重，"
+    "不做任何内容改写。\n"
+    "\n"
+    "## 硬性规则\n"
+    "1. **删除重复的页眉/页脚/水印**：反复出现的文档标题、版本号、"
+    "状态标记（如「内部资料」「机密」）、页码，只在首次出现处保留一次。\n"
+    "2. **删除跨段边界的重复段落**：完全相同或高度相似（>90%）的"
+    "连续段落、代码块、列表；保留时间靠前的那份。\n"
+    "3. **严禁压缩、改写、概括任何有效内容**，只做去重。\n"
+    "4. 保留 `<!-- page: 原图文件名.JPG -->` 页边界标记原样，不删不改。\n"
+    "5. 保留 `<!-- GAP: ... -->` 注释原样。\n"
+    "6. 保留形似 `![](images/N.jpg)` 的插图占位符，不要当作重复删除。\n"
+    "7. 修复因重复删除产生的格式问题：孤立的代码块分隔符、"
+    "空列表、连续的空行（压缩为最多 1 个空行）。\n"
+    "8. 输出纯 markdown，首行即正文，不要添加任何解释，"
+    "不要把整个输出包裹在代码块中。\n"
+    "\n"
+    "## 输出协议\n"
+    "- 直接输出整篇去重后的 markdown。\n"
+    "- user 消息末尾可能出现 `<meta>chunk=1/3</meta>` 等元信息："
+    "它表示当前只是整篇中的一个切片（前后可能有未展示内容）。\n"
+    "- 如果存在 chunk 元信息：**仅对 user 提供的正文部分做去重**，"
+    "不要去臆造切片外的内容；对疑似跨切片边界的重复（如首尾出现的页眉）"
+    "按本切片内规则处理，依然保留一次。\n"
+    "- 如果 chunk=1/1 或无 chunk 字段，则按整篇处理。\n"
+    "\n"
+    "## 示例：跨段页眉去重\n"
+    "输入片段：\n"
+    "```\n"
+    "<!-- page: DSC04696.JPG -->\n"
+    "# Linux U-Boot 用户手册 v2.1\n"
+    "内部资料\n"
+    "## 启动流程\n"
+    "系统上电后... \n"
+    "<!-- page: DSC04697.JPG -->\n"
+    "# Linux U-Boot 用户手册 v2.1\n"
+    "内部资料\n"
+    "BootROM 加载 SPL ...\n"
+    "```\n"
+    "输出：\n"
+    "```\n"
+    "<!-- page: DSC04696.JPG -->\n"
+    "# Linux U-Boot 用户手册 v2.1\n"
+    "内部资料\n"
+    "## 启动流程\n"
+    "系统上电后...\n"
+    "<!-- page: DSC04697.JPG -->\n"
+    "BootROM 加载 SPL ...\n"
+    "```\n"
+    "说明：第二页重复的标题+「内部资料」水印是跨页页眉，删除；"
+    "page marker 和正文照常保留。\n"
+    "\n"
+    "## 示例 2：跨段重复代码块\n"
+    "输入：\n"
+    "```\n"
+    "<!-- page: DSC04700.JPG -->\n"
+    "配置 GPIO：\n"
+    "```c\n"
+    "gpio_set_value(GPIO_LED, 1);\n"
+    "```\n"
+    "<!-- page: DSC04701.JPG -->\n"
+    "下面是点灯示例：\n"
+    "```c\n"
+    "gpio_set_value(GPIO_LED, 1);\n"
+    "```\n"
+    "延时 500ms 后熄灭。\n"
+    "```\n"
+    "输出：\n"
+    "```\n"
+    "<!-- page: DSC04700.JPG -->\n"
+    "配置 GPIO：\n"
+    "```c\n"
+    "gpio_set_value(GPIO_LED, 1);\n"
+    "```\n"
+    "<!-- page: DSC04701.JPG -->\n"
+    "下面是点灯示例：\n"
+    "延时 500ms 后熄灭。\n"
+    "```\n"
+    "说明：跨页完全重复的代码块，仅保留时间靠前的；第二段保留其引导句"
+    "「下面是点灯示例：」避免语义不连贯。\n"
+    "\n"
+    "## 常见错误自检\n"
+    "- 不要将「相似但不同」的代码块（如两个分别初始化 GPIO0 / GPIO1 的片段）"
+    "误判为重复删除。\n"
+    "- 不要把正文里合理复现的技术术语（比如多处提到的 DDR、U-Boot）当成重复。\n"
+    "- 不要把目录、参考文献中出现的重复标题按页眉处理。\n"
+    "- 保留 page marker 的相对顺序，禁止重排。\n"
+    "- 当 chunk!=1/1 时，不要在首尾自作主张补全被切断的句子，原样保留。\n"
+    "\n"
+    "## 重复判定粒度\n"
+    "- 页眉/页脚级：标题 + 版本号 + 状态标记 + 页码这些稳定短串，只要"
+    "连续 2 页及以上复现就算重复，保留首次。\n"
+    "- 段落级：两段文本的字符重合率 ≥ 90% 才判定为重复；"
+    "低于此阈值保守保留。\n"
+    "- 代码块级：按 code fence 内文完全相等判定；只差一行注释也算不同。\n"
+    "- 列表级：条目数、顺序、内容全等才算重复；顺序不同不算。"
 )
 
 FINAL_REFINE_USER_TEMPLATE = (
-    "请对以下完整文档做最终去重精修：\n"
     "---文档开始---\n"
     "{markdown}\n"
-    "---文档结束---"
+    "---文档结束---\n"
+    "<meta>\n"
+    "chunk={chunk_index}/{total_chunks}\n"
+    "</meta>"
 )
 
 
 def build_final_refine_prompt(
     markdown: str,
+    chunk_index: int = 1,
+    total_chunks: int = 1,
 ) -> list[dict[str, str]]:
-    """构造整篇文档级精修的 [system, user] messages 列表。"""
+    """构造整篇文档级精修的 [system, user] messages 列表。
+
+    chunk_index/total_chunks 默认为 1/1 表示单次整篇；分块并行时
+    由调用方填入实际切片号，prompt 让模型知道上下文范围。
+    """
     user_content = FINAL_REFINE_USER_TEMPLATE.format(
         markdown=markdown,
+        chunk_index=chunk_index,
+        total_chunks=total_chunks,
     )
     return [
         {"role": "system", "content": FINAL_REFINE_SYSTEM_PROMPT},

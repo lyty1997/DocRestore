@@ -28,7 +28,7 @@ class TestBuildRefinePrompt:
     """build_refine_prompt 测试"""
 
     def test_basic_structure(self) -> None:
-        """返回 [system, user] 两条消息"""
+        """返回 [system, user] 两条消息，段号在末尾 meta 块中"""
         ctx = RefineContext(
             segment_index=1,
             total_segments=3,
@@ -39,11 +39,16 @@ class TestBuildRefinePrompt:
         assert len(msgs) == 2
         assert msgs[0]["role"] == "system"
         assert msgs[1]["role"] == "user"
-        assert "1/3" in msgs[1]["content"]
-        assert "# 标题" in msgs[1]["content"]
+        content = msgs[1]["content"]
+        assert "segment=1/3" in content
+        assert "# 标题" in content
+        # user 以正文开头为前缀（便于远端 prefix cache 命中）
+        assert content.startswith("---正文开始---\n")
+        # meta 块在末尾
+        assert content.rstrip().endswith("</meta>")
 
     def test_with_overlap(self) -> None:
-        """带 overlap 上下文"""
+        """带 overlap 上下文，overlap 也在末尾 meta 中"""
         ctx = RefineContext(
             segment_index=2,
             total_segments=5,
@@ -52,13 +57,16 @@ class TestBuildRefinePrompt:
         )
         msgs = build_refine_prompt("正文内容", ctx)
         content = msgs[1]["content"]
-        assert "前段上下文" in content
-        assert "前段尾部内容" in content
-        assert "后段上下文" in content
-        assert "后段头部内容" in content
+        assert "overlap_before_tail=前段尾部内容" in content
+        assert "overlap_after_head=后段头部内容" in content
+        # 变量必须在 <meta> 块内，不能破坏前缀
+        meta_start = content.rfind("<meta>")
+        assert meta_start != -1
+        assert "overlap_before_tail" in content[meta_start:]
+        assert "overlap_after_head" in content[meta_start:]
 
     def test_no_overlap(self) -> None:
-        """无 overlap 时不包含上下文标记"""
+        """无 overlap 时 meta 中不出现 overlap 字段"""
         ctx = RefineContext(
             segment_index=1,
             total_segments=1,
@@ -67,8 +75,8 @@ class TestBuildRefinePrompt:
         )
         msgs = build_refine_prompt("正文", ctx)
         content = msgs[1]["content"]
-        assert "前段上下文" not in content
-        assert "后段上下文" not in content
+        assert "overlap_before_tail" not in content
+        assert "overlap_after_head" not in content
 
 
 class TestParseGaps:
@@ -140,12 +148,26 @@ class TestBuildFinalRefinePrompt:
         assert msgs[1]["role"] == "user"
         # 输入必须完整出现在 user（不能被截断或剪裁）
         assert md in msgs[1]["content"]
+        # user 以正文分隔符开头（稳定前缀，利于 prefix cache）
+        assert msgs[1]["content"].startswith("---文档开始---\n")
 
     def test_contains_markdown(self) -> None:
         """user 消息中包含输入的 markdown"""
         md = "# 文档\n\n## 章节一\n内容"
         msgs = build_final_refine_prompt(md)
         assert md in msgs[1]["content"]
+
+    def test_chunk_meta(self) -> None:
+        """chunk 元信息在末尾 meta 块中"""
+        msgs = build_final_refine_prompt("正文", chunk_index=2, total_chunks=3)
+        content = msgs[1]["content"]
+        assert "chunk=2/3" in content
+        assert content.rstrip().endswith("</meta>")
+
+    def test_chunk_default(self) -> None:
+        """默认 chunk=1/1 表示整篇单次精修"""
+        msgs = build_final_refine_prompt("正文")
+        assert "chunk=1/1" in msgs[1]["content"]
 
     def test_system_prompt_keywords(self) -> None:
         """system prompt 包含去重相关关键指令"""

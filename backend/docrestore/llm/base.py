@@ -99,8 +99,18 @@ class LLMRefiner(Protocol):
         """从 re-OCR 文本中提取 gap 缺失内容。"""
         ...
 
-    async def final_refine(self, markdown: str) -> RefinedResult:
-        """整篇文档级精修：去除跨段重复和页眉水印。"""
+    async def final_refine(
+        self,
+        markdown: str,
+        *,
+        chunk_index: int = 1,
+        total_chunks: int = 1,
+    ) -> RefinedResult:
+        """整篇文档级精修：去除跨段重复和页眉水印。
+
+        chunk_index/total_chunks 默认 1/1 表示单次整篇；分块并行时
+        调用方填入实际切片号，模型据此判断当前是整篇还是切片。
+        """
         ...
 
     async def detect_doc_boundaries(
@@ -139,9 +149,16 @@ class BaseLLMRefiner:
         self._semaphore = semaphore
 
     def _build_kwargs(
-        self, messages: list[dict[str, str]],
+        self,
+        messages: list[dict[str, str]],
+        *,
+        prediction_content: str | None = None,
     ) -> dict[str, object]:
-        """构造 litellm.acompletion 公共参数。"""
+        """构造 litellm.acompletion 公共参数。
+
+        prediction_content 非空且 config.enable_prediction=True 时，追加
+        OpenAI Predicted Outputs 参数（仅 gpt-4o 系支持，gpt-5 全系原生不支持）。
+        """
         kwargs: dict[str, object] = {
             "model": self._config.model,
             "messages": messages,
@@ -152,6 +169,14 @@ class BaseLLMRefiner:
             kwargs["base_url"] = self._config.api_base
         if self._config.api_key:
             kwargs["api_key"] = self._config.api_key
+        if (
+            self._config.enable_prediction
+            and prediction_content
+        ):
+            kwargs["prediction"] = {
+                "type": "content",
+                "content": prediction_content,
+            }
         return kwargs
 
     @contextlib.asynccontextmanager
@@ -213,7 +238,10 @@ class BaseLLMRefiner:
         4. 返回 RefinedResult
         """
         messages = build_refine_prompt(raw_markdown, context)
-        kwargs = self._build_kwargs(messages)
+        # 精修输出 ≈ 输入（只改格式 + 去重复），把原文作为 prediction 给支持的模型
+        kwargs = self._build_kwargs(
+            messages, prediction_content=raw_markdown,
+        )
 
         response = await self._call_llm(kwargs)
         if not response.choices:
@@ -261,11 +289,22 @@ class BaseLLMRefiner:
         return fill_content.strip()
 
     async def final_refine(
-        self, markdown: str,
+        self,
+        markdown: str,
+        *,
+        chunk_index: int = 1,
+        total_chunks: int = 1,
     ) -> RefinedResult:
         """整篇文档级精修：去除跨段重复和页眉水印。"""
-        messages = build_final_refine_prompt(markdown)
-        kwargs = self._build_kwargs(messages)
+        messages = build_final_refine_prompt(
+            markdown,
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+        )
+        # final_refine 同样是改写任务，输出高度相似输入 → 可用 prediction
+        kwargs = self._build_kwargs(
+            messages, prediction_content=markdown,
+        )
 
         response = await self._call_llm(kwargs)
         if not response.choices:
