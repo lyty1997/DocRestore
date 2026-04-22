@@ -237,7 +237,7 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
         self, image_path: Path, output_dir: Path
     ) -> PageOCR:
         """单张 OCR，结果写入 output_dir/{stem}_OCR/"""
-        await self._recover_desync_if_needed()
+        await self._resync_if_needed()
 
         # 增量OCR：检查已有结果
         ocr_dir = output_dir / f"{image_path.stem}_OCR"
@@ -275,7 +275,7 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
         - 已有 result.mmd 的图跳过 worker，直接从磁盘加载。
         - OOM 时按 batch_size 对半降级重试，单图仍 OOM 才抛 RuntimeError。
         """
-        await self._recover_desync_if_needed()
+        await self._resync_if_needed()
 
         batch_size = max(1, self._config.ocr_batch_size)
         if batch_size < 2:
@@ -401,7 +401,7 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
 
     async def reocr_page(self, image_path: Path) -> str:
         """对整页图片重新 OCR，返回清洗后的 markdown（gap fill 用）。"""
-        await self._recover_desync_if_needed()
+        await self._resync_if_needed()
 
         resp = await self._send_command({
             "cmd": "reocr_page",

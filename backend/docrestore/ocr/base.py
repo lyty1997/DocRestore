@@ -24,7 +24,7 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol
+from typing import NoReturn, Protocol
 
 from docrestore.models import PageOCR
 from docrestore.pipeline.config import OCRConfig
@@ -133,7 +133,14 @@ class WorkerBackedOCREngine(ABC):
         self._config = config
         self._process: asyncio.subprocess.Process | None = None
         self._ready = False
-        self._desync = False
+        # JSON Lines 命令序列号。每次 `_send_command` 前自增；worker 在响应里
+        # 回显该 seq 以便协议失步时定位、丢弃旧响应。
+        self._seq: int = 0
+        # 前一条命令被 cancel 等中断，响应还在 worker stdout 缓冲区里未消费。
+        # 下次 `_send_command` 前先走 `_resync_if_needed` 按 `_pending_seq`
+        # 把残留响应 drain 掉；drain 超时才回退 `_restart_worker`。
+        self._pending_resync: bool = False
+        self._pending_seq: int | None = None
         # worker stderr drain 任务 + 最近 N 行缓冲（供 _raise_worker_exited 取）
         self._stderr_drain_task: asyncio.Task[None] | None = None
         self._stderr_tail: deque[str] = deque(maxlen=200)
@@ -346,24 +353,78 @@ class WorkerBackedOCREngine(ABC):
         logger.info("%s 引擎已关闭", self.engine_name)
 
     async def _restart_worker(self) -> None:
-        """重启 worker 进程（用于清理累积显存或恢复协议失步）。
+        """重启 worker 进程（用于清理累积显存或最终兜底 resync）。
 
         restart 场景下 worker 往往已经假死/卡住，graceful 命令没有意义，
-        直接 force=True 终止进程避免再次在 shutdown 命令上阻塞。
+        直接 force=True 终止进程避免再次在 shutdown 命令上阻塞。重启后
+        seq 归零、pending_resync 清空——worker 是新进程。
         """
         logger.info("重启 %s worker...", self.engine_name)
         await self.shutdown(force=True)
+        self._seq = 0
+        self._pending_resync = False
+        self._pending_seq = None
         await self.initialize()
         logger.info("%s worker 重启完成", self.engine_name)
 
-    async def _recover_desync_if_needed(self) -> None:
-        """若上次命令被 cancel 导致协议失步，重启 worker 恢复同步。"""
-        if self._desync:
-            logger.warning(
-                "检测到协议失步，重启 %s worker 恢复同步", self.engine_name,
-            )
+    async def _resync_if_needed(self) -> None:
+        """若上次命令被 cancel 导致响应残留，drain 残留直到 seq 对齐。
+
+        流程：
+        1. `_pending_seq` 不为空时，循环从 stdout 读下一行 JSON 响应；
+        2. `seq == pending_seq` → 残留已消费完毕，协议同步；
+        3. `seq < pending_seq` → 更早的残留（理论不应出现），继续丢弃；
+        4. `seq > pending_seq` / 缺失 seq / 解析失败 / 超时 → 无法安全恢复，
+           fallback `_restart_worker()`。
+        """
+        if not self._pending_resync:
+            return
+        expected = self._pending_seq
+        if expected is None or self._process is None:
+            # 异常状态：置位但无信息 → 只能重启兜底
             await self._restart_worker()
-            self._desync = False
+            return
+        stdout = self._process.stdout
+        if stdout is None:
+            await self._restart_worker()
+            return
+
+        read_timeout = self._get_timeout()
+        logger.info(
+            "检测到协议残留，开始 drain %s worker stdout 至 seq=%d",
+            self.engine_name, expected,
+        )
+        try:
+            while True:
+                resp = await self._read_next_response(stdout, read_timeout)
+                resp_seq = resp.get("seq")
+                if isinstance(resp_seq, int):
+                    if resp_seq == expected:
+                        logger.info(
+                            "%s resync 成功：已消费残留响应 seq=%d",
+                            self.engine_name, expected,
+                        )
+                        self._pending_resync = False
+                        self._pending_seq = None
+                        return
+                    if resp_seq < expected:
+                        logger.debug(
+                            "resync 丢弃更早残留响应 seq=%d（期望 %d）",
+                            resp_seq, expected,
+                        )
+                        continue
+                # seq > expected / seq 缺失：协议错乱，走 restart 兜底
+                logger.warning(
+                    "%s resync 读到异常响应 seq=%r（期望 %d），重启 worker",
+                    self.engine_name, resp_seq, expected,
+                )
+                break
+        except (TimeoutError, RuntimeError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "%s resync 失败 (%s)，重启 worker 兜底",
+                self.engine_name, exc,
+            )
+        await self._restart_worker()
 
     async def ocr_batch(
         self,
@@ -408,7 +469,14 @@ class WorkerBackedOCREngine(ABC):
     async def _send_command(
         self, cmd: dict[str, object]
     ) -> dict[str, object]:
-        """向 worker stdin 写 JSON，从 stdout 读 JSON 响应。"""
+        """向 worker stdin 写 JSON，从 stdout 读 seq 匹配的 JSON 响应。
+
+        协议：
+        - 请求注入自增 `seq`；worker 回显 `seq`
+        - cancel 打断时只记下 `_pending_seq`，下次 `_resync_if_needed` 负责
+          drain 残留，避免整个 worker 重启
+        - 读响应时 `seq < expected` 的旧帧直接丢弃（通常是 resync 未清完）
+        """
         if self._process is None:
             msg = "Worker 进程未启动"
             raise RuntimeError(msg)
@@ -419,34 +487,73 @@ class WorkerBackedOCREngine(ABC):
             msg = "Worker 进程 stdin/stdout 不可用"
             raise RuntimeError(msg)
 
-        line = json.dumps(cmd, ensure_ascii=False) + "\n"
+        self._seq += 1
+        seq = self._seq
+        payload = {**cmd, "seq": seq}
+
+        line = json.dumps(payload, ensure_ascii=False) + "\n"
         stdin.write(line.encode("utf-8"))
         try:
             await stdin.drain()
         except asyncio.CancelledError:
             # 命令可能已部分/全部写入，worker 可能产生响应残留
-            self._desync = True
+            self._pending_resync = True
+            self._pending_seq = seq
             raise
 
         read_timeout = self._get_timeout()
-        try:
-            raw = await asyncio.wait_for(
-                stdout.readline(), timeout=read_timeout,
+        while True:
+            try:
+                resp = await self._read_next_response(stdout, read_timeout)
+            except asyncio.CancelledError:
+                # worker 仍在处理，响应会残留在 stdout 缓冲区
+                self._pending_resync = True
+                self._pending_seq = seq
+                raise
+            except TimeoutError:
+                msg = f"{self.engine_name} worker 响应超时({read_timeout}s)"
+                raise RuntimeError(msg) from None
+
+            resp_seq = resp.get("seq")
+            if isinstance(resp_seq, int):
+                if resp_seq == seq:
+                    return resp
+                if resp_seq < seq:
+                    logger.debug(
+                        "丢弃滞留响应 seq=%d（期望 %d）", resp_seq, seq,
+                    )
+                    continue
+                # seq 超前：worker 协议错乱
+                msg = (
+                    f"{self.engine_name} 响应 seq={resp_seq} 超前于"
+                    f"期望 seq={seq}，协议错乱"
+                )
+                raise RuntimeError(msg)
+            # seq 缺失：老 worker / 协议不兼容 → 按当前响应返回（向后兼容）
+            logger.debug(
+                "响应未携带 seq（期望 %d），按当前响应返回", seq,
             )
-        except asyncio.CancelledError:
-            # worker 仍在处理，响应会残留在 stdout 缓冲区
-            self._desync = True
-            raise
-        except TimeoutError:
-            msg = f"{self.engine_name} worker 响应超时({read_timeout}s)"
-            raise RuntimeError(msg) from None
+            return resp
 
+    async def _read_next_response(
+        self,
+        stdout: asyncio.StreamReader,
+        read_timeout: float,
+    ) -> dict[str, object]:
+        """从 stdout 读下一行并解析为响应 dict。
+
+        保留子类覆盖 `_read_response` 以跳过非 JSON 行（如 vLLM 日志混入）的
+        能力；在此做一层 readline + worker-exit 兜底。
+        """
+        raw = await asyncio.wait_for(
+            stdout.readline(), timeout=read_timeout,
+        )
         if not raw:
+            # 永远 raise，返回路径不可达
             await self._raise_worker_exited()
+        return await self._read_response(raw, stdout, int(read_timeout))
 
-        return await self._read_response(raw, stdout, read_timeout)
-
-    async def _raise_worker_exited(self) -> None:
+    async def _raise_worker_exited(self) -> NoReturn:
         """worker 进程退出时，从 stderr tail 取最后 N 行抛出 RuntimeError。
 
         stderr 已由 drain task 持续消费写入 self._stderr_tail；这里等 drain

@@ -37,8 +37,10 @@ from pathlib import Path
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
 
-def _send(data: dict[str, object]) -> None:
-    """向 stdout 写一行 JSON。"""
+def _send(data: dict[str, object], *, seq: object = None) -> None:
+    """向 stdout 写一行 JSON；seq 非空时注入 `seq` 字段以便主进程对齐响应。"""
+    if seq is not None and "seq" not in data:
+        data = {**data, "seq": seq}
     sys.stdout.write(json.dumps(data, ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
@@ -494,6 +496,7 @@ def main() -> None:
             break
 
         cmd = request.get("cmd", "")
+        seq = request.get("seq")
 
         if cmd == "initialize":
             _send(worker.handle_initialize(
@@ -501,7 +504,7 @@ def main() -> None:
                 server_model_name=str(
                     request.get("server_model_name", "")
                 ),
-            ))
+            ), seq=seq)
         elif cmd == "ocr":
             min_img_raw = request.get("min_image_size", 0)
             min_img = (
@@ -514,17 +517,19 @@ def main() -> None:
                     str(request.get("image_path", "")),
                     str(request.get("output_dir", "")),
                     min_image_size=min_img,
-                )
+                ),
+                seq=seq,
             )
         elif cmd == "shutdown":
-            _send(worker.handle_shutdown())
+            _send(worker.handle_shutdown(), seq=seq)
             break
         else:
             _send(
                 {
                     "ok": False,
                     "error": f"未知命令: {cmd}",
-                }
+                },
+                seq=seq,
             )
 
 

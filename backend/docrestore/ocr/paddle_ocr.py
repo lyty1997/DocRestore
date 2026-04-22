@@ -149,7 +149,7 @@ class PaddleOCREngine(WorkerBackedOCREngine):
         self, image_path: Path, output_dir: Path
     ) -> PageOCR:
         """单张 OCR，结果写入 output_dir/{stem}_OCR/"""
-        await self._recover_desync_if_needed()
+        await self._resync_if_needed()
 
         # 增量OCR：优先检查裁剪后版本，再检查原始版本
         cropped_ocr_dir = output_dir / f"{image_path.stem}_cropped_OCR"

@@ -384,3 +384,186 @@ async def test_restart_worker_uses_force_shutdown(
         )
         # initialize 命令被重新发送
         assert "initialize" in new_cmds
+
+
+# ── seq 协议与 resync 回归 ──────────────────────────────
+
+def _sent_payloads(mock_process: MockProcess) -> list[dict[str, object]]:
+    """取所有已写入 stdin 的 JSON payload。"""
+    return [
+        json.loads(call.args[0].decode("utf-8"))
+        for call in mock_process.stdin.write.call_args_list
+    ]
+
+
+def _make_readline(responses: list[bytes]) -> object:
+    """把一串字节响应串成 stdout.readline 的 async mock。"""
+
+    async def readline() -> bytes:
+        if responses:
+            return responses.pop(0)
+        return b""
+
+    return readline
+
+
+@pytest.mark.asyncio
+async def test_send_command_injects_monotonic_seq(
+    paddle_config: OCRConfig,
+    mock_process: MockProcess,
+) -> None:
+    """每次 _send_command 请求 payload 必须带自增 seq。"""
+    mock_process.set_responses([
+        {"ok": True, "seq": 1},  # initialize
+        {"ok": True, "seq": 2},  # shutdown
+    ])
+    original_exists = Path.exists
+
+    def mock_exists(p: Path) -> bool:
+        return True if str(p) == paddle_config.paddle_python else original_exists(p)
+
+    with (
+        patch.object(Path, "exists", lambda p: mock_exists(p)),
+        patch("asyncio.create_subprocess_exec", return_value=mock_process),
+    ):
+        engine = PaddleOCREngine(paddle_config)
+        await engine.initialize()
+        await engine.shutdown()
+
+    payloads = _sent_payloads(mock_process)
+    seqs = [p["seq"] for p in payloads]
+    assert seqs == [1, 2], f"seq 非严格单调递增: {seqs}"
+
+
+@pytest.mark.asyncio
+async def test_send_command_drops_stale_response(
+    paddle_config: OCRConfig,
+    mock_process: MockProcess,
+) -> None:
+    """响应 seq 落后于期望时应被丢弃，继续读下一条直到 seq 对齐。"""
+    responses = [
+        json.dumps({"ok": True, "seq": 1}).encode() + b"\n",  # initialize
+        # OCR 命令对应 seq=2；先混入一条旧残留 seq=1、再给出 seq=2 真响应
+        json.dumps({"ok": True, "stale": True, "seq": 1}).encode() + b"\n",
+        json.dumps({
+            "ok": True,
+            "seq": 2,
+            "raw_text": "# t",
+            "image_size": [10, 10],
+            "image_count": 0,
+            "ocr_dir": "",
+        }).encode() + b"\n",
+    ]
+    mock_process.stdout.readline = _make_readline(responses)
+
+    original_exists = Path.exists
+
+    def mock_exists(p: Path) -> bool:
+        return True if str(p) == paddle_config.paddle_python else original_exists(p)
+
+    with (
+        patch.object(Path, "exists", lambda p: mock_exists(p)),
+        patch("asyncio.create_subprocess_exec", return_value=mock_process),
+    ):
+        engine = PaddleOCREngine(paddle_config)
+        await engine.initialize()
+        # 直接构造最小 ocr 命令，绕开 PaddleOCREngine.ocr 的文件系统副作用
+        resp = await engine._send_command({"cmd": "ocr"})
+        assert resp["seq"] == 2
+        assert resp.get("stale") is not True
+
+
+@pytest.mark.asyncio
+async def test_cancel_records_pending_seq_and_resync_drains(
+    paddle_config: OCRConfig,
+    mock_process: MockProcess,
+) -> None:
+    """_send_command 被 cancel 时记下 pending_seq；下次 _resync_if_needed
+    读到匹配 seq 的残留响应即完成同步，不触发 _restart_worker。"""
+    # initialize 正常；cancel 发生后 worker 仍会把请求响应写出
+    init_resp = json.dumps({"ok": True, "seq": 1}).encode() + b"\n"
+    # cancel 期间模拟 readline 抛 CancelledError
+    # resync 时模拟 worker 先写出一条更早的残留再写出 pending seq=2
+    resync_resps = [
+        json.dumps({"ok": True, "stale": True, "seq": 0}).encode() + b"\n",
+        json.dumps({"ok": True, "seq": 2}).encode() + b"\n",
+    ]
+    readline_plan = [init_resp, "CANCEL", *resync_resps]
+
+    async def readline() -> bytes:
+        if not readline_plan:
+            return b""
+        item = readline_plan.pop(0)
+        if item == "CANCEL":
+            raise asyncio.CancelledError
+        assert isinstance(item, bytes)
+        return item
+
+    mock_process.stdout.readline = readline
+
+    original_exists = Path.exists
+
+    def mock_exists(p: Path) -> bool:
+        return True if str(p) == paddle_config.paddle_python else original_exists(p)
+
+    with (
+        patch.object(Path, "exists", lambda p: mock_exists(p)),
+        patch("asyncio.create_subprocess_exec", return_value=mock_process),
+    ):
+        engine = PaddleOCREngine(paddle_config)
+        await engine.initialize()
+
+        # 第一次 send 遇到 CancelledError → 记录 pending
+        with pytest.raises(asyncio.CancelledError):
+            await engine._send_command({"cmd": "ocr"})
+        assert engine._pending_resync is True
+        assert engine._pending_seq == 2
+
+        # 预期：resync 丢弃 seq=0 残留、对齐 seq=2 完成
+        with patch.object(
+            engine, "_restart_worker", new=AsyncMock(),
+        ) as restart_mock:
+            await engine._resync_if_needed()
+            restart_mock.assert_not_called()
+
+        assert engine._pending_resync is False
+        assert engine._pending_seq is None
+
+
+@pytest.mark.asyncio
+async def test_resync_timeout_falls_back_to_restart(
+    paddle_config: OCRConfig,
+    mock_process: MockProcess,
+) -> None:
+    """resync 读超时应回退 _restart_worker 兜底。"""
+    mock_process.set_responses([{"ok": True, "seq": 1}])  # initialize
+
+    original_exists = Path.exists
+
+    def mock_exists(p: Path) -> bool:
+        return True if str(p) == paddle_config.paddle_python else original_exists(p)
+
+    with (
+        patch.object(Path, "exists", lambda p: mock_exists(p)),
+        patch("asyncio.create_subprocess_exec", return_value=mock_process),
+    ):
+        engine = PaddleOCREngine(paddle_config)
+        await engine.initialize()
+        # 手动置位 pending
+        engine._pending_resync = True
+        engine._pending_seq = 99
+
+        async def hang_forever() -> bytes:
+            await asyncio.sleep(10)
+            return b""
+
+        mock_process.stdout.readline = hang_forever
+
+        with (
+            patch.object(
+                engine, "_restart_worker", new=AsyncMock(),
+            ) as restart_mock,
+            patch.object(engine, "_get_timeout", return_value=0),
+        ):
+            await engine._resync_if_needed()
+            restart_mock.assert_awaited_once()
