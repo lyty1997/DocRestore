@@ -106,6 +106,10 @@ export const zhCN = {
   "taskProgress.taskLabel": "任务：{taskId}",
   "taskProgress.polling": "轮询",
   "taskProgress.subtasksLabel": "并行处理 {count} 个子文档",
+  "taskProgress.phaseOcr": "OCR",
+  "taskProgress.phaseLlm": "LLM 精修",
+  "taskProgress.mainLabel": "主进度",
+  "taskProgress.streamingCount": "第 {current} 段（流式）",
 
   // ── 任务结果 ──
   "taskResult.title": "处理结果",

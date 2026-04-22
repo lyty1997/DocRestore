@@ -714,6 +714,37 @@ body {
   transition: width 0.3s ease;
 }
 
+/* 流式未知总数：条纹动画代替 0% 死条 */
+.progress-bar-indeterminate {
+  width: 100% !important;
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--color-primary) 40%,
+    var(--color-primary-dark) 50%,
+    var(--color-primary) 60%,
+    transparent 100%
+  );
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  background-color: transparent;
+  animation: progress-bar-indeterminate-slide 1.6s ease-in-out infinite;
+}
+
+@keyframes progress-bar-indeterminate-slide {
+  0%   { background-position: -40% 0; }
+  100% { background-position: 140% 0; }
+}
+
+/* 减少动效场景尊重系统偏好 */
+@media (prefers-reduced-motion: reduce) {
+  .progress-bar-indeterminate {
+    animation: none;
+    background: var(--color-primary);
+    opacity: 0.5;
+  }
+}
+
 .progress-detail {
   display: flex;
   justify-content: space-between;
@@ -758,6 +789,18 @@ body {
   margin-bottom: 0;
 }
 
+.subtask-group {
+  padding: 0.55rem 0.75rem;
+  border-radius: calc(var(--radius) - 2px);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  margin-bottom: 0.5rem;
+}
+
+.subtask-group:last-child {
+  margin-bottom: 0;
+}
+
 .subtask-label {
   font-size: 0.8rem;
   font-weight: 600;
@@ -769,6 +812,75 @@ body {
 
 .subtask-row .progress-bar-container {
   height: 6px;
+}
+
+/* 双轨进度：OCR + LLM 行内标签 */
+.phase-row {
+  display: grid;
+  grid-template-columns: 4.5rem 1fr;
+  grid-column-gap: 0.6rem;
+  grid-row-gap: 0.25rem;
+  align-items: center;
+  padding: 0.35rem 0;
+}
+
+.phase-row + .phase-row {
+  margin-top: 0.3rem;
+  border-top: 1px dashed var(--color-border);
+}
+
+.phase-row .phase-label {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+  padding: 0.2rem 0.4rem;
+  border-radius: 6px;
+  background: var(--color-progress-bg);
+  text-align: center;
+  align-self: center;
+}
+
+.phase-row-ocr .phase-label {
+  color: var(--color-primary);
+}
+
+.phase-row-llm .phase-label {
+  color: #b45309;
+}
+
+.phase-row .progress-bar-container {
+  grid-column: 2;
+  grid-row: 1;
+  margin-bottom: 0;
+  height: 6px;
+}
+
+.phase-row .progress-detail {
+  grid-column: 2;
+  grid-row: 2;
+  font-size: 0.8rem;
+}
+
+.phase-row .progress-message {
+  grid-column: 1 / -1;
+  margin-top: 0.25rem;
+  font-size: 0.78rem;
+}
+
+.progress-bar-ocr {
+  background: linear-gradient(90deg, var(--color-primary-dark), var(--color-primary));
+}
+
+.progress-bar-llm {
+  background: linear-gradient(90deg, #b45309, #f59e0b);
+}
+
+.phase-row-indent .phase-label {
+  font-size: 0.68rem;
 }
 
 /* ── Error ─────────────────────────────────────── */

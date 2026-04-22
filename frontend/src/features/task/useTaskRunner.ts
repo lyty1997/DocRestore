@@ -12,9 +12,12 @@ import {
 } from "../../api/client";
 import {
   TaskProgressSchema,
-  type TaskProgress,
   type TaskResultResponse,
 } from "../../api/schemas";
+import {
+  mergeProgressFrame,
+  type ProgressBuckets,
+} from "./progressPhase";
 
 /** 页面状态 */
 type TaskStatus = "idle" | "pending" | "processing" | "completed" | "failed";
@@ -29,11 +32,11 @@ interface UseTaskRunnerReturn {
   /** 页面状态 */
   status: TaskStatus;
   /**
-   * 按 subtask 分轨保存的最新进度帧：
-   * - key "" 是任务级/单目录主进度
-   * - 其它 key 为 process_tree 并行时的子目录相对路径
+   * 按 (subtask, phase) 双层分轨的最新进度帧：
+   * - 外层 key "" 为任务级/单目录主进度，其它 key 为 process_tree 并行的子目录
+   * - 内层 key ∈ {ocr, llm}：流式 Pipeline 并发的 OCR 与 LLM 精修两条轨
    */
-  progresses: Record<string, TaskProgress>;
+  progresses: ProgressBuckets;
   /** 完成后的 markdown 结果（第一篇，向下兼容） */
   resultMarkdown: string | undefined;
   /** 全部文档结果 */
@@ -76,9 +79,7 @@ const WS_CONNECT_TIMEOUT = 5000;
 export function useTaskRunner(): UseTaskRunnerReturn {
   const [taskId, setTaskId] = useState<string | undefined>();
   const [status, setStatus] = useState<TaskStatus>("idle");
-  const [progresses, setProgresses] = useState<Record<string, TaskProgress>>(
-    {},
-  );
+  const [progresses, setProgresses] = useState<ProgressBuckets>({});
   const [resultMarkdown, setResultMarkdown] = useState<string | undefined>();
   const [allResults, setAllResults] = useState<TaskResultResponse[]>([]);
   const [taskResult, setTaskResult] = useState<
@@ -147,7 +148,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
 
       if (resp.progress) {
         const frame = resp.progress;
-        setProgresses((prev) => ({ ...prev, [frame.subtask]: frame }));
+        setProgresses((prev) => mergeProgressFrame(prev, frame));
       }
 
       switch (resp.status) {
@@ -233,7 +234,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
               ? (JSON.parse(event.data) as unknown)
               : event.data;
           const parsed = TaskProgressSchema.parse(data);
-          setProgresses((prev) => ({ ...prev, [parsed.subtask]: parsed }));
+          setProgresses((prev) => mergeProgressFrame(prev, parsed));
           setStatus("processing");
         } catch {
           // schema 校验失败，降级到轮询

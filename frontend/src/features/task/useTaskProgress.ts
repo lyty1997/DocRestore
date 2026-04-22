@@ -14,7 +14,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getTask, getWsProgressUrl } from "../../api/client";
-import { TaskProgressSchema, type TaskProgress } from "../../api/schemas";
+import { TaskProgressSchema } from "../../api/schemas";
+import {
+  mergeProgressFrame,
+  type ProgressBuckets,
+} from "./progressPhase";
 
 type WsState = "connecting" | "open" | "closed" | "error";
 type TrackedStatus = "pending" | "processing" | "completed" | "failed" | "unknown";
@@ -35,7 +39,7 @@ interface UseTaskProgressOptions {
 }
 
 interface UseTaskProgressReturn {
-  readonly progresses: Record<string, TaskProgress>;
+  readonly progresses: ProgressBuckets;
   readonly status: TrackedStatus;
   readonly wsState: WsState;
   readonly pollingEnabled: boolean;
@@ -49,9 +53,7 @@ export function useTaskProgress(
 ): UseTaskProgressReturn {
   const { taskId, enabled, onTerminal } = options;
 
-  const [progresses, setProgresses] = useState<Record<string, TaskProgress>>(
-    {},
-  );
+  const [progresses, setProgresses] = useState<ProgressBuckets>({});
   const [status, setStatus] = useState<TrackedStatus>("unknown");
   const [wsState, setWsState] = useState<WsState>("closed");
   const [pollingEnabled, setPollingEnabled] = useState(false);
@@ -104,7 +106,7 @@ export function useTaskProgress(
         if (!mountedRef.current) return "terminal";
         if (resp.progress) {
           const frame = resp.progress;
-          setProgresses((prev) => ({ ...prev, [frame.subtask]: frame }));
+          setProgresses((prev) => mergeProgressFrame(prev, frame));
         }
         switch (resp.status) {
           case "completed": {
@@ -186,7 +188,7 @@ export function useTaskProgress(
               ? (JSON.parse(event.data) as unknown)
               : event.data;
           const parsed = TaskProgressSchema.parse(raw);
-          setProgresses((prev) => ({ ...prev, [parsed.subtask]: parsed }));
+          setProgresses((prev) => mergeProgressFrame(prev, parsed));
           /* 进度帧的 stage 可能是 "completed"/"failed"；WS close 后 REST 才是权威 */
           if (parsed.stage === "completed" || parsed.stage === "failed") {
             /* 记住状态但不触发 terminal — 让 close handler 的 REST 兜底确认 */

@@ -110,6 +110,10 @@ export const zhTW: Record<TranslationKey, string> = {
   "taskProgress.taskLabel": "任務：{taskId}",
   "taskProgress.polling": "輪詢",
   "taskProgress.subtasksLabel": "並行處理 {count} 篇子文件",
+  "taskProgress.phaseOcr": "OCR",
+  "taskProgress.phaseLlm": "LLM 精修",
+  "taskProgress.mainLabel": "主進度",
+  "taskProgress.streamingCount": "第 {current} 段（流式）",
 
   // ── 任務結果 ──
   "taskResult.title": "處理結果",

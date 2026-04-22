@@ -115,6 +115,10 @@ export const en: Record<TranslationKey, string> = {
   "taskProgress.taskLabel": "Task: {taskId}",
   "taskProgress.polling": "Polling",
   "taskProgress.subtasksLabel": "Processing {count} subdocuments in parallel",
+  "taskProgress.phaseOcr": "OCR",
+  "taskProgress.phaseLlm": "LLM Refine",
+  "taskProgress.mainLabel": "Main",
+  "taskProgress.streamingCount": "Segment {current} (streaming)",
 
   // ── Task result ──
   "taskResult.title": "Results",
