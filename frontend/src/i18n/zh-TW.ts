@@ -113,7 +113,7 @@ export const zhTW: Record<TranslationKey, string> = {
   "taskProgress.phaseOcr": "OCR",
   "taskProgress.phaseLlm": "LLM 精修",
   "taskProgress.mainLabel": "主進度",
-  "taskProgress.streamingCount": "第 {current} 段（流式）",
+  "taskProgress.streamingCount": "第 {current} 小段（流式切分）",
 
   // ── 任務結果 ──
   "taskResult.title": "處理結果",

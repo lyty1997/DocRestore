@@ -144,8 +144,22 @@ class RateController:
                 self._chars_per_page_ema, float(chars),
             )
 
-    def record_llm(self, chars: int, duration: float) -> None:
-        """登记一段 LLM refine 完成：chars 输入、duration 耗时。"""
+    def record_llm(
+        self,
+        chars: int,
+        duration: float,
+        *,
+        target: int | None = None,
+    ) -> None:
+        """登记一段 LLM refine 完成：chars 输入、duration 耗时。
+
+        target 非空时按 target 归桶（表达"我试图探索哪个桶"），而不是按
+        实际 chars —— 避免 segmenter 把 target=5250 切出 3000 字符段时，
+        样本被错归到小桶，导致大桶的探索意图长期无法积累样本。r_ema 仍用
+        chars/duration 反映真实观测吞吐；只是桶归属按意图。
+
+        target=None 时（如 tail 段、外部测试）回退按 chars 归桶。
+        """
         if chars <= 0 or duration <= 0:
             return
 
@@ -159,7 +173,8 @@ class RateController:
 
         # 2. 桶吞吐统计：异常样本只计入原始 samples（供线性回归），
         #    不污染 r_ema（拐点判定基准）
-        b = self._bucket_of(chars)
+        bucket_key = target if target is not None and target > 0 else chars
+        b = self._bucket_of(bucket_key)
         is_outlier = self._is_outlier(b, duration)
         if is_outlier:
             self._outlier_count += 1
@@ -356,25 +371,36 @@ class RateController:
         """计算目标段长 L*。
 
         分支:
-        - OCR 瓶颈（解析解 < MAX）→ 用解析解做吞吐匹配
-        - LLM 瓶颈（解析解发散或 ≥ MAX）→ 走分桶 argmax + 爬山探索
+        - OCR 瓶颈（解析解 ∈ [MIN, MAX)）→ 用解析解做吞吐匹配
+        - LLM 瓶颈 / legacy 失效（解析解 < MIN 或 ≥ MAX）→ argmax 爬山
+
+        为什么 legacy_l < MIN_CHARS 要走 argmax 而不是 clamp 到 MIN？
+        早期 OCR 样本少、EMA 未稳定时 R_ocr 估得很小，legacy 会输出
+        几百字符甚至负值。此时若 clamp 到 MIN=1500，会让 target 长期
+        停在下限，record_llm 全部样本涌入桶 0 形成自我强化的霸权，
+        爬山永远无法探到更大桶。改走 argmax 让桶统计数据驱动决策，
+        避免 OCR 冷启动期污染 L* 决策。
         """
         legacy_l = self._legacy_analytical_l_star()
 
         # OCR 瓶颈：LLM 还没成为约束，直接用解析解让两侧平衡
-        if legacy_l is not None and 0 < legacy_l < self.MAX_CHARS:
+        if (
+            legacy_l is not None
+            and self.MIN_CHARS <= legacy_l < self.MAX_CHARS
+        ):
             # 走经典分支就"放弃"爬山探索状态；保留桶数据以备切换回来
             self._exploring_idx = None
             return legacy_l
 
-        # LLM 瓶颈：argmax + 爬山探索
+        # LLM 瓶颈 / legacy 失效：argmax + 爬山探索
         return self._argmax_with_exploration()
 
     def _legacy_analytical_l_star(self) -> int | None:
         """原吞吐匹配解析解 L* = R_ocr · overhead / (1 - R_ocr · k)。
 
-        - 返回 None：数据不够算
-        - 返回 ≥ MAX 或负数：落入 LLM 瓶颈分支
+        - 返回 None：数据不够算 / 解析解无意义（≤0），让上层走 argmax
+        - 返回 ≥ MAX：落入 LLM 瓶颈分支
+        - 返回有限正数：OCR 瓶颈，调用方按 [MIN, MAX) 接受
         """
         if (
             self._ocr_ema is None
@@ -393,7 +419,8 @@ class RateController:
             return self.MAX_CHARS
         l_star = r_ocr * self._overhead / denom
         if l_star <= 0:
-            return self.MIN_CHARS
+            # overhead ≈ 0 + R_ocr 很慢 → 解析解退化，让上层 fallback argmax
+            return None
         return int(l_star)
 
     def _argmax_with_exploration(self) -> int:

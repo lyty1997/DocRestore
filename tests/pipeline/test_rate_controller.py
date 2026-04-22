@@ -73,23 +73,26 @@ class TestAdaptiveLStar:
             ctrl.record_ocr(duration=ocr_duration, chars=chars_per_page)
 
     def test_l_star_analytical_hit_cap_down(self) -> None:
-        """解析解远小于冷启动末值时，首次自适应被 cap_down 限幅（±30%）。"""
+        """解析解 ∈ [MIN, MAX) 且小于冷启动末值时，首次自适应被 cap_down 限幅。
+
+        Legacy 返回值必须 ≥ MIN_CHARS 才走 legacy 分支；若 < MIN，新语义
+        改走 argmax（见 test_legacy_below_min_falls_back_to_argmax）。
+        """
         ctrl = RateController()
-        # duration = 0.5 + 0.001 · chars → overhead=0.5, k=0.001
-        # OCR 5s/页 · 2000 字符 → R_ocr = 400 chars/s
-        # R_ocr · k = 0.4，denom = 0.6
-        # L* 解析解 = 400 · 0.5 / 0.6 ≈ 333
-        # 但首次自适应 last_target bump 到冷启动末值 6000，cap_down = 4200
-        # → 最终 target = 4200
+        # duration = 5 + 0.002 · chars → overhead=5, k=0.002
+        # OCR 1s/页 · 300 字符 → R_ocr=300, R_ocr·k=0.6
+        # L* = 300 · 5 / 0.4 = 3750 (在 [MIN, MAX) 内，触发 legacy 分支)
+        # 首次自适应 last_target bump 到 6000, cap_down = 4200
+        # → clamp(3750, 4200, 7800) = 4200
         self._seed_samples(
             ctrl,
             samples=[
-                (2000, 2.5),
-                (4000, 4.5),
-                (6000, 6.5),
+                (2000, 9.0),
+                (4000, 13.0),
+                (6000, 17.0),
             ],
-            ocr_duration=5.0,
-            chars_per_page=2000,
+            ocr_duration=1.0,
+            chars_per_page=300,
         )
         target = ctrl.target_segment_chars()
         cap_down_from_6000 = int(
@@ -296,6 +299,57 @@ class TestArgmaxExploration:
                 f"chars={chars} 应落桶 {expected}, "
                 f"实际 {ctrl._bucket_of(chars)}"
             )
+
+    def test_record_llm_bucket_by_target(self) -> None:
+        """record_llm(target=...) 时按 target 归桶，而不是实际 chars。
+
+        场景：controller 下发 target=7000（桶 3），但 segmenter 只切出
+        3000 chars。样本应记到桶 3（探索意图），不能让桶 1 的样本污染
+        探索计数。
+        """
+        ctrl = RateController()
+        ctrl.record_llm(chars=3000, duration=5.0, target=7000)
+        snap = ctrl.snapshot()
+        # 桶 3 = [6000, 8000)，应收到这次样本
+        assert snap["bucket_count"][3] == 1
+        # 桶 1 ([3000, 4500)) 对应 chars=3000，不应该被计入
+        assert snap["bucket_count"][1] == 0
+        # r_ema 仍用实际 chars/duration
+        assert snap["bucket_r_ema"][3] == round(3000 / 5.0, 2)
+
+    def test_record_llm_target_none_fallback_to_chars(self) -> None:
+        """target=None（如 tail 段）回退按 chars 归桶，保持向后兼容。"""
+        ctrl = RateController()
+        ctrl.record_llm(chars=3000, duration=5.0)
+        snap = ctrl.snapshot()
+        # chars=3000 属于桶 1
+        assert snap["bucket_count"][1] == 1
+        assert snap["bucket_count"][3] == 0
+
+    def test_legacy_below_min_falls_back_to_argmax(self) -> None:
+        """legacy 解析解 < MIN_CHARS 时不走 legacy，改走 argmax 桶探索。
+
+        防止早期 OCR 冷启动样本不稳定（R_ocr 估得过小）导致 legacy
+        输出几百字符，clamp 到 MIN=1500 → 形成桶 0 自我强化霸权。
+        """
+        ctrl = RateController()
+        # 构造 legacy 会输出非常小的 L*：
+        # 3 LLM 样本 k~0.001 overhead~0；OCR 很慢但 chars 也很小
+        # → R_ocr · k 很小 ∈ (0, 1)，走 legacy，但 overhead → 0 让 L*→0
+        for c, d in [(1500, 1.5), (3000, 3.0), (6000, 6.0)]:
+            ctrl.record_llm(chars=c, duration=d)
+        for _ in range(5):
+            ctrl.record_ocr(duration=10.0, chars=100)
+        # 此时线性回归 overhead ≈ 0, k ≈ 0.001
+        # R_ocr = 100/10 = 10 chars/s, R_ocr·k ≈ 0.01 < 1
+        # L* = 10 * 0 / 0.99 ≈ 0 → legacy 返回 None
+        # → 应该走 argmax 分支而不是 clamp 到 1500
+        target = ctrl.target_segment_chars()
+        # argmax 分支在冷启动完成后会返回桶中心值（≥ bucket_center(0) = 2250）
+        # 关键断言：target 不应该被压到 MIN_CHARS=1500
+        assert target > RateController.MIN_CHARS, (
+            f"legacy < MIN 时不应 clamp 到 MIN, 实际 target={target}"
+        )
 
 
 class TestSnapshot:

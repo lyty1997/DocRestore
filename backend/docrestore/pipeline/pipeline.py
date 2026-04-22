@@ -809,6 +809,7 @@ class Pipeline:
                         )
                     )
                 if used_refiner:
+                    # tail 段无 target（extractor 的剩余），按 chars 归桶
                     controller.record_llm(
                         len(remaining), time.perf_counter() - t0,
                     )
@@ -817,7 +818,7 @@ class Pipeline:
                 segment_index += 1
                 report_fn(
                     "refine", segment_index, 0,
-                    f"精修段 {segment_index}",
+                    f"流式精修 第 {segment_index} 小段",
                 )
 
         await self._save_debug(
@@ -888,15 +889,19 @@ class Pipeline:
                 " (cached)" if not used_refiner else "",
             )
             # 缓存命中/refiner=None 不喂 RateController，避免低估 LLM 成本
+            # target 传给 record_llm：按意图归桶，而不是按 segmenter 实际切出
+            # 的 chars —— 防止 target=5250 切出 3000 时样本错归小桶
             if used_refiner:
-                controller.record_llm(len(seg_text), elapsed)
+                controller.record_llm(
+                    len(seg_text), elapsed, target=target,
+                )
             refined_results.append(result)
             all_gaps.extend(result.gaps)
             segmented_offset = new_offset
             segment_index += 1
             report_fn(
                 "refine", segment_index, 0,
-                f"精修段 {segment_index}",
+                f"流式精修 第 {segment_index} 小段",
             )
         return segmented_offset, segment_index
 

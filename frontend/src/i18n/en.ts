@@ -118,7 +118,7 @@ export const en: Record<TranslationKey, string> = {
   "taskProgress.phaseOcr": "OCR",
   "taskProgress.phaseLlm": "LLM Refine",
   "taskProgress.mainLabel": "Main",
-  "taskProgress.streamingCount": "Segment {current} (streaming)",
+  "taskProgress.streamingCount": "Sub-segment {current} (streaming)",
 
   // ── Task result ──
   "taskResult.title": "Results",

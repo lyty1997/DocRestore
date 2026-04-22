@@ -109,7 +109,7 @@ export const zhCN = {
   "taskProgress.phaseOcr": "OCR",
   "taskProgress.phaseLlm": "LLM 精修",
   "taskProgress.mainLabel": "主进度",
-  "taskProgress.streamingCount": "第 {current} 段（流式）",
+  "taskProgress.streamingCount": "第 {current} 小段（流式切分）",
 
   // ── 任务结果 ──
   "taskResult.title": "处理结果",
