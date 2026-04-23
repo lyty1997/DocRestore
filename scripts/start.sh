@@ -125,6 +125,27 @@ start_backend() {
         --log-level info &
 }
 
+wait_for_backend() {
+    # 等后端 bind 8000 + lifespan 跑完（engine_manager/DB/ppocr 预热调度
+    # 等等）。没这个守护，vite proxy 会在前端首屏命中 ECONNREFUSED
+    # 窗口（uvicorn 启动耗时 2~4s，Vite 200ms 就 ready）。
+    local url="http://127.0.0.1:${BACKEND_PORT}/api/v1/ocr/status"
+    local timeout_s=30
+    local waited=0
+    log "等待后端就绪 (最多 ${timeout_s}s)..."
+    while [ "$waited" -lt $((timeout_s * 2)) ]; do
+        if curl -sf --max-time 1 --noproxy 127.0.0.1 "$url" \
+            >/dev/null 2>&1; then
+            log "后端已就绪"
+            return 0
+        fi
+        sleep 0.5
+        waited=$((waited + 1))
+    done
+    err "后端 ${timeout_s}s 内未响应，继续启动前端（可能有短暂 proxy error）"
+    return 0  # 不阻断，让用户仍能看到前端页面
+}
+
 start_frontend() {
     log "启动前端 → http://localhost:${FRONTEND_PORT}"
 
@@ -195,6 +216,7 @@ case "$MODE" in
         ;;
     all)
         start_backend
+        wait_for_backend
         start_frontend
         echo ""
         log "${GREEN}服务已启动${NC}"
