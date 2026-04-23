@@ -12,6 +12,26 @@ import { getAssetUrl } from "../../api/client";
 const ALLOWED_TAG_RE =
   /^\/?\s*(?:div|img|table|thead|tbody|tr|td|th|br|hr|span|p|b|i|u|strong|em|sub|sup|ul|ol|li|a|code|pre|h[1-6]|blockquote)\b/i;
 
+/**
+ * 把后端 `PageDeduplicator.merge_all_pages` 插入的 `<!-- page: xxx.jpg -->`
+ * 注释转成可定位的隐藏锚点，供左右同步滚动 hook 定位。
+ *
+ * - 注释本来在 rehype-raw 里会被丢弃，变成不可见节点
+ * - 转成 `<span class="page-anchor" data-page="...">` 后既能被 querySelectorAll
+ *   找到，也不会破坏视觉（CSS 里设零高度 / display:block）
+ */
+export function injectPageAnchors(text: string): string {
+  // 注意：HTML 注释内不能含 `--`，但文件名可以含单个 `-`（如 DSC04696-2.jpg）。
+  // 用 `.+?` 非贪婪匹配到 `-->` 之前即可。
+  return text.replaceAll(
+    /<!--\s*page:\s*(.+?)\s*-->/g,
+    (_match, name: string) => {
+      const safe = name.trim().replaceAll('"', "&quot;");
+      return `<span class="page-anchor" data-page="${safe}"></span>`;
+    },
+  );
+}
+
 /** 转义非白名单 HTML 标签，保留合法的 OCR 产出标签 */
 export function escapeNonHtmlTags(text: string): string {
   return text.replaceAll(/<([^>]*)>/g, (match, inner: string) => {
@@ -37,7 +57,8 @@ export function preprocessMarkdown(
   taskId: string,
   docDir?: string,
 ): string {
-  const rewritten = rewriteImageUrls(markdown, taskId, docDir);
+  const withAnchors = injectPageAnchors(markdown);
+  const rewritten = rewriteImageUrls(withAnchors, taskId, docDir);
   return escapeNonHtmlTags(rewritten);
 }
 

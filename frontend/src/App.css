@@ -1059,6 +1059,19 @@ body {
   background: var(--color-surface);
 }
 
+/* 分页锚点：左右同步滚动用的隐形定位点（来自 <!-- page: xxx --> 标记）。
+   保留 block 级布局以便 getBoundingClientRect 拿得到位置，但视觉上不占
+   空间、不可选。 */
+.markdown-preview .page-anchor {
+  display: block;
+  height: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 /* 图片点击放大遮罩 */
 .image-lightbox {
   position: fixed;

@@ -2,7 +2,7 @@
  * 任务结果展示组件：多文档切换 + 源图片 + Markdown 编辑/预览 + 下载
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
@@ -14,6 +14,7 @@ import {
 } from "../api/client";
 import type { TaskResultResponse } from "../api/schemas";
 import { preprocessMarkdown } from "../features/task/markdown";
+import { useScrollSync } from "../hooks/useScrollSync";
 import { useTranslation } from "../i18n";
 import { SourceImagePanel } from "./SourceImagePanel";
 
@@ -37,6 +38,12 @@ export function TaskResult({
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | undefined>();
   const downloadUrl = getDownloadUrl(taskId);
+
+  // 左右同步滚动：左侧 .source-images-list、右侧 .markdown-preview 两个
+  // 可滚动容器，用 data-page="<filename>" 做对齐锚点。edit 模式下右侧是
+  // textarea 没有 page 标记，禁用同步。
+  const leftScrollRef = useRef<HTMLDivElement>(null);
+  const rightScrollRef = useRef<HTMLDivElement>(null);
 
   const selectedDoc = docResults[selectedIdx];
   const docDir = selectedDoc?.doc_dir;
@@ -103,6 +110,11 @@ export function TaskResult({
     };
   }, [taskId]);
 
+  useScrollSync(leftScrollRef, rightScrollRef, {
+    align: "center",
+    enabled: !editMode,
+  });
+
   return (
     <div className="task-result">
       <div className="result-header">
@@ -165,7 +177,11 @@ export function TaskResult({
       )}
 
       <div className="preview-split">
-        <SourceImagePanel taskId={taskId} images={filteredImages} />
+        <SourceImagePanel
+          ref={leftScrollRef}
+          taskId={taskId}
+          images={filteredImages}
+        />
         {editMode ? (
           <div className="markdown-editor">
             <textarea
@@ -175,7 +191,7 @@ export function TaskResult({
             />
           </div>
         ) : (
-          <div className="markdown-preview">
+          <div ref={rightScrollRef} className="markdown-preview">
             <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
               {rewritten}
             </Markdown>
