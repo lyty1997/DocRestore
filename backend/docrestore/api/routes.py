@@ -246,7 +246,9 @@ async def ws_task_progress(
 
     try:
         initial = task.progress or TaskProgress(
-            stage="ocr", message="等待开始",
+            stage="ocr",
+            message="等待开始",
+            message_key="progress.waiting",
         )
         await websocket.send_json(dataclasses.asdict(initial))
 

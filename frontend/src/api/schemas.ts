@@ -12,9 +12,14 @@ export const ProgressResponseSchema = z.object({
   current: z.number(),
   total: z.number(),
   percent: z.number(),
+  /** 服务端拼好的中文消息，i18n 无 key 时 fallback 展示 */
   message: z.string(),
   /** 子目录标识（process_tree 并行时每一路的 rel path，空=主进度） */
   subtask: z.string().default(""),
+  /** i18n 入口 key，如 "progress.refineStream"；空=无结构化文案 */
+  message_key: z.string().default(""),
+  /** i18n 插值参数（值统一 str） */
+  message_params: z.record(z.string(), z.string()).default({}),
 });
 export type ProgressResponse = z.infer<typeof ProgressResponseSchema>;
 

@@ -149,7 +149,14 @@ class TaskProgress:
     current: int = 0
     total: int = 0
     percent: float = 0.0
+    #: 人类可读文本，服务端默认用简体中文拼，保留给 CLI / 日志 / 老客户端 fallback。
     message: str = ""
     # 并行子目录标识：非空表示这是某个子目录的进度帧（见 process_tree）；
     # 空表示任务级/单目录主进度。前端按该字段分轨渲染。
     subtask: str = ""
+    #: 结构化文案 key（i18n 入口）：前端按当前语言渲染，避免服务端写死语言。
+    #: 典型值见 pipeline.py 各 report_fn 调用点；空串表示本帧无结构化文案，
+    #: 前端 fallback 到 `message` 原文。
+    message_key: str = ""
+    #: 结构化文案的插值参数（值统一 str，避免 WS JSON 里混 int/float 抖动）。
+    message_params: dict[str, str] = field(default_factory=dict)

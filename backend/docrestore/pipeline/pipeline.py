@@ -28,6 +28,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
+from typing import Protocol
 
 import aiofiles
 
@@ -84,7 +85,25 @@ from docrestore.utils.paths import sanitize_dirname
 _PII_DETECT_THRESHOLD = 5
 
 # 进度回调类型
-ReportFn = Callable[[str, int, int, str], None]
+class ReportFn(Protocol):
+    """进度上报回调。
+
+    - `message` 是服务端拼出的人类可读中文（CLI / 日志 / 老客户端 fallback）
+    - `message_key` + `message_params` 是 i18n 入口，前端按当前语言渲染，
+      服务端不写死任何语言
+    """
+
+    def __call__(
+        self,
+        stage: str,
+        current: int,
+        total: int,
+        message: str = "",
+        *,
+        message_key: str = "",
+        message_params: dict[str, str] | None = None,
+    ) -> None:
+        ...
 
 # page marker 正则
 _PAGE_MARKER_RE = re.compile(r"<!--\s*page:\s*(.+?)\s*-->")
@@ -613,6 +632,9 @@ class Pipeline:
             current: int,
             total: int,
             message: str = "",
+            *,
+            message_key: str = "",
+            message_params: dict[str, str] | None = None,
         ) -> None:
             if on_progress is not None:
                 percent = (
@@ -621,6 +643,8 @@ class Pipeline:
                 on_progress(TaskProgress(
                     stage=stage, current=current, total=total,
                     percent=round(percent, 1), message=message,
+                    message_key=message_key,
+                    message_params=dict(message_params or {}),
                 ))
 
         images = await asyncio.to_thread(scan_images, image_dir)
@@ -729,6 +753,11 @@ class Pipeline:
                 report_fn(
                     "ocr", i + 1, total,
                     f"OCR {i + 1}/{total}...",
+                    message_key="progress.ocrPage",
+                    message_params={
+                        "current": str(i + 1),
+                        "total": str(total),
+                    },
                 )
         finally:
             await queue.put(None)
@@ -819,6 +848,8 @@ class Pipeline:
                 report_fn(
                     "refine", segment_index, 0,
                     f"流式精修 第 {segment_index} 小段",
+                    message_key="progress.refineStream",
+                    message_params={"index": str(segment_index)},
                 )
 
         await self._save_debug(
@@ -902,6 +933,8 @@ class Pipeline:
             report_fn(
                 "refine", segment_index, 0,
                 f"流式精修 第 {segment_index} 小段",
+                message_key="progress.refineStream",
+                message_params={"index": str(segment_index)},
             )
         return segmented_offset, segment_index
 
@@ -950,7 +983,10 @@ class Pipeline:
         final_gaps = list(all_gaps)
         final_gaps.extend(extra_gaps)
 
-        report_fn("render", 1, 1, "渲染输出...")
+        report_fn(
+            "render", 1, 1, "渲染输出...",
+            message_key="progress.render",
+        )
         with profiler.stage("render.write"):
             renderer = Renderer(self._config.output)
             doc_path = await renderer.render(doc, output_dir)
@@ -1075,6 +1111,11 @@ class Pipeline:
         def _on_batch_progress(done: int, tot: int) -> None:
             report_fn(
                 "ocr", done, tot, f"OCR {done}/{tot}...",
+                message_key="progress.ocrPage",
+                message_params={
+                    "current": str(done),
+                    "total": str(tot),
+                },
             )
 
         # 只有 WorkerBackedOCREngine 子类才有真正的 ocr_batch 实现
@@ -1106,6 +1147,11 @@ class Pipeline:
             report_fn(
                 "ocr", i + 1, total,
                 f"OCR 第 {i + 1}/{total} 张...",
+                message_key="progress.ocrPage",
+                message_params={
+                    "current": str(i + 1),
+                    "total": str(total),
+                },
             )
             pages.append(page)
         return pages
@@ -1140,6 +1186,11 @@ class Pipeline:
             report_fn(
                 "refine", i + 1, len(segments),
                 f"精修第 {i + 1}/{len(segments)} 段...",
+                message_key="progress.refineSegment",
+                message_params={
+                    "current": str(i + 1),
+                    "total": str(len(segments)),
+                },
             )
             await self._save_debug(
                 output_dir, f"segments/{i}_input.md", seg.text
@@ -1531,6 +1582,11 @@ class Pipeline:
             report_fn(
                 "gap_fill", gi + 1, len(gaps),
                 f"补充缺口 {gi + 1}/{len(gaps)}...",
+                message_key="progress.gapFill",
+                message_params={
+                    "current": str(gi + 1),
+                    "total": str(len(gaps)),
+                },
             )
 
             # 安全检查：after_image 必须在已知页面中
@@ -1781,6 +1837,13 @@ class Pipeline:
             "final_refine", 0, len(chunks),
             f"整篇文档级精修...（{len(chunks)} 块并行）"
             if len(chunks) > 1 else "整篇文档级精修...",
+            message_key=(
+                "progress.finalRefineChunks"
+                if len(chunks) > 1
+                else "progress.finalRefine"
+            ),
+            message_params={"chunks": str(len(chunks))}
+            if len(chunks) > 1 else {},
         )
 
         try:
@@ -1872,7 +1935,10 @@ class Pipeline:
         report_fn: ReportFn,
     ) -> list[DocBoundary]:
         """检测文档边界。"""
-        report_fn("doc_boundary", 0, 1, "检测文档边界...")
+        report_fn(
+            "doc_boundary", 0, 1, "检测文档边界...",
+            message_key="progress.docBoundary",
+        )
         refiner = self._get_refiner(llm)
         if refiner is None:
             logger.warning("未配置 LLM refiner，跳过文档边界检测")
@@ -1937,6 +2003,7 @@ class Pipeline:
         """
         report_fn(
             "pii_redaction", 0, 1, "PII 脱敏...",
+            message_key="progress.piiRedaction",
         )
 
         redactor = PIIRedactor(pii_config)

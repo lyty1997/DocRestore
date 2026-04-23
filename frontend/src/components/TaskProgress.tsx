@@ -173,7 +173,7 @@ function ProgressRow({
   // 此时 percent 一直是 0，显示 "N/0 (0.0%)" 体验差；改用 indeterminate 动画
   // 条 + "第 N 段（流式）" 文本。
   const isStreaming =
-    progress !== undefined && progress.total === 0 && progress.current > 0;
+    progress?.total === 0 && progress.current > 0;
   const rowClass = [
     "progress-row",
     "phase-row",
@@ -210,9 +210,26 @@ function ProgressRow({
           <span className="counts">{waitingLabel}</span>
         )}
       </div>
-      {progress?.message ? (
-        <p className="progress-message">{progress.message}</p>
-      ) : undefined}
+      <ProgressMessage progress={progress} t={t} />
     </div>
   );
+}
+
+/**
+ * 优先展示后端下发的 i18n key（前端按语言渲染），缺失或为空时 fallback
+ * 到原始 message（兼容 engine_manager 的 init 动态文案）。
+ */
+function ProgressMessage({
+  progress,
+  t,
+}: {
+  progress: TaskProgressData | undefined;
+  t: ReturnType<typeof useTranslation>["t"];
+}): React.JSX.Element | undefined {
+  if (progress === undefined) return undefined;
+  const localized = progress.message_key === ""
+    ? progress.message
+    : t(progress.message_key, progress.message_params);
+  if (localized === "") return undefined;
+  return <p className="progress-message">{localized}</p>;
 }

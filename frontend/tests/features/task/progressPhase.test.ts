@@ -21,6 +21,8 @@ function frame(
     percent: overrides.percent ?? 0,
     message: overrides.message ?? "",
     subtask: overrides.subtask ?? "",
+    message_key: overrides.message_key ?? "",
+    message_params: overrides.message_params ?? {},
   };
 }
 

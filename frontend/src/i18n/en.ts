@@ -119,6 +119,20 @@ export const en: Record<TranslationKey, string> = {
   "taskProgress.phaseLlm": "LLM Refine",
   "taskProgress.mainLabel": "Main",
   "taskProgress.streamingCount": "Sub-segment {current} (streaming)",
+  // Structured progress messages emitted by backend pipeline.
+  "progress.waiting": "Waiting to start",
+  "progress.ocrPage": "OCR {current}/{total}...",
+  "progress.refineStream": "Streaming refine, segment {index}",
+  "progress.refineSegment": "Refining segment {current}/{total}...",
+  "progress.gapFill": "Filling gap {current}/{total}...",
+  "progress.finalRefine": "Final document refine...",
+  "progress.finalRefineChunks": "Final document refine... ({chunks} chunks in parallel)",
+  "progress.docBoundary": "Detecting document boundaries...",
+  "progress.piiRedaction": "PII redaction...",
+  "progress.render": "Rendering output...",
+  "progress.completed": "Completed",
+  "progress.cancelled": "Task cancelled",
+  "progress.failed": "Failed",
 
   // ── Task result ──
   "taskResult.title": "Results",

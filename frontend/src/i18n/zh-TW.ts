@@ -114,6 +114,20 @@ export const zhTW: Record<TranslationKey, string> = {
   "taskProgress.phaseLlm": "LLM 精修",
   "taskProgress.mainLabel": "主進度",
   "taskProgress.streamingCount": "第 {current} 小段（流式切分）",
+  // 服務端結構化進度訊息（pipeline report_fn 下發的 message_key 對應）
+  "progress.waiting": "等待開始",
+  "progress.ocrPage": "OCR {current}/{total}...",
+  "progress.refineStream": "流式精修 第 {index} 小段",
+  "progress.refineSegment": "精修第 {current}/{total} 段...",
+  "progress.gapFill": "補充缺口 {current}/{total}...",
+  "progress.finalRefine": "整篇文件級精修...",
+  "progress.finalRefineChunks": "整篇文件級精修...（{chunks} 塊並行）",
+  "progress.docBoundary": "偵測文件邊界...",
+  "progress.piiRedaction": "PII 脫敏...",
+  "progress.render": "渲染輸出...",
+  "progress.completed": "處理完成",
+  "progress.cancelled": "任務取消",
+  "progress.failed": "處理失敗",
 
   // ── 任務結果 ──
   "taskResult.title": "處理結果",

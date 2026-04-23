@@ -303,6 +303,8 @@ class TaskManager:
                         total=len(results),
                         percent=0.0,
                         message=err_msg,
+                        # err_msg 本身可能来自后端异常（已是英文/中文混合），
+                        # 前端用 message_key fallback 到 message 原文即可
                     ),
                 )
                 return
@@ -323,6 +325,7 @@ class TaskManager:
                     total=1,
                     percent=100.0,
                     message="处理完成",
+                    message_key="progress.completed",
                 ),
             )
         except asyncio.CancelledError:
@@ -342,6 +345,7 @@ class TaskManager:
                         total=0,
                         percent=0.0,
                         message="任务取消",
+                        message_key="progress.cancelled",
                     ),
                 )
             except Exception:  # noqa: BLE001 — 关闭阶段不阻断
@@ -372,6 +376,7 @@ class TaskManager:
                     total=0,
                     percent=0.0,
                     message="处理失败",
+                    message_key="progress.failed",
                 ),
             )
         finally:

@@ -110,6 +110,20 @@ export const zhCN = {
   "taskProgress.phaseLlm": "LLM 精修",
   "taskProgress.mainLabel": "主进度",
   "taskProgress.streamingCount": "第 {current} 小段（流式切分）",
+  // 服务端结构化进度消息（pipeline report_fn 下发的 message_key 对应）
+  "progress.waiting": "等待开始",
+  "progress.ocrPage": "OCR {current}/{total}...",
+  "progress.refineStream": "流式精修 第 {index} 小段",
+  "progress.refineSegment": "精修第 {current}/{total} 段...",
+  "progress.gapFill": "补充缺口 {current}/{total}...",
+  "progress.finalRefine": "整篇文档级精修...",
+  "progress.finalRefineChunks": "整篇文档级精修...（{chunks} 块并行）",
+  "progress.docBoundary": "检测文档边界...",
+  "progress.piiRedaction": "PII 脱敏...",
+  "progress.render": "渲染输出...",
+  "progress.completed": "处理完成",
+  "progress.cancelled": "任务取消",
+  "progress.failed": "处理失败",
 
   // ── 任务结果 ──
   "taskResult.title": "处理结果",
