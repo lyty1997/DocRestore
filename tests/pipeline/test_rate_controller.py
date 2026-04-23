@@ -366,7 +366,126 @@ class TestSnapshot:
             "samples_llm", "cold_start_elapsed_s",
             "cold_start_failed", "final_target_chars",
             "queue_depth_last",
+            # v3 新加字段（pending exploration / record target anchor）
+            "pending_exploration", "last_recorded_target",
         }
         assert expected_keys.issubset(snap.keys())
         assert snap["samples_llm"] == 1
         assert snap["ocr_avg_s"] == pytest.approx(1.0)
+
+
+class TestAntiBucketZeroHegemony:
+    """桶 0 霸权回归测试（基于 2026-04-22 gpt-5.4-mini profile 观测）。
+
+    观测：mini 跑完后 bucket_count=[50, 23, 1, 0, 1, 0]，bucket 2 r_ema=646
+    是全局最高但 count=1 永远进不了 argmax（旧 MIN_SAMPLES_PER_BUCKET=2 门槛），
+    target 被限幅一路衰减到 MIN_CHARS=1500 霸占 67% 样本。
+
+    本组测试覆盖：
+    1. pending 探索跨调用持久化，不被 OCR 瓶颈分支擦掉
+    2. 单样本高吞吐桶能立刻参与 argmax
+    3. MAX_RATE_CHANGE anchor 基于 record_llm 时点而不是 query 时点
+    4. pending 探索超时能自动放弃
+    """
+
+    def test_pending_exploration_survives_query_burst(self) -> None:
+        """空 query 不消耗探索意图：5 次无 record 的 query 仍应坚持探索目标。
+
+        模拟多子目录并发场景：一次 query 选定 bucket 2（返回 5250），后续
+        多次 query 因为 segmenter buffer 不够没有 record_llm。旧代码每次
+        query 会重算 _compute_l_star，OCR 瓶颈分支一旦触发就把探索意图擦掉。
+        """
+        ctrl = RateController()
+        # 冷启动 3 样本，形成 bucket 0/1/3 各 1 个
+        for chars in RateController.COLD_START_SEQUENCE:
+            ctrl.record_llm(chars=chars, duration=0.1 + 0.01 * chars)
+        for _ in range(5):
+            ctrl.record_ocr(duration=1.0, chars=200)
+
+        # 第一次 query：应进入 Phase A 覆盖扫描，先探 bucket 0（count=1<2）
+        t1 = ctrl.target_segment_chars()
+        assert ctrl._pending_exploration is not None
+        pending = ctrl._pending_exploration
+
+        # 连续 5 次空 query（不 record），target 应持续指向同一桶中心
+        for _ in range(5):
+            t = ctrl.target_segment_chars()
+            assert ctrl._pending_exploration == pending, (
+                "pending 探索意图不应被空 query 擦掉"
+            )
+            assert t == t1, "空 query 时 target 应稳定"
+
+    def test_single_sample_bucket_wins_argmax(self) -> None:
+        """单样本桶吞吐观测很高时应被选为 best，不再卡在 MIN_SAMPLES=2 门槛。
+
+        mini 场景缩影：bucket 0 多个样本但 r 中等，bucket 2 只有 1 样本但
+        r 明显更高。新 argmax 应认可 bucket 2 为 best。
+        """
+        ctrl = RateController()
+        for chars in RateController.COLD_START_SEQUENCE:
+            ctrl.record_llm(chars=chars, duration=0.1 + 0.01 * chars)
+        for _ in range(5):
+            ctrl.record_ocr(duration=1.0, chars=200)
+
+        # 给 bucket 0 灌 5 个中等吞吐样本（r ≈ 500）
+        for _ in range(5):
+            ctrl.record_llm(chars=2200, duration=4.4, target=2200)
+        # 给 bucket 2 一个高吞吐样本（r ≈ 1000）
+        ctrl.record_llm(chars=5200, duration=5.2, target=5250)
+
+        # 触发一次 _compute_l_star 让 best_idx 更新
+        ctrl.target_segment_chars()
+        snap = ctrl.snapshot()
+        assert snap["best_bucket_idx"] == 2, (
+            f"单样本高吞吐桶应能赢 argmax，snapshot={snap}"
+        )
+
+    def test_max_rate_change_anchor_uses_recorded_target(self) -> None:
+        """限幅 anchor 基于 _last_recorded_target 而非 _last_target。
+
+        空 query 把 _last_target 衰减到 MIN，但 anchor 应跟 record_llm 走 —
+        这正是"target_segment_chars 被 query 但 extract 失败"场景下防止
+        桶 0 霸权的关键。
+        """
+        ctrl = RateController()
+        for chars in RateController.COLD_START_SEQUENCE:
+            ctrl.record_llm(chars=chars, duration=0.1 + 0.01 * chars)
+        for _ in range(5):
+            ctrl.record_ocr(duration=1.0, chars=300)
+
+        # 真实 record 一次大 target，让 anchor 记在 5250
+        ctrl.record_llm(chars=5200, duration=5.2, target=5250)
+        assert ctrl._last_recorded_target == 5250
+
+        # 多次空 query 不应把 anchor 拉低（只有 _last_target 会被本地衰减）
+        for _ in range(10):
+            ctrl.target_segment_chars()
+        assert ctrl._last_recorded_target == 5250, (
+            "空 query 不应改变 anchor"
+        )
+
+    def test_pending_exploration_times_out(self) -> None:
+        """pending 探索超时后自动放弃，防止 buffer 长期凑不齐死循环。"""
+        ctrl = RateController()
+        ctrl.EXPLORATION_TIMEOUT_S = 0.05  # 缩短到 50ms 便于测试
+        for chars in RateController.COLD_START_SEQUENCE:
+            ctrl.record_llm(chars=chars, duration=0.1 + 0.01 * chars)
+        for _ in range(5):
+            ctrl.record_ocr(duration=1.0, chars=200)
+
+        ctrl.target_segment_chars()
+        assert ctrl._pending_exploration is not None
+
+        import time as _t
+        _t.sleep(0.08)  # 超过 EXPLORATION_TIMEOUT_S
+        ctrl.target_segment_chars()
+        # 超时后 pending 被清零（下一次调用可能又设新的，但至少不是原来那个卡死的）
+        # 更严格：连续调用时至少有一次 pending=None 的窗口
+        # 这里直接验证 expire 函数生效过
+        assert (
+            ctrl._pending_exploration is None
+            or ctrl._pending_exploration_started_at is not None
+            and (
+                _t.monotonic() - ctrl._pending_exploration_started_at
+            ) < 0.05
+        ), "pending 探索应被超时清零或重置为新目标"

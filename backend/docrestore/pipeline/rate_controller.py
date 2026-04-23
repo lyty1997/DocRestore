@@ -95,8 +95,18 @@ class RateController:
     BUCKET_EDGES: tuple[int, ...] = (
         1500, 3000, 4500, 6000, 8000, 10000, 12000,
     )
-    #: 桶需要的最少样本数，达到才参与 argmax 和异常过滤。
+    #: 桶"覆盖采样"所需样本数：Phase A 覆盖扫描 + outlier 基线用这个阈值。
+    #: 旧名 MIN_SAMPLES_PER_BUCKET，同时兼作 argmax qualified 门槛 —— 后者
+    #: 现单独用 MIN_SAMPLES_FOR_ARGMAX=1 放宽，让单样本桶也能被选为 best，
+    #: 防止"探索请求 target=N 但 segmenter buffer 长期凑不齐 → 那个桶只有
+    #: 1 样本 → 永远不 qualified → 永远不被选 → 桶 0 霸权"恶性循环。
     MIN_SAMPLES_PER_BUCKET: int = 2
+    #: argmax 挑选 best_idx 时接受的最小桶样本数。放宽到 1 让"探索过一次
+    #: 就有候选资格"，观测到的最高吞吐桶立刻参与竞争，不必等第二个样本。
+    MIN_SAMPLES_FOR_ARGMAX: int = 1
+    #: 探索意图超时（秒）：pending_exploration 在此时长内若仍未采到样本
+    #: （buffer 长期凑不够大 target），放弃本次探索避免死锁。
+    EXPLORATION_TIMEOUT_S: float = 30.0
     #: 更大桶吞吐相对 best 的下跌阈值：低于 best × KNEE_DROP_RATIO
     #: 即判定越过拐点，停止上探。0.9 = 允许 10% 的抖动容忍。
     KNEE_DROP_RATIO: float = 0.9
@@ -128,8 +138,22 @@ class RateController:
         self._samples_since_reexplore: int = 0
         #: 上次 argmax 结果索引；用于爬山探索和重探索
         self._best_bucket_idx: int = 0
-        #: 正在主动探索的桶索引（非 None 表示处于"上探索或重探索"中）
+        #: 正在主动探索的桶索引（非 None 表示处于"上探索或重探索"中）。
+        #: 每次 target_segment_chars 调用都会重算，是"本次意图"。
         self._exploring_idx: int | None = None
+        #: 跨调用持久化的探索目标。一旦 _argmax_with_exploration 选定一个
+        #: 桶要"凑样本"，此字段持续指向该桶，直到：
+        #:   1) 桶样本数 ≥ MIN_SAMPLES_PER_BUCKET（达成覆盖），或
+        #:   2) EXPLORATION_TIMEOUT_S 超时（segmenter buffer 常年凑不齐）
+        #: 与 _exploring_idx 的区别：后者每次 _compute_l_star 重算可能被
+        #: OCR 瓶颈分支清零，前者必须显式满足完成条件才清。
+        self._pending_exploration: int | None = None
+        self._pending_exploration_started_at: float | None = None
+        #: 最近一次 record_llm 时使用的 target（controller 实际"下单"成功
+        #: 的段长）。MAX_RATE_CHANGE 限幅以此为 anchor，而不是 _last_target
+        #: —— 避免"target_segment_chars 被 query 但 extract 失败没 record"
+        #: 的空 query 也把 anchor 一路衰减到 MIN_CHARS，导致桶 0 霸权。
+        self._last_recorded_target: int | None = None
 
     # ── 记录接口 ──────────────────────────────────────────
 
@@ -188,6 +212,21 @@ class RateController:
             )
             self._bucket_count[b] += 1
 
+        # 3. MAX_RATE_CHANGE anchor 更新：只有真实 record 才推进 anchor，
+        #    空 query（target 返回但 extract 失败没 record）不算数，防止
+        #    anchor 在"没有真实样本反馈"的情况下被衰减到 MIN_CHARS。
+        if target is not None and target > 0:
+            self._last_recorded_target = target
+
+        # 4. 探索意图完成判定：若正在等 bucket X 凑满，且它现在达标，清零
+        if (
+            self._pending_exploration is not None
+            and self._bucket_count[self._pending_exploration]
+            >= self.MIN_SAMPLES_PER_BUCKET
+        ):
+            self._pending_exploration = None
+            self._pending_exploration_started_at = None
+
         self._samples_since_reexplore += 1
 
         # 3. 冷启动完成判定
@@ -226,19 +265,54 @@ class RateController:
                 self._last_target = self.COLD_START_SEQUENCE[-1]
             self._adaptive_initialized = True
 
+        # 检查 pending 探索是否超时：buffer 长期凑不齐大 target 时放弃
+        self._expire_pending_exploration_if_timeout()
+
+        # Pending 探索优先：上一次某次调用决定要"凑 bucket X 的样本"，
+        # 本次仍未完成就继续返回该桶中心。跳过 _compute_l_star 以防 OCR
+        # 瓶颈分支把意图擦掉；跳过 MAX_RATE_CHANGE 让探索目标一步到位。
+        if self._pending_exploration is not None:
+            idx = self._pending_exploration
+            self._exploring_idx = idx
+            target = self._bucket_center(idx)
+            target = max(self.MIN_CHARS, min(self.MAX_CHARS, target))
+            self._last_target = target
+            return target
+
         target = self._compute_l_star()
         # 探索跳变（含爬山上探和周期重探）允许一次性跨桶，不受 ±30% 限幅，
         # 否则从冷启动末值到更大桶中心要好几轮才能到达，探索实际失效。
         # 稳态下仍然限幅防止 argmax 在两桶间抖动或异常样本把 L* 甩飞。
         if self._exploring_idx is None:
-            cap_up = int(self._last_target * (1 + self.MAX_RATE_CHANGE))
-            cap_down = int(
-                self._last_target * (1 - self.MAX_RATE_CHANGE),
+            # anchor 优先取 _last_recorded_target（真实反馈点）；首批调用
+            # 尚无 record 时回退到 _last_target 保持旧行为兼容。
+            anchor = (
+                self._last_recorded_target
+                if self._last_recorded_target is not None
+                else self._last_target
             )
+            cap_up = int(anchor * (1 + self.MAX_RATE_CHANGE))
+            cap_down = int(anchor * (1 - self.MAX_RATE_CHANGE))
             target = max(cap_down, min(cap_up, target))
         target = max(self.MIN_CHARS, min(self.MAX_CHARS, target))
         self._last_target = target
         return target
+
+    def _expire_pending_exploration_if_timeout(self) -> None:
+        """若 pending 探索已超过 EXPLORATION_TIMEOUT_S 仍没被 record，放弃。"""
+        if self._pending_exploration is None:
+            return
+        started = self._pending_exploration_started_at
+        if started is None:
+            return
+        if time.monotonic() - started > self.EXPLORATION_TIMEOUT_S:
+            logger.info(
+                "RateController 放弃 pending 探索 bucket=%d (超时 %.1fs)",
+                self._pending_exploration,
+                self.EXPLORATION_TIMEOUT_S,
+            )
+            self._pending_exploration = None
+            self._pending_exploration_started_at = None
 
     async def wait_cold_start(self) -> None:
         """阻塞直到样本 ≥ 3 或 COLD_START_TIMEOUT_S 超时。"""
@@ -284,6 +358,8 @@ class RateController:
             # 拐点学习观测量（v2 新加）
             "best_bucket_idx": self._best_bucket_idx,
             "exploring_idx": self._exploring_idx,
+            "pending_exploration": self._pending_exploration,
+            "last_recorded_target": self._last_recorded_target,
             "outlier_count": self._outlier_count,
             "bucket_edges": list(self.BUCKET_EDGES),
             "bucket_count": list(self._bucket_count),
@@ -427,73 +503,87 @@ class RateController:
         """LLM 瓶颈场景的核心：分桶吞吐 argmax + 爬山探索拐点。
 
         三阶段:
-        1. 冷启动桶探索: 已观测桶 < 2 → 返回下一个未探索桶的中心
-        2. 爬山上探: best_idx 右边有未探索桶 → 探该桶；有探但 r 跌破
+        A. 覆盖扫描：bucket 0..best+1 内第一个 count < MIN_SAMPLES_PER_BUCKET
+           的桶要先凑满，避免跳过中间桶
+        B. 爬山上探：best_idx 右边有未探索桶 → 探该桶；有探但 r 跌破
            `best_r × KNEE_DROP_RATIO` → 锁定 best_idx
-        3. 稳态 + 重探索: argmax 决定 L*；每 REEXPLORE_EVERY 段去试一次
+        C. 稳态 + 重探索：argmax 决定 L*；每 REEXPLORE_EVERY 段去试一次
            best_idx+1 探测拐点漂移
+
+        argmax qualified 门槛（MIN_SAMPLES_FOR_ARGMAX=1）比覆盖探索门槛
+        （MIN_SAMPLES_PER_BUCKET=2）低：单样本桶立刻进 best 候选池，驱动
+        Phase A/B 把真正的最优桶凑满。
         """
         n_buckets = len(self.BUCKET_EDGES) - 1
 
+        # best 候选池：count ≥ 1 就进，让单样本观测的高吞吐桶也能拿到
+        # best_idx，进而通过 Phase A/B 逼近 argmax 真正最优点
         qualified = [
             i for i in range(n_buckets)
             if (
-                self._bucket_count[i] >= self.MIN_SAMPLES_PER_BUCKET
+                self._bucket_count[i] >= self.MIN_SAMPLES_FOR_ARGMAX
                 and self._bucket_r_ema[i] is not None
             )
         ]
 
-        # 阶段 1：桶覆盖不足 → 按顺序向未探索桶探索
-        if len(qualified) < 2:
-            # 找最小的未充分采样桶（从 0 开始）
-            for i in range(n_buckets):
-                if self._bucket_count[i] < self.MIN_SAMPLES_PER_BUCKET:
-                    self._exploring_idx = i
-                    return self._bucket_center(i)
-            # 理论不可达（qualified < 2 意味着至少一个桶没满足）
-            self._exploring_idx = None
-            return self._bucket_center(self._best_bucket_idx)
+        if qualified:
+            best_idx = max(
+                qualified,
+                key=lambda i: self._bucket_r_ema[i] or 0.0,
+            )
+            self._best_bucket_idx = best_idx
+        else:
+            best_idx = self._best_bucket_idx
 
-        # 更新 best: qualified 中 r_ema 最大的桶
-        best_idx = max(
-            qualified,
-            key=lambda i: self._bucket_r_ema[i] or 0.0,
-        )
-        best_r = self._bucket_r_ema[best_idx] or 0.0
-        self._best_bucket_idx = best_idx
+        # Phase A：覆盖扫描 bucket 0..best+1 —— 任何 < MIN_SAMPLES_PER_BUCKET
+        # 的桶都要先凑满，确保 argmax 判断基于对中间桶的真实观测
+        explore_up_to = min(best_idx + 1, n_buckets - 1)
+        for i in range(explore_up_to + 1):
+            if self._bucket_count[i] < self.MIN_SAMPLES_PER_BUCKET:
+                self._set_pending_exploration(i)
+                self._exploring_idx = i
+                return self._bucket_center(i)
 
-        # 阶段 2：爬山上探
+        # Phase B：爬山上探 best+1
         next_idx = best_idx + 1
         if next_idx < n_buckets:
             next_count = self._bucket_count[next_idx]
             next_r = self._bucket_r_ema[next_idx]
             if next_count < self.MIN_SAMPLES_PER_BUCKET:
-                # 右边桶还没样本，去探
+                self._set_pending_exploration(next_idx)
                 self._exploring_idx = next_idx
                 return self._bucket_center(next_idx)
+            best_r = self._bucket_r_ema[best_idx] or 0.0
             if (
                 next_r is not None
                 and next_r >= best_r * self.KNEE_DROP_RATIO
             ):
                 # 右边桶没比 best 差多少，说明还没过拐点，继续试更大
-                # 但不盲目冲顶：只有 next_r 也在 qualified 时再看 next+1
                 next_next = next_idx + 1
                 if (
                     next_next < n_buckets
                     and self._bucket_count[next_next]
                     < self.MIN_SAMPLES_PER_BUCKET
                 ):
+                    self._set_pending_exploration(next_next)
                     self._exploring_idx = next_next
                     return self._bucket_center(next_next)
 
-        # 阶段 3：稳态 —— best_idx 锁定；按周期重探索下一个桶
+        # Phase C：稳态 —— best_idx 锁定；按周期重探索下一个桶
         self._exploring_idx = None
         if (
             self._samples_since_reexplore >= self.REEXPLORE_EVERY
             and next_idx < n_buckets
         ):
             self._samples_since_reexplore = 0
+            self._set_pending_exploration(next_idx)
             self._exploring_idx = next_idx
             return self._bucket_center(next_idx)
 
         return self._bucket_center(best_idx)
+
+    def _set_pending_exploration(self, idx: int) -> None:
+        """登记 pending 探索目标；若已指向同一桶则保留原起始时间。"""
+        if self._pending_exploration != idx:
+            self._pending_exploration = idx
+            self._pending_exploration_started_at = time.monotonic()
