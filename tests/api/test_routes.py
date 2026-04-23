@@ -128,9 +128,16 @@ class TestRoutes:
         output_path = Path(data["output_path"])
         assert output_path.exists()  # noqa: ASYNC240
         assert output_path.is_file()  # noqa: ASYNC240
-        # 产物内容与接口返回的 markdown 完全一致
+        # 产物内容与接口返回的 markdown 去掉 page 锚点后一致。
+        # 2026-04-23 起 API markdown 保留 `<!-- page: xxx -->` 锚点供前端
+        # 左右同步滚动对齐；disk 版本剥除注释让下载用户看到干净文本。
+        import re
         on_disk = output_path.read_text(encoding="utf-8")  # noqa: ASYNC240
-        assert on_disk == data["markdown"]
+        api_stripped = re.sub(
+            r"<!--\s*page:\s*[^>]*-->\n?", "", data["markdown"],
+        )
+        api_stripped = re.sub(r"\n{3,}", "\n\n", api_stripped).strip() + "\n"
+        assert on_disk == api_stripped
 
     @pytest.mark.asyncio
     async def test_get_result_nonexistent(

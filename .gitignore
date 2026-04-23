@@ -58,3 +58,4 @@ debug_image/
 
 # 并行测试数据集
 test_images/parallel_test/
+test_images/Chromium_VDA_code/

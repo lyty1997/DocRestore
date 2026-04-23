@@ -1758,9 +1758,17 @@ class Pipeline:
         self,
         llm: LLMConfig | None,
     ) -> LLMRefiner | None:
-        """获取 refiner 实例：llm 非空时按请求快照新建，否则复用默认实例。"""
+        """获取 refiner 实例：llm 非空时按请求快照新建，否则复用默认实例。
+
+        llm 非空但 `llm.model` 为空串时返回 None —— 下游调用点已有
+        `if refiner is None: 跳过` 的回退路径。否则 `_create_refiner` 会
+        把 model="" 塞进去，litellm 调用时对每次都抛 BadRequestError 并
+        在 stderr 打"Provider List: https://docs.litellm.ai/docs/providers"。
+        """
         if llm is None:
             return self._refiner
+        if not llm.model:
+            return None
         return self._create_refiner(llm)
 
     async def _do_final_refine(

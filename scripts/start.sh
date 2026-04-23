@@ -56,12 +56,17 @@ cleanup() {
     local pids
     pids="$(jobs -p)"
     if [ -n "$pids" ]; then
-        # 先给 SIGTERM，优雅退出
-        # shellcheck disable=SC2086
-        kill $pids 2>/dev/null || true
-        # 最多等 10s（uvicorn lifespan 里 ppocr-server + vLLM 清理需要时间）
+        # 子进程都用 setsid 启动（各自 session/pgid leader），用 kill -PGID
+        # 把整个组一起 TERM。否则 `kill $pid` 只到 npm exec 那层，它派生的
+        # `sh -c vite → node vite` 孙子会变孤儿继续占端口。
+        local pid
+        for pid in $pids; do
+            kill -TERM "-${pid}" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        done
+        # 最多等 20s（uvicorn lifespan 里 ppocr-server + vLLM 清理较慢，
+        # OCR engine_manager.shutdown + pipeline.shutdown 串行要 10~15s）
         local waited=0
-        while [ "$waited" -lt 20 ]; do
+        while [ "$waited" -lt 40 ]; do
             # shellcheck disable=SC2086
             if ! kill -0 $pids 2>/dev/null; then
                 break
@@ -69,18 +74,19 @@ cleanup() {
             sleep 0.5
             waited=$((waited + 1))
         done
-        # SIGKILL 兜底：防止 lifespan 卡在某个 await 不退
+        # SIGKILL 兜底：防止 lifespan 卡在某个 await 不退，对整组发 -9
         # shellcheck disable=SC2086
         if kill -0 $pids 2>/dev/null; then
-            log "子进程未在 10s 内退出，升级到 SIGKILL"
-            # shellcheck disable=SC2086
-            kill -9 $pids 2>/dev/null || true
+            log "子进程未在 20s 内退出，升级到 SIGKILL"
+            for pid in $pids; do
+                kill -KILL "-${pid}" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+            done
         fi
     fi
     wait 2>/dev/null || true
     log "已关闭"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT INT TERM HUP
 
 start_backend() {
     log "启动后端 → http://${BACKEND_HOST}:${BACKEND_PORT}"
@@ -117,12 +123,16 @@ start_backend() {
     log "使用 conda 环境: ${backend_env}"
     conda activate "$backend_env"
 
-    python -m uvicorn \
+    # setsid 让 uvicorn 独立 session：SSH 断线 / VS Code 终端关闭时内核
+    # 对 session leader 广播 SIGHUP 不再波及 uvicorn。start.sh 自己已 trap
+    # HUP 走 cleanup 优雅关闭链（SIGTERM → 10s → SIGKILL 兜底），避免
+    # uvicorn 被硬杀导致 ppocr-server / vLLM 孤儿进程残留。
+    setsid python -m uvicorn \
         docrestore.api.app:create_app \
         --factory \
         --host "$BACKEND_HOST" \
         --port "$BACKEND_PORT" \
-        --log-level info &
+        --log-level info </dev/null &
 }
 
 wait_for_backend() {
@@ -157,7 +167,8 @@ start_frontend() {
         npm install
     fi
 
-    npx vite --port "$FRONTEND_PORT" &
+    # 同理用 setsid 隔离 session，防 SSH 断开时 vite 被 SIGHUP 硬杀
+    setsid npx vite --port "$FRONTEND_PORT" </dev/null &
 }
 
 start_ppocr_server() {
@@ -189,18 +200,19 @@ start_ppocr_server() {
 
     # 未显式指定 PPOCR_GPU_ID 时不设 CUDA_VISIBLE_DEVICES，vLLM 自行探测所有 GPU；
     # 避免"被 hard code 指向不存在的设备导致 NVMLError_InvalidArgument"。
+    # setsid 隔离 session（同 start_backend / start_frontend 注释）。
     if [ -n "$PPOCR_GPU_ID" ]; then
         CUDA_DEVICE_ORDER=PCI_BUS_ID \
         CUDA_VISIBLE_DEVICES="$PPOCR_GPU_ID" \
-        paddleocr genai_server \
+        setsid paddleocr genai_server \
             --model_name "$PPOCR_MODEL" \
             --backend vllm \
-            --port "$PPOCR_PORT" &
+            --port "$PPOCR_PORT" </dev/null &
     else
-        paddleocr genai_server \
+        setsid paddleocr genai_server \
             --model_name "$PPOCR_MODEL" \
             --backend vllm \
-            --port "$PPOCR_PORT" &
+            --port "$PPOCR_PORT" </dev/null &
     fi
 }
 
