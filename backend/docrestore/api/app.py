@@ -244,8 +244,12 @@ def create_app(
         app.state.scheduler = scheduler
         app.state.db = db
 
-        # 启动上传会话清理后台任务
-        cleanup_task = await start_cleanup_task()
+        # 启动上传会话清理后台任务：provider 从 TaskManager 收集活跃
+        # 任务的 image_dir，清理循环据此跳过仍被引用的 upload_dir，避免
+        # 预览原图在 TTL 到期后被 rmtree 擦掉（烂图 bug）。
+        cleanup_task = await start_cleanup_task(
+            manager.collect_referenced_image_dirs,
+        )
 
         yield
 

@@ -20,6 +20,7 @@ import asyncio
 import logging
 import tempfile
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +37,11 @@ from docrestore.api.schemas import (
     UploadSessionFilesResponse,
     UploadSessionResponse,
 )
+
+#: 收集"仍被某个 task 引用的 upload_dir"的回调类型。cleanup 会跳过这些
+#: 目录，避免把正在被预览/浏览的任务原图误删。None 表示无约束（退化为
+#: 旧行为：只按 TTL 清理）。
+ReferencedDirsProvider = Callable[[], Awaitable[set[str]]]
 
 logger = logging.getLogger(__name__)
 
@@ -378,8 +384,16 @@ async def complete_upload(session_id: str) -> UploadCompleteResponse:
     )
 
 
-async def cleanup_expired_sessions() -> None:
-    """清理超时的上传会话（后台定期调用）。"""
+async def cleanup_expired_sessions(
+    referenced_dirs_provider: ReferencedDirsProvider | None = None,
+) -> None:
+    """清理超时的上传会话（后台定期调用）。
+
+    `referenced_dirs_provider` 若提供，会先查一份"仍被任务引用的 upload_dir"
+    集合；命中的 session 即便 TTL 到期也不删，防止前端预览原图时被清理拖死
+    （历史 bug：task.image_dir 复用 upload_dir，1h 后 upload 被清 → 原图 404
+    → 前端烂图占位）。provider=None 时退回纯 TTL 清理（便于测试）。
+    """
     import shutil
 
     now = datetime.now()
@@ -387,19 +401,46 @@ async def cleanup_expired_sessions() -> None:
         sid for sid, s in _sessions.items()
         if (now - s.created_at).total_seconds() > _SESSION_TTL_SECONDS
     ]
+    if not expired:
+        return
+
+    referenced: set[str] = set()
+    if referenced_dirs_provider is not None:
+        try:
+            referenced = await referenced_dirs_provider()
+        except Exception:
+            logger.exception(
+                "收集活跃任务的 upload_dir 失败，按保守策略跳过本轮清理"
+            )
+            return
+
+    skipped: list[str] = []
     for sid in expired:
-        session = _sessions.pop(sid, None)
-        if session is not None:
-            shutil.rmtree(session.upload_dir, ignore_errors=True)
-            logger.info("清理过期上传会话: %s", sid)
+        session = _sessions.get(sid)
+        if session is None:
+            continue
+        if str(session.upload_dir) in referenced:
+            # 仍被任务引用（running / 或历史终态任务尚未 delete）
+            skipped.append(sid)
+            continue
+        _sessions.pop(sid, None)
+        shutil.rmtree(session.upload_dir, ignore_errors=True)
+        logger.info("清理过期上传会话: %s", sid)
+
+    if skipped:
+        logger.debug(
+            "跳过清理（仍被任务引用）: %d 个 session", len(skipped),
+        )
 
 
-async def start_cleanup_task() -> asyncio.Task[None]:
+async def start_cleanup_task(
+    referenced_dirs_provider: ReferencedDirsProvider | None = None,
+) -> asyncio.Task[None]:
     """启动后台清理任务。"""
     async def _loop() -> None:
         while True:
             await asyncio.sleep(_CLEANUP_INTERVAL_SECONDS)
-            await cleanup_expired_sessions()
+            await cleanup_expired_sessions(referenced_dirs_provider)
 
     return asyncio.create_task(_loop())
 

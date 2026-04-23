@@ -659,6 +659,44 @@ class TaskManager:
 
         return ""
 
+    async def collect_referenced_image_dirs(self) -> set[str]:
+        """返回所有任务（内存 + DB）引用的 image_dir 集合。
+
+        供上传会话清理循环用：cleanup TTL 到期前先过滤掉仍被任务引用的
+        upload_dir，避免"历史任务的原图预览"在 1h 后因 rmtree 失效（烂图
+        占位）。终态任务（completed / failed）也要包含 —— 用户可能在
+        任务完成后回看预览。
+        """
+        dirs: set[str] = set()
+        async with self._lock:
+            dirs.update(
+                t.image_dir for t in self._tasks.values() if t.image_dir
+            )
+
+        if self._db is not None:
+            for status in (
+                "pending", "processing", "completed", "failed",
+            ):
+                page = 1
+                while True:
+                    try:
+                        result = await self._db.list_tasks(
+                            status=status, page=page, page_size=200,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "DB list_tasks 失败 status=%s page=%d",
+                            status, page,
+                        )
+                        break
+                    dirs.update(
+                        t.image_dir for t in result.tasks if t.image_dir
+                    )
+                    if len(result.tasks) < 200:
+                        break
+                    page += 1
+        return dirs
+
     async def _collect_cleanup_targets(
         self,
         statuses: list[str],

@@ -402,6 +402,102 @@ class TestListTasksInMemory:
         assert only_failed.tasks[0].task_id == "b"
 
 
+class TestCollectReferencedImageDirs:
+    """collect_referenced_image_dirs：合并内存 + DB 的 image_dir。
+
+    upload 清理循环用这个集合跳过"仍被任务引用的 upload_dir"，修复
+    2026-04-23 的烂图预览 bug（task 复用 upload_dir，1h 后被 rmtree）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_memory_only_when_no_db(self, tmp_path: Path) -> None:
+        mgr = _make_manager()
+        dir_a = str(tmp_path / "a")
+        dir_b = str(tmp_path / "b")
+        mgr._tasks["a"] = Task(
+            task_id="a", status=TaskStatus.COMPLETED,
+            image_dir=dir_a, output_dir="/",
+        )
+        mgr._tasks["b"] = Task(
+            task_id="b", status=TaskStatus.PROCESSING,
+            image_dir=dir_b, output_dir="/",
+        )
+        mgr._tasks["c"] = Task(
+            task_id="c", status=TaskStatus.FAILED,
+            image_dir="", output_dir="/",  # 空串应被过滤
+        )
+
+        dirs = await mgr.collect_referenced_image_dirs()
+        assert dirs == {dir_a, dir_b}
+
+    @pytest.mark.asyncio
+    async def test_merges_memory_and_db(self, tmp_path: Path) -> None:
+        from docrestore.persistence.database import (
+            TaskListItem as DBTaskListItem,
+        )
+        from docrestore.persistence.database import TaskListResult
+
+        db = MagicMock(spec=TaskDatabase)
+        dir_mem = str(tmp_path / "mem-only")
+        dir_db = str(tmp_path / "from-db")
+
+        def _fake_list(
+            status: str,
+            page: int,
+            page_size: int,
+        ) -> TaskListResult:
+            # db 里再多一个 dir_db 的已完成任务
+            if status == "completed" and page == 1:
+                return TaskListResult(
+                    tasks=[
+                        DBTaskListItem(
+                            task_id="db1",
+                            status="completed",
+                            image_dir=dir_db,
+                            output_dir="/",
+                            error=None,
+                            created_at="2026-04-23T00:00:00",
+                            result_count=1,
+                        ),
+                    ],
+                    total=1,
+                    page=1,
+                    page_size=page_size,
+                )
+            return TaskListResult(
+                tasks=[], total=0, page=page, page_size=page_size,
+            )
+
+        db.list_tasks = AsyncMock(side_effect=_fake_list)
+
+        mgr = _make_manager(db=db)
+        mgr._tasks["mem1"] = Task(
+            task_id="mem1", status=TaskStatus.PROCESSING,
+            image_dir=dir_mem, output_dir="/",
+        )
+
+        dirs = await mgr.collect_referenced_image_dirs()
+        assert dirs == {dir_mem, dir_db}
+
+    @pytest.mark.asyncio
+    async def test_db_exception_does_not_break(
+        self, tmp_path: Path,
+    ) -> None:
+        """DB 故障时只从内存收集，保守返回；不让 cleanup 崩。"""
+        db = MagicMock(spec=TaskDatabase)
+        db.list_tasks = AsyncMock(side_effect=RuntimeError("db down"))
+
+        dir_m = str(tmp_path / "m")
+        mgr = _make_manager(db=db)
+        mgr._tasks["m"] = Task(
+            task_id="m", status=TaskStatus.COMPLETED,
+            image_dir=dir_m, output_dir="/",
+        )
+
+        dirs = await mgr.collect_referenced_image_dirs()
+        assert dirs == {dir_m}
+
+
 class TestProgressPubSub:
     """进度发布/订阅"""
 
