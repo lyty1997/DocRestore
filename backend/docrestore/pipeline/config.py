@@ -192,7 +192,16 @@ class LLMConfig(BaseModel):
     max_chars_per_segment: int = 8000  # 分段上限（中文字符 token 密度高，需保守）
     segment_overlap_lines: int = 5
     max_retries: int = 2
-    timeout: int = 600  # 单次请求超时（秒），慢速中转站需要更大值
+    #: 基础超时（秒）。实际 timeout 按 input_chars 线性放大，见 effective_timeout。
+    #: 默认 60s —— 正常 API p95 远低于此值；超时代表服务端真的挂了，快速失败
+    #: + litellm num_retries 自动重试比长等实用。历史上设 600s（10 分钟），
+    #: gpt-5.4-nano profile 出现过 904s 单次挂起 —— 那是 timeout=600 触发一次
+    #: retry 凑出来的。改小后类似 outlier 在 180s 内就被切断。
+    timeout: int = 60
+    #: 每 1000 个 input 字符额外给多少秒。大段 LLM 本身就慢，要线性放宽。
+    timeout_per_1k_chars_s: float = 3.0
+    #: 单次 timeout 上限（秒）。防止超长 input 把 timeout 放到天上去。
+    timeout_max_s: int = 180
     enable_final_refine: bool = True  # 分段精修后是否做整篇文档级精修
     # 整篇精修分块：文档超过 final_refine_min_chars 时切成 final_refine_chunks 块
     # 并行调用；块数 ≤1 退化为单次整篇调用。每块按 <!-- page: --> 边界切分。

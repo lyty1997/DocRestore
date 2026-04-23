@@ -148,6 +148,29 @@ class BaseLLMRefiner:
         self._config = config
         self._semaphore = semaphore
 
+    def _compute_timeout(
+        self, messages: list[dict[str, str]],
+    ) -> int:
+        """按 input 大小动态调单次 LLM timeout。
+
+        公式：`base + per_1k * (chars / 1000)`，并 clamp 到 `[base, timeout_max_s]`。
+        小段快速失败（避免服务端挂起拖死 subdir），大段线性放宽（LLM 本身就慢）。
+        """
+        msg_chars = sum(
+            len(str(m.get("content", "")))
+            for m in messages
+        )
+        adaptive = (
+            self._config.timeout
+            + self._config.timeout_per_1k_chars_s
+            * msg_chars / 1000.0
+        )
+        clamped = min(
+            float(self._config.timeout_max_s),
+            max(float(self._config.timeout), adaptive),
+        )
+        return int(clamped)
+
     def _build_kwargs(
         self,
         messages: list[dict[str, str]],
@@ -158,12 +181,15 @@ class BaseLLMRefiner:
 
         prediction_content 非空且 config.enable_prediction=True 时，追加
         OpenAI Predicted Outputs 参数（仅 gpt-4o 系支持，gpt-5 全系原生不支持）。
+
+        timeout 按 input 大小动态调整（见 _compute_timeout）：短段快挂断，长段
+        宽限；litellm 的 num_retries 负责重试。
         """
         kwargs: dict[str, object] = {
             "model": self._config.model,
             "messages": messages,
             "num_retries": self._config.max_retries,
-            "timeout": self._config.timeout,
+            "timeout": self._compute_timeout(messages),
         }
         if self._config.api_base:
             kwargs["base_url"] = self._config.api_base
