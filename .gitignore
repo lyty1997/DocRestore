@@ -7,8 +7,9 @@ vendor/
 # 模型权重
 models/
 
-# 测试输出目录
-output/
+# 测试输出目录（仅根目录下的 output/；不影响 backend/docrestore/output/
+# 这个源码模块，否则 renderer.py 等永远 untracked）
+/output/
 test_images/*_OCR
 test_images/linux_sdk
 

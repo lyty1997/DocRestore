@@ -23,6 +23,7 @@ import {
 import type { TaskListItem, TaskResultResponse } from "../api/schemas";
 import { preprocessMarkdown } from "../features/task/markdown";
 import { useTaskProgress } from "../features/task/useTaskProgress";
+import { useScrollSync } from "../hooks/useScrollSync";
 import { useTranslation } from "../i18n";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { SourceImagePanel } from "./SourceImagePanel";
@@ -84,6 +85,13 @@ export function TaskDetail({
 
   /* 确认弹窗 */
   const [confirm, setConfirm] = useState<ConfirmState | undefined>();
+
+  /* 左右预览同步滚动：SourceImagePanel 的 .source-images-list 与右侧
+     .markdown-preview 各挂一个 callback ref，把实际 DOM 元素塞到 state
+     里。state 变化触发 useScrollSync 内 useEffect 重新跑 → listener 绑上。
+     edit 模式或失败 tab 下右侧不是 markdown，禁用同步。 */
+  const [leftScrollEl, setLeftScrollEl] = useState<HTMLDivElement>();
+  const [rightScrollEl, setRightScrollEl] = useState<HTMLDivElement>();
 
   const selectedDoc = docResults[selectedDocIdx];
   /**
@@ -154,6 +162,14 @@ export function TaskDetail({
     void fetchTaskInfo();
     void fetchResults();
   }, [fetchTaskInfo, fetchResults]);
+
+  useScrollSync(leftScrollEl, rightScrollEl, {
+    // 左侧是堆叠的小缩略图、右侧是长 markdown，形状差异大；用 start 对齐
+    // 更贴合用户直觉：看到哪张图"在顶部可见"，右侧 markdown 也滚到对应
+    // 段落"在顶部"，而不是把图居中。
+    align: "start",
+    enabled: !editMode && !selectedDocFailed,
+  });
 
   /* 实时进度订阅：pending/processing 时建 WS，终态自动停 + 刷新任务信息/结果 */
   const taskStatus = task?.status ?? "unknown";
@@ -493,7 +509,11 @@ export function TaskDetail({
           )}
 
           <div className="preview-split">
-            <SourceImagePanel taskId={taskId} images={filteredImages} />
+            <SourceImagePanel
+              ref={(el) => { setLeftScrollEl(el ?? undefined); }}
+              taskId={taskId}
+              images={filteredImages}
+            />
             {selectedDocFailed && (
               <div className="doc-failed-panel">
                 <h4>{t("taskDetail.docFailedTitle")}</h4>
@@ -515,7 +535,10 @@ export function TaskDetail({
               </div>
             )}
             {!selectedDocFailed && !editMode && (
-              <div className="markdown-preview">
+              <div
+                ref={(el) => { setRightScrollEl(el ?? undefined); }}
+                className="markdown-preview"
+              >
                 <Markdown
                   remarkPlugins={[remarkGfm]}
                   rehypePlugins={[rehypeRaw]}

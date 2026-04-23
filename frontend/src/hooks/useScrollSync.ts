@@ -17,7 +17,7 @@
  *   且 IO 在容器 scroll 里配置 root 有兼容坑）
  */
 
-import { useEffect, useRef, type RefObject } from "react";
+import { useEffect, useRef } from "react";
 
 export interface ScrollSyncOptions {
   /** 对齐方式：center（居中）/ start（顶部） */
@@ -30,10 +30,18 @@ export interface ScrollSyncOptions {
  * 绑定左右两侧容器的同步滚动。
  *
  * 两侧容器内须有 `[data-page]` 锚点元素，且可滚动（overflow 非 visible）。
+ *
+ * 接口用 `HTMLElement | null` 而不是 `RefObject`：
+ * - 调用方通过 `useState<HTMLElement|null>(null)` + 组件上的 callback ref
+ *   `ref={setLeftEl}` 暴露元素。这样 ref 填入时 state 变化 → useEffect
+ *   重新跑 → listener 才能成功绑定
+ * - 如果用 `RefObject.current`，mount 时 current 通常为 null（内层组件
+ *   异步 render 完后才填入），effect 的 deps 不感知 current 变化 →
+ *   listener 永远不绑
  */
 export function useScrollSync(
-  leftRef: RefObject<HTMLElement | null>,
-  rightRef: RefObject<HTMLElement | null>,
+  left: HTMLElement | null | undefined,
+  right: HTMLElement | null | undefined,
   options: ScrollSyncOptions = {},
 ): void {
   const { align = "center", enabled = true } = options;
@@ -44,9 +52,6 @@ export function useScrollSync(
 
   useEffect(() => {
     if (!enabled) return;
-
-    const left = leftRef.current;
-    const right = rightRef.current;
     if (!left || !right) return;
 
     const markProgrammatic = (): void => {
@@ -71,7 +76,7 @@ export function useScrollSync(
         if (rafId !== undefined) return;
         rafId = globalThis.requestAnimationFrame(() => {
           rafId = undefined;
-          const key = findActivePageKey(source);
+          const key = findActivePageKey(source, align);
           if (key === undefined) return;
           const targetEl = target.querySelector<HTMLElement>(
             `[data-page="${cssEscape(key)}"]`,
@@ -97,25 +102,60 @@ export function useScrollSync(
         syncResetTimerRef.current = undefined;
       }
     };
-  }, [leftRef, rightRef, align, enabled]);
+  }, [left, right, align, enabled]);
 }
 
 /**
- * 扫描容器内所有 [data-page] 锚点，返回距离容器视口中心最近的那个的 key。
+ * 扫描容器内所有 [data-page] 锚点，返回"活跃"锚点的 key。
+ *
+ * 两种策略：
+ * - `center`：最靠近容器视口中心的锚点几何中心。适合两侧都是等高列表、
+ *   想让"当前阅读焦点"居中对齐的场景
+ * - `start`：最后一个 `rect.top <= 容器顶部 + 小偏移` 的锚点 ——
+ *   语义是"当前从顶部往下第一页"。适合"左侧图片缩略图、右侧长 markdown"
+ *   这种形状差异大的场景：用户看到某张图出现在顶部 → 对侧跳到对应段落
+ *   的开头。20px 小偏移避免"正好滚到 anchor 顶部就切页"的抖动
  */
-function findActivePageKey(container: HTMLElement): string | undefined {
+function findActivePageKey(
+  container: HTMLElement,
+  align: "center" | "start",
+): string | undefined {
   const anchors = container.querySelectorAll<HTMLElement>("[data-page]");
   if (anchors.length === 0) return undefined;
 
   const containerRect = container.getBoundingClientRect();
-  const viewportCenter = containerRect.top + containerRect.height / 2;
 
+  if (align === "start") {
+    const threshold = containerRect.top + 20;
+    // 遍历所有 anchor，取 top <= threshold 里 top 最大的（最靠近顶部）
+    let bestKey: string | undefined;
+    let bestTop = Number.NEGATIVE_INFINITY;
+    let firstKey: string | undefined;
+    let firstTop = Number.POSITIVE_INFINITY;
+    for (const el of anchors) {
+      const rect = el.getBoundingClientRect();
+      if (rect.top <= threshold) {
+        if (rect.top > bestTop) {
+          bestTop = rect.top;
+          bestKey = el.dataset.page;
+        }
+      } else if (rect.top < firstTop) {
+        // 所有 anchor 都在阈值下方时的 fallback：取最靠近阈值的
+        firstTop = rect.top;
+        firstKey = el.dataset.page;
+      }
+    }
+    return bestKey ?? firstKey;
+  }
+
+  // center 模式：几何中心最近
+  const probeY = containerRect.top + containerRect.height / 2;
   let bestKey: string | undefined;
   let bestDist = Number.POSITIVE_INFINITY;
   for (const el of anchors) {
     const rect = el.getBoundingClientRect();
     const elCenter = rect.top + rect.height / 2;
-    const dist = Math.abs(elCenter - viewportCenter);
+    const dist = Math.abs(elCenter - probeY);
     if (dist < bestDist) {
       bestDist = dist;
       bestKey = el.dataset.page;

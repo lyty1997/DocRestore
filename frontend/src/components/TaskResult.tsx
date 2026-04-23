@@ -2,7 +2,7 @@
  * 任务结果展示组件：多文档切换 + 源图片 + Markdown 编辑/预览 + 下载
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
@@ -39,11 +39,12 @@ export function TaskResult({
   const [saveError, setSaveError] = useState<string | undefined>();
   const downloadUrl = getDownloadUrl(taskId);
 
-  // 左右同步滚动：左侧 .source-images-list、右侧 .markdown-preview 两个
-  // 可滚动容器，用 data-page="<filename>" 做对齐锚点。edit 模式下右侧是
-  // textarea 没有 page 标记，禁用同步。
-  const leftScrollRef = useRef<HTMLDivElement>(null);
-  const rightScrollRef = useRef<HTMLDivElement>(null);
+  // 左右同步滚动：两个滚动容器用 callback ref 把实际 DOM 塞到 state，
+  // state 变化触发 hook 内 useEffect 重绑 listener。用 RefObject 会在
+  // 初次 mount 时错过 ref 填入的时机（内层组件延后 render）。
+  // edit 模式下右侧是 textarea 没有 page 标记，禁用同步。
+  const [leftScrollEl, setLeftScrollEl] = useState<HTMLDivElement>();
+  const [rightScrollEl, setRightScrollEl] = useState<HTMLDivElement>();
 
   const selectedDoc = docResults[selectedIdx];
   const docDir = selectedDoc?.doc_dir;
@@ -110,7 +111,7 @@ export function TaskResult({
     };
   }, [taskId]);
 
-  useScrollSync(leftScrollRef, rightScrollRef, {
+  useScrollSync(leftScrollEl, rightScrollEl, {
     align: "center",
     enabled: !editMode,
   });
@@ -178,7 +179,7 @@ export function TaskResult({
 
       <div className="preview-split">
         <SourceImagePanel
-          ref={leftScrollRef}
+          ref={(el) => { setLeftScrollEl(el ?? undefined); }}
           taskId={taskId}
           images={filteredImages}
         />
@@ -191,7 +192,10 @@ export function TaskResult({
             />
           </div>
         ) : (
-          <div ref={rightScrollRef} className="markdown-preview">
+          <div
+            ref={(el) => { setRightScrollEl(el ?? undefined); }}
+            className="markdown-preview"
+          >
             <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
               {rewritten}
             </Markdown>

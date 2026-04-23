@@ -989,10 +989,10 @@ class Pipeline:
         )
         with profiler.stage("render.write"):
             renderer = Renderer(self._config.output)
-            doc_path = await renderer.render(doc, output_dir)
-        final_md = await asyncio.to_thread(
-            doc_path.read_text, encoding="utf-8",
-        )
+            doc_path, final_md = await renderer.render(doc, output_dir)
+        # final_md 来自 renderer 返回值（带 <!-- page: xxx --> marker 的
+        # 预览版），供前端左右同步滚动锚点定位。磁盘上的 document.md 是
+        # 剥除 marker 的下载版，两者互不干扰。
 
         warnings = self._collect_warnings(
             refined_results, final_gaps, truncated,

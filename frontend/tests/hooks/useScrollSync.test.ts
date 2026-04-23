@@ -12,7 +12,6 @@
  */
 
 import { act, renderHook } from "@testing-library/react";
-import { createRef } from "react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { useScrollSync } from "../../src/hooks/useScrollSync";
@@ -129,12 +128,8 @@ describe("useScrollSync", () => {
       { key: "c.jpg", top: 1500 },
     ]);
 
-    const leftRef = createRef<HTMLDivElement>();
-    const rightRef = createRef<HTMLDivElement>();
-    (leftRef as { current: HTMLDivElement | null }).current = left.container;
-    (rightRef as { current: HTMLDivElement | null }).current = right.container;
 
-    renderHook(() => { useScrollSync(leftRef, rightRef); });
+    renderHook(() => { useScrollSync(left.container, right.container); });
 
     // 模拟左侧滚到让 b.jpg (top=600) 接近视口中心（viewport=400，中心 200）
     // 滚 500 后 b 在视口内坐标 = 600 - 500 = 100，居中心 200 最近的是 b
@@ -155,12 +150,8 @@ describe("useScrollSync", () => {
       { key: "b.jpg", top: 900 },
     ]);
 
-    const leftRef = createRef<HTMLDivElement>();
-    const rightRef = createRef<HTMLDivElement>();
-    (leftRef as { current: HTMLDivElement | null }).current = left.container;
-    (rightRef as { current: HTMLDivElement | null }).current = right.container;
 
-    renderHook(() => { useScrollSync(leftRef, rightRef); });
+    renderHook(() => { useScrollSync(left.container, right.container); });
 
     // 右滚 700，b.jpg 在视口坐标 = 900 - 700 = 200，正好居中
     simulateScroll(right.container, 700);
@@ -174,12 +165,8 @@ describe("useScrollSync", () => {
     const left = makeContainer([{ key: "a.jpg", top: 0 }]);
     const right = makeContainer([{ key: "a.jpg", top: 500 }]);
 
-    const leftRef = createRef<HTMLDivElement>();
-    const rightRef = createRef<HTMLDivElement>();
-    (leftRef as { current: HTMLDivElement | null }).current = left.container;
-    (rightRef as { current: HTMLDivElement | null }).current = right.container;
 
-    renderHook(() => { useScrollSync(leftRef, rightRef, { enabled: false }); });
+    renderHook(() => { useScrollSync(left.container, right.container, { enabled: false }); });
 
     simulateScroll(left.container, 200);
     await flushRaf();
@@ -197,12 +184,8 @@ describe("useScrollSync", () => {
       { key: "b.jpg", top: 900 },
     ]);
 
-    const leftRef = createRef<HTMLDivElement>();
-    const rightRef = createRef<HTMLDivElement>();
-    (leftRef as { current: HTMLDivElement | null }).current = left.container;
-    (rightRef as { current: HTMLDivElement | null }).current = right.container;
 
-    renderHook(() => { useScrollSync(leftRef, rightRef); });
+    renderHook(() => { useScrollSync(left.container, right.container); });
 
     // 左滚触发右侧程序化滚动
     simulateScroll(left.container, 400);
@@ -222,12 +205,8 @@ describe("useScrollSync", () => {
     const left = makeContainer([{ key: "a.jpg", top: 0 }]);
     const right = makeContainer([{ key: "different.jpg", top: 300 }]);
 
-    const leftRef = createRef<HTMLDivElement>();
-    const rightRef = createRef<HTMLDivElement>();
-    (leftRef as { current: HTMLDivElement | null }).current = left.container;
-    (rightRef as { current: HTMLDivElement | null }).current = right.container;
 
-    renderHook(() => { useScrollSync(leftRef, rightRef); });
+    renderHook(() => { useScrollSync(left.container, right.container); });
 
     simulateScroll(left.container, 50);
     await flushRaf();
@@ -235,16 +214,45 @@ describe("useScrollSync", () => {
     expect(right.container.scrollTop).toBe(0);
   });
 
+  it("align=start 模式：选最后一个穿过顶部阈值的锚点（非几何中心）", async () => {
+    // 场景：左侧是图片缩略图（anchors 有高度），右侧是长 markdown（anchors
+    // 零高度）。滚到"10.jpg 的图恰好在视口顶部可见"时，应对齐右侧 10.jpg
+    // 段落的开头，而不是因为图片本身高度让中心点偏到 11.jpg。
+    const left = makeContainer(
+      [
+        { key: "1.jpg", top: 0 },
+        { key: "10.jpg", top: 160 },
+        { key: "11.jpg", top: 310 },
+      ],
+      { scrollHeight: 600 },
+    );
+    const right = makeContainer(
+      [
+        { key: "1.jpg", top: 20 },
+        { key: "10.jpg", top: 1680 },
+        { key: "11.jpg", top: 3360 },
+      ],
+      { scrollHeight: 4000 },
+    );
+
+    renderHook(() => {
+      useScrollSync(left.container, right.container, { align: "start" });
+    });
+
+    // left scrollTop = 160 —— 10.jpg 锚点在视口顶部，应对齐 right 的 10.jpg
+    simulateScroll(left.container, 160);
+    await flushRaf();
+
+    // align=start → right.scrollTop 应为 1680（不是中心对齐的其他值）
+    expect(right.container.scrollTop).toBe(1680);
+  });
+
   it("卸载时移除事件监听（不泄漏）", async () => {
     const left = makeContainer([{ key: "a.jpg", top: 0 }]);
     const right = makeContainer([{ key: "a.jpg", top: 500 }]);
 
-    const leftRef = createRef<HTMLDivElement>();
-    const rightRef = createRef<HTMLDivElement>();
-    (leftRef as { current: HTMLDivElement | null }).current = left.container;
-    (rightRef as { current: HTMLDivElement | null }).current = right.container;
 
-    const { unmount } = renderHook(() => { useScrollSync(leftRef, rightRef); });
+    const { unmount } = renderHook(() => { useScrollSync(left.container, right.container); });
     unmount();
 
     // 卸载后滚动不应再触发同步
