@@ -49,6 +49,32 @@ REFINE_SYSTEM_PROMPT = (
     "   - context_before/after 各取 20-40 字的定位片段\n"
     "9. 输出纯 markdown，不要添加任何解释文字，不要把整个输出包裹在代码块中。\n"
     "\n"
+    "## 网页 UI 噪音清理（原图是屏幕拍摄时高频出现）\n"
+    "10. 代码块顶部的"
+    "「语言标签 + 复制提示」UI 行必须整行删除，**不要保留在代码块内**：\n"
+    "    - 单独一行 `Plain Text 复制代码` / `Bash 复制代码` / `Python 复制代码`"
+    " / `C 复制代码` / 任意 `{语言} 复制代码` 形式\n"
+    "    - 单独的 `复制代码` 一词、或以 `▶` / `▼` / `☐` / `◆` / `✦`"
+    " 等符号开头后跟短串（≤ 20 字且非正文）的视觉修饰行\n"
+    "    - 删除这些后若代码块仍未闭合，补 ```text 围栏\n"
+    "11. 代码块内部每行形如 `N 代码内容`（行首 1-4 位整数 + 一个空格 +"
+    " 真实代码）是网页代码框的**视觉行号**，必须剥掉只保留代码内容。"
+    "例外：如果整块内容本身就是有序列表/枚举（如 `1. Step one`），保留。\n"
+    "12. 形如 `{产品名}_{手册名} ☐ 评审进行中` / `内部资料` /"
+    " `Confidential` / `机密` / `Draft` 的短行，是页眉页脚状态标记，"
+    "整行删除；同理每页重复出现的版本号/页码一并删除。\n"
+    "\n"
+    "## HTML 表格 → 代码块判别（保守）\n"
+    "13. 输入可能包含 `<table>...</table>` HTML 片段。**默认保留 HTML 原样**。\n"
+    "14. 仅当表格**所有非空单元格都是代码/配置**（如全是 `CONFIG_XXX=y`"
+    " Kconfig、或全是函数调用 `xxx(...);`、或全是命令行），且结构是"
+    "「行号列 + 代码列」或「单列代码」的明显视觉代码框时，"
+    "**替换为**（不是插入另一份）一段 ```text 代码块，每行一条，行号列剥掉。\n"
+    "15. **关键：改写 HTML 表时必须 REPLACE，不允许同时输出"
+    "`<table>` 原文和代码块两份**。看到 HTML 表时，做出决定后只输出一种形态。\n"
+    "16. 其余真正的数据表格（规格参数、厂商型号、信号引脚对照）一律保留 HTML"
+    " 原样；混合内容（部分代码部分数据）也保留 HTML 原样，不要乱改。\n"
+    "\n"
     "## 输出协议\n"
     "- 直接输出修复后的 markdown 正文，首行即正文。\n"
     "- user 消息末尾的 `<meta>...</meta>` 块是段号与上下文元信息，仅供参考，"
@@ -128,11 +154,51 @@ REFINE_SYSTEM_PROMPT = (
     "说明：原文跳级（### 直接到 #####），修正为连续层级；"
     "列表项、正文内容一字不改。\n"
     "\n"
+    "## 示例 4：UI 噪音清理 + 代码块行号剥离 + HTML 表 → 代码块\n"
+    "输入：\n"
+    "```\n"
+    "<!-- page: DSC04727.JPG -->\n"
+    "DDR_适配指南 ☐ 评审进行中\n"
+    "SPL 正常启动 log:\n"
+    "\n"
+    "Plain Text 复制代码\n"
+    "1 U-Boot SPL 2020.01 (Mar 19 2023)\n"
+    "2 FM[1] lpddr4x dualrank freq=3733 sdram init\n"
+    "3 ddr initialized, jump to uboot\n"
+    "\n"
+    "<table border=1><tr><td>1</td><td>CONFIG_DDR_LP4X_3733=y</td></tr>"
+    "<tr><td>2</td><td>CONFIG_DDR_LP4_2133=y</td></tr></table>\n"
+    "```\n"
+    "输出：\n"
+    "```\n"
+    "<!-- page: DSC04727.JPG -->\n"
+    "SPL 正常启动 log:\n"
+    "\n"
+    "```text\n"
+    "U-Boot SPL 2020.01 (Mar 19 2023)\n"
+    "FM[1] lpddr4x dualrank freq=3733 sdram init\n"
+    "ddr initialized, jump to uboot\n"
+    "```\n"
+    "\n"
+    "```text\n"
+    "CONFIG_DDR_LP4X_3733=y\n"
+    "CONFIG_DDR_LP4_2133=y\n"
+    "```\n"
+    "```\n"
+    "说明：① `DDR_适配指南 ☐ 评审进行中` 页眉状态行整行删除；"
+    "② `Plain Text 复制代码` 是代码框语言标签+复制按钮 UI 噪音，整行删除，"
+    "并补上 ```text 围栏；③ 代码前 `1 ` `2 ` `3 ` 是视觉行号，剥掉；"
+    "④ HTML 表内容是 Kconfig 配置（含 `CONFIG_` 前缀 + `=y`），"
+    "整表改写成 ```text 代码块，行号单元格剥掉。\n"
+    "\n"
     "## 常见错误自检\n"
     "- 不要自行补全 OCR 缺失的句子，只能标记 GAP 让上层补。\n"
     "- 不要把正文里的技术术语（寄存器名、枚举值）当成重复误删。\n"
     "- 不要把合法的重复（如多个同名小节标题「参考资料」）误删。\n"
-    "- 不要把空白行过度压缩为零空行，段落间保留 1 个空行。"
+    "- 不要把空白行过度压缩为零空行，段落间保留 1 个空行。\n"
+    "- 不要把数据表格（如规格参数、厂商列表）误判为代码表格；"
+    "不确定时保留 HTML 原样。\n"
+    "- 剥代码块行号时不要误删有序列表（`1. xxx` 带点号的是列表，保留）。"
 )
 
 REFINE_USER_TEMPLATE = (
@@ -161,7 +227,7 @@ def build_refine_prompt(
     """构造 [system, user] messages 列表。
 
     变量全部集中在 user 消息末尾的 <meta> 块中，便于远端 prefix cache
-    命中长 system + 稳定的正文分隔符前缀。
+    命中长 system + 稳定的正文分隔符前缀。retry_hint 非空时附加重试提示段。
     """
     overlap_lines: list[str] = []
     if context.overlap_before:
@@ -180,6 +246,13 @@ def build_refine_prompt(
         overlap_meta=overlap_meta,
         raw_markdown=raw_markdown,
     )
+    if context.retry_hint:
+        user_content = (
+            "⚠️ 这是重试调用：上一轮输出被质量检测判定仍有问题。\n"
+            f"具体问题：{context.retry_hint}\n"
+            "请**严格按 system 规则**重做，特别关注上述具体问题。\n\n"
+            + user_content
+        )
 
     return [
         {"role": "system", "content": REFINE_SYSTEM_PROMPT},
@@ -194,9 +267,15 @@ FINAL_REFINE_SYSTEM_PROMPT = (
     "\n"
     "## 硬性规则\n"
     "1. **删除重复的页眉/页脚/水印**：反复出现的文档标题、版本号、"
-    "状态标记（如「内部资料」「机密」）、页码，只在首次出现处保留一次。\n"
+    "状态标记（如「内部资料」「机密」「评审进行中」「Draft」「Confidential」）、"
+    "页码，**所有出现处全部删除**（不只是保留首次）——这些是拍摄时每页底部"
+    "都会重复的模板文字，不属于正文一部分。例：`{产品名}_{手册名} ☐ 评审进行中`"
+    " 出现 ≥2 次即视为页脚，整行全部删除。\n"
     "2. **删除跨段边界的重复段落**：完全相同或高度相似（>90%）的"
-    "连续段落、代码块、列表；保留时间靠前的那份。\n"
+    "连续段落、代码块、列表；保留时间靠前的那份。尤其注意"
+    "**跨页连续句子的重复**：前页末尾的 1-3 行与下一页开头的 1-3 行完全相同时，"
+    "是拍照重叠导致的重复，删除下一页开头的那份；若下一页的版本更完整"
+    "（更长、没有 OCR 截断），则反向删除前页末尾的半截版本。\n"
     "3. **严禁压缩、改写、概括任何有效内容**，只做去重。\n"
     "4. 保留 `<!-- page: 原图文件名.JPG -->` 页边界标记原样，不删不改。\n"
     "5. 保留 `<!-- GAP: ... -->` 注释原样。\n"
@@ -205,6 +284,10 @@ FINAL_REFINE_SYSTEM_PROMPT = (
     "空列表、连续的空行（压缩为最多 1 个空行）。\n"
     "8. 输出纯 markdown，首行即正文，不要添加任何解释，"
     "不要把整个输出包裹在代码块中。\n"
+    "9. **残留的 UI 噪音兜底清理**：若段内精修漏删了"
+    " `Plain Text 复制代码` / `Bash 复制代码` / `{语言} 复制代码` /"
+    " 独立 `复制代码` / 开头是 `▶` `▼` `☐` `◆` 后跟短 UI 标签的行，整行删除。"
+    "若留在代码块内，剥离后保持代码块闭合。\n"
     "\n"
     "## 输出协议\n"
     "- 直接输出整篇去重后的 markdown。\n"
@@ -240,6 +323,29 @@ FINAL_REFINE_SYSTEM_PROMPT = (
     "```\n"
     "说明：第二页重复的标题+「内部资料」水印是跨页页眉，删除；"
     "page marker 和正文照常保留。\n"
+    "\n"
+    "## 示例 3：跨页半截句 + 完整版并存（必须删半截）\n"
+    "输入：\n"
+    "```\n"
+    "<!-- page: DSC04726.JPG -->\n"
+    "## 编译方式\n"
+    "完成 DDR 配置后，重新编译完整镜像或单独编译 u-boot image 和 Linux, theod jn\n"
+    "<!-- page: DSC04727.JPG -->\n"
+    "## 编译方式\n"
+    "完成 DDR 配置后，重新编译完整镜像或单独编译 u-boot image 和"
+    " linux-thead image（编译方式参考 SDK 使用说明）\n"
+    "```\n"
+    "输出：\n"
+    "```\n"
+    "<!-- page: DSC04726.JPG -->\n"
+    "<!-- page: DSC04727.JPG -->\n"
+    "## 编译方式\n"
+    "完成 DDR 配置后，重新编译完整镜像或单独编译 u-boot image 和"
+    " linux-thead image（编译方式参考 SDK 使用说明）\n"
+    "```\n"
+    "说明：前一页末尾的 `Linux, theod jn` 明显是 OCR 拍照被切断的半截"
+    "（乱码 + 断句），下一页开头是同一段的完整版。删掉半截版本和它的重复"
+    "标题，只保留完整的一份。两个 `<!-- page: --> ` 标记照常保留。\n"
     "\n"
     "## 示例 2：跨段重复代码块\n"
     "输入：\n"
@@ -301,17 +407,28 @@ def build_final_refine_prompt(
     markdown: str,
     chunk_index: int = 1,
     total_chunks: int = 1,
+    retry_hint: str = "",
 ) -> list[dict[str, str]]:
     """构造整篇文档级精修的 [system, user] messages 列表。
 
     chunk_index/total_chunks 默认为 1/1 表示单次整篇；分块并行时
     由调用方填入实际切片号，prompt 让模型知道上下文范围。
+    retry_hint 非空时前置一段"这是重试调用"的提示，指出上一轮
+    未处理好的具体问题（如重复 H2 列表），供 A-2 选择性重跑用。
     """
     user_content = FINAL_REFINE_USER_TEMPLATE.format(
         markdown=markdown,
         chunk_index=chunk_index,
         total_chunks=total_chunks,
     )
+    if retry_hint:
+        user_content = (
+            "⚠️ 这是重试调用：上一轮输出被质量检测判定仍有问题。\n"
+            f"具体问题：{retry_hint}\n"
+            "请**严格按 system 规则**重做，特别是规则 1 / 2（删除重复"
+            "页眉页脚、删除跨段/跨页半截句+完整版并存）。\n\n"
+            + user_content
+        )
     return [
         {"role": "system", "content": FINAL_REFINE_SYSTEM_PROMPT},
         {"role": "user", "content": user_content},

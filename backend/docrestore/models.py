@@ -91,6 +91,9 @@ class RefineContext:
     total_segments: int  # 总段数
     overlap_before: str  # 与前段重叠的上下文（空字符串表示第一段）
     overlap_after: str  # 与后段重叠的上下文（空字符串表示最后一段）
+    #: 重试提示：A-2 选择性重跑时注入的额外指令，提醒 LLM 上一轮具体
+    #: 漏掉/错做的事（如"还有 3 处 UI 噪音未清"），空=无重试提示。
+    retry_hint: str = ""
 
 
 @dataclass
