@@ -172,10 +172,41 @@ class PageDeduplicator:
                 content_lines.append(line)
         return markers, content_lines
 
-    def merge_two_pages(
+    def _find_suffix_prefix_overlap(
+        self,
+        a_content: list[str],
+        b_content: list[str],
+    ) -> int:
+        """返回满足 A[-k:] 归一化等于 B[:k] 归一化的最大 k。
+
+        锚定到 A 真正尾部和 B 真正头部，避免 find_longest_match 误中页中间巧合。
+        - 归一化：压缩连续空白，空白行与 "" 视为相等
+        - 非空行数 < 2 时返回 0（单行重叠不够可信）
+        - 搜索上限：页面重叠一般 ≤ 20 行
+        """
+        max_k = min(len(a_content), len(b_content), 20)
+        if max_k < 1:
+            return 0
+
+        norm_a = [_normalize_line(line) for line in a_content]
+        norm_b = [_normalize_line(line) for line in b_content]
+
+        for k in range(max_k, 0, -1):
+            if norm_a[-k:] != norm_b[:k]:
+                continue
+            non_empty = sum(1 for line in norm_a[-k:] if line)
+            if non_empty >= 2:
+                return k
+        return 0
+
+    def merge_two_pages(  # noqa: C901 — 合并分支必要
         self, text_a: str, text_b: str
     ) -> MergeResult:
         """合并两页文本，检测并去除重叠区域。
+
+        检测策略：
+        1. 先做 suffix-prefix 精确锚定（A 真正尾部 == B 真正头部）
+        2. 否则退回 SequenceMatcher 最长块，但要求**同时**锚定 A 尾 + B 头
 
         Page marker 行（<!-- page: xxx -->）会被保留，不参与重叠检测。
         """
@@ -192,7 +223,24 @@ class PageDeduplicator:
         a_markers, a_content_lines = self._extract_markers_and_content(lines_a)
         b_markers, b_content_lines = self._extract_markers_and_content(lines_b)
 
-        # 对纯内容做重叠检测
+        # 路径 1：suffix-prefix 精确锚定
+        sp_overlap = self._find_suffix_prefix_overlap(
+            a_content_lines, b_content_lines,
+        )
+        if sp_overlap > 0:
+            overlap_end_in_a = len(a_content_lines)
+            overlap_end_in_b = sp_overlap
+            match_size_for_report = sp_overlap
+            similarity = 1.0
+            return self._assemble_merge(
+                text_a, text_b,
+                a_markers, a_content_lines,
+                b_markers, b_content_lines,
+                overlap_end_in_a, overlap_end_in_b,
+                match_size_for_report, similarity,
+            )
+
+        # 路径 2：对纯内容做 SequenceMatcher 最长块检测
         ratio = self._config.search_ratio
         tail_count = max(1, int(len(a_content_lines) * ratio))
         head_count = max(1, int(len(b_content_lines) * ratio))
@@ -206,6 +254,18 @@ class PageDeduplicator:
         )
 
         if match.size == 0:
+            combined = text_a + "\n\n" + text_b
+            return MergeResult(
+                text=combined, overlap_lines=0, similarity=0.0
+            )
+
+        # **关键约束**：匹配块必须同时锚定 A 真尾部和 B 真头部。
+        # - match.a + match.size == len(tail_a)：块贴在 tail_a 末尾
+        # - match.b == 0：块贴在 head_b 开头
+        # 任一不满足说明匹配到了页中间的巧合重复，不是真的页面重叠
+        anchored_at_a_tail = (match.a + match.size) == len(tail_a)
+        anchored_at_b_head = match.b == 0
+        if not (anchored_at_a_tail and anchored_at_b_head):
             combined = text_a + "\n\n" + text_b
             return MergeResult(
                 text=combined, overlap_lines=0, similarity=0.0
@@ -244,7 +304,31 @@ class PageDeduplicator:
         overlap_end_in_a = overlap_start_in_a + match.size
         overlap_end_in_b = match.b + match.size
 
-        # 合并纯内容：A 的全部 + B 的非重叠部分
+        return self._assemble_merge(
+            text_a, text_b,
+            a_markers, a_content_lines,
+            b_markers, b_content_lines,
+            overlap_end_in_a, overlap_end_in_b,
+            match.size, similarity,
+        )
+
+    def _assemble_merge(  # noqa: PLR0913 — 参数都是重组合并位置索引
+        self,
+        text_a: str,
+        text_b: str,
+        a_markers: list[tuple[int, str]],
+        a_content_lines: list[str],
+        b_markers: list[tuple[int, str]],
+        b_content_lines: list[str],
+        overlap_end_in_a: int,
+        overlap_end_in_b: int,
+        match_size: int,
+        similarity: float,
+    ) -> MergeResult:
+        """根据给定的重叠索引，拼接合并后的文本 + 重插 page markers。"""
+        _ = text_a, text_b  # 调用方保留原文本仅供签名兼容
+
+        # 合并纯内容：A 的全部（含重叠部分的 A 版本） + B 的非重叠部分
         merged_content = (
             a_content_lines[:overlap_end_in_a]
             + b_content_lines[overlap_end_in_b:]
@@ -277,7 +361,7 @@ class PageDeduplicator:
         combined = "\n".join(result_lines)
         return MergeResult(
             text=combined,
-            overlap_lines=match.size,
+            overlap_lines=match_size,
             similarity=similarity,
         )
 

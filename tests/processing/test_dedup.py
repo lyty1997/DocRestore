@@ -72,6 +72,72 @@ class TestMergeTwoPages:
         assert "内容B" in result.text
         assert result.overlap_lines == 0
 
+    def test_short_tail_head_overlap(self) -> None:
+        """短跨页重叠（2-3 行）必须被检测到。
+
+        回归：DDR_适配指南 案例——上页末尾 "也可以在..." + "Usage: ..."
+        与下页开头完全一致，旧版 find_longest_match 被 A 中间巧合的
+        "Plain Text 复制代码" + 空行重复骗走，导致这 2 行重复保留。
+        新版 suffix-prefix 锚定应该精确去重。
+        """
+        text_a = (
+            "前面内容\n\n"
+            "Plain Text 复制代码\n\n"  # A 中间的巧合重复
+            "一些代码\n\n"
+            "Plain Text 复制代码\n\n"  # A 中间再次出现
+            "更多代码\n\n"
+            "也可以在 Uboot 命令行，通过 stress_test 压测 DDR 读写的正确性\n\n"
+            "Usage: stress_test [start end [pattern [iterations]]]"
+        )
+        text_b = (
+            "也可以在 Uboot 命令行，通过 stress_test 压测 DDR 读写的正确性\n\n"
+            "Usage: stress_test [start end [pattern [iterations]]]\n\n"
+            "Plain Text 复制代码\n\n"
+            "1 实际压测代码"
+        )
+        dedup = _make_dedup(threshold=0.8, search_ratio=0.7)
+        result = dedup.merge_two_pages(text_a, text_b)
+        # 真正的跨页重叠应被识别
+        assert result.overlap_lines > 0
+        # 两行跨页重复仅保留一次
+        assert result.text.count("也可以在 Uboot 命令行") == 1
+        assert result.text.count(
+            "Usage: stress_test [start end [pattern [iterations]]]"
+        ) == 1
+        # B 的新内容完整保留
+        assert "1 实际压测代码" in result.text
+
+    def test_middle_coincidence_not_merged(self) -> None:
+        """A 中间与 B 头部的巧合重复不应被误判为页面重叠。
+
+        A 的 *尾部* 不包含 B 的头部，但 A 中间恰好有几行与 B 开头相同。
+        旧版 find_longest_match 会锁定这个中间匹配导致错误去重 B 的开头。
+        新版锚定约束应拒绝这种匹配。
+        """
+        text_a = (
+            "第一段内容\n"
+            "巧合行X\n"
+            "巧合行Y\n"
+            "中间别的内容\n"
+            "A 尾部独有的内容\n"
+            "A 最后一行"
+        )
+        text_b = (
+            "巧合行X\n"
+            "巧合行Y\n"
+            "B 独有的新内容\n"
+            "B 最后一行"
+        )
+        dedup = _make_dedup(threshold=0.5, search_ratio=1.0)
+        result = dedup.merge_two_pages(text_a, text_b)
+        # 不应识别为重叠
+        assert result.overlap_lines == 0
+        # A、B 完整保留
+        assert "A 尾部独有的内容" in result.text
+        assert "B 独有的新内容" in result.text
+        # 巧合行 A 里一次、B 里一次，合计两次
+        assert result.text.count("巧合行X") == 2
+
 
 class TestMergeAllPages:
     """merge_all_pages 测试"""
