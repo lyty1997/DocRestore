@@ -16,6 +16,56 @@ limitations under the License.
 
 # DocRestore 开发进度
 
+## 2026-04-24 AGE-8 启动 + Phase 1 落地（IDE 代码照片 → 源文件）
+
+### 背景
+
+`docs/zh/backend/age-8-ide-code.md` 已完成设计；本次把设计同步到 Linear AGE-8
+主 issue，按 Phase 1/2/3 拆成 12 个子 issue（AGE-41~52），并落地 Phase 1 全部
+三个子 issue。
+
+### 子 issue 清单
+- AGE-51 [P0] `CodeRestoreConfig` 配置入口 + API/前端开关
+- AGE-41 [P1.1] `processing/ide_ui_strip.py` IDE-UI 剪裁 ✅ In Review
+- AGE-42 [P1.2] `processing/code_columns.py` 多栏切割 ✅ In Review
+- AGE-43 [P1.3] `scripts/preview_ide_columns.py` 视觉切分预览 CLI ✅ In Review
+- AGE-44 [P2.1] 每栏独立 OCR + cleaner `strip_ide_line_numbers`
+- AGE-45 [P2.2] `processing/ide_meta_extract.py` tab/breadcrumb 元数据
+- AGE-46 [P2.3] `processing/code_file_grouping.py` 跨张文件归类
+- AGE-47 [P2.4] `output/code_renderer.py` 代码渲染器
+- AGE-48 [P3.1] `CODE_REFINE_SYSTEM_PROMPT` LLM 字符级精修
+- AGE-49 [P3.2] `scripts/age8_compile_check.py` 编译验证
+- AGE-50 [P3.3] 前端「原图 ↔ 还原代码」对照视图
+- AGE-52 [E2E] 8 张 spike 端到端集成测试
+
+### Phase 1 落地内容
+
+**P1.1 IDE-UI 剪裁（ide_ui_strip.py）**
+- 两阶段几何检测：先全宽行方差找 top/bottom 分隔线，再在 editor 行区间内算
+  列方差找 sidebar（避免 top/bottom 非分隔条像素污染列统计）
+- 邻区 sanity check：分隔条左右至少一侧邻区需为高方差内容区，过滤 sidebar
+  内部偶发的零方差列（伪分隔条）
+- 策略：`geometric` / `hybrid`（默认，失败比例 fallback） / `ocr_anchored`（预留）
+- 9 个单测：合成图（numpy 批量 noise）+ spike 真实照片 golden
+
+**P1.2 code_columns.py 多栏切割**
+- 中央垂直低方差带 = VSCode split editor 间隙（宽 4-20px + 贯穿 ≥ 80%）
+- 多候选取最靠中央；aspect ≥ 1.6 但无分隔条 → 硬切 50/50 + flag
+- 11 个单测：单/双栏 + 宽屏 fallback + 边界（过窄/过宽分隔条）
+
+**P1.3 preview_ide_columns.py CLI**
+- 批量跑，每张图导出 original（红框标 code region）/ stripped / col_N
+- 生成 summary.html 网格视图供人眼验收；单张失败不中断
+- 8 张 spike 烟测通过
+
+### 依赖变更
+- `numpy` 从 `ocr` extras 提到默认依赖（Phase 1/2/3 多模块共用）
+
+### 遗留 / 下一步
+- Phase 1 参数调优：8 张 spike 里 7/8 走 sidebar_fallback、全部走 column_fallback_split；
+  这是"真实 IDE 照片参数不同于合成图"的信号，跑完 273 张预览后根据人工标注回调阈值
+- Phase 2 起步：AGE-44 每栏 OCR + cleaner 行号剥离
+
 ## 2026-04-21 五补：任务列表单项删除 + 批量清理终态任务
 
 ### 背景
