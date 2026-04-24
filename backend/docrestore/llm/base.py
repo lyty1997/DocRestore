@@ -31,6 +31,10 @@ from typing import Any, Protocol
 
 import litellm
 
+from docrestore.llm.circuit_breaker import (
+    LLMCircuitOpenError,
+    get_breaker,
+)
 from docrestore.llm.prompts import (
     GAP_FILL_EMPTY_MARKER,
     build_doc_boundary_detect_prompt,
@@ -105,11 +109,14 @@ class LLMRefiner(Protocol):
         *,
         chunk_index: int = 1,
         total_chunks: int = 1,
+        retry_hint: str = "",
     ) -> RefinedResult:
         """整篇文档级精修：去除跨段重复和页眉水印。
 
         chunk_index/total_chunks 默认 1/1 表示单次整篇；分块并行时
         调用方填入实际切片号，模型据此判断当前是整篇还是切片。
+        retry_hint 非空表示这是 A-2 选择性重跑，会在 prompt 前置一段
+        "上一轮未处理好"的提示 + 具体问题描述。
         """
         ...
 
@@ -215,11 +222,14 @@ class BaseLLMRefiner:
             yield
 
     async def _call_llm(self, kwargs: dict[str, object]) -> Any:
-        """统一出口：限流 + litellm.acompletion。
+        """统一出口：熔断器 + 限流 + litellm.acompletion。
 
         埋两个 profiler span：
         - llm.sem_wait：等待 llm_semaphore（定位并发瓶颈）
         - llm.api_call：真实 litellm 网络/重试耗时（定位上游慢）
+
+        熔断器处于 open 时直接抛 LLMCircuitOpenError（不占用 semaphore，
+        不记 timing log），由上层 fallback 捕获退到原文/reassembled。
         """
         prof = current_profiler()
         model = str(kwargs.get("model", ""))
@@ -231,6 +241,17 @@ class BaseLLMRefiner:
             if isinstance(m, dict)
         )
 
+        breaker = await get_breaker(model)
+        try:
+            await breaker.before_call()
+        except LLMCircuitOpenError:
+            _timing_logger.info(
+                "llm_call model=%s status=circuit_open wait_s=0.000 "
+                "call_s=0.000 input_chars=%d",
+                model, msg_chars,
+            )
+            raise
+
         wait_start = time.monotonic()
         async with self._rate_limit():
             wait_s = time.monotonic() - wait_start
@@ -241,10 +262,14 @@ class BaseLLMRefiner:
                 with prof.stage(
                     "llm.api_call", model=model, input_chars=msg_chars,
                 ):
-                    return await litellm.acompletion(**kwargs)
+                    response = await litellm.acompletion(**kwargs)
             except Exception:
                 status = "error"
+                await breaker.on_failure()
                 raise
+            else:
+                await breaker.on_success()
+                return response
             finally:
                 call_s = time.monotonic() - call_start
                 _timing_logger.info(
@@ -320,12 +345,14 @@ class BaseLLMRefiner:
         *,
         chunk_index: int = 1,
         total_chunks: int = 1,
+        retry_hint: str = "",
     ) -> RefinedResult:
         """整篇文档级精修：去除跨段重复和页眉水印。"""
         messages = build_final_refine_prompt(
             markdown,
             chunk_index=chunk_index,
             total_chunks=total_chunks,
+            retry_hint=retry_hint,
         )
         # final_refine 同样是改写任务，输出高度相似输入 → 可用 prediction
         kwargs = self._build_kwargs(
