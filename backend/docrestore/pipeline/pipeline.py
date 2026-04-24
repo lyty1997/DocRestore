@@ -35,6 +35,21 @@ import aiofiles
 from docrestore.llm.base import BaseLLMRefiner, LLMRefiner
 from docrestore.llm.cache import LLMCache
 from docrestore.llm.cloud import CloudLLMRefiner
+from docrestore.pipeline.quality_report import (
+    UI_NOISE_RESIDUAL_RE,
+    QualityIssue,
+    QualityReport,
+    detect_cleaner_quality,
+    detect_final_refine_quality,
+    detect_llm_segment_quality,
+    find_duplicate_h2_titles,
+)
+from docrestore.processing.heading_dedup import dedup_h2_sections
+from docrestore.processing.markdown_polish import (
+    strip_code_block_line_numbers,
+    strip_residual_ui_noise,
+)
+from docrestore.processing.table_dedup import dedup_html_tables
 from docrestore.llm.prompts import (
     extract_first_heading,
     parse_doc_boundaries,
@@ -662,20 +677,75 @@ class Pipeline:
         pages_ref: list[PageOCR] = []
         pii_cfg = pii or self._config.pii
 
+        # 质量报告收集：每阶段的异常信号汇总到 .quality_report.json
+        quality = QualityReport()
+
+        # 熔断器告警订阅：OPEN 时推 `llm_unavailable` 进度帧给前端，
+        # finally 里无条件 unsubscribe 防止 listener 泄漏到后续任务
+        llm_cfg_for_breaker = llm if llm is not None else self._config.llm
+        unsub_breaker = await self._subscribe_breaker(
+            llm_cfg_for_breaker.model, _report,
+        )
+
         ocr_task = asyncio.create_task(
             self._ocr_producer(
                 images, output_dir, gpu_lock, page_queue,
                 pages_ref, controller, _report, ocr, pii_cfg,
+                quality=quality,
             ),
             name=f"ocr-producer-{image_dir.name}",
         )
         try:
-            return await self._stream_process(
+            result = await self._stream_process(
                 page_queue, pages_ref, output_dir,
                 llm, gpu_lock, pii_cfg, controller, _report,
+                quality=quality,
             )
         finally:
+            unsub_breaker()
             await ocr_task
+
+        # 写质量报告（只读操作，放在 finally 外，shutdown 异常时不写）
+        try:
+            await quality.dump_to_file(
+                output_dir / ".quality_report.json",
+            )
+        except OSError:
+            logger.warning(
+                "质量报告写入失败 (path=%s)",
+                output_dir / ".quality_report.json",
+                exc_info=True,
+            )
+        return result
+
+    @staticmethod
+    async def _subscribe_breaker(
+        model: str,
+        report_fn: ReportFn,
+    ) -> Callable[[], None]:
+        """订阅 per-model 熔断器的 OPEN 事件，翻译为 `llm_unavailable` 进度帧。
+
+        返回 unsubscribe 句柄；空 model 时返回 no-op。
+        """
+        if not model:
+            return lambda: None
+        from docrestore.llm.circuit_breaker import get_breaker
+        breaker = await get_breaker(model)
+
+        def listener(m: str, open_until: float) -> None:
+            remain_s = max(0.0, open_until - time.monotonic())
+            report_fn(
+                "llm_unavailable", 0, 0,
+                f"LLM provider 暂不可用 ({m})，"
+                f"已熔断 {remain_s:.0f}s，段级精修降级",
+                message_key="progress.llmUnavailable",
+                message_params={
+                    "model": m,
+                    "cool_down_s": f"{remain_s:.0f}",
+                },
+            )
+
+        return breaker.subscribe_open(listener)
 
     async def _resolve_ocr_engine(
         self,
@@ -705,6 +775,7 @@ class Pipeline:
         report_fn: ReportFn,
         ocr: OCRConfig | None,
         pii_cfg: PIIConfig,
+        quality: QualityReport | None = None,
     ) -> None:
         """OCR 生产者：逐张 OCR → 清洗 → 可选 regex-only PII → 入队。
 
@@ -727,10 +798,19 @@ class Pipeline:
                             page = await engine.ocr(img, output_dir)
                     else:
                         page = await engine.ocr(img, output_dir)
+                raw_before_clean = page.raw_text
                 with profiler.stage(
                     "cleaner.page", stem=page.image_path.stem,
                 ):
                     await cleaner.clean(page)
+
+                if quality is not None:
+                    await detect_cleaner_quality(
+                        quality,
+                        page_name=page.image_path.name,
+                        raw_text=raw_before_clean,
+                        cleaned_text=page.cleaned_text,
+                    )
 
                 if redactor is not None:
                     page.cleaned_text, _ = redactor.redact_regex_only(
@@ -772,6 +852,7 @@ class Pipeline:
         pii_cfg: PIIConfig,
         controller: RateController,
         report_fn: ReportFn,
+        quality: QualityReport | None = None,
     ) -> PipelineResult:
         """消费 OCR 队列：增量合并 → 按 L* 切段 → LLM 精修 → 收齐终结化。"""
         profiler = current_profiler()
@@ -816,7 +897,7 @@ class Pipeline:
                         merger, extractor, refiner, controller,
                         segmented_offset, segment_index,
                         refined_results, all_gaps, report_fn,
-                        cache, llm_cfg,
+                        cache, llm_cfg, quality,
                     )
                 )
 
@@ -834,7 +915,7 @@ class Pipeline:
                     result, used_refiner = (
                         await self._refine_segment_with_cache(
                             refiner, remaining, segment_index, 0,
-                            cache, llm_cfg,
+                            cache, llm_cfg, quality,
                         )
                     )
                 if used_refiner:
@@ -864,7 +945,7 @@ class Pipeline:
         return await self._finalize_single_doc(
             merger, pages_ref, refined_results, all_gaps,
             output_dir, llm, gpu_lock, report_fn, entity_lexicon,
-            cache, llm_cfg,
+            cache, llm_cfg, quality,
         )
 
     async def _try_extract_and_refine(
@@ -880,6 +961,7 @@ class Pipeline:
         report_fn: ReportFn,
         cache: LLMCache,
         llm_cfg: LLMConfig,
+        quality: QualityReport | None = None,
     ) -> tuple[int, int]:
         """合并器有新文本时按 controller.target L* 尝试切段精修。"""
         profiler = current_profiler()
@@ -910,7 +992,7 @@ class Pipeline:
                 result, used_refiner = (
                     await self._refine_segment_with_cache(
                         refiner, seg_text, segment_index, 0,
-                        cache, llm_cfg,
+                        cache, llm_cfg, quality,
                     )
                 )
             elapsed = time.perf_counter() - t0
@@ -938,7 +1020,7 @@ class Pipeline:
             )
         return segmented_offset, segment_index
 
-    async def _finalize_single_doc(
+    async def _finalize_single_doc(  # noqa: C901
         self,
         merger: IncrementalMerger,
         pages_ref: list[PageOCR],
@@ -951,6 +1033,7 @@ class Pipeline:
         entity_lexicon: EntityLexicon | None,
         cache: LLMCache,
         llm_cfg: LLMConfig,
+        quality: QualityReport | None = None,
     ) -> PipelineResult:
         """单文档终结化：reassemble → gap fill → final refine → render。"""
         profiler = current_profiler()
@@ -977,6 +1060,97 @@ class Pipeline:
         with profiler.stage("llm.final_refine"):
             doc, truncated = await self._do_final_refine(
                 doc, output_dir, llm, report_fn, cache, llm_cfg,
+            )
+
+        # A-2 信号 4：final_refine 输出仍有重复 H2 → 带提示重做一次
+        if not truncated:
+            doc, truncated = await self._maybe_retry_final_refine_on_dup_h2(
+                doc, output_dir, llm, report_fn, cache, llm_cfg,
+                quality, initial_truncated=truncated,
+            )
+
+        # 程序化 HTML 表格去重：LLM 对长表（200+ 字符 HTML）跨段去重不稳定，
+        # 实测 U-Boot 两轮都有 4-8 对完全相同的 23 行表残留。这里 0 LLM 成本
+        # 兜底删重复，比让 LLM 重做更可靠。
+        new_md, removed = dedup_html_tables(doc.markdown)
+        if removed:
+            doc = MergedDocument(
+                markdown=new_md,
+                images=doc.images,
+                gaps=doc.gaps,
+            )
+            if quality is not None:
+                await quality.add(QualityIssue(
+                    stage="llm_final_refine",
+                    code="llm.final_duplicate_table_removed",
+                    severity="info",
+                    message=(
+                        f"程序化去重删除 {len(removed)} 张重复 HTML 表"
+                    ),
+                    metadata={
+                        "count": len(removed),
+                        "details": removed,
+                    },
+                ))
+
+        # 程序化 H2 章节去重：signal 4 LLM retry 还是有 1-3 个残留（实测
+        # 4/6 doc）。双轨判定：near_identical (ratio≥0.98 + 末尾匹配) 或
+        # truncated_prefix (短的是长的截断版)。同名但内容差异大的章节不动。
+        new_md, removed_h2 = dedup_h2_sections(doc.markdown)
+        if removed_h2:
+            doc = MergedDocument(
+                markdown=new_md,
+                images=doc.images,
+                gaps=doc.gaps,
+            )
+            if quality is not None:
+                await quality.add(QualityIssue(
+                    stage="llm_final_refine",
+                    code="llm.final_duplicate_h2_removed",
+                    severity="info",
+                    message=(
+                        f"程序化去重删除 {len(removed_h2)} 个重复 H2 章节"
+                    ),
+                    metadata={
+                        "count": len(removed_h2),
+                        "details": removed_h2,
+                    },
+                ))
+
+        # 轻量 polish：剥代码块视觉行号（U-Boot 51 行 / EMMC 27 行实测残留）
+        new_md, n_lineno = strip_code_block_line_numbers(doc.markdown)
+        if n_lineno:
+            doc = MergedDocument(
+                markdown=new_md, images=doc.images, gaps=doc.gaps,
+            )
+            if quality is not None:
+                await quality.add(QualityIssue(
+                    stage="llm_final_refine",
+                    code="polish.code_line_numbers_stripped",
+                    severity="info",
+                    message=f"剥离代码块视觉行号 {n_lineno} 行",
+                    metadata={"count": n_lineno},
+                ))
+
+        # UI 噪音兜底：cleaner 已剥过一次，但 LLM 可能漏带回少数（如 EMMC
+        # `Makefile 复制代码`）。复用同正则再扫一遍。
+        new_md, n_ui = strip_residual_ui_noise(doc.markdown)
+        if n_ui:
+            doc = MergedDocument(
+                markdown=new_md, images=doc.images, gaps=doc.gaps,
+            )
+            if quality is not None:
+                await quality.add(QualityIssue(
+                    stage="llm_final_refine",
+                    code="polish.residual_ui_noise_stripped",
+                    severity="info",
+                    message=f"兜底删除残留 UI 噪音 {n_ui} 行",
+                    metadata={"count": n_ui},
+                ))
+
+        if quality is not None:
+            await detect_final_refine_quality(
+                quality, output_markdown=doc.markdown,
             )
 
         _, extra_gaps = parse_gaps(doc.markdown)
@@ -1270,6 +1444,7 @@ class Pipeline:
         total: int,
         cache: LLMCache,
         llm_cfg: LLMConfig,
+        quality: QualityReport | None = None,
     ) -> tuple[RefinedResult, bool]:
         """段级精修带磁盘缓存。返回 `(result, used_refiner)`。
 
@@ -1279,6 +1454,10 @@ class Pipeline:
 
         异常 fallback 不写缓存（put 只在 refine 成功分支后调用），下次
         resume 仍会重试该段。truncated=True 由 LLMCache.put 内部过滤。
+
+        `quality` 非 None 时，每次实际 refine 调用后写入 LLM 段级质量信号
+        （截断 / 回退到原文 / UI 噪音残留）。缓存命中路径不写信号，
+        避免历史重放污染当次任务的质量报告。
         """
         if cache.enabled:
             cached = cache.get_segment(
@@ -1309,7 +1488,41 @@ class Pipeline:
                 index + 1,
                 exc_info=True,
             )
+            if quality is not None:
+                await detect_llm_segment_quality(
+                    quality,
+                    segment_index=index + 1,
+                    truncated=False,
+                    fallback_to_raw=True,
+                    output_markdown=text,
+                )
             return RefinedResult(markdown=text), True
+
+        # A-2 信号 2：截断 → 递归二分重试，仍截断回退到原文。
+        # 关键防护：流式 pipeline 历史 bug，截断后 LLM 输出会直接吞掉
+        # 后半段（包括 page markers），导致 reassembled.md 比 merged_raw.md
+        # 短一大截、文档尾页消失。这里强制做与批量版一致的截断检测兜底。
+        if (
+            result.truncated
+            or Pipeline._heuristic_truncated(text, result.markdown, llm_cfg)
+        ):
+            result = await Pipeline._maybe_retry_on_truncation(
+                refiner, text, ctx, result, llm_cfg, quality,
+            )
+
+        # A-2 选择性重跑：段输出仍含 UI 噪音 → 最多重试 1 次，带重试提示
+        result = await Pipeline._maybe_retry_refine_on_ui_noise(
+            refiner, text, ctx, result, quality,
+        )
+
+        if quality is not None:
+            await detect_llm_segment_quality(
+                quality,
+                segment_index=index + 1,
+                truncated=result.truncated,
+                fallback_to_raw=False,
+                output_markdown=result.markdown,
+            )
 
         # refine 返回，尚未判 truncated — put 内部会按 truncated 过滤
         cache.put_segment(
@@ -1319,6 +1532,333 @@ class Pipeline:
             result=result,
         )
         return result, True
+
+    @staticmethod
+    def _heuristic_truncated(
+        input_text: str,
+        output_md: str,
+        llm_cfg: LLMConfig,
+    ) -> bool:
+        """与批量版一致的截断启发式：输出行数 < 输入 *(1 - ratio) 视为截断。
+
+        小输入（≤ truncation_min_input_lines 行）误判率高，跳过启发式。
+        """
+        input_lines = input_text.count("\n") + 1
+        if input_lines <= llm_cfg.truncation_min_input_lines:
+            return False
+        output_lines = output_md.count("\n") + 1
+        return (
+            output_lines
+            < input_lines * (1 - llm_cfg.truncation_ratio_threshold)
+        )
+
+    @staticmethod
+    def _split_segment_in_half(  # noqa: C901
+        text: str,
+    ) -> list[str] | None:
+        """把段文本对半切，**避开 page marker 周围**。
+
+        切点优先级（heading > blank line > 任意换行），但**故意避免**在
+        page marker 前后 `_PAGE_MARKER_AVOID_CHARS` 字符内切。
+
+        为什么避开 page marker：跨页拍照重叠造成的重复内容（典型 1-3 行
+        在前页末尾、后页开头各出现一次）就盘踞在 page marker 前后。如果
+        在 marker 处切，那段重叠区被分到两个子段，LLM 单独看任一子段都
+        以为内容是单一页、不会去重。等到 reassemble 后跨段重复才会暴露
+        给 final_refine —— 而 final_refine 看的是整篇压缩后的输入，
+        细粒度去重能力远不如段级。
+
+        与 stream segmenter 的策略相反（segmenter 优先 page marker）。
+        两者目标不同：segmenter 控制 prompt 长度；truncation 二分要让
+        LLM 看见完整的重叠区。
+
+        返回长度 2 的列表；无法切（太短 / 无换行）返回 None。
+        """
+        n = len(text)
+        if n < 200:
+            return None
+        target = n // 2
+
+        # page marker 周围禁止切的"禁区"，按字符数定（折算约等于 ~5 行）
+        avoid_chars = 240
+        marker_zones: list[tuple[int, int]] = []
+        for m in _PAGE_MARKER_RE.finditer(text):
+            zone_start = max(0, m.start() - avoid_chars)
+            zone_end = min(n, m.end() + avoid_chars)
+            marker_zones.append((zone_start, zone_end))
+
+        def in_marker_zone(pos: int) -> bool:
+            for zs, ze in marker_zones:
+                if zs <= pos < ze:
+                    return True
+            return False
+
+        def best_match(matches: list[tuple[int, int]]) -> int | None:
+            """从候选切点中挑距离 target 最近、且不在禁区里的位置。"""
+            best_pos: int | None = None
+            best_dist = n
+            for pos, _ in matches:
+                if in_marker_zone(pos):
+                    continue
+                d = abs(pos - target)
+                if d < best_dist:
+                    best_dist = d
+                    best_pos = pos
+            # 限定切点距 target 不要太远（不超过 n//3），否则切偏严重
+            if best_pos is not None and best_dist <= n // 3:
+                return best_pos
+            return None
+
+        # 优先级 1：heading 行起始（## / ### / #### 等）
+        heading_re = re.compile(r"^(#{1,6})\s+", re.MULTILINE)
+        heading_candidates = [
+            (m.start(), m.end()) for m in heading_re.finditer(text)
+        ]
+        cut = best_match(heading_candidates)
+        if cut is not None:
+            return [text[:cut].rstrip("\n"), text[cut:]]
+
+        # 优先级 2：连续空行（段落边界）
+        blank_re = re.compile(r"\n[\t ]*\n")
+        blank_candidates = [
+            (m.end(), m.end()) for m in blank_re.finditer(text)
+        ]
+        cut = best_match(blank_candidates)
+        if cut is not None:
+            return [text[:cut].rstrip("\n"), text[cut:]]
+
+        # 优先级 3：中点附近的任意换行（仍尝试避禁区）
+        # 在 [target - n//4, target + n//4] 区间扫所有换行
+        window_lo = max(0, target - n // 4)
+        window_hi = min(n, target + n // 4)
+        nl_candidates: list[tuple[int, int]] = []
+        idx = text.find("\n", window_lo)
+        while 0 <= idx < window_hi:
+            nl_candidates.append((idx + 1, idx + 1))
+            idx = text.find("\n", idx + 1)
+        cut = best_match(nl_candidates)
+        if cut is not None and 0 < cut < n:
+            return [text[:cut].rstrip("\n"), text[cut:]]
+
+        # 兜底：如果所有合适位置都在 marker 禁区里（极小段 + 密集 marker
+        # 的退化场景），允许切在禁区内，但仍按 heading > blank > line 找
+        for cands in (heading_candidates, blank_candidates, nl_candidates):
+            if not cands:
+                continue
+            best_pos: int | None = None
+            best_dist = n
+            for pos, _ in cands:
+                d = abs(pos - target)
+                if d < best_dist:
+                    best_dist = d
+                    best_pos = pos
+            if best_pos is not None and 0 < best_pos < n:
+                return [text[:best_pos].rstrip("\n"), text[best_pos:]]
+
+        return None
+
+    @staticmethod
+    async def _maybe_retry_on_truncation(
+        refiner: LLMRefiner,
+        text: str,
+        ctx: RefineContext,
+        first_result: RefinedResult,  # noqa: ARG004 — API 对称占位
+        llm_cfg: LLMConfig,
+        quality: QualityReport | None,
+        *,
+        depth: int = 0,
+        max_depth: int = 3,
+        min_chunk_chars: int = 800,
+    ) -> RefinedResult:
+        """A-2 信号 2：段输出截断 → 递归二分重试。
+
+        策略：
+        - 把当前段对半切（page marker / 空行 / 换行优先），分别 refine
+        - 任一子段仍截断 → 对它继续二分（depth+1）
+        - depth ≥ max_depth 或 段长 < 2*min_chunk_chars → 回退原文
+        - 二分子段调用异常 → 整段回退原文（保守）
+        - 拼回时按原顺序 join，gaps 合并
+
+        first_result 仅作 API 对称传入（与 ui_noise / dup_h2 retry 保持一致），
+        当前实现不读取它（截断信号判定在调用方上一层做）。
+
+        重要：拼回的 markdown 长度可以 > LLM 单次 max_tokens，因为它由多段
+        独立 refine 拼接，不再受单次响应 token 上限约束 —— 这正是修复
+        U-Boot 尾页消失的核心：原本「LLM 截断 1 次就丢半段」的失败模式，
+        被「截多少段就 refine 多少次」绕过。
+        """
+        if depth >= max_depth:
+            logger.warning(
+                "段 %d 截断递归到达上限 depth=%d，回退到原文",
+                ctx.segment_index, depth,
+            )
+            if quality is not None:
+                await quality.add(QualityIssue(
+                    stage="llm_segment",
+                    code="llm.seg_truncation_unrecoverable",
+                    severity="warn",
+                    message=(
+                        f"段 {ctx.segment_index} 截断递归到达上限"
+                        f" depth={depth}，回退原文"
+                    ),
+                    segment_index=ctx.segment_index,
+                    metadata={
+                        "depth": depth,
+                        "input_chars": len(text),
+                    },
+                ))
+            return RefinedResult(markdown=text, gaps=[], truncated=True)
+
+        halves = Pipeline._split_segment_in_half(text)
+        if halves is None or any(
+            len(h) < min_chunk_chars for h in halves
+        ):
+            logger.warning(
+                "段 %d 截断但无法继续二分（input=%d 字符）→ 回退原文",
+                ctx.segment_index, len(text),
+            )
+            if quality is not None:
+                await quality.add(QualityIssue(
+                    stage="llm_segment",
+                    code="llm.seg_truncation_unrecoverable",
+                    severity="warn",
+                    message=(
+                        f"段 {ctx.segment_index} 截断且无法继续二分"
+                        f"（input={len(text)} 字符），回退原文"
+                    ),
+                    segment_index=ctx.segment_index,
+                    metadata={
+                        "input_chars": len(text),
+                        "depth": depth,
+                    },
+                ))
+            return RefinedResult(markdown=text, gaps=[], truncated=True)
+
+        sub_ctx_template = RefineContext(
+            segment_index=ctx.segment_index,
+            total_segments=ctx.total_segments,
+            overlap_before="",
+            overlap_after="",
+            retry_hint=ctx.retry_hint,
+        )
+        sub_results: list[RefinedResult] = []
+        for sub_text in halves:
+            try:
+                sub_result = await refiner.refine(
+                    sub_text, sub_ctx_template,
+                )
+            except Exception:
+                logger.warning(
+                    "段 %d 二分子段精修失败 (depth=%d)，整段回退原文",
+                    ctx.segment_index, depth, exc_info=True,
+                )
+                return RefinedResult(
+                    markdown=text, gaps=[], truncated=True,
+                )
+            if (
+                sub_result.truncated
+                or Pipeline._heuristic_truncated(
+                    sub_text, sub_result.markdown, llm_cfg,
+                )
+            ):
+                sub_result = await Pipeline._maybe_retry_on_truncation(
+                    refiner, sub_text, sub_ctx_template, sub_result,
+                    llm_cfg, quality,
+                    depth=depth + 1,
+                    max_depth=max_depth,
+                    min_chunk_chars=min_chunk_chars,
+                )
+            sub_results.append(sub_result)
+
+        merged_md = "\n".join(r.markdown for r in sub_results)
+        merged_gaps = [g for r in sub_results for g in r.gaps]
+        any_truncated = any(r.truncated for r in sub_results)
+        if quality is not None:
+            await quality.add(QualityIssue(
+                stage="llm_segment",
+                code="llm.seg_truncation_split",
+                severity="info",
+                message=(
+                    f"段 {ctx.segment_index} 截断 → 二分重试"
+                    f" depth={depth + 1}"
+                    + ("（仍部分截断）" if any_truncated else "（已恢复）")
+                ),
+                segment_index=ctx.segment_index,
+                metadata={
+                    "depth": depth + 1,
+                    "still_truncated": any_truncated,
+                    "halves_chars": [len(h) for h in halves],
+                },
+            ))
+        # any_truncated=False 表示二分后所有子段都成功 → 拼回的结果是完整的
+        return RefinedResult(
+            markdown=merged_md,
+            gaps=merged_gaps,
+            truncated=any_truncated,
+        )
+
+    @staticmethod
+    async def _maybe_retry_refine_on_ui_noise(
+        refiner: LLMRefiner,
+        text: str,
+        ctx: RefineContext,
+        first_result: RefinedResult,
+        quality: QualityReport | None,
+    ) -> RefinedResult:
+        """A-2 信号 1：段输出残留 UI 噪音 → 带提示重试一次。
+
+        比较两次结果，保留噪音少的那一份（同数时保留第一次）。
+        重试失败（异常 / 噪音更多）则回退第一次结果，不影响主流程。
+        """
+        first_hits = UI_NOISE_RESIDUAL_RE.findall(first_result.markdown)
+        if not first_hits:
+            return first_result
+        if ctx.retry_hint:
+            # 已是重试结果，不再递归
+            return first_result
+
+        retry_ctx = RefineContext(
+            segment_index=ctx.segment_index,
+            total_segments=ctx.total_segments,
+            overlap_before=ctx.overlap_before,
+            overlap_after=ctx.overlap_after,
+            retry_hint=(
+                f"上一轮输出仍含 {len(first_hits)} 处网页 UI 噪音"
+                f"（如 `{first_hits[0]}`）。请按 system 规则 10-12"
+                "逐行删除所有 `{语言} 复制代码` / 独立 `复制代码` /"
+                "以 `▶▼☐` 开头的视觉 UI 行；若留在代码块内，"
+                "剥离后保持代码块闭合。"
+            ),
+        )
+        try:
+            retry_result = await refiner.refine(text, retry_ctx)
+        except Exception:
+            logger.warning(
+                "段 %d UI 噪音重试失败，保留首轮结果",
+                ctx.segment_index, exc_info=True,
+            )
+            return first_result
+
+        retry_hits = UI_NOISE_RESIDUAL_RE.findall(retry_result.markdown)
+        if quality is not None:
+            await quality.add(QualityIssue(
+                stage="llm_segment",
+                code="llm.seg_ui_noise_retry",
+                severity="info",
+                message=(
+                    f"段 {ctx.segment_index} UI 噪音重试："
+                    f"{len(first_hits)} → {len(retry_hits)} 处"
+                ),
+                segment_index=ctx.segment_index,
+                metadata={
+                    "first_count": len(first_hits),
+                    "retry_count": len(retry_hits),
+                    "kept_retry": len(retry_hits) < len(first_hits),
+                },
+            ))
+        if len(retry_hits) < len(first_hits):
+            return retry_result
+        return first_result
 
     async def shutdown(self) -> None:
         """释放所有资源"""
@@ -1771,6 +2311,98 @@ class Pipeline:
             return None
         return self._create_refiner(llm)
 
+    async def _maybe_retry_final_refine_on_dup_h2(
+        self,
+        doc: MergedDocument,
+        output_dir: Path,
+        llm: LLMConfig | None,
+        report_fn: ReportFn,
+        cache: LLMCache,
+        llm_cfg: LLMConfig,
+        quality: QualityReport | None,
+        *,
+        initial_truncated: bool,
+    ) -> tuple[MergedDocument, bool]:
+        """A-2 信号 4：final_refine 输出仍有重复 H2 → 带提示重做一次。
+
+        重试流程：
+        - 检测 `doc.markdown` 中出现 ≥ 2 次的 H2 标题
+        - 无重复 → 直接返回（no-op）
+        - 有重复 → 构造 retry_hint，调 `_do_final_refine(retry_hint=...)`
+        - 比较两轮的重复 H2 数量，保留更少的那份；结果回写 quality report
+        - 重试截断 / 重试反而更糟 → 保留首轮
+
+        返回 `(文档, 是否截断)`。首轮已截断时不触发重试，直接原路返回。
+        """
+        if initial_truncated:
+            return doc, initial_truncated
+
+        first_dups = find_duplicate_h2_titles(doc.markdown)
+        if not first_dups:
+            return doc, initial_truncated
+
+        hint = (
+            f"输出仍有 {len(first_dups)} 个重复的 `##` 二级标题："
+            f"{', '.join(first_dups)}. 请按 system 规则 2 清理——"
+            "若两次出现的内容几乎一样（跨页拍照重叠导致），保留靠前的；"
+            "若前一份明显被 OCR 截断（乱码/半句），改保留靠后的完整版。"
+            "重复的标题必须合并为一次，正文也按完整版保留。"
+        )
+        logger.info(
+            "final_refine 重复 H2 重试 (%d 个): %s",
+            len(first_dups), first_dups,
+        )
+        retry_doc, retry_trunc = await self._do_final_refine(
+            MergedDocument(
+                markdown=doc.markdown,
+                images=doc.images,
+                gaps=[],
+            ),
+            output_dir, llm, report_fn, cache, llm_cfg,
+            retry_hint=hint,
+        )
+        if retry_trunc:
+            logger.warning(
+                "final_refine 重复 H2 重试截断，保留首轮",
+            )
+            if quality is not None:
+                await quality.add(QualityIssue(
+                    stage="llm_final_refine",
+                    code="llm.final_duplicate_h2_retry",
+                    severity="warn",
+                    message="重复 H2 重试截断，已保留首轮结果",
+                    metadata={
+                        "first_dup_count": len(first_dups),
+                        "retry_truncated": True,
+                        "kept_retry": False,
+                    },
+                ))
+            return doc, initial_truncated
+
+        retry_dups = find_duplicate_h2_titles(retry_doc.markdown)
+        if quality is not None:
+            await quality.add(QualityIssue(
+                stage="llm_final_refine",
+                code="llm.final_duplicate_h2_retry",
+                severity="info",
+                message=(
+                    f"重复 H2 重试：{len(first_dups)} → {len(retry_dups)} 个"
+                ),
+                metadata={
+                    "first_dup_count": len(first_dups),
+                    "retry_dup_count": len(retry_dups),
+                    "kept_retry": len(retry_dups) < len(first_dups),
+                },
+            ))
+        if len(retry_dups) < len(first_dups):
+            # 重试更干净 → 采用；保留原 images，合并 gaps
+            return MergedDocument(
+                markdown=retry_doc.markdown,
+                images=doc.images,
+                gaps=doc.gaps + retry_doc.gaps,
+            ), retry_trunc
+        return doc, initial_truncated
+
     async def _do_final_refine(
         self,
         doc: MergedDocument,
@@ -1779,8 +2411,14 @@ class Pipeline:
         report_fn: ReportFn,
         cache: LLMCache,
         llm_cfg: LLMConfig,
+        *,
+        retry_hint: str = "",
     ) -> tuple[MergedDocument, bool]:
-        """整篇文档级精修（去跨段重复 + 页眉水印）。"""
+        """整篇文档级精修（去跨段重复 + 页眉水印）。
+
+        retry_hint 非空时视为 A-2 重试：强制 single-chunk（整篇看）+
+        绕过缓存（旧结果已经被检测为有问题），把 hint 透传给 prompt。
+        """
         refiner = self._get_refiner(llm)
         if (
             not self._config.llm.enable_final_refine
@@ -1790,9 +2428,10 @@ class Pipeline:
 
         return await self._final_refine(
             refiner, doc, output_dir, report_fn, cache, llm_cfg,
+            retry_hint=retry_hint,
         )
 
-    async def _final_refine(
+    async def _final_refine(  # noqa: C901
         self,
         refiner: LLMRefiner,
         doc: MergedDocument,
@@ -1800,18 +2439,29 @@ class Pipeline:
         report_fn: ReportFn,
         cache: LLMCache,
         llm_cfg: LLMConfig,
+        *,
+        retry_hint: str = "",
     ) -> tuple[MergedDocument, bool]:
         """整篇文档级精修，失败时回退到原文。返回 (文档, 是否截断)。
 
         带磁盘缓存：命中直接返回，miss 才真正调 LLM 并落盘。
         大文档按 <!-- page: --> 边界切成多块并行调用，降低墙钟。
+
+        retry_hint 非空（A-2 重跑）时：
+        - 跳过缓存命中判断（旧结果已被检测为有问题）
+        - 强制 single-chunk（重复 H2 这类问题是跨段全局问题，必须整篇看）
+        - 不写缓存（重试结果不应覆盖后续真实运行）
+        - 不覆盖 debug/final_refined.md（保留首轮输出供对比）
         """
         if not hasattr(refiner, "final_refine"):
             return doc, False
 
+        is_retry = bool(retry_hint)
+
         # 先查缓存 — 整文档级精修通常是最昂贵的一步
         # cache key 以完整 markdown 为准，分块是纯实现细节、对缓存透明
-        if cache.enabled:
+        # 重试路径绕过缓存：旧结果已被质量检测判定为有问题
+        if cache.enabled and not is_retry:
             cached = cache.get_final(
                 model=llm_cfg.model,
                 api_base=llm_cfg.api_base,
@@ -1828,30 +2478,39 @@ class Pipeline:
                     gaps=doc.gaps + cached.gaps,
                 ), False
 
-        # 决定是否分块：文档够大 + 配置允许
-        n_chunks = max(1, int(llm_cfg.final_refine_chunks))
-        if (
-            n_chunks <= 1
-            or len(doc.markdown) < llm_cfg.final_refine_min_chars
-        ):
+        # 决定是否分块：文档够大 + 配置允许（重试路径强制 single chunk）
+        if is_retry:
             chunks = [doc.markdown]
         else:
-            chunks = _split_by_page_markers(doc.markdown, n_chunks)
-            # 切分失败（页边界不足以支撑 N 块）则回退单次
-            if len(chunks) <= 1:
+            n_chunks = max(1, int(llm_cfg.final_refine_chunks))
+            if (
+                n_chunks <= 1
+                or len(doc.markdown) < llm_cfg.final_refine_min_chars
+            ):
                 chunks = [doc.markdown]
+            else:
+                chunks = _split_by_page_markers(doc.markdown, n_chunks)
+                # 切分失败（页边界不足以支撑 N 块）则回退单次
+                if len(chunks) <= 1:
+                    chunks = [doc.markdown]
 
         report_fn(
             "final_refine", 0, len(chunks),
-            f"整篇文档级精修...（{len(chunks)} 块并行）"
-            if len(chunks) > 1 else "整篇文档级精修...",
+            (
+                "整篇文档级精修（重试）..."
+                if is_retry
+                else (
+                    f"整篇文档级精修...（{len(chunks)} 块并行）"
+                    if len(chunks) > 1 else "整篇文档级精修..."
+                )
+            ),
             message_key=(
-                "progress.finalRefineChunks"
-                if len(chunks) > 1
-                else "progress.finalRefine"
+                "progress.finalRefine"
+                if is_retry or len(chunks) == 1
+                else "progress.finalRefineChunks"
             ),
             message_params={"chunks": str(len(chunks))}
-            if len(chunks) > 1 else {},
+            if len(chunks) > 1 and not is_retry else {},
         )
 
         try:
@@ -1862,6 +2521,7 @@ class Pipeline:
                     *(
                         refiner.final_refine(
                             c, chunk_index=i + 1, total_chunks=total,
+                            retry_hint=retry_hint,
                         )
                         for i, c in enumerate(chunks)
                     ),
@@ -1900,16 +2560,22 @@ class Pipeline:
             gaps=merged_gaps,
             truncated=False,
         )
-        await self._save_debug(
-            output_dir, "final_refined.md", merged_markdown,
-        )
-        # 真正成功才写缓存
-        cache.put_final(
-            model=llm_cfg.model,
-            api_base=llm_cfg.api_base,
-            markdown=doc.markdown,
-            result=final_result,
-        )
+        if is_retry:
+            # 重试路径：另存文件便于对比，不覆盖首轮；不写缓存
+            await self._save_debug(
+                output_dir, "final_refined.retry.md", merged_markdown,
+            )
+        else:
+            await self._save_debug(
+                output_dir, "final_refined.md", merged_markdown,
+            )
+            # 真正成功才写缓存（重试路径跳过，避免污染主缓存）
+            cache.put_final(
+                model=llm_cfg.model,
+                api_base=llm_cfg.api_base,
+                markdown=doc.markdown,
+                result=final_result,
+            )
         return MergedDocument(
             markdown=merged_markdown,
             images=doc.images,
