@@ -187,6 +187,7 @@ export function TaskDetail({
     progresses,
     wsState,
     pollingEnabled,
+    llmUnavailable,
   } = useTaskProgress({
     taskId,
     enabled: isLive,
@@ -397,6 +398,7 @@ export function TaskDetail({
             progresses={progresses}
             wsState={wsState}
             pollingEnabled={pollingEnabled}
+            llmUnavailable={llmUnavailable}
           />
         </section>
       )}

@@ -38,11 +38,21 @@ interface UseTaskProgressOptions {
   readonly onTerminal?: (status: "completed" | "failed") => void;
 }
 
+/** LLM 熔断告警（与 useTaskRunner 对齐，避免循环 import 重新声明） */
+export interface LlmUnavailableWarning {
+  readonly timestamp: number;
+  readonly message: string;
+  readonly messageKey: string;
+  readonly messageParams: Readonly<Record<string, string>>;
+}
+
 interface UseTaskProgressReturn {
   readonly progresses: ProgressBuckets;
   readonly status: TrackedStatus;
   readonly wsState: WsState;
   readonly pollingEnabled: boolean;
+  /** LLM provider 熔断告警：stage="llm_unavailable" 帧触发，undefined=未触发 */
+  readonly llmUnavailable: LlmUnavailableWarning | undefined;
 }
 
 const POLL_INTERVAL = 1000;
@@ -57,6 +67,9 @@ export function useTaskProgress(
   const [status, setStatus] = useState<TrackedStatus>("unknown");
   const [wsState, setWsState] = useState<WsState>("closed");
   const [pollingEnabled, setPollingEnabled] = useState(false);
+  const [llmUnavailable, setLlmUnavailable] = useState<
+    LlmUnavailableWarning | undefined
+  >(undefined);
 
   const wsRef = useRef<WebSocket | undefined>(undefined);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | undefined>(
@@ -107,6 +120,14 @@ export function useTaskProgress(
         if (resp.progress) {
           const frame = resp.progress;
           setProgresses((prev) => mergeProgressFrame(prev, frame));
+          if (frame.stage === "llm_unavailable") {
+            setLlmUnavailable({
+              timestamp: Date.now(),
+              message: frame.message,
+              messageKey: frame.message_key,
+              messageParams: { ...frame.message_params },
+            });
+          }
         }
         switch (resp.status) {
           case "completed": {
@@ -189,11 +210,20 @@ export function useTaskProgress(
               : event.data;
           const parsed = TaskProgressSchema.parse(raw);
           setProgresses((prev) => mergeProgressFrame(prev, parsed));
+          if (parsed.stage === "llm_unavailable") {
+            setLlmUnavailable({
+              timestamp: Date.now(),
+              message: parsed.message,
+              messageKey: parsed.message_key,
+              messageParams: { ...parsed.message_params },
+            });
+          }
           /* 进度帧的 stage 可能是 "completed"/"failed"；WS close 后 REST 才是权威 */
           if (parsed.stage === "completed" || parsed.stage === "failed") {
             /* 记住状态但不触发 terminal — 让 close handler 的 REST 兜底确认 */
             setStatus(parsed.stage);
-          } else {
+          } else if (parsed.stage !== "llm_unavailable") {
+            /* llm_unavailable 是告警帧，不改变 processing 状态 */
             setStatus("processing");
           }
         } catch {
@@ -239,6 +269,7 @@ export function useTaskProgress(
     /* 新订阅周期：重置状态 + 允许再次触发 onTerminal */
     terminalFiredRef.current = false;
     setProgresses({});
+    setLlmUnavailable(undefined);
     setStatus("pending");
     setWsState("closed");
     setPollingEnabled(false);
@@ -257,5 +288,5 @@ export function useTaskProgress(
     /* eslint-disable-next-line react-hooks/exhaustive-deps -- 订阅只依赖 taskId/enabled */
   }, [taskId, enabled]);
 
-  return { progresses, status, wsState, pollingEnabled };
+  return { progresses, status, wsState, pollingEnabled, llmUnavailable };
 }

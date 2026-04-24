@@ -33,6 +33,7 @@ function App(): React.JSX.Element {
     taskId,
     status,
     progresses,
+    llmUnavailable,
     allResults,
     error,
     wsState,
@@ -115,6 +116,7 @@ function App(): React.JSX.Element {
                   progresses={progresses}
                   wsState={wsState}
                   pollingEnabled={pollingEnabled}
+                  llmUnavailable={llmUnavailable}
                 />
                 {taskId !== undefined && (
                   <button

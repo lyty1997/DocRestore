@@ -124,6 +124,8 @@ export const zhCN = {
   "progress.completed": "处理完成",
   "progress.cancelled": "任务取消",
   "progress.failed": "处理失败",
+  "progress.llmUnavailable":
+    "LLM provider 暂不可用（{model}），已熔断 {cool_down_s}s，相关段级精修降级为原文",
 
   // ── 任务结果 ──
   "taskResult.title": "处理结果",

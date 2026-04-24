@@ -10,6 +10,7 @@
 import { useMemo } from "react";
 
 import type { TaskProgress as TaskProgressData } from "../api/schemas";
+import type { LlmUnavailableWarning } from "../features/task/useTaskRunner";
 import type {
   ProgressBuckets,
   SubtaskProgress,
@@ -21,6 +22,8 @@ interface TaskProgressProps {
   progresses: ProgressBuckets;
   wsState: string;
   pollingEnabled: boolean;
+  /** LLM 熔断告警；undefined=未触发，不渲染 banner */
+  llmUnavailable?: LlmUnavailableWarning | undefined;
 }
 
 export function TaskProgress({
@@ -28,6 +31,7 @@ export function TaskProgress({
   progresses,
   wsState,
   pollingEnabled,
+  llmUnavailable,
 }: TaskProgressProps): React.JSX.Element {
   const { t } = useTranslation();
 
@@ -55,6 +59,12 @@ export function TaskProgress({
   const stageLabelOf = (p: TaskProgressData | undefined): string =>
     p ? (stageLabels[p.stage] ?? p.stage) : t("taskProgress.waiting");
 
+  const llmWarningText = llmUnavailable === undefined
+    ? ""
+    : (llmUnavailable.messageKey === ""
+      ? llmUnavailable.message
+      : t(llmUnavailable.messageKey, llmUnavailable.messageParams));
+
   return (
     <div className="task-progress">
       <div className="progress-header">
@@ -67,6 +77,16 @@ export function TaskProgress({
             : (pollingEnabled ? t("taskProgress.polling") : wsState)}
         </span>
       </div>
+
+      {llmUnavailable !== undefined ? (
+        <div
+          className="llm-unavailable-banner"
+          role="alert"
+          aria-live="polite"
+        >
+          {llmWarningText}
+        </div>
+      ) : undefined}
 
       {/* 单目录任务且主桶已有帧时才渲染主进度双轨。
           - 任务初始 / 并行多子目录：主桶恒为空（process_tree 下所有帧都带非空

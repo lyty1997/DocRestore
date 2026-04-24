@@ -133,6 +133,8 @@ export const en: Record<TranslationKey, string> = {
   "progress.completed": "Completed",
   "progress.cancelled": "Task cancelled",
   "progress.failed": "Failed",
+  "progress.llmUnavailable":
+    "LLM provider unavailable ({model}); circuit broken for {cool_down_s}s, affected segments fell back to raw",
 
   // ── Task result ──
   "taskResult.title": "Results",

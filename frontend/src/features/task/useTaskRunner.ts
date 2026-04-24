@@ -18,6 +18,9 @@ import {
   mergeProgressFrame,
   type ProgressBuckets,
 } from "./progressPhase";
+import type { LlmUnavailableWarning } from "./useTaskProgress";
+
+export type { LlmUnavailableWarning };
 
 /** 页面状态 */
 type TaskStatus = "idle" | "pending" | "processing" | "completed" | "failed";
@@ -37,6 +40,11 @@ interface UseTaskRunnerReturn {
    * - 内层 key ∈ {ocr, llm}：流式 Pipeline 并发的 OCR 与 LLM 精修两条轨
    */
   progresses: ProgressBuckets;
+  /**
+   * LLM 熔断器 OPEN 事件通知（stage="llm_unavailable" 帧）。
+   * 同一 task 内只保留最新一条，UI 按时间戳判新旧。undefined 表示从未触发。
+   */
+  llmUnavailable: LlmUnavailableWarning | undefined;
   /** 完成后的 markdown 结果（第一篇，向下兼容） */
   resultMarkdown: string | undefined;
   /** 全部文档结果 */
@@ -80,6 +88,9 @@ export function useTaskRunner(): UseTaskRunnerReturn {
   const [taskId, setTaskId] = useState<string | undefined>();
   const [status, setStatus] = useState<TaskStatus>("idle");
   const [progresses, setProgresses] = useState<ProgressBuckets>({});
+  const [llmUnavailable, setLlmUnavailable] = useState<
+    LlmUnavailableWarning | undefined
+  >(undefined);
   const [resultMarkdown, setResultMarkdown] = useState<string | undefined>();
   const [allResults, setAllResults] = useState<TaskResultResponse[]>([]);
   const [taskResult, setTaskResult] = useState<
@@ -149,6 +160,9 @@ export function useTaskRunner(): UseTaskRunnerReturn {
       if (resp.progress) {
         const frame = resp.progress;
         setProgresses((prev) => mergeProgressFrame(prev, frame));
+        if (frame.stage === "llm_unavailable") {
+          captureLlmUnavailable(frame, setLlmUnavailable);
+        }
       }
 
       switch (resp.status) {
@@ -235,6 +249,9 @@ export function useTaskRunner(): UseTaskRunnerReturn {
               : event.data;
           const parsed = TaskProgressSchema.parse(data);
           setProgresses((prev) => mergeProgressFrame(prev, parsed));
+          if (parsed.stage === "llm_unavailable") {
+            captureLlmUnavailable(parsed, setLlmUnavailable);
+          }
           setStatus("processing");
         } catch {
           // schema 校验失败，降级到轮询
@@ -312,6 +329,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
       cleanup();
       setStatus("pending");
       setProgresses({});
+      setLlmUnavailable(undefined);
       setResultMarkdown(undefined);
       setAllResults([]);
       setTaskResult(undefined);
@@ -350,6 +368,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
     setTaskId(undefined);
     setStatus("idle");
     setProgresses({});
+    setLlmUnavailable(undefined);
     setResultMarkdown(undefined);
     setAllResults([]);
     setTaskResult(undefined);
@@ -362,6 +381,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
     taskId,
     status,
     progresses,
+    llmUnavailable,
     resultMarkdown,
     allResults,
     taskResult,
@@ -371,4 +391,21 @@ export function useTaskRunner(): UseTaskRunnerReturn {
     startTask,
     reset,
   };
+}
+
+/** 从进度帧抽取 LLM 熔断告警；state setter 幂等写入最新一条。 */
+function captureLlmUnavailable(
+  frame: {
+    message: string;
+    message_key: string;
+    message_params: Readonly<Record<string, string>>;
+  },
+  setter: (w: LlmUnavailableWarning) => void,
+): void {
+  setter({
+    timestamp: Date.now(),
+    message: frame.message,
+    messageKey: frame.message_key,
+    messageParams: { ...frame.message_params },
+  });
 }

@@ -128,6 +128,8 @@ export const zhTW: Record<TranslationKey, string> = {
   "progress.completed": "處理完成",
   "progress.cancelled": "任務取消",
   "progress.failed": "處理失敗",
+  "progress.llmUnavailable":
+    "LLM provider 暫不可用（{model}），已熔斷 {cool_down_s}s，相關段級精修降級為原文",
 
   // ── 任務結果 ──
   "taskResult.title": "處理結果",
