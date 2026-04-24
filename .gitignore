@@ -56,6 +56,6 @@ logs/
 # 本地调试输出（OCR 截图等）
 debug_image/
 
-# 并行测试数据集
-test_images/parallel_test/
-test_images/Chromium_VDA_code/
+# 并行测试数据集（含 symlink 形式，所以不加尾斜杠以匹配文件和目录）
+test_images/parallel_test
+test_images/Chromium_VDA_code
