@@ -522,6 +522,55 @@ async def download_task_result(task_id: str) -> Response:
 _IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"})
 
 
+@router.get("/tasks/{task_id}/quality")
+async def get_task_quality_report(task_id: str) -> dict[str, object]:
+    """返回任务级质量报告（.quality_report.json）。
+
+    process_tree 多子目录时合并所有子目录的报告；单目录直接返回。
+    没有报告（老任务或任务失败前）返回空 issues + 空 summary。
+    """
+    import asyncio
+    import json as _json
+
+    manager = _get_manager()
+    task = manager.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    def _load() -> dict[str, object]:
+        output_root = Path(task.output_dir)
+        if not output_root.is_dir():
+            return {"summary": {"total": 0}, "issues": []}
+
+        # 收集所有子目录的 .quality_report.json
+        reports: list[dict[str, object]] = []
+        for p in output_root.rglob(".quality_report.json"):
+            try:
+                reports.append(_json.loads(
+                    p.read_text(encoding="utf-8"),
+                ))
+            except (OSError, _json.JSONDecodeError):
+                continue
+
+        if not reports:
+            return {"summary": {"total": 0}, "issues": []}
+        if len(reports) == 1:
+            return reports[0]
+
+        # 多子目录：合并 issues 列表，聚合 summary 计数
+        merged_issues: list[dict[str, object]] = []
+        for r in reports:
+            issues = r.get("issues", [])
+            if isinstance(issues, list):
+                merged_issues.extend(issues)
+        return {
+            "summary": {"total": len(merged_issues)},
+            "issues": merged_issues,
+        }
+
+    return await asyncio.to_thread(_load)
+
+
 @router.get(
     "/tasks/{task_id}/source-images",
     response_model=SourceImagesResponse,
