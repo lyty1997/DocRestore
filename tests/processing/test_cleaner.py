@@ -84,6 +84,68 @@ class TestRemoveGarbage:
         assert result == text
 
 
+class TestRemoveUINoise:
+    """网页代码框 UI 噪音清理测试"""
+
+    def test_removes_plain_text_copy_line(
+        self, cleaner: OCRCleaner
+    ) -> None:
+        """"Plain Text 复制代码" 整行删除"""
+        text = (
+            "SPL 正常启动 log:\n"
+            "Plain Text 复制代码\n"
+            "U-Boot SPL 2020.01\n"
+        )
+        result = cleaner.remove_ui_noise(text)
+        assert "Plain Text 复制代码" not in result
+        assert "SPL 正常启动 log:" in result
+        assert "U-Boot SPL 2020.01" in result
+
+    def test_removes_various_language_labels(
+        self, cleaner: OCRCleaner
+    ) -> None:
+        """多种语言标签 + 复制代码都要删"""
+        for lang in ["Bash", "Python", "Shell", "SQL", "JSON", "YAML"]:
+            text = f"正文\n{lang} 复制代码\n代码行"
+            result = cleaner.remove_ui_noise(text)
+            assert f"{lang} 复制代码" not in result
+
+    def test_removes_bullet_prefixed_ui(
+        self, cleaner: OCRCleaner
+    ) -> None:
+        """▶/▼/☐ 符号开头的 UI 标签行删除"""
+        text = "正文\n▶ Plain Text 复制代码\n代码"
+        result = cleaner.remove_ui_noise(text)
+        assert "复制代码" not in result
+        assert "正文" in result
+
+    def test_removes_bare_copy_line(
+        self, cleaner: OCRCleaner
+    ) -> None:
+        """独立一行的"复制代码"也删"""
+        text = "上文\n复制代码\n下文"
+        result = cleaner.remove_ui_noise(text)
+        assert "复制代码" not in result
+        assert "上文" in result
+        assert "下文" in result
+
+    def test_preserves_inline_copy_text(
+        self, cleaner: OCRCleaner
+    ) -> None:
+        """正文中含"复制代码"的句子不受影响"""
+        text = "使用 Ctrl+C 复制代码，然后粘贴到终端"
+        result = cleaner.remove_ui_noise(text)
+        assert result == text
+
+    def test_preserves_language_in_prose(
+        self, cleaner: OCRCleaner
+    ) -> None:
+        """正文提到"Python 代码"这种不能误删"""
+        text = "下面是一段 Python 代码的例子"
+        result = cleaner.remove_ui_noise(text)
+        assert result == text
+
+
 class TestNormalizeWhitespace:
     """空行规范化测试"""
 
