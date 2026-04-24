@@ -12,6 +12,7 @@ dependencies = [
     "aiosqlite>=0.20",
     "fastapi>=0.115",
     "litellm>=1.50",
+    "numpy>=1.26",
     "Pillow>=10.0",
     "python-multipart>=0.0.9",
     "uvicorn>=0.30",
@@ -33,7 +34,6 @@ ocr = [
     "einops",
     "easydict",
     "addict",
-    "numpy",
 ]
 
 [tool.hatch.build.targets.wheel]
