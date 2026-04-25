@@ -308,72 +308,29 @@ def _pair_by_y(
 def _splice_unpaired_codes(
     assembled: list[CodeLine],
     unpaired_codes: list[TextLine],
-    left_margin: int,
-    char_width: float,
+    left_margin: int,  # noqa: ARG001 — 保留接口，后续可能恢复推断插入
+    char_width: float,  # noqa: ARG001 — 同上
     flags: list[str],
-    min_text_len: int,
+    min_text_len: int,  # noqa: ARG001
 ) -> list[CodeLine]:
-    """把未配对的代码（行号 OCR 漏识但代码识别到）按 y 推断行号插入。
+    """处理"代码 line 没匹配上行号"的情况。
 
-    算法（v2）：
-      1. unpaired_codes 按 y 升序
-      2. 对每个 code line，在 assembled 中找 y_center 紧邻的前一个有 bbox 的
-         line（即 prev_assembled），插在它之后
-      3. 推断 line_no = prev_assembled.line_no + 1（若已被占用，可能产生
-         同号；标记 ``is_inferred_line_no=True`` 让下游识别）
-      4. 计算 indent 同正常代码 line
+    历史尝试（已回滚）：v2 曾用"按 y 紧邻插入 + line_no=prev+1"推断插入。
+    实测表明 unpaired 在 1259 张数据集上 ~50% 是 UI 噪声（breadcrumb /
+    git blame / status bar），剩 50% 真代码片段也大量是 OCR 把一行切成多
+    box 的重复内容（同一逻辑行号被多次推断）。强插入污染代码。
 
-    防噪：text 长度 < ``min_text_len`` 的 unpaired 跳过。
+    当前策略（保守）：只标 quality flag 不真插入。让下游知道有未配对
+    代码，可在 LLM 精修阶段（AGE-48）按需要查阅原图补全。
+
+    上游配合：``ide_layout._assign_regions`` 已改用 bbox 中心点判定，
+    把 breadcrumb / status bar 类噪声更早归到 above/below 区域，从源头
+    减少进入 column 的 unpaired_codes 数量。
     """
     if not assembled or not unpaired_codes:
         return assembled
-
-    sortable: list[TextLine] = [
-        c for c in unpaired_codes if len(c.text.strip()) >= min_text_len
-    ]
-    skipped = len(unpaired_codes) - len(sortable)
-    if skipped > 0:
-        flags.append(f"code.assembly.unpaired_skipped_short={skipped}")
-    if not sortable:
-        flags.append(f"code.assembly.unpaired_codes={len(unpaired_codes)}")
-        return assembled
-
-    sortable.sort(key=lambda c: c.bbox[1])
-    new_lines = list(assembled)
-    inserted = 0
-
-    for code in sortable:
-        code_yc = (code.bbox[1] + code.bbox[3]) // 2
-        # 在 new_lines 中找 y_center 紧邻的前一个有 bbox 的 line
-        prev_idx = -1
-        for i, ln in enumerate(new_lines):
-            if ln.bbox is None:
-                continue
-            ln_yc = (ln.bbox[1] + ln.bbox[3]) // 2
-            if ln_yc <= code_yc:
-                prev_idx = i
-            else:
-                break
-        if prev_idx >= 0:
-            inferred_no = new_lines[prev_idx].line_no + 1
-            insert_at = prev_idx + 1
-        else:
-            # 在所有 assembled 之前 → 行号取首行 line_no - 1（可能 < 1，
-            # 上限保 1）
-            inferred_no = max(1, new_lines[0].line_no - 1)
-            insert_at = 0
-        indent = max(0, round((code.bbox[0] - left_margin) / char_width))
-        new_lines.insert(insert_at, CodeLine(
-            line_no=inferred_no,
-            text=code.text,
-            indent=indent,
-            bbox=code.bbox,
-            is_inferred_line_no=True,
-        ))
-        inserted += 1
-
-    flags.append(f"code.assembly.unpaired_inferred={inserted}")
-    return new_lines
+    flags.append(f"code.assembly.unpaired_codes={len(unpaired_codes)}")
+    return assembled
 
 
 def _detect_line_number_gaps(

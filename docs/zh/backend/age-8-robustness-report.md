@@ -149,66 +149,83 @@
 2. AGE-48 LLM 字符级修正
 3. AGE-49 编译验证 / AGE-50 前端对照
 
-## 10. v2 升级与最终结果
+## 10. v2 升级历程：尝试 → 审计 → 回滚 → v3 最终
 
-### 10.1 升级内容
-基于 §3.4 暴露的两个弱点：
+### 10.1 v2 升级初版（已回滚）
+v2 初版加了"unpaired_codes 推断插入"——把行号 OCR 漏识但代码 line 识别到的
+情况，按 y 紧邻位置推断行号插入。看似救回 6396 行代码（70% 图触发）。
 
-**A. unpaired_codes 推断插入**（`code_assembly._splice_unpaired_codes`）：
-v1 只标 flag 不真插入，导致 OCR 漏识行号但识别到的代码 line 被丢弃。v2 实现：
-- unpaired code 按 y 升序，找紧邻前一个有 bbox 的 assembled line 插在其后
-- 推断 line_no = prev.line_no + 1
-- 标 `is_inferred_line_no=True` 让下游识别
-- text 长度 < `unpaired_min_text_len=2` 跳过防 OCR 噪声
+### 10.2 用户质疑触发的 audit（关键转折）
+用户问"救的是不是垃圾"。立即抽样 5 张 TMedia 高 inferred 图实测：
 
-**B. anchor.num_range 上限校验**（`ide_layout.LayoutConfig.max_num_range=3000`）：
-基于 v1 实测的多数据集分布定阈值：
-- 真长 file：TMedia DSC09871 跨度 694；git diff 视图最长 2000
-- 真噪声：chromium_video PID/堆栈 3700-5500
-- 3000 是平衡点
-
-### 10.2 v1 vs v2 总览
-
-| 数据集 | v1 检出率 | v2-3000 检出率 | 净变化 |
-|---|---|---|---|
-| Chromium_VDA_code | 272/272 (100%) | 272/272 (100%) | ✓ |
-| TMedia | 585/585 (100%) | 585/585 (100%) | ✓ 救回 DSC09871 |
-| chromium_display_code | 157/157 (100%) | 157/157 (100%) | ✓ |
-| chromium_diff | 121/123 (98.37%) | 121/123 (98.37%) | ✓ 救回 3 张长 diff |
-| chromium_video（非目标）| 49/111 (44%) | 47/111 (42%) | -2 噪声合理过滤 |
-| doc_control | 0/11 (零误判) | 0/11 (零误判) | ✓ |
-
-**IDE 代码场景（前 4 数据集合计 1137 张）：v1/v2 都是 99.82%（1135/1137）**
-
-### 10.3 v2 净收益
-
-**unpaired_inferred 量化**：
-
-| 数据集 | 推断插入行数 | 触发图数 |
+| inferred 类型 | 占比 | 例子 |
 |---|---|---|
-| TMedia | 5302 | 580 |
-| chromium_diff | 501 | 102 |
-| chromium_video | 299 | 40 |
-| Chromium_VDA_code | 159 | 96 |
-| chromium_display_code | 135 | 62 |
-| **合计** | **6396 行** | **880 张图** |
+| OCR 切碎残片（非完整代码行） | ~20% | `_e`, `type`, `intertace`（一行被切多 box，重复推断同 line_no） |
+| 真代码片段（部分有用） | ~50% | `CSI_VENC_H264_PROFILE_MAIN = 2,`, `21,`, `break;` |
+| UI 噪声 — breadcrumb | ~10% | `t >include >tmedia_backend_light >format > camera_theadhal.h>` |
+| UI 噪声 — git blame | ~10% | `yangtianyu.lu, 9months ago\|1author(...)` |
+| UI 噪声 — status bar | ~10% | `Mac`, `C++`, `LF`, `UTF-8`, `{}` |
 
-**70% 的代码图触发 unpaired 推断插入**——v1 这些代码被完全丢弃，v2 全部救回到输出。
+**结论**：50% 是垃圾，50% 真代码也大量是切碎重复。强插入污染 code_text。
+v2 的"6396 行救回"是误导性指标。
 
-### 10.4 顺手修复的 bug
-**TextLine 排序 fallback 比较**（`code_assembly._pair_by_y`）：
-- 现象：chromium_diff 8 张图触发 `'<' not supported between TextLine and TextLine`
-- 根因：sorted((int, TextLine)) 在 int 同值时 fallback 比较 dataclass 实例
-- 修复：sorted() 加 `key=lambda x: x[0]`
-- 验证：chromium_diff 8 张 OCR fail 全部恢复识别
+### 10.3 v3 修复方案
 
-### 10.5 v2 验收
-- ✅ IDE 代码场景检出率维持 99.82%
-- ✅ 6396 行代码救回（70% 代码图触发推断）
+**A. 回滚 unpaired_codes 推断插入**：保留 quality flag 标记不插入实际内容
+- 让上层（AGE-48 LLM 精修）按需查阅原图补全 unpaired
+- 不强行污染 assembled
+
+**B. ide_layout 区域归类改用 bbox 中心点**（治本）：
+v1/v2 用 bbox 边界判 above/below_code：`y_max < anchor.y_top` 才算 above。
+breadcrumb / status bar / git blame 等 UI 元素 bbox 与 anchor 范围**重叠**
+但 y_center 在外侧，被错归 column 后变成 unpaired。
+v3 改用 `y_center < anchor.y_top` / `y_center > anchor.y_bottom`，从源头
+让 UI 噪声归到正确区域，不再进 column。
+
+**C. anchor.num_range 上限保留 3000**：基于实测平衡值
+- 真长 file（跨度 694-2000）通过
+- 极端噪声（堆栈 PID 3700-5500）过滤
+
+### 10.4 v1 vs v2 vs v3 三方对比
+
+| 数据集 | v1 | v2-3000 | v3（最终） |
+|---|---|---|---|
+| Chromium_VDA_code | 272/272 (100%) | 272/272 (100%) | 272/272 (100%) ✓ |
+| TMedia | 585/585 (100%) | 585/585 (100%) | 585/585 (100%) ✓ |
+| chromium_display_code | 157/157 (100%) | 157/157 (100%) | 157/157 (100%) ✓ |
+| chromium_diff | 121/123 (98.37%) | 121/123 (98.37%) | 121/123 (98.37%) ✓ |
+| chromium_video（非目标）| 49/111 (44%) | 47/111 (42%) | 47/111 (42%) ✓ |
+| doc_control | 0/11 (零误判) | 0/11 (零误判) | 0/11 (零误判) ✓ |
+
+anchor 检出率三方完全一致。v3 真正改进的是**输出 code_text 的质量**：
+
+**column 长度对比（v2 含垃圾插入 vs v3 干净）**：
+
+| 数据集 | v2 mean / max | v3 mean / max | 减少率 |
+|---|---|---|---|
+| TMedia | 40.3 / 67 | 32.1 / 36 | -20% / -46% |
+| chromium_display_code | 24.9 / 32 | 24.5 / 25 | -1.6% / -22% |
+| Chromium_VDA_code | 24.6 / 39 | 24.3 / 38 | -1% / -3% |
+
+v3 的 max 列长度接近 IDE 视图典型 25 行（一屏标准），证明垃圾被剔除。
+v2 多出的列长度全是 OCR 切碎残片+UI 噪声+真代码混合。
+
+### 10.5 v3 净收益
+- ✅ IDE 代码场景检出率 **99.82%**（1135/1137，与 v1/v2 持平）
+- ✅ **code_text 干净**——breadcrumb / status bar / git blame 等 UI 不再污染
+- ✅ **真 OCR 切碎现象暴露**：unpaired_codes flag 现在准确标记，让上层处理
 - ✅ 极端噪声 anchor（>3000 跨度）被过滤
-- ✅ 文档误判率仍 0%
-- ✅ 84 单测全过 + mypy --strict + ruff
-- ✅ TextLine sort bug 修复
+- ✅ 文档误判率仍 **0%**
+- ✅ TextLine sort bug 修复（v2 时已修，v3 沿用）
+- ✅ 83 单测全过 + mypy --strict + ruff
+
+### 10.6 经验教训
+1. **"指标看着好" ≠ 实际质量好**：v2 看似救回 6396 行，实测 50% 垃圾
+2. **从源头修才稳**：v3 上游 above/below 边界判定改进，从根本减少 unpaired
+3. **保守的代码总比激进强插入的代码好**：unpaired 不强插，让 LLM 精修阶段
+   有干净基础上做字符级修复，比基于污染数据补救容易
+4. **多数据集 audit 不可缺**：spike 8 张 v2 只 2 条 inferred 看不出问题；
+   TMedia 5 张高 inferred 的 audit 才暴露真相
 
 ## 7. 沉淀产物
 

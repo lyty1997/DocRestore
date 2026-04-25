@@ -246,14 +246,18 @@ def _assign_regions(
 
     for ln in text_lines:
         x1, y1, x2, y2 = ln.bbox
+        # 用 bbox 中心点判定区域归属，避免 breadcrumb / status bar 等
+        # "y 与 anchor 边界重叠" 的 line 误归 column 后污染代码
+        y_center = (y1 + y2) // 2
+        x_center = (x1 + x2) // 2
 
-        if y2 < code_y_top:
+        if y_center < code_y_top:
             above.append(ln)
             continue
-        if x2 < leftmost_anchor_x:
+        if x_center < leftmost_anchor_x:
             sidebar.append(ln)
             continue
-        if y1 > code_y_bot:
+        if y_center > code_y_bot:
             below.append(ln)
             continue
 

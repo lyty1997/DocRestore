@@ -130,17 +130,11 @@ class TestEmpty:
         assert assemble_columns(layout) == []
 
 
-class TestUnpairedInference:
-    """unpaired_codes 推断插入（v2 升级）"""
+class TestUnpairedNotInserted:
+    """unpaired_codes 当前策略：只标 flag 不插入（避免污染代码）"""
 
-    def test_inserted_with_inferred_line_no(self) -> None:
-        """有代码 line y 没匹配上任何行号 → 推断行号插入，标记 is_inferred
-
-        构造：行号 1-5 在 y=100/150/200/250/300（line_height=50，height=25,
-        容差 = 25*0.55 ≈ 13）；代码 1,2,4,5 跟行号同 y；额外插一个游离代码
-        line 在 y=235（行号 3 y_center=212 距 23、行号 4 y_center=262 距 27,
-        都 > 容差）→ unpaired。
-        """
+    def test_unpaired_marked_but_not_inserted(self) -> None:
+        """有未配对代码 → 标 flag，不插入到 assembled"""
         lines: list[TextLine] = []
         line_height = 50
         char_w = 12
@@ -154,31 +148,12 @@ class TestUnpairedInference:
         lines.append(_line((200, 222, 200 + char_w * 10, 248), "FLOATER_X"))
         layout = analyze_layout(lines, image_size=(800, 600))
         col = assemble_columns(layout)[0]
-        # 至少有一行 is_inferred_line_no=True
-        inferred = [ln for ln in col.lines if ln.is_inferred_line_no]
-        assert inferred, "未发生 unpaired 插入（fixture 失效或算法没触发）"
-        # FLOATER 应被插入
-        assert any("FLOATER" in ln.text for ln in inferred)
-
-    def test_short_text_skipped(self) -> None:
-        """text 长度 < min_text_len 的 unpaired 不应插入（防 OCR 噪声）"""
-        lines: list[TextLine] = []
-        for i in range(5):
-            y = 100 + i * 30
-            lines.append(_line((100, y, 130, y + 25), str(i + 1)))
-            # 代码 1, 2, 4, 5 配上行号；3 是单字符 noise + y 偏移
-            if i == 2:
-                lines.append(_line((200, y + 60, 210, y + 85), "x"))
-            else:
-                lines.append(_line(
-                    (200, y, 200 + 8 * 12, y + 25), f"line{i + 1}",
-                ))
-        layout = analyze_layout(lines, image_size=(800, 400))
-        col = assemble_columns(layout)[0]
-        # 单字符 'x' 应被 short-skip，不出现在 inferred lines
-        for ln in col.lines:
-            if ln.is_inferred_line_no:
-                assert len(ln.text.strip()) >= 2
+        # 不应有 inferred line
+        assert not any(ln.is_inferred_line_no for ln in col.lines)
+        # 但应有 quality flag 记录
+        assert any("unpaired_codes=" in f for f in col.flags)
+        # FLOATER 不在 code_text 中
+        assert "FLOATER" not in col.code_text
 
 
 class TestGapDetection:
