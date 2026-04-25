@@ -81,6 +81,11 @@ class LayoutConfig:
     min_anchor_lines: int = 5
     #: 数值升序对占比下限
     min_monotonic_ratio: float = 0.6
+    #: anchor.num_range 跨度上限。超此视为噪声 anchor（EXPLORER 文件树文件名
+    #: 含数字被当行号识别等极端 case）。VSCode IDE 视图典型行号跨度 ≤ 100，
+    #: 滚动到大文件深处也很少 > 500；实测 chromium_diff/video 出现过 1700+
+    #: 的极端噪声需过滤。
+    max_num_range: int = 500
 
 
 def analyze_layout(
@@ -176,6 +181,9 @@ def _find_line_number_columns(
         ascending = sum(1 for i in range(len(nums) - 1) if nums[i + 1] > nums[i])
         ratio = ascending / (len(nums) - 1)
         if ratio < cfg.min_monotonic_ratio:
+            continue
+        # 跨度过大 → 噪声（如 EXPLORER 文件名误识）
+        if (max(nums) - min(nums)) > cfg.max_num_range:
             continue
         x1s = [ln.bbox[0] for ln in cluster]
         x2s = [ln.bbox[2] for ln in cluster]

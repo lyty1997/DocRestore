@@ -50,6 +50,8 @@ class AssemblyConfig:
     char_width_min_text_len: int = 5
     #: 输出空行时的占位（None 即真空行；string 即写该字符串）
     empty_line_placeholder: str | None = None
+    #: unpaired_codes 推断插入时，文本最小长度（防 OCR 噪声短串污染）
+    unpaired_min_text_len: int = 2
 
 
 @dataclass
@@ -176,6 +178,7 @@ def _assemble_one_column(
     if unpaired_codes and assembled:
         assembled = _splice_unpaired_codes(
             assembled, unpaired_codes, left_margin, char_width, flags,
+            cfg.unpaired_min_text_len,
         )
 
     # 7. 缺号检测（OCR 行号集 vs anchor.num_range 期望集）
@@ -305,20 +308,72 @@ def _pair_by_y(
 def _splice_unpaired_codes(
     assembled: list[CodeLine],
     unpaired_codes: list[TextLine],
-    left_margin: int,  # noqa: ARG001 — 占位，升级为 y 推断插入时启用
-    char_width: float,  # noqa: ARG001 — 同上
+    left_margin: int,
+    char_width: float,
     flags: list[str],
+    min_text_len: int,
 ) -> list[CodeLine]:
     """把未配对的代码（行号 OCR 漏识但代码识别到）按 y 推断行号插入。
 
-    简化策略：当前版本只标 flag，不真插入——避免误插打乱编号。
-    spike 实测中 unpaired 很少；若 273 全集 fail 率高，再升级为
-    "用 y 位置在 assembled 相邻 line_no 之间推断行号"插入逻辑。
+    算法（v2）：
+      1. unpaired_codes 按 y 升序
+      2. 对每个 code line，在 assembled 中找 y_center 紧邻的前一个有 bbox 的
+         line（即 prev_assembled），插在它之后
+      3. 推断 line_no = prev_assembled.line_no + 1（若已被占用，可能产生
+         同号；标记 ``is_inferred_line_no=True`` 让下游识别）
+      4. 计算 indent 同正常代码 line
+
+    防噪：text 长度 < ``min_text_len`` 的 unpaired 跳过。
     """
-    if not assembled:
+    if not assembled or not unpaired_codes:
         return assembled
-    flags.append(f"code.assembly.unpaired_codes={len(unpaired_codes)}")
-    return assembled
+
+    sortable: list[TextLine] = [
+        c for c in unpaired_codes if len(c.text.strip()) >= min_text_len
+    ]
+    skipped = len(unpaired_codes) - len(sortable)
+    if skipped > 0:
+        flags.append(f"code.assembly.unpaired_skipped_short={skipped}")
+    if not sortable:
+        flags.append(f"code.assembly.unpaired_codes={len(unpaired_codes)}")
+        return assembled
+
+    sortable.sort(key=lambda c: c.bbox[1])
+    new_lines = list(assembled)
+    inserted = 0
+
+    for code in sortable:
+        code_yc = (code.bbox[1] + code.bbox[3]) // 2
+        # 在 new_lines 中找 y_center 紧邻的前一个有 bbox 的 line
+        prev_idx = -1
+        for i, ln in enumerate(new_lines):
+            if ln.bbox is None:
+                continue
+            ln_yc = (ln.bbox[1] + ln.bbox[3]) // 2
+            if ln_yc <= code_yc:
+                prev_idx = i
+            else:
+                break
+        if prev_idx >= 0:
+            inferred_no = new_lines[prev_idx].line_no + 1
+            insert_at = prev_idx + 1
+        else:
+            # 在所有 assembled 之前 → 行号取首行 line_no - 1（可能 < 1，
+            # 上限保 1）
+            inferred_no = max(1, new_lines[0].line_no - 1)
+            insert_at = 0
+        indent = max(0, round((code.bbox[0] - left_margin) / char_width))
+        new_lines.insert(insert_at, CodeLine(
+            line_no=inferred_no,
+            text=code.text,
+            indent=indent,
+            bbox=code.bbox,
+            is_inferred_line_no=True,
+        ))
+        inserted += 1
+
+    flags.append(f"code.assembly.unpaired_inferred={inserted}")
+    return new_lines
 
 
 def _detect_line_number_gaps(
