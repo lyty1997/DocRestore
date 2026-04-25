@@ -81,11 +81,14 @@ class LayoutConfig:
     min_anchor_lines: int = 5
     #: 数值升序对占比下限
     min_monotonic_ratio: float = 0.6
-    #: anchor.num_range 跨度上限。超此视为噪声 anchor（EXPLORER 文件树文件名
-    #: 含数字被当行号识别等极端 case）。VSCode IDE 视图典型行号跨度 ≤ 100，
-    #: 滚动到大文件深处也很少 > 500；实测 chromium_diff/video 出现过 1700+
-    #: 的极端噪声需过滤。
-    max_num_range: int = 500
+    #: anchor.num_range 跨度上限。超此视为噪声 anchor。
+    #:
+    #: 设为 3000 的原因（基于 1259 张多数据集实测）：
+    #: - 真长文件场景：TMedia DSC09871 行号 110-804（跨度 694），git diff 视图
+    #:   行号跨度可达 1700-2000（diff 把整个文件 sparse 行号都展示）
+    #: - 真噪声场景：chromium_video 含 PID/堆栈数字混入达 3700-5500，应过滤
+    #: 3000 是平衡点：保留所有真 IDE/diff 视图，过滤极端噪声。
+    max_num_range: int = 3000
 
 
 def analyze_layout(

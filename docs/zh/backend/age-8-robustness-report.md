@@ -1,8 +1,10 @@
 # AGE-8 行号列锚点方案多数据集鲁棒性报告
 
-**日期**：2026-04-25
+**日期**：2026-04-25（v2 升级后更新）
 **作者**：Claude（offline 验证）
 **关联**：[AGE-8](https://linear.app/axiom-mind/issue/AGE-8/) · [设计文档](age-8-ide-code.md)
+
+> ⚠️ **v2 升级（同日）**：基于 v1 报告暴露的两个弱点完成升级，详见 §10 v2 升级章节。本节其余统计为 v1 跑数；v2 最终结果在 §10。
 
 ---
 
@@ -146,6 +148,67 @@
 1. AGE-45 ide_meta_extract / AGE-46 file_grouping / AGE-47 renderer
 2. AGE-48 LLM 字符级修正
 3. AGE-49 编译验证 / AGE-50 前端对照
+
+## 10. v2 升级与最终结果
+
+### 10.1 升级内容
+基于 §3.4 暴露的两个弱点：
+
+**A. unpaired_codes 推断插入**（`code_assembly._splice_unpaired_codes`）：
+v1 只标 flag 不真插入，导致 OCR 漏识行号但识别到的代码 line 被丢弃。v2 实现：
+- unpaired code 按 y 升序，找紧邻前一个有 bbox 的 assembled line 插在其后
+- 推断 line_no = prev.line_no + 1
+- 标 `is_inferred_line_no=True` 让下游识别
+- text 长度 < `unpaired_min_text_len=2` 跳过防 OCR 噪声
+
+**B. anchor.num_range 上限校验**（`ide_layout.LayoutConfig.max_num_range=3000`）：
+基于 v1 实测的多数据集分布定阈值：
+- 真长 file：TMedia DSC09871 跨度 694；git diff 视图最长 2000
+- 真噪声：chromium_video PID/堆栈 3700-5500
+- 3000 是平衡点
+
+### 10.2 v1 vs v2 总览
+
+| 数据集 | v1 检出率 | v2-3000 检出率 | 净变化 |
+|---|---|---|---|
+| Chromium_VDA_code | 272/272 (100%) | 272/272 (100%) | ✓ |
+| TMedia | 585/585 (100%) | 585/585 (100%) | ✓ 救回 DSC09871 |
+| chromium_display_code | 157/157 (100%) | 157/157 (100%) | ✓ |
+| chromium_diff | 121/123 (98.37%) | 121/123 (98.37%) | ✓ 救回 3 张长 diff |
+| chromium_video（非目标）| 49/111 (44%) | 47/111 (42%) | -2 噪声合理过滤 |
+| doc_control | 0/11 (零误判) | 0/11 (零误判) | ✓ |
+
+**IDE 代码场景（前 4 数据集合计 1137 张）：v1/v2 都是 99.82%（1135/1137）**
+
+### 10.3 v2 净收益
+
+**unpaired_inferred 量化**：
+
+| 数据集 | 推断插入行数 | 触发图数 |
+|---|---|---|
+| TMedia | 5302 | 580 |
+| chromium_diff | 501 | 102 |
+| chromium_video | 299 | 40 |
+| Chromium_VDA_code | 159 | 96 |
+| chromium_display_code | 135 | 62 |
+| **合计** | **6396 行** | **880 张图** |
+
+**70% 的代码图触发 unpaired 推断插入**——v1 这些代码被完全丢弃，v2 全部救回到输出。
+
+### 10.4 顺手修复的 bug
+**TextLine 排序 fallback 比较**（`code_assembly._pair_by_y`）：
+- 现象：chromium_diff 8 张图触发 `'<' not supported between TextLine and TextLine`
+- 根因：sorted((int, TextLine)) 在 int 同值时 fallback 比较 dataclass 实例
+- 修复：sorted() 加 `key=lambda x: x[0]`
+- 验证：chromium_diff 8 张 OCR fail 全部恢复识别
+
+### 10.5 v2 验收
+- ✅ IDE 代码场景检出率维持 99.82%
+- ✅ 6396 行代码救回（70% 代码图触发推断）
+- ✅ 极端噪声 anchor（>3000 跨度）被过滤
+- ✅ 文档误判率仍 0%
+- ✅ 84 单测全过 + mypy --strict + ruff
+- ✅ TextLine sort bug 修复
 
 ## 7. 沉淀产物
 

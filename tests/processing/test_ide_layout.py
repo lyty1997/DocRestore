@@ -178,30 +178,44 @@ class TestThresholds:
         assert layout.anchors == []
 
     def test_excessive_num_range_filtered(self) -> None:
-        """num_range 跨度 > max_num_range 视为噪声 anchor 过滤"""
-        # 8 个单调数字但跨度 = 1700（如 EXPLORER 文件树的文件名数字）
-        nums = ["1", "10", "100", "300", "500", "800", "1200", "1700"]
+        """num_range 跨度 > max_num_range 视为噪声 anchor 过滤
+
+        构造：8 个单调数字但跨度 = 5500（如 chromium_video 堆栈 PID 噪声）
+        """
+        nums = ["1", "100", "500", "1000", "2000", "3000", "4500", "5500"]
         lines = [
             _line((200, 100 + i * 30, 230, 130 + i * 30), n)
             for i, n in enumerate(nums)
         ]
         layout = analyze_layout(lines, image_size=(2000, 800))
-        # 默认 max_num_range=500 → 跨度 1699 应被过滤
+        # 默认 max_num_range=3000 → 跨度 5499 应被过滤
         assert layout.anchors == []
         assert "code.no_anchor" in layout.flags
 
-    def test_custom_max_num_range_passes(self) -> None:
-        """放开 max_num_range 后大跨度也允许"""
-        nums = ["1", "10", "100", "300", "500", "800", "1200", "1700"]
+    def test_long_file_passes(self) -> None:
+        """真长文件（行号跨度 < 3000）应通过"""
+        # 行号跨度 = 800（如 IDE 滚动到 file 中段：行号 200-1000）
+        nums = ["200", "300", "400", "500", "600", "700", "850", "1000"]
+        lines = [
+            _line((200, 100 + i * 30, 230, 130 + i * 30), n)
+            for i, n in enumerate(nums)
+        ]
+        layout = analyze_layout(lines, image_size=(2000, 800))
+        assert len(layout.anchors) == 1
+        assert layout.anchors[0].num_range == (200, 1000)
+
+    def test_custom_max_num_range_strict(self) -> None:
+        """收紧 max_num_range 可过滤掉本来通过的 anchor"""
+        nums = ["1", "100", "200", "400", "600", "800"]
         lines = [
             _line((200, 100 + i * 30, 230, 130 + i * 30), n)
             for i, n in enumerate(nums)
         ]
         layout = analyze_layout(
             lines, image_size=(2000, 800),
-            config=LayoutConfig(max_num_range=2000),
+            config=LayoutConfig(max_num_range=500),
         )
-        assert len(layout.anchors) == 1
+        assert layout.anchors == []
 
 
 # ---------- spike 真实数据 fixture ----------
