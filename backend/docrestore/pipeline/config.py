@@ -21,7 +21,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ColumnFilterThresholds(BaseModel):
@@ -127,6 +129,13 @@ class OCRConfig(BaseModel):
     gpu_memory_safety_margin_mib: int = 1024
 
     # === PaddleOCR 专用（model="paddle-ocr/..." 时生效）===
+    #: PaddleOCR pipeline 选择
+    #: - ``vl``：PaddleOCR-VL（vllm-server 模式），文档场景默认；输出 markdown
+    #:   + 块级 layout（``parsing_res_list``），需先拉 ppocr-server 进程
+    #: - ``basic``：PP-OCRv5（DBNet+CRNN），AGE-8 IDE 代码场景；输出**行级**
+    #:   ``rec_boxes``+text+score（填充到 ``PageOCR.text_lines``），不需要
+    #:   vllm-server，纯本地推理
+    paddle_pipeline: Literal["basic", "vl"] = "vl"
     paddle_python: str = ""  # PaddleOCR conda 环境的 python 路径
     paddle_ocr_timeout: int = 300  # 单张 OCR 超时（秒）
     paddle_restart_interval: int = 20  # 每 N 张图片重启 worker（0 禁用）
@@ -274,6 +283,24 @@ class PIIConfig(BaseModel):
     block_cloud_on_detect_failure: bool = True
 
 
+class CodeRestoreConfig(BaseModel):
+    """AGE-8 IDE 代码照片 → 源文件还原配置
+
+    enable=True 时启用 IDE 代码场景，pipeline 自动切换：
+      - OCR 切到 ``basic`` pipeline（PP-OCRv5 行级 bbox）
+      - 走行号列锚点 + 栏代码组装的 IDE 专用流程
+    """
+
+    enable: bool = False
+    #: 输出源文件子目录名（output_dir/<files_dir>/<relative-path>）
+    output_files_dir: str = "files"
+    #: 跨张归类策略：tab_breadcrumb（用 tab+breadcrumb 路径分组，AGE-46
+    #: 默认）/ content_only（仅按代码内容连续性分组，未实现）
+    file_grouping_strategy: Literal["tab_breadcrumb", "content_only"] = (
+        "tab_breadcrumb"
+    )
+
+
 class PipelineConfig(BaseModel):
     """Pipeline 总配置"""
 
@@ -282,7 +309,19 @@ class PipelineConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     pii: PIIConfig = Field(default_factory=PIIConfig)
+    code: CodeRestoreConfig = Field(default_factory=CodeRestoreConfig)
     db_path: str = "data/docrestore.db"  # SQLite 持久化路径
+
+    @model_validator(mode="after")
+    def _apply_code_mode_defaults(self) -> PipelineConfig:
+        """code.enable=True 时自动把 OCR 切到 basic pipeline。
+
+        IDE 代码场景必须用行级 OCR（PP-OCRv5）才能拿到 ``PageOCR.text_lines``
+        供 ide_layout 锚点识别。这里只在用户没显式覆盖（仍是默认 vl）时改写。
+        """
+        if self.code.enable and self.ocr.paddle_pipeline == "vl":
+            self.ocr.paddle_pipeline = "basic"
+        return self
     debug: bool = True  # 落盘各阶段中间结果到 output_dir/debug/
 
     # 性能调试开关：开启后 Pipeline 全流程埋点，任务结束写 profile.json

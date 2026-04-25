@@ -445,9 +445,17 @@ class WorkerBackedOCREngine(ABC):
     async def _load_existing_ocr(
         self, image_path: Path, ocr_dir: Path
     ) -> PageOCR:
-        """从 ocr_dir/OCR_RESULT_FILENAME 加载已有 OCR 结果。"""
+        """从 ocr_dir/OCR_RESULT_FILENAME 加载已有 OCR 结果。
+
+        若同目录有 ``text_lines.jsonl``（PaddleOCR basic pipeline 产出），
+        重建 ``PageOCR.text_lines`` 让缓存命中也能跑 IDE 布局识别（AGE-8）。
+        """
+        import json
+
         import aiofiles
         from PIL import Image
+
+        from docrestore.models import TextLine
 
         result_mmd = ocr_dir / OCR_RESULT_FILENAME
         async with aiofiles.open(result_mmd, encoding="utf-8") as f:
@@ -457,6 +465,28 @@ class WorkerBackedOCREngine(ABC):
         image_size = img.size
         img.close()
 
+        # 重建 text_lines（仅 basic pipeline 写过该文件）
+        text_lines: list[TextLine] = []
+        lines_path = ocr_dir / "text_lines.jsonl"
+        if lines_path.exists():
+            async with aiofiles.open(lines_path, encoding="utf-8") as f:
+                content = await f.read()
+            for line in content.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                    bbox = item.get("bbox")
+                    if isinstance(bbox, list) and len(bbox) >= 4:
+                        x1, y1, x2, y2 = (int(v) for v in bbox[:4])
+                        text_lines.append(TextLine(
+                            bbox=(x1, y1, x2, y2),
+                            text=str(item.get("text", "")),
+                            score=float(item.get("score", 0.0) or 0.0),
+                        ))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+
         return PageOCR(
             image_path=image_path,
             raw_text=raw_text,
@@ -464,6 +494,7 @@ class WorkerBackedOCREngine(ABC):
             output_dir=ocr_dir,
             image_size=image_size,
             has_eos=True,
+            text_lines=text_lines,
         )
 
     async def _send_command(

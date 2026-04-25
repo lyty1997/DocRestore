@@ -371,8 +371,12 @@ class EngineManager:
 
                     provider, _ = _parse_model(target_model)
 
-                    # PaddleOCR 需要先启动 ppocr-server
-                    if provider == "paddle-ocr":
+                    # PaddleOCR-VL 需要 ppocr-server（vllm 推理）；
+                    # basic pipeline (PP-OCRv5) 纯本地，跳过 server 启动节省 GPU。
+                    if (
+                        provider == "paddle-ocr"
+                        and config.paddle_pipeline == "vl"
+                    ):
                         _progress("正在启动 OCR 推理服务...")
                         await self._start_ppocr_server(config, _progress)
 
