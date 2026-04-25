@@ -153,6 +153,59 @@ class TestSingleColumn:
             assert m.language == lang, f"ext={ext} expected {lang}"
 
 
+class TestWithinImageReconcile:
+    """同图栏间路径补全（场景 1：借用，场景 2：粘连还原）"""
+
+    def test_path_inferred_from_peer(self) -> None:
+        """col_0 只有 filename → 借用 col_1 的目录前缀"""
+        above = [
+            # col_0：tab 有 filename 无 breadcrumb（path=None）
+            _line((180, 60, 800, 90), "C+ openmax_status.h 4×"),
+            # col_1：完整 breadcrumb
+            _line(
+                (1990, 100, 2800, 130),
+                "media >gpu >openmax > openmax_status.h",
+            ),
+        ]
+        layout = _make_layout_with_above(above, anchor_count=2)
+        metas = extract_ide_metas(layout)
+        assert len(metas) == 2
+        # col_0 path 应该被补成 col_1 的目录前缀
+        assert metas[0].filename == "openmax_status.h"
+        assert metas[0].path == "media/gpu/openmax/openmax_status.h"
+        assert "code.path_inferred_from_peer" in metas[0].flags
+
+    def test_path_segments_recovered(self) -> None:
+        """col_0 的 path 段粘连（gpuopenmax）→ 用 col_1 的细分版本替换"""
+        above = [
+            # col_0：OCR 漏 `>` 导致 gpu+openmax 粘连
+            _line(
+                (180, 100, 1500, 130),
+                "media >gpuopenmax > foo.cc",
+            ),
+            # col_1：正常细分
+            _line(
+                (1990, 100, 2800, 130),
+                "media >gpu >openmax > bar.cc",
+            ),
+        ]
+        layout = _make_layout_with_above(above, anchor_count=2)
+        metas = extract_ide_metas(layout)
+        assert metas[0].path == "media/gpu/openmax/foo.cc"
+        assert "code.path_segments_recovered" in metas[0].flags
+
+    def test_no_reconcile_when_no_peer_path(self) -> None:
+        """所有栏都 path=None → 无可借用，保持 None"""
+        above = [
+            _line((180, 60, 800, 90), "C+ foo.cc 4×"),
+            _line((1990, 60, 2800, 90), "C+ bar.cc 4×"),
+        ]
+        layout = _make_layout_with_above(above, anchor_count=2)
+        metas = extract_ide_metas(layout)
+        assert metas[0].path is None
+        assert metas[1].path is None
+
+
 class TestMultipleColumns:
     def test_two_columns_independent(self) -> None:
         """双栏：每栏独立 breadcrumb，各自归类"""

@@ -104,6 +104,9 @@ class IDEMeta:
 def extract_ide_metas(layout: IDELayout) -> list[IDEMeta]:
     """对 layout 的每个 anchor 提取一份 IDEMeta。
 
+    最后做"同图栏间路径补全"：用其他栏的目录前缀补全本栏 path=None 或
+    OCR 漏分隔符（如 ``gpuopenmax`` ↔ ``gpu/openmax``）的场景。
+
     没有 anchor 返回空列表。
     """
     if not layout.anchors:
@@ -126,7 +129,61 @@ def extract_ide_metas(layout: IDELayout) -> list[IDEMeta]:
             if col_left <= ((ln.bbox[0] + ln.bbox[2]) // 2) <= col_right
         ]
         metas.append(_extract_for_column(i, col_lines))
+
+    _reconcile_within_image(metas)
     return metas
+
+
+def _reconcile_within_image(metas: list[IDEMeta]) -> None:
+    """同图栏间路径补全（in-place mutate）
+
+    场景：
+      1. 某栏 path=None 但 filename 有 → 借用其他栏的目录前缀拼路径
+      2. 某栏 path 因 OCR 漏 ``>`` 把多段粘连（``media/gpuopenmax/...``），
+         但其他栏 path 是 ``media/gpu/openmax/...`` → 用粘连版"去 /"后等价
+         判定为相同目录，替换为细分版
+
+    标 quality flag：
+      - ``code.path_inferred_from_peer``（无 path 借用其他栏）
+      - ``code.path_segments_recovered``（粘连段被还原）
+    """
+    if len(metas) < 2:
+        return
+
+    # 1. 收集所有有 path 的栏的目录前缀（去掉末段文件名）
+    from collections import Counter
+    dirs: list[str] = []
+    for m in metas:
+        if m.path and "/" in m.path:
+            dirs.append(m.path.rsplit("/", 1)[0])
+    if not dirs:
+        return
+    # 选众数；并列时偏好"段数更多"版本（更细分 = 更可信，OCR 漏分隔符
+    # 只会让段变少，不会凭空多段。``media/gpu/openmax`` 比 ``media/gpuopenmax`` 可信）
+    counter = Counter(dirs)
+    max_count = max(counter.values())
+    top_dirs = [d for d, c in counter.items() if c == max_count]
+    most_common_dir = max(top_dirs, key=lambda d: d.count("/"))
+    canonical_compact = most_common_dir.replace("/", "")
+
+    for m in metas:
+        if not m.filename:
+            continue
+        # 场景 1：path 缺失 → 借用
+        if m.path is None:
+            m.path = f"{most_common_dir}/{m.filename}"
+            m.flags.append("code.path_inferred_from_peer")
+            continue
+        # 场景 2：粘连还原（"gpuopenmax" → "gpu/openmax"）
+        if "/" not in m.path:
+            continue
+        m_dir = m.path.rsplit("/", 1)[0]
+        if (
+            m_dir != most_common_dir
+            and m_dir.replace("/", "") == canonical_compact
+        ):
+            m.path = f"{most_common_dir}/{m.filename}"
+            m.flags.append("code.path_segments_recovered")
 
 
 def _extract_for_column(idx: int, lines: list[TextLine]) -> IDEMeta:
@@ -253,12 +310,20 @@ def _parse_breadcrumb(text: str) -> tuple[str | None, str | None]:
     if file_idx < 0 or filename is None:
         return None, None
 
-    # 路径段 = file_idx 之前的所有段（清洗图标前缀） + filename
+    # 反向收集路径段，遇到 symbol/另一个 file/非法字符就停（spike DSC06837
+    # 等场景：OCR 把两条 breadcrumb 合一行，含 ``{}media > AllocateOmxC``
+    # symbol path，必须截断不让它污染 path）
     path_segments: list[str] = []
-    for seg in parts[:file_idx]:
-        cleaned = _clean_segment(seg)
-        if cleaned:
-            path_segments.append(cleaned)
+    for j in range(file_idx - 1, -1, -1):
+        cleaned = _clean_segment(parts[j])
+        if not cleaned:
+            break
+        # 遇到第二个含扩展名段 = 这是上一个 file 的路径终点，停止
+        if FILENAME_RE.search(cleaned):
+            break
+        if not _is_valid_path_segment(cleaned):
+            break
+        path_segments.insert(0, cleaned)
     path_segments.append(filename)
     return "/".join(path_segments), filename
 
@@ -266,6 +331,21 @@ def _parse_breadcrumb(text: str) -> tuple[str | None, str | None]:
 def _clean_segment(seg: str) -> str:
     """去掉 VSCode 文件类型图标 OCR 误识的前缀（如 ``C+ ``、``Cgl ``）"""
     return _ICON_PREFIX_WITH_SPACE_RE.sub("", seg).strip()
+
+
+_VALID_PATH_SEGMENT_RE = re.compile(r"^[\w\-.]+$")
+_CAMELCASE_SYMBOL_RE = re.compile(r"^[A-Z][a-z]+[A-Z]")
+
+
+def _is_valid_path_segment(seg: str) -> bool:
+    """段看起来像合法路径段（vs symbol path 或 OCR 噪声）
+
+    路径段：纯字母数字 + ``_-.``，长度 ≤ 50。
+    排除：CamelCase 符号（``AllocateOmxC``）、过长段、含 ``{}()`` 等
+    """
+    if len(seg) > 50 or not _VALID_PATH_SEGMENT_RE.match(seg):
+        return False
+    return not _CAMELCASE_SYMBOL_RE.match(seg)
 
 
 def _strip_attached_icon(filename: str) -> str:
