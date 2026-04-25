@@ -16,7 +16,78 @@ limitations under the License.
 
 # DocRestore 开发进度
 
+## 2026-04-25 AGE-8 设计反转 + v2 方案 100% 验证
+
+### 背景
+4-24 落地的 v1 方案（像素方差几何切分）在 8 张 spike 实测中暴露根本性问题：
+7/8 sidebar fallback、1/8 column fallback 硬切。**用户洞察**：分栏拖拽、
+sidebar 折叠/展开、字体缩放等真实场景下，**任何固定比例阈值都会失效**。
+
+### 调研业内方案（全部不可用）
+- **PaddleOCR-VL `merge_layout_blocks=False`**：实测无效，VL layout 模型
+  对复杂 IDE 直接输出单 content block 是模型能力极限
+- **PP-DocBlockLayout 阈值 0.05~0.5**：永远输出单一 Region 覆盖整图
+- **PP-StructureV3 / MinerU 的 reading order pointer network**：方向反——
+  它们优化"多栏论文 → 单列阅读顺序"，会把多栏代码错误合并
+
+### v2 突破：行号列锚点
+**核心**：用 IDE 编辑器的内在不变量——**行号列**——做布局锚点。
+- text 严格匹配 `^\d{1,4}$` + score≥0.8 + x1 聚类 + 数值单调递增
+- 三重锚定使误报概率几乎为零（代码里不存在连续 5 行纯数字 x 对齐）
+- **完全数据驱动**——不依赖任何固定比例/像素阈值
+
+### 落地内容
+**新增模块**（AGE-53）：
+- `backend/docrestore/models.py`：`TextLine` 数据类 + `PageOCR.text_lines`
+  字段（默认空 list，向后兼容）
+- `backend/docrestore/processing/ide_layout.py`：`analyze_layout` 主入口
+  + `LineNumberAnchor` / `IDELayout` / `LayoutConfig`
+- `tests/processing/test_ide_layout.py`：32 单测（24 合成 + 8 spike fixture）
+
+**实测脚本**：
+- `scripts/age8_probe_basic_ocr.py`：PP-OCRv5 行级 OCR
+- `scripts/age8_analyze_line_layout.py`：行号列锚点分析
+- `scripts/age8_validate_full_dataset.py`：批量统计验证
+- `scripts/age8_probe_*.py`：调研用（VL、layout、low-threshold 等）
+
+**删除（v1 错误代码）**：
+- `backend/docrestore/processing/{ide_ui_strip,code_columns}.py`
+- `tests/processing/test_{ide_ui_strip,code_columns}.py`
+- `scripts/preview_ide_columns.py`
+
+### 实测证据（硬数字）
+**8 张 spike**（`output/age8-line-layout/`）：
+- 全部检出 2 个 anchor，单调性 100%
+- 折叠 sidebar 5 张 / 展开 sidebar（EXPLORER）3 张
+
+**全 NAS 272 张**（`output/age8-validate-full/summary.json`）：
+- success_rate: **1.0 (272/272)**
+- anchor_count_distribution: `{2: 272}`
+- avg_max_monotonic: **1.0**
+- code.no_anchor: **0 张**
+- 唯一 warning：DSC06875 右栏含三位数行号 OCR 偶发噪声（mono=0.676），
+  但仍检出 2 anchor + max_mono=1.0，整体可用
+
+**回归测试**：873 passed / 49 skipped / 0 failed（含 ide_layout 32 + 现有 841）
+
+### Linear 操作
+- **Cancel**：AGE-41/42/43（v1 像素方差方向）/ AGE-44（per-column OCR）
+- **新建** v2 子 issue：
+  - AGE-53 [P1.2 v2] `ide_layout.py` ✅ **In Review**
+  - AGE-54 [P1.3 v2] `code_assembly.py` 栏代码组装
+  - AGE-55 [P1.4 v2] OCR pipeline 切换（basic/vl）
+- **更新**：AGE-8 主 issue 描述（v1 → v2 反转 + 实测证据）
+- **重写**：`docs/zh/backend/age-8-ide-code.md` v2 全文
+
+### 遗留 / 下一步
+- AGE-54 实施：栏代码组装（行号/代码分离 + 缩进保留 + 缺号检测）
+- AGE-55 实施：OCR worker 加 basic pipeline 分支 + EngineManager 按 pipeline
+  决定是否拉 vllm-server
+- 后续 AGE-45/46/47/48/49/50/52 沿用，输入改为 `IDELayout`
+
 ## 2026-04-24 AGE-8 启动 + Phase 1 落地（IDE 代码照片 → 源文件）
+
+> ⚠️ **历史记录** — v1 方案次日（4-25）整体反转，详见上节。本节代码已删除。
 
 ### 背景
 
