@@ -66,8 +66,9 @@ def _ocr_to_lines(ocr, img_path: Path) -> tuple[list[dict], tuple[int, int]]:
 
 
 def _analyze(lines_dict_list, image_size):
-    """调 docrestore.processing.ide_layout"""
+    """跑 ide_layout + code_assembly 完整链路"""
     from docrestore.models import TextLine
+    from docrestore.processing.code_assembly import assemble_columns
     from docrestore.processing.ide_layout import analyze_layout
 
     text_lines = [
@@ -78,7 +79,9 @@ def _analyze(lines_dict_list, image_size):
         )
         for ln in lines_dict_list
     ]
-    return analyze_layout(text_lines, image_size)
+    layout = analyze_layout(text_lines, image_size)
+    columns = assemble_columns(layout)
+    return layout, columns
 
 
 def _summarize(per_image: list[dict]) -> dict:
@@ -125,19 +128,29 @@ def _summarize(per_image: list[dict]) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument(
+        "--input", type=Path, action="append", required=True,
+        help="可重复，多个数据集",
+    )
     parser.add_argument(
         "--output", type=Path,
         default=PROJECT_ROOT / "output" / "age8-validate-full",
     )
     parser.add_argument("--limit", type=int, default=0, help="0=全量")
+    parser.add_argument(
+        "--label", default="default",
+        help="数据集标签，写入 per_image.dataset 字段",
+    )
     args = parser.parse_args()
 
     args.output.mkdir(parents=True, exist_ok=True)
-    images = _scan_images(args.input)
+    images: list[tuple[str, Path]] = []
+    for in_dir in args.input:
+        for p in _scan_images(in_dir):
+            images.append((args.label, p))
     if args.limit:
         images = images[: args.limit]
-    print(f"validating {len(images)} images from {args.input}")
+    print(f"validating {len(images)} images")
 
     from paddleocr import PaddleOCR
 
@@ -150,13 +163,14 @@ def main() -> int:
 
     per_image: list[dict] = []
     t_start = time.time()
-    for idx, img_path in enumerate(images, 1):
+    for idx, (label, img_path) in enumerate(images, 1):
         try:
             lines_data, image_size = _ocr_to_lines(ocr, img_path)
-            layout = _analyze(lines_data, image_size)
+            layout, code_columns = _analyze(lines_data, image_size)
         except Exception as exc:
             print(f"[{idx:>3}/{len(images)}] {img_path.name}: ERROR {exc}")
             per_image.append({
+                "dataset": label,
                 "stem": img_path.stem,
                 "error": str(exc),
                 "anchor_count": 0,
@@ -172,6 +186,7 @@ def main() -> int:
         )
         column_lengths = [len(c) for c in layout.columns]
         per_image.append({
+            "dataset": label,
             "stem": img_path.stem,
             "image_size": list(image_size),
             "line_count": len(lines_data),
@@ -194,6 +209,15 @@ def main() -> int:
             "sidebar_count": len(layout.sidebar),
             "other_count": len(layout.other),
             "flags": list(layout.flags),
+            # code_assembly 集成统计
+            "assembled_columns": len(code_columns),
+            "assembled_lines_per_col": [len(c.lines) for c in code_columns],
+            "char_widths": [c.char_width for c in code_columns],
+            "line_heights": [c.avg_line_height for c in code_columns],
+            "total_line_gaps": sum(len(c.line_gaps) for c in code_columns),
+            "assembly_flags": [
+                f for c in code_columns for f in c.flags
+            ],
         })
         if idx % 20 == 0 or idx == len(images):
             elapsed = time.time() - t_start

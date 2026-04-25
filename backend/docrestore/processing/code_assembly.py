@@ -272,9 +272,11 @@ def _pair_by_y(
     if not line_no_lines:
         return {}, list(code_lines)
 
-    # 行号 line 按 y_center 索引
+    # 行号 line 按 y_center 索引；指定 key 避免 y_center 同值时 fallback
+    # 比较 TextLine（dataclass 默认无 __lt__，会抛 TypeError）
     ln_by_yc: list[tuple[int, TextLine]] = sorted(
-        ((ln.bbox[1] + ln.bbox[3]) // 2, ln) for ln in line_no_lines
+        (((ln.bbox[1] + ln.bbox[3]) // 2, ln) for ln in line_no_lines),
+        key=lambda x: x[0],
     )
 
     paired: dict[int, list[TextLine]] = {id(ln): [] for ln in line_no_lines}
