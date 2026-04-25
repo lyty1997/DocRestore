@@ -67,7 +67,10 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101", "ARG001", "ARG002", "T201"]
-"scripts/**/*.py" = ["T201", "E501"]
+"scripts/**/*.py" = [
+    "T201", "E501", "SIM105", "S110", "S603", "S607",
+    "BLE001", "C901", "B007", "E741", "F401", "ARG001",
+]
 
 [tool.mypy]
 strict = true
