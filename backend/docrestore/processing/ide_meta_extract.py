@@ -61,9 +61,12 @@ EXT_TO_LANG: dict[str, str] = {
 
 _EXT_PATTERN = "|".join(re.escape(e) for e in EXT_TO_LANG)
 #: 匹配 "文件名.ext"。允许文件名段含 `_` `-` `.`（如 ``av1_decoder.cc``、
-#: ``my.config.yaml``）；扩展名严格在白名单内
+#: ``my.config.yaml``）；扩展名严格在白名单内。
+#: lookahead 额外允许 ``.cc4×`` 形式（VSCode tab 文件状态计数 + close
+#: 按钮被 OCR 合并成无空格串）。
 FILENAME_RE = re.compile(
-    rf"([\w][\w\-]*(?:\.[\w\-]+)*\.(?:{_EXT_PATTERN}))(?=[^\w]|$)",
+    rf"([\w][\w\-]*(?:\.[\w\-]+)*\.(?:{_EXT_PATTERN}))"
+    r"(?=\d*\s*[×x]|[^\w]|$)",
     re.IGNORECASE,
 )
 
@@ -360,15 +363,45 @@ def _strip_attached_icon(filename: str) -> str:
     return filename
 
 
+#: VSCode 窗口标题/SSH 标识的噪声特征（不是文件 tab）
+_WINDOW_TITLE_RE = re.compile(r"\[SSH:|-src\[|\(.*@.*?\)|@\d+\.\d+\.\d+\.\d+")
+
+#: VSCode active tab 关闭按钮（紧邻文件名后；允许中间数字如 ``.cc 4 ×``
+#: 表示该文件有 4 处未保存修改，OCR 常把空格吞掉成 ``.cc4×``）
+_ACTIVE_TAB_RE = re.compile(r"\.[a-zA-Z]+\d*\s*[×x]")
+
+
 def _pick_best_tab_filename(tab_lines: list[TextLine]) -> str | None:
     """从多个 tab line 中挑出最可信的 filename。
 
-    启发式：取 y 最小（最上面的 tab bar 行）+ 第一个匹配文件扩展名的。
+    优先级：
+      1. 排除 window title（含 SSH / -src[/IP 地址等噪声特征）
+      2. 优先 active tab（VSCode 当前激活 tab 紧跟 ``×`` 关闭按钮）
+      3. 否则取 y 最小的（最顶 tab bar 行）+ 第一个匹配扩展名的
     """
     if not tab_lines:
         return None
-    sorted_by_y = sorted(tab_lines, key=lambda ln: ln.bbox[1])
-    for ln in sorted_by_y:
+
+    # 第一阶段：过滤 window title 噪声
+    filtered = [
+        ln for ln in tab_lines
+        if not _WINDOW_TITLE_RE.search(ln.text)
+    ]
+    if not filtered:
+        filtered = tab_lines  # 全是噪声 → 退化用原列表
+
+    # 第二阶段：优先选含 `×`（active 标记）的 tab
+    active = [ln for ln in filtered if _ACTIVE_TAB_RE.search(ln.text)]
+    if active:
+        active.sort(key=lambda ln: ln.bbox[1])
+        for ln in active:
+            m = FILENAME_RE.search(ln.text)
+            if m:
+                return _strip_attached_icon(m.group(1))
+
+    # 第三阶段：所有过滤后 tab 按 y 排序
+    filtered.sort(key=lambda ln: ln.bbox[1])
+    for ln in filtered:
         m = FILENAME_RE.search(ln.text)
         if m:
             return _strip_attached_icon(m.group(1))

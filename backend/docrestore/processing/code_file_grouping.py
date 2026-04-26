@@ -87,7 +87,10 @@ def group_into_files(page_columns: list[PageColumn]) -> list[SourceFile]:
     files: list[SourceFile] = []
     for group in by_filename.values():
         for sub_group in _split_by_compatible_dir(group):
-            files.append(_build_source_file(sub_group))
+            # 决策 #3 硬约束：同 page_stem 不同 column_index 必须拆开
+            # （AGE-45 偶发把同图两栏识别为同 file，这里兜底拒绝合并）
+            for one_page_group in _enforce_one_page_one_file(sub_group):
+                files.append(_build_source_file(one_page_group))
 
     # 3. 处理 filename 缺失的（quality 信号 + 单独成组）
     for pc in no_filename:
@@ -95,8 +98,38 @@ def group_into_files(page_columns: list[PageColumn]) -> list[SourceFile]:
             [pc], extra_flags=["code.grouping.no_filename"],
         ))
 
+    # 4. path 去重：决策 #3 拆出来的多个 sub_group 可能 canonical_path 相同
+    # （都是 status.h），加 :col<i> 后缀避免 AGE-47 写文件时覆盖
+    _disambiguate_duplicate_paths(files)
+
     files.sort(key=lambda f: f.path)
     return files
+
+
+def _disambiguate_duplicate_paths(files: list[SourceFile]) -> None:
+    """同 path 多 SourceFile 时给后续的加 ``:col<idx>`` 后缀（in-place）"""
+    seen: dict[str, int] = {}
+    for src in files:
+        if src.path not in seen:
+            seen[src.path] = 1
+            continue
+        seen[src.path] += 1
+        col_indices = sorted({pc.column_index for pc in src.pages})
+        suffix = f"__col{col_indices[0]}"
+        # 把后缀插到扩展名前：foo.cc → foo__col1.cc
+        if "." in src.filename:
+            base, ext = src.filename.rsplit(".", 1)
+            new_filename = f"{base}{suffix}.{ext}"
+        else:
+            new_filename = f"{src.filename}{suffix}"
+        # 同步改 path
+        if "/" in src.path:
+            head = src.path.rsplit("/", 1)[0]
+            src.path = f"{head}/{new_filename}"
+        else:
+            src.path = new_filename
+        src.filename = new_filename
+        src.flags.append("code.grouping.disambiguated_by_column")
 
 
 def _fuzzy_filename_key(name: str) -> str:
@@ -112,6 +145,34 @@ def _fuzzy_filename_key(name: str) -> str:
     for ch in ("o", "0"):
         s = s.replace(ch, "@")
     return s
+
+
+def _enforce_one_page_one_file(
+    group: list[PageColumn],
+) -> list[list[PageColumn]]:
+    """决策 #3 硬约束：同 page_stem 多个 column_index 必须分组
+
+    一张图同 file 不可能出现两次（IDE 不允许同 file 在两个 split editor 栏），
+    若 AGE-45 错识致同 page 多 column 进同组 → 这里强制按 column_index 拆。
+
+    返回 ``max(per_page_count)`` 个子组：
+      - sub_group[0]：每张图的 column_index 最小那个
+      - sub_group[1]：每张图的 column_index 第二小（如有）
+      - ...
+    """
+    by_page: dict[str, list[PageColumn]] = {}
+    for pc in group:
+        by_page.setdefault(pc.page_stem, []).append(pc)
+
+    if all(len(cols) == 1 for cols in by_page.values()):
+        return [group]
+
+    max_cols = max(len(cols) for cols in by_page.values())
+    sub_groups: list[list[PageColumn]] = [[] for _ in range(max_cols)]
+    for cols in by_page.values():
+        for slot, pc in enumerate(sorted(cols, key=lambda c: c.column_index)):
+            sub_groups[slot].append(pc)
+    return [g for g in sub_groups if g]
 
 
 def _split_by_compatible_dir(
