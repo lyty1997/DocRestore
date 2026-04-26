@@ -10,6 +10,8 @@ ifndEf = "ifndEf"
 dEfineOMX_GPU_MEDIA = "dEfineOMX_GPU_MEDIA"
 ifndEfOMX_GPU = "ifndEfOMX_GPU"
 dEfineOMX_GPU = "dEfineOMX_GPU"
+ifndEfFOO_BAR_H = "ifndEfFOO_BAR_H"
+dEfineFOO_BAR_H = "dEfineFOO_BAR_H"
 
 [default.extend-words]
 # OCR 误改业务变量反例（演示 LLM 不该修业务拼写）

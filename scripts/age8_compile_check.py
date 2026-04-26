@@ -87,6 +87,7 @@ _SYNTAX_ERROR_PATTERNS = [
     "stray ",                            # stray '\343' (中文标点未转 ascii)
     "unterminated",                      # 引号 / 块注释未闭
     "missing terminating",               # 引号未闭
+    "unable to find numeric literal",    # 全角逗号被当成数字字面量后缀
     "extra ';'",
     "extra qualification",
     # "expected X" 类常常是上面错误的级联，不当作首要 OCR 噪声指标 ——
