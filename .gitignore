@@ -11,11 +11,9 @@ models/
 output/
 test_images/*_OCR
 test_images/linux_sdk
+test_images/TMedia_source_code
 
-# 下载缓存（vllm whl 等）
-.cache/
-
-# llm环境
+# llm 环境
 .env
 
 # Python
@@ -30,21 +28,14 @@ build/
 .ruff_cache/
 .pytest_cache/
 
-# claude环境
+# 前端 / Node
+node_modules/
+
+# Claude 本地配置
 .claude/
 CLAUDE.md
 
-# 项目进度
-docs/progress.md
-
-# playwright
-node_modules/
-package-lock.json
-package.json
-
 # 中间产物
 .playwright-mcp/
-=0.20
 data/
 screenshots/
-test_images/TMedia_source_code
