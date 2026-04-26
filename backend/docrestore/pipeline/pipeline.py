@@ -78,6 +78,7 @@ from docrestore.ocr.base import OCREngine, WorkerBackedOCREngine
 from docrestore.ocr.engine_manager import EngineManager
 from docrestore.output.renderer import Renderer
 from docrestore.pipeline.config import (
+    CodeRestoreConfig,
     LLMConfig,
     OCRConfig,
     PIIConfig,
@@ -472,6 +473,7 @@ class Pipeline:
         gpu_lock: asyncio.Lock | None = None,
         pii: PIIConfig | None = None,
         ocr: OCRConfig | None = None,
+        code: CodeRestoreConfig | None = None,
     ) -> list[PipelineResult]:
         """统一入口：处理叶子目录，或多子目录 → warmup cold start 并发。
 
@@ -499,7 +501,7 @@ class Pipeline:
                 ):
                     result = await self.process_many(
                         image_dir, output_dir, on_progress,
-                        llm, gpu_lock, pii, ocr,
+                        llm, gpu_lock, pii, ocr, code=code,
                     )
                     return [result]
 
@@ -519,7 +521,7 @@ class Pipeline:
                 warmup_task = asyncio.create_task(
                     self._process_leaf(
                         0, warmup_leaf, image_dir, output_dir,
-                        on_progress, llm, gpu_lock, pii, ocr,
+                        on_progress, llm, gpu_lock, pii, ocr, code,
                         total=len(leaves_sorted),
                         controller=controller,
                     ),
@@ -539,7 +541,7 @@ class Pipeline:
                     asyncio.create_task(
                         self._process_leaf(
                             i + 1, leaf, image_dir, output_dir,
-                            on_progress, llm, gpu_lock, pii, ocr,
+                            on_progress, llm, gpu_lock, pii, ocr, code,
                             total=len(leaves_sorted),
                             controller=controller,
                         ),
@@ -597,6 +599,7 @@ class Pipeline:
         gpu_lock: asyncio.Lock | None,
         pii: PIIConfig | None,
         ocr: OCRConfig | None,
+        code: CodeRestoreConfig | None,
         *,
         total: int,
         controller: RateController | None = None,
@@ -626,6 +629,7 @@ class Pipeline:
             result = await self.process_many(
                 leaf, sub_output, wrapped_progress,
                 llm, gpu_lock, pii, ocr,
+                code=code,
                 controller=controller,
             )
 
@@ -669,6 +673,7 @@ class Pipeline:
         gpu_lock: asyncio.Lock | None = None,
         pii: PIIConfig | None = None,
         ocr: OCRConfig | None = None,
+        code: CodeRestoreConfig | None = None,
         controller: RateController | None = None,
     ) -> PipelineResult:
         """单文档流式处理：OCR Producer + Stream Processor。
@@ -688,7 +693,7 @@ class Pipeline:
             with root_stage:
                 return await self._stream_pipeline(
                     image_dir, output_dir, on_progress,
-                    llm, gpu_lock, pii, ocr, controller,
+                    llm, gpu_lock, pii, ocr, code, controller,
                 )
 
     async def _stream_pipeline(
@@ -700,6 +705,7 @@ class Pipeline:
         gpu_lock: asyncio.Lock | None,
         pii: PIIConfig | None,
         ocr: OCRConfig | None,
+        code: CodeRestoreConfig | None,
         controller: RateController | None,
     ) -> PipelineResult:
         """process_many 的实际实现：启动 OCR Producer + Stream Processor。"""
@@ -761,7 +767,9 @@ class Pipeline:
             name=f"ocr-producer-{image_dir.name}",
         )
         try:
-            if self._config.code.enable:
+            # 请求级 code 覆盖优先；为 None 时回退到 pipeline 启动配置
+            code_cfg = code if code is not None else self._config.code
+            if code_cfg.enable:
                 # AGE-8 代码模式：跳过 LLM 流式精修，OCR 收齐后跑 ide_layout
                 # → ide_meta_extract → code_assembly → group_into_files →
                 # render_code_files，按需 LLM 字符级修正每个 SourceFile

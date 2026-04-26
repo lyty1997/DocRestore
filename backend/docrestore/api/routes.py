@@ -57,6 +57,7 @@ from docrestore.api.schemas import (
 from docrestore.ocr.gpu_detect import list_gpus, pick_best_gpu
 from docrestore.models import TaskProgress
 from docrestore.pipeline.config import (
+    CodeRestoreConfig,
     CustomWord,
     LLMConfig,
     OCRConfig,
@@ -338,6 +339,7 @@ async def create_task(
             )
         pii_cfg = defaults.pii.model_copy(update=pii_update)
 
+    code_cfg: CodeRestoreConfig | None = None
     if req.code is not None:
         code_cfg = defaults.code.model_copy(
             update=req.code.model_dump(exclude_none=True),
@@ -357,6 +359,7 @@ async def create_task(
         llm=llm_cfg,
         ocr=ocr_cfg,
         pii=pii_cfg,
+        code=code_cfg,
     )
     logger.info("任务已创建: task_id=%s", task.task_id)
     bg = asyncio.create_task(

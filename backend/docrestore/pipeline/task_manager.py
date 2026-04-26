@@ -30,7 +30,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from docrestore.models import PipelineResult, TaskProgress
-from docrestore.pipeline.config import LLMConfig, OCRConfig, PIIConfig
+from docrestore.pipeline.config import (
+    CodeRestoreConfig,
+    LLMConfig,
+    OCRConfig,
+    PIIConfig,
+)
 from docrestore.pipeline.pipeline import Pipeline
 from docrestore.pipeline.scheduler import PipelineScheduler
 
@@ -55,7 +60,7 @@ class TaskStatus(Enum):
 class Task:
     """任务记录。
 
-    llm/ocr/pii 为本次任务的完整 Config 快照：
+    llm/ocr/pii/code 为本次任务的完整 Config 快照：
     - None → pipeline 使用默认配置
     - 非空 → 上游（API 层）合成的完整 Config，下游直接使用、不再合并
     """
@@ -67,6 +72,7 @@ class Task:
     llm: LLMConfig | None = None
     ocr: OCRConfig | None = None
     pii: PIIConfig | None = None
+    code: CodeRestoreConfig | None = None
     progress: TaskProgress | None = None
     results: list[PipelineResult] = field(default_factory=list)
     error: str | None = None
@@ -163,6 +169,7 @@ class TaskManager:
                     llm=row.llm,
                     ocr=row.ocr,
                     pii=row.pii,
+                    code=row.code,
                     error=row.error,
                     created_at=datetime.fromisoformat(row.created_at),
                 )
@@ -231,6 +238,7 @@ class TaskManager:
         llm: LLMConfig | None = None,
         ocr: OCRConfig | None = None,
         pii: PIIConfig | None = None,
+        code: CodeRestoreConfig | None = None,
     ) -> Task:
         """创建任务，状态为 PENDING。同步返回，DB 写入由后台完成。"""
         task_id = uuid.uuid4().hex[:8]
@@ -244,6 +252,7 @@ class TaskManager:
             llm=llm,
             ocr=ocr,
             pii=pii,
+            code=code,
         )
         self._tasks[task_id] = task
 
@@ -269,6 +278,7 @@ class TaskManager:
                 llm=task.llm,
                 ocr=task.ocr,
                 pii=task.pii,
+                code=task.code,
                 created_at=task.created_at.isoformat(),
             )
         except Exception:
@@ -359,6 +369,7 @@ class TaskManager:
                 gpu_lock=gpu_lock,
                 pii=task.pii,
                 ocr=task.ocr,
+                code=task.code,
             )
 
             # process_tree 在 2026-04-21 之后不再对子目录异常 raise，而是把失败

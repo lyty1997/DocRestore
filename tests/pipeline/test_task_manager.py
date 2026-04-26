@@ -122,6 +122,7 @@ class TestGetTaskAsync:
                 llm=None,
                 ocr=None,
                 pii=None,
+                code=None,
                 error="boom",
                 created_at="2026-04-08T10:00:00",
                 updated_at="2026-04-08T11:00:00",
