@@ -49,19 +49,18 @@ class TestCompileReport:
         f.write_text("def foo():\n    return 1\n")
         report = _compile_check.run_compile_check(tmp_path)
         assert report.total == 1
-        assert report.passed == 1
-        assert report.results[0].status == "passed"
+        assert report.syntax_clean == 1
+        assert report.results[0].status == "syntax_clean"
 
     def test_python_fail(self, tmp_path: Path) -> None:
         f = tmp_path / "bad.py"
         f.write_text("def foo(:\n  return 1\n")
         report = _compile_check.run_compile_check(tmp_path)
-        assert report.failed == 1
+        # python 的 syntax error 落到 syntax_dirty 或 sysroot_missing；
+        # 用 status 字段比 .failed 更精准
         result = report.results[0]
-        assert result.status == "failed"
+        assert result.status in ("syntax_dirty", "sysroot_missing")
         assert result.error
-        # python 的 SyntaxError 通常报第 1 行附近
-        assert result.failing_lines or result.error
 
     def test_unsupported_extension_skipped(self, tmp_path: Path) -> None:
         f = tmp_path / "config.toml"
@@ -94,15 +93,18 @@ class TestCompileReport:
             "int main() { return 0; }\n",
         )
         report = _compile_check.run_compile_check(tmp_path)
-        assert report.passed == 1
+        assert report.syntax_clean == 1
 
     @pytest.mark.skipif(not _has_tool("g++"), reason="g++ 不在 PATH")
     def test_cpp_fail(self, tmp_path: Path) -> None:
         f = tmp_path / "bad.cc"
         f.write_text("int main(\n")  # 不闭合
         report = _compile_check.run_compile_check(tmp_path)
-        assert report.failed == 1
-        assert report.results[0].error
+        # 编译失败：可能是 syntax_dirty（cascade 错）或 sysroot_missing
+        # 关键是 status 不是 syntax_clean
+        result = report.results[0]
+        assert result.status in ("syntax_dirty", "sysroot_missing")
+        assert result.error
 
     def test_tool_availability_reported(self, tmp_path: Path) -> None:
         report = _compile_check.run_compile_check(tmp_path)
@@ -130,8 +132,8 @@ class TestIndexUpdate:
         )
         _compile_check.update_index_with_compile(index_path, report)
         idx = json.loads(index_path.read_text())
-        assert idx[0]["compile_status"] == "passed"
-        assert idx[1]["compile_status"] == "failed"
+        assert idx[0]["compile_status"] == "syntax_clean"
+        assert idx[1]["compile_status"] in ("syntax_dirty", "sysroot_missing")
         assert idx[1].get("compile_error")
 
 

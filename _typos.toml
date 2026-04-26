@@ -4,10 +4,12 @@
 # 业务代码里如果真用到下列词请先评估是不是 typo。
 
 [default.extend-identifiers]
-# OCR 大小写错认反例（CODE_REFINE_SYSTEM_PROMPT）
+# OCR 大小写错认反例（CODE_REFINE_SYSTEM_PROMPT + classify 测试样本）
 dEfine = "dEfine"
 ifndEf = "ifndEf"
 dEfineOMX_GPU_MEDIA = "dEfineOMX_GPU_MEDIA"
+ifndEfOMX_GPU = "ifndEfOMX_GPU"
+dEfineOMX_GPU = "dEfineOMX_GPU"
 
 [default.extend-words]
 # OCR 误改业务变量反例（演示 LLM 不该修业务拼写）
