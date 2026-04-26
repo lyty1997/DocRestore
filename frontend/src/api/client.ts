@@ -270,7 +270,7 @@ export async function uploadFiles(
     method: "POST",
     headers: apiHeaders(),
     body: formData,
-    signal,
+    ...(signal !== undefined && { signal }),
   });
   return handleResponse(response, UploadFilesResponseSchema);
 }

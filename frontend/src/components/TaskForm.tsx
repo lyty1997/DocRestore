@@ -382,7 +382,7 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
             >
               {OCR_ENGINE_VALUES.map((value) => (
                 <option key={value} value={value}>
-                  {t(OCR_ENGINE_KEYS[value].label)}
+                  {t(OCR_ENGINE_KEYS[value]?.label ?? value)}
                 </option>
               ))}
             </select>
@@ -401,7 +401,7 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
             >
               {GPU_VALUES.map((value) => (
                 <option key={value} value={value}>
-                  {t(GPU_KEYS[value])}
+                  {t(GPU_KEYS[value] ?? value)}
                 </option>
               ))}
             </select>
