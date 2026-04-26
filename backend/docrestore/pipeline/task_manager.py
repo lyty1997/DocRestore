@@ -78,6 +78,17 @@ class Task:
         return self.results[0] if self.results else None
 
 
+def _read_text_or_empty(path: Path) -> str:
+    """阻塞读取文本文件，失败/不存在 → 空串（task_manager.load_persisted_tasks 用）"""
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        logger.warning("load_persisted_tasks: 读取 markdown 失败 (%s)", path)
+        return ""
+
+
 def _write_debug_error(output_dir: Path, content: str) -> None:
     """将完整 traceback 写入 output_dir/debug/error.txt（阻塞 I/O，需 to_thread）。"""
     try:
@@ -104,6 +115,7 @@ class TaskManager:
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
         self._subscribers: dict[str, set[asyncio.Queue[TaskProgress]]] = {}
+        self._hydrated_from_db = False
         # 追踪所有 fire-and-forget 的后台协程（DB 持久化 / 进度广播 /
         # 引擎预热等）。shutdown 时统一 cancel + gather，避免残留任务
         # 持续跑或在 event loop 关闭后抛未捕获异常。
@@ -113,6 +125,79 @@ class TaskManager:
     def pipeline(self) -> Pipeline:
         """暴露底层 Pipeline，用于 API 层读取默认 Config 合成请求快照。"""
         return self._pipeline
+
+    async def load_persisted_tasks(  # noqa: C901
+        self, *, page_size: int = 200,
+    ) -> int:
+        """从 DB 把全部历史任务装回 ``_tasks`` 内存缓存。
+
+        重启后让 ``GET /tasks/{id}`` / ``/results`` / 代码模式 files-index 等
+        同步路由能命中已完成任务，不需要每个 handler 都改成 async DB 回退。
+        markdown 内容从磁盘 ``output_path`` 读回；读不到则留空，前端按错误
+        分支处理。重复调用幂等（已 hydrate 过 → 直接返回 0）。
+        """
+        if self._hydrated_from_db or self._db is None:
+            return 0
+
+        loaded = 0
+        page = 1
+        while True:
+            try:
+                listing = await self._db.list_tasks(
+                    page=page, page_size=page_size,
+                )
+            except Exception:
+                logger.exception("load_persisted_tasks: list_tasks 失败")
+                break
+            for item in listing.tasks:
+                if item.task_id in self._tasks:
+                    continue
+                row = await self._db.get_task(item.task_id)
+                if row is None:
+                    continue
+                task = Task(
+                    task_id=row.task_id,
+                    status=TaskStatus(row.status),
+                    image_dir=row.image_dir,
+                    output_dir=row.output_dir,
+                    llm=row.llm,
+                    ocr=row.ocr,
+                    pii=row.pii,
+                    error=row.error,
+                    created_at=datetime.fromisoformat(row.created_at),
+                )
+                # 加载结果元信息 + 从磁盘 fallback markdown
+                try:
+                    rows = await self._db.get_results(item.task_id)
+                except Exception:
+                    logger.exception(
+                        "load_persisted_tasks: get_results 失败 (%s)",
+                        item.task_id,
+                    )
+                    rows = []
+                for r in rows:
+                    output_path = Path(r.output_path)
+                    markdown = await asyncio.to_thread(
+                        _read_text_or_empty, output_path,
+                    )
+                    task.results.append(PipelineResult(
+                        output_path=output_path,
+                        markdown=markdown,
+                        doc_title=r.doc_title or "",
+                        doc_dir=r.doc_dir or "",
+                    ))
+                self._tasks[task.task_id] = task
+                loaded += 1
+            if (page * page_size) >= listing.total:
+                break
+            page += 1
+
+        self._hydrated_from_db = True
+        if loaded > 0:
+            logger.info(
+                "load_persisted_tasks: 从 DB 装回 %d 个历史任务", loaded,
+            )
+        return loaded
 
     def spawn_background(
         self,

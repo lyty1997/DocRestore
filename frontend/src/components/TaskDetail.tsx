@@ -13,6 +13,7 @@ import {
   cancelTask,
   deleteTask,
   getDownloadUrl,
+  getFilesIndex,
   getTask,
   getTaskResults,
   listSourceImages,
@@ -25,6 +26,7 @@ import { preprocessMarkdown } from "../features/task/markdown";
 import { useTaskProgress } from "../features/task/useTaskProgress";
 import { useScrollSync } from "../hooks/useScrollSync";
 import { useTranslation } from "../i18n";
+import { CodeViewer } from "./CodeViewer";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { SourceImagePanel } from "./SourceImagePanel";
 import { TaskProgress } from "./TaskProgress";
@@ -76,6 +78,10 @@ export function TaskDetail({
   const [selectedDocIdx, setSelectedDocIdx] = useState(0);
   const [allSourceImages, setAllSourceImages] = useState<string[]>([]);
   const [resultsLoading, setResultsLoading] = useState(false);
+
+  /* 代码模式探测：files-index.json 存在则任务跑过代码模式 */
+  const [codeAvailable, setCodeAvailable] = useState(false);
+  const [viewMode, setViewMode] = useState<"doc" | "code">("doc");
 
   /* 编辑 */
   const [editMode, setEditMode] = useState(false);
@@ -155,6 +161,14 @@ export function TaskDetail({
       /* 未完成的任务没有结果，静默处理 */
     } finally {
       setResultsLoading(false);
+    }
+    /* 探测代码模式产物：files-index.json 存在 → 启用 toggle。
+       非代码模式任务返回 404，setCodeAvailable=false 不显示 toggle。 */
+    try {
+      const idx = await getFilesIndex(taskId);
+      setCodeAvailable(idx.length > 0);
+    } catch {
+      setCodeAvailable(false);
     }
   }, [taskId]);
 
@@ -408,12 +422,64 @@ export function TaskDetail({
         <div className="task-detail-loading">{t("taskDetail.loadingResults")}</div>
       )}
 
-      {/* 文档预览 */}
-      {docResults.length > 0 && selectedDoc !== undefined && (
+      {/* 代码模式独立分支：files-index.json 存在 + 用户选了 code → CodeViewer */}
+      {codeAvailable && viewMode === "code" && (
         <div className="task-detail-preview">
           <div className="preview-header">
             <h3>{t("taskDetail.docPreview")}</h3>
             <div className="preview-actions">
+              <div className="view-mode-toggle">
+                <button
+                  type="button"
+                  className="toggle-btn"
+                  onClick={() => {
+                    setViewMode("doc");
+                  }}
+                >
+                  {t("taskDetail.viewModeDoc")}
+                </button>
+                <button
+                  type="button"
+                  className="toggle-btn active"
+                >
+                  {t("taskDetail.viewModeCode")}
+                </button>
+              </div>
+            </div>
+          </div>
+          <CodeViewer
+            taskId={taskId}
+            allSourceImages={allSourceImages}
+          />
+        </div>
+      )}
+
+      {/* 文档预览 */}
+      {(!codeAvailable || viewMode === "doc")
+        && docResults.length > 0 && selectedDoc !== undefined && (
+        <div className="task-detail-preview">
+          <div className="preview-header">
+            <h3>{t("taskDetail.docPreview")}</h3>
+            <div className="preview-actions">
+              {codeAvailable && (
+                <div className="view-mode-toggle">
+                  <button
+                    type="button"
+                    className="toggle-btn active"
+                  >
+                    {t("taskDetail.viewModeDoc")}
+                  </button>
+                  <button
+                    type="button"
+                    className="toggle-btn"
+                    onClick={() => {
+                      setViewMode("code");
+                    }}
+                  >
+                    {t("taskDetail.viewModeCode")}
+                  </button>
+                </div>
+              )}
               {!selectedDocFailed && (
                 <>
                   <div className="edit-preview-toggle">

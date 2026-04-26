@@ -173,6 +173,23 @@ export const en: Record<TranslationKey, string> = {
   "taskDetail.resumeTask": "Resume",
   "taskDetail.resumeHint": "Reuse the original output dir; skip images already OCR'd and only finish the rest",
   "taskDetail.resumeFailed": "Resume failed",
+  "taskDetail.viewModeDoc": "Document",
+  "taskDetail.viewModeCode": "Code",
+
+  // ── Code-mode viewer (AGE-50) ──
+  "codeViewer.loadingIndex": "Loading file index...",
+  "codeViewer.indexError": "Failed to load index",
+  "codeViewer.empty": "No source files were generated in code mode",
+  "codeViewer.filesTitle": "Source files ({count})",
+  "codeViewer.lines": "lines",
+  "codeViewer.flags": "{count} flag(s)",
+  "codeViewer.loadingFile": "Loading file...",
+  "codeViewer.fileError": "Failed to load file",
+  "codeViewer.sourcePagesTitle": "Source pages",
+  "codeViewer.noSourceImages": "No matching source image",
+  "codeViewer.compile.passed": "Compile OK",
+  "codeViewer.compile.failed": "Compile failed",
+  "codeViewer.compile.skipped": "Compile skipped",
 
   // ── App-level ──
   "app.processingFailed": "Processing Failed",

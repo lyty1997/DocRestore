@@ -222,3 +222,27 @@ export const OcrWarmupResponseSchema = z.object({
   message: z.string(),
 });
 export type OcrWarmupResponse = z.infer<typeof OcrWarmupResponseSchema>;
+
+/** 代码模式 files-index 单条记录 */
+export const FilesIndexEntrySchema = z.object({
+  path: z.string(),
+  filename: z.string(),
+  language: z.string().nullable().optional(),
+  source_pages: z.array(z.string()).default([]),
+  line_count: z.number().default(0),
+  line_no_range: z.array(z.number()).default([]),
+  flags: z.array(z.string()).default([]),
+  /** 由 scripts/age8_compile_check.py 写入；可缺省 */
+  compile_status: z
+    .enum(["passed", "failed", "skipped"])
+    .nullable()
+    .optional(),
+  compile_error: z.string().nullable().optional(),
+  compile_skip_reason: z.string().nullable().optional(),
+  compile_failing_lines: z.array(z.number()).nullable().optional(),
+});
+export type FilesIndexEntry = z.infer<typeof FilesIndexEntrySchema>;
+
+/** files-index.json 整个数组 */
+export const FilesIndexSchema = z.array(FilesIndexEntrySchema);
+export type FilesIndex = z.infer<typeof FilesIndexSchema>;

@@ -157,7 +157,7 @@ def _auto_configure_llm(config: PipelineConfig) -> None:
 
 
 
-def create_app(
+def create_app(  # noqa: C901
     config: PipelineConfig | None = None,
 ) -> FastAPI:
     """创建 FastAPI 应用。
@@ -238,6 +238,15 @@ def create_app(
         await db.initialize()
 
         manager = TaskManager(pipeline, scheduler=scheduler, db=db)
+        # 把 DB 里历史任务装回内存：让 GET /tasks/{id} / results /
+        # files-index 等同步路由在重启后仍能命中（不然 sidebar 列得到、
+        # 详情页打不开）。失败不阻断启动。
+        try:
+            await manager.load_persisted_tasks()
+        except Exception:
+            logger.warning(
+                "从 DB 装回历史任务失败（不影响新任务）", exc_info=True,
+            )
         set_task_manager(manager)
         app.state.task_manager = manager
         app.state.engine_manager = engine_manager

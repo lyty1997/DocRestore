@@ -163,6 +163,23 @@ export const zhCN = {
   "taskDetail.resumeTask": "继续",
   "taskDetail.resumeHint": "复用原输出目录，跳过已 OCR 的图、只补跑未完成部分",
   "taskDetail.resumeFailed": "继续任务失败",
+  "taskDetail.viewModeDoc": "文档模式",
+  "taskDetail.viewModeCode": "代码模式",
+
+  // ── 代码模式视图（AGE-50） ──
+  "codeViewer.loadingIndex": "加载文件索引...",
+  "codeViewer.indexError": "加载索引失败",
+  "codeViewer.empty": "代码模式未生成任何源文件",
+  "codeViewer.filesTitle": "源文件 ({count})",
+  "codeViewer.lines": "行",
+  "codeViewer.flags": "{count} 个标记",
+  "codeViewer.loadingFile": "加载文件...",
+  "codeViewer.fileError": "加载文件失败",
+  "codeViewer.sourcePagesTitle": "原图来源",
+  "codeViewer.noSourceImages": "无对应原图",
+  "codeViewer.compile.passed": "编译通过",
+  "codeViewer.compile.failed": "编译失败",
+  "codeViewer.compile.skipped": "跳过编译",
 
   // ── App 级别 ──
   "app.processingFailed": "处理失败",

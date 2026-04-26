@@ -494,6 +494,97 @@ async def get_task_asset(task_id: str, asset_path: str) -> FileResponse:
     return FileResponse(path=target)
 
 
+@router.get("/tasks/{task_id}/files-index")
+async def get_task_files_index(
+    task_id: str,
+) -> list[dict[str, object]]:
+    """返回 AGE-8 代码模式的 ``files-index.json``。
+
+    没跑代码模式 / 任务未完成 / 索引不存在 → 404。
+    """
+    import json as _json
+
+    manager = _get_manager()
+    task = manager.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    output_dir = Path(task.output_dir)
+    # 多文档场景下 doc_dir 也可能含 files-index.json，简单起见只看根目录
+    index_path = output_dir / "files-index.json"
+    if not index_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="任务未生成代码索引（非代码模式或未完成）",
+        )
+
+    try:
+        data = _json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, _json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=500, detail=f"索引解析失败: {exc}",
+        ) from exc
+
+    if not isinstance(data, list):
+        raise HTTPException(
+            status_code=500, detail="索引格式异常（非数组）",
+        )
+
+    return data
+
+
+@router.get("/tasks/{task_id}/files/{file_path:path}")
+async def get_task_code_file(
+    task_id: str,
+    file_path: str,
+) -> Response:
+    """返回 AGE-8 代码模式渲染的源文件文本内容。
+
+    路径限定在 ``output_dir/files/`` 下；任何 ``..`` / 绝对路径 / 非法
+    字符 → 404，避免任意文件读取。
+    """
+    manager = _get_manager()
+    task = manager.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    rel = _validate_code_file_path(file_path)
+    if rel is None:
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    output_dir = Path(task.output_dir)
+    files_root = (output_dir / "files").resolve(strict=False)
+    if not files_root.is_dir():
+        raise HTTPException(status_code=404, detail="代码目录不存在")
+
+    target = (files_root / Path(*rel.parts)).resolve(strict=False)
+    if not target.is_relative_to(files_root):
+        raise HTTPException(status_code=404, detail="文件不存在")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    try:
+        content = target.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500, detail=f"读取失败: {exc}",
+        ) from exc
+
+    return Response(content=content, media_type="text/plain; charset=utf-8")
+
+
+def _validate_code_file_path(file_path: str) -> PurePosixPath | None:
+    """校验 ``files/`` 下的相对路径，禁止 .. / 绝对路径 / 隐藏目录。"""
+    if not file_path:
+        return None
+    p = PurePosixPath(file_path)
+    if p.is_absolute() or ".." in p.parts or "." in p.parts:
+        return None
+    if any(seg.startswith(".") for seg in p.parts):
+        return None
+    return p
+
+
 @router.get("/tasks/{task_id}/download")
 async def download_task_result(task_id: str) -> Response:
     """下载任务结果 zip（AGE-13）。"""

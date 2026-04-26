@@ -696,11 +696,20 @@ class Pipeline:
             name=f"ocr-producer-{image_dir.name}",
         )
         try:
-            result = await self._stream_process(
-                page_queue, pages_ref, output_dir,
-                llm, gpu_lock, pii_cfg, controller, _report,
-                quality=quality,
-            )
+            if self._config.code.enable:
+                # AGE-8 代码模式：跳过 LLM 流式精修，OCR 收齐后跑 ide_layout
+                # → ide_meta_extract → code_assembly → group_into_files →
+                # render_code_files，按需 LLM 字符级修正每个 SourceFile
+                result = await self._code_pipeline(
+                    page_queue, pages_ref, output_dir,
+                    llm, _report,
+                )
+            else:
+                result = await self._stream_process(
+                    page_queue, pages_ref, output_dir,
+                    llm, gpu_lock, pii_cfg, controller, _report,
+                    quality=quality,
+                )
         finally:
             unsub_breaker()
             await ocr_task
@@ -746,6 +755,142 @@ class Pipeline:
             )
 
         return breaker.subscribe_open(listener)
+
+    async def _code_pipeline(  # noqa: C901
+        self,
+        page_queue: asyncio.Queue[PageOCR | None],
+        pages_ref: list[PageOCR],
+        output_dir: Path,
+        llm: LLMConfig | None,
+        report_fn: ReportFn,
+    ) -> PipelineResult:
+        """AGE-8 代码模式分支：OCR 收齐 → 代码链 → render_code_files。
+
+        只消费 page_queue 直到哨兵；不做 markdown 合并/精修。LLM 仅做单文件
+        字符级修正（CodeLLMRefiner），失败/超时回退原文。
+        """
+        from docrestore.llm.code_refine import CodeLLMRefiner
+        from docrestore.output.code_renderer import render_code_files
+        from docrestore.processing.code_assembly import assemble_columns
+        from docrestore.processing.code_file_grouping import (
+            PageColumn,
+            group_into_files,
+        )
+        from docrestore.processing.ide_layout import analyze_layout
+        from docrestore.processing.ide_meta_extract import extract_ide_metas
+
+        # 1. 排空 OCR 队列；pages_ref 已被 producer 填充
+        while True:
+            page = await page_queue.get()
+            if page is None:
+                break
+
+        if not pages_ref:
+            msg = "代码模式：OCR producer 未产出任何页"
+            raise RuntimeError(msg)
+
+        # 2. 每张图跑 ide_layout / extract_metas / assemble_columns，组装 PageColumn
+        report_fn(
+            "code_layout", 0, len(pages_ref),
+            "代码模式：分析 IDE 布局",
+            message_key="progress.codeLayout",
+            message_params={"total": str(len(pages_ref))},
+        )
+        all_pcs: list[PageColumn] = []
+        for i, page in enumerate(pages_ref):
+            text_lines = page.text_lines
+            if not text_lines:
+                logger.warning(
+                    "代码模式：page %s 无 text_lines（OCR pipeline 非 basic？）",
+                    page.image_path.stem,
+                )
+                continue
+            try:
+                from PIL import Image
+                with Image.open(page.image_path) as img:
+                    image_size = img.size
+            except OSError:
+                # 用 bbox 兜底（max x2,y2）
+                image_size = (
+                    max((ln.bbox[2] for ln in text_lines), default=0),
+                    max((ln.bbox[3] for ln in text_lines), default=0),
+                )
+            layout = analyze_layout(text_lines, image_size)
+            metas = extract_ide_metas(layout)
+            columns = assemble_columns(layout)
+            for col, meta in zip(columns, metas, strict=True):
+                all_pcs.append(PageColumn(
+                    page_stem=page.image_path.stem,
+                    column_index=col.column_index,
+                    meta=meta,
+                    column=col,
+                ))
+            report_fn(
+                "code_layout", i + 1, len(pages_ref),
+                f"分析 {i + 1}/{len(pages_ref)}",
+                message_key="progress.codeLayout",
+                message_params={
+                    "current": str(i + 1),
+                    "total": str(len(pages_ref)),
+                },
+            )
+
+        # 3. 跨张归类 + 落盘
+        sources = group_into_files(all_pcs)
+        report_fn(
+            "code_group", len(sources), len(sources),
+            f"代码模式：归类得到 {len(sources)} 个源文件",
+            message_key="progress.codeGroup",
+            message_params={"count": str(len(sources))},
+        )
+
+        # 4. 可选 LLM 字符级精修（每个 SourceFile 独立调用，失败回退原文）
+        llm_cfg = llm if llm is not None else self._config.llm
+        if llm_cfg.model and sources:
+            base = self._get_refiner(llm)
+            if isinstance(base, BaseLLMRefiner):
+                code_refiner = CodeLLMRefiner(base)
+                for i, src in enumerate(sources):
+                    try:
+                        result = await code_refiner.refine(src)
+                        src.merged_text = result.refined_text
+                        if result.flags:
+                            src.flags = list({*src.flags, *result.flags})
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "代码模式 LLM 精修失败 (path=%s)，回退原文",
+                            src.path,
+                        )
+                    report_fn(
+                        "code_refine", i + 1, len(sources),
+                        f"LLM 精修 {i + 1}/{len(sources)}",
+                        message_key="progress.codeRefine",
+                        message_params={
+                            "current": str(i + 1),
+                            "total": str(len(sources)),
+                        },
+                    )
+
+        render_result = await render_code_files(sources, output_dir)
+        report_fn(
+            "code_render", 1, 1,
+            f"代码模式：写出 {len(render_result.written_files)} 个文件",
+            message_key="progress.codeRender",
+            message_params={
+                "count": str(len(render_result.written_files)),
+            },
+        )
+
+        # 5. 构造 PipelineResult：output_path 指向 document.md（兼容旧 UI），
+        # markdown 暂留空（前端按 files-index.json 单独渲染）
+        return PipelineResult(
+            output_path=render_result.document_path,
+            markdown="",
+            warnings=[
+                f"code_mode: {len(render_result.written_files)} files, "
+                f"{len(render_result.skipped)} skipped",
+            ],
+        )
 
     async def _resolve_ocr_engine(
         self,

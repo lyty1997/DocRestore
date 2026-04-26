@@ -167,6 +167,23 @@ export const zhTW: Record<TranslationKey, string> = {
   "taskDetail.resumeTask": "繼續",
   "taskDetail.resumeHint": "複用原輸出目錄，跳過已 OCR 的圖、只補跑未完成部分",
   "taskDetail.resumeFailed": "繼續任務失敗",
+  "taskDetail.viewModeDoc": "文件模式",
+  "taskDetail.viewModeCode": "程式碼模式",
+
+  // ── 程式碼模式視圖（AGE-50） ──
+  "codeViewer.loadingIndex": "載入檔案索引...",
+  "codeViewer.indexError": "載入索引失敗",
+  "codeViewer.empty": "程式碼模式未產生任何來源檔案",
+  "codeViewer.filesTitle": "來源檔案 ({count})",
+  "codeViewer.lines": "行",
+  "codeViewer.flags": "{count} 個標記",
+  "codeViewer.loadingFile": "載入檔案...",
+  "codeViewer.fileError": "載入檔案失敗",
+  "codeViewer.sourcePagesTitle": "原圖來源",
+  "codeViewer.noSourceImages": "無對應原圖",
+  "codeViewer.compile.passed": "編譯通過",
+  "codeViewer.compile.failed": "編譯失敗",
+  "codeViewer.compile.skipped": "跳過編譯",
 
   // ── App 級別 ──
   "app.processingFailed": "處理失敗",

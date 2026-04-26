@@ -13,6 +13,7 @@ import {
   TaskResponseSchema,
   TaskResultResponseSchema,
   TaskResultsResponseSchema,
+  FilesIndexSchema,
   UploadCompleteResponseSchema,
   UploadFilesResponseSchema,
   UploadSessionFileDeleteResponseSchema,
@@ -31,6 +32,7 @@ import {
   type TaskResponse,
   type TaskResultResponse,
   type TaskResultsResponse,
+  type FilesIndex,
   type UploadCompleteResponse,
   type UploadFilesResponse,
   type UploadSessionFileDeleteResponse,
@@ -221,6 +223,31 @@ export async function updateResultMarkdown(
     },
   );
   return handleResponse(response, ActionResponseSchema);
+}
+
+/** 获取代码模式 files-index.json；任务非代码模式 → 抛 HTTP 404 错误 */
+export async function getFilesIndex(taskId: string): Promise<FilesIndex> {
+  const response = await fetch(`${API_BASE}/tasks/${taskId}/files-index`, {
+    headers: apiHeaders(),
+  });
+  return handleResponse(response, FilesIndexSchema);
+}
+
+/** 获取代码模式单文件内容（text/plain） */
+export async function getCodeFileContent(
+  taskId: string,
+  filePath: string,
+): Promise<string> {
+  const url = `${API_BASE}/tasks/${taskId}/files/${filePath
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/")}`;
+  const response = await fetch(url, { headers: apiHeaders() });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`HTTP ${response.status.toString()}: ${text}`);
+  }
+  return response.text();
 }
 
 /** 获取源图片列表 */
