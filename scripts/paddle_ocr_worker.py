@@ -599,6 +599,7 @@ def main() -> None:
                 server_model_name=str(
                     request.get("server_model_name", "")
                 ),
+                pipeline=str(request.get("pipeline", "vl")),
             ), seq=seq)
         elif cmd == "ocr":
             min_img_raw = request.get("min_image_size", 0)
