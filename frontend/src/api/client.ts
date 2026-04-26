@@ -65,6 +65,10 @@ interface CreateTaskBody {
     model?: string | undefined;
     gpu_id?: string | undefined;
   } | undefined;
+  code?: {
+    enable: boolean;
+    output_files_dir?: string | undefined;
+  } | undefined;
 }
 
 /** 合并认证 header 与自定义 header */

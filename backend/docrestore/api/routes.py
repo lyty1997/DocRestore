@@ -338,6 +338,19 @@ async def create_task(
             )
         pii_cfg = defaults.pii.model_copy(update=pii_update)
 
+    if req.code is not None:
+        code_cfg = defaults.code.model_copy(
+            update=req.code.model_dump(exclude_none=True),
+        )
+        # code.enable=True → OCR 切到 basic pipeline（行级 bbox 给 ide_layout）
+        # PipelineConfig.model_validator 也兜底；这里显式让 ocr_cfg 立即生效，
+        # 单测和日志可见
+        if code_cfg.enable:
+            base_ocr = ocr_cfg if ocr_cfg is not None else defaults.ocr
+            ocr_cfg = base_ocr.model_copy(
+                update={"paddle_pipeline": "basic"},
+            )
+
     task = manager.create_task(
         image_dir=req.image_dir,
         output_dir=req.output_dir,

@@ -90,6 +90,9 @@ export const zhTW: Record<TranslationKey, string> = {
   "taskForm.llmHint":
     "不填則跳過 LLM 精修，僅輸出 OCR 原始結果。模型名稱使用 litellm 格式（provider/model）。",
   "taskForm.storageWarning": " 設定（含 API Key）將以明文儲存於瀏覽器本地。",
+  "taskForm.codeModeTitle": "IDE 程式碼模式（AGE-8）",
+  "taskForm.codeModeDesc":
+    "上傳 IDE 編輯器截圖時啟用：輸出獨立原始檔（.cc/.h/.gn/.py/...）到 files/，不再合成單份 Markdown。",
   "taskForm.piiTitle": "脫敏功能",
   "taskForm.piiDesc":
     "開啟後自動檢測並脫敏手機號碼、電子郵件、身分證號等隱私資訊。也可新增自定義敏感詞，無需開啟即生效。",

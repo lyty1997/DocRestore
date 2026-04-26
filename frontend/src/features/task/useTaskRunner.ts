@@ -73,6 +73,7 @@ interface UseTaskRunnerReturn {
         | undefined;
     },
     ocr?: { model?: string | undefined; gpu_id?: string | undefined },
+    code?: { enable: boolean },
   ) => void;
   /** 重置到 idle */
   reset: () => void;
@@ -324,6 +325,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
           | undefined;
       },
       ocr?: { model?: string | undefined; gpu_id?: string | undefined },
+      code?: { enable: boolean },
     ) => {
       // 重置状态
       cleanup();
@@ -345,6 +347,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
             llm,
             pii,
             ocr,
+            code,
           });
           if (!isMountedRef.current) return;
           setTaskId(resp.task_id);

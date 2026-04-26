@@ -60,6 +60,13 @@ class PIIConfigRequest(BaseModel):
     ) = None
 
 
+class CodeRestoreConfigRequest(BaseModel):
+    """AGE-8 IDE 代码模式配置（请求级覆盖）"""
+
+    enable: bool | None = None
+    output_files_dir: str | None = None
+
+
 class CreateTaskRequest(BaseModel):
     """创建任务请求"""
 
@@ -68,6 +75,7 @@ class CreateTaskRequest(BaseModel):
     llm: LLMConfigRequest | None = None
     ocr: OCRConfigRequest | None = None
     pii: PIIConfigRequest | None = None
+    code: CodeRestoreConfigRequest | None = None
 
 
 class UpdateMarkdownRequest(BaseModel):

@@ -69,6 +69,11 @@ export interface PIIConfig {
   custom_sensitive_words?: readonly CustomSensitiveWord[] | undefined;
 }
 
+/** AGE-8 IDE 代码模式配置 */
+export interface CodeRestoreConfig {
+  enable: boolean;
+}
+
 /** OCR 引擎配置 */
 export interface OCRConfig {
   model: string;
@@ -104,6 +109,7 @@ interface TaskFormProps {
     llm?: LLMConfig,
     pii?: PIIConfig,
     ocr?: OCRConfig,
+    code?: CodeRestoreConfig,
   ) => void;
   readonly disabled: boolean;
 }
@@ -159,6 +165,9 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
       cancelled = true;
     };
   }, []);
+
+  /* AGE-8 IDE 代码模式：勾选后强制 OCR 走 basic pipeline 输出独立源文件 */
+  const [codeMode, setCodeMode] = useState(false);
 
   /* 脱敏开关 + 敏感词（每条可选独立代号） */
   const [piiEnabled, setPiiEnabled] = useState(false);
@@ -341,7 +350,11 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
         }
       : undefined;
 
-    onSubmit(trimmed, outputDir.trim() || undefined, llm, pii, ocr);
+    const code: CodeRestoreConfig | undefined = codeMode
+      ? { enable: true }
+      : undefined;
+
+    onSubmit(trimmed, outputDir.trim() || undefined, llm, pii, ocr, code);
   };
 
   const canSubmit = !disabled && imageDir.trim() !== "";
@@ -544,6 +557,29 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
             </p>
           </div>
         )}
+      </div>
+
+      {/* AGE-8 IDE 代码模式：截图含 IDE 编辑器代码时启用，输出独立源文件 */}
+      <div className="form-group pii-section">
+        <div className="pii-header">
+          <span className="pii-title">{t("taskForm.codeModeTitle")}</span>
+          <label className="toggle-switch" htmlFor="code-mode-toggle">
+            <input
+              id="code-mode-toggle"
+              type="checkbox"
+              checked={codeMode}
+              onChange={(e) => {
+                setCodeMode(e.target.checked);
+              }}
+              disabled={disabled}
+            />
+            <span className="toggle-slider" />
+            <span className="toggle-label">
+              {codeMode ? t("common.enabled") : t("common.disabled")}
+            </span>
+          </label>
+        </div>
+        <p className="pii-desc">{t("taskForm.codeModeDesc")}</p>
       </div>
 
       {/* 脱敏功能 */}
