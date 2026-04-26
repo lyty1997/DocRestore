@@ -28,7 +28,10 @@ import re
 import time
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from docrestore.processing.code_file_grouping import SourceFile
 
 import aiofiles
 
@@ -124,6 +127,68 @@ class ReportFn(Protocol):
 _PAGE_MARKER_RE = re.compile(r"<!--\s*page:\s*(.+?)\s*-->")
 
 logger = logging.getLogger(__name__)
+
+
+#: C/C++ 预处理指令，``#`` 开头但不是注释，遇到要停止 header 收集
+_C_PREPROCESSOR_RE = re.compile(
+    r"^\s*#\s*"
+    r"(include|define|undef|if|ifdef|ifndef|else|elif|endif|"
+    r"pragma|error|warning|line)\b",
+)
+
+
+def _is_comment_line(stripped: str) -> bool:
+    """判断一行（已去除首尾空白）是否属于 leading comment block。
+
+    - ``//`` / ``/*`` / ``*`` / ``*/`` → 一律算注释
+    - ``#`` 开头：先排除 C/C++ 预处理指令（``#include`` / ``#define`` 等），
+      其余视为 Python/shell/gn 风格注释
+    """
+    if not stripped:
+        return False
+    if stripped.startswith(("//", "/*", "*")):
+        return True
+    if stripped.startswith("#"):
+        return _C_PREPROCESSOR_RE.match(stripped) is None
+    return False
+
+
+def _split_leading_comment(text: str) -> tuple[str, str]:
+    """切出文件开头的 leading comment block（含其中空行）。
+
+    AGE-50 PII 用：仅对 header 做实体脱敏，body（import 路径/namespace/
+    字符串字面量）保持原样，避免误伤代码语义。
+
+    识别规则（保守、跨语言）：
+      - 行 1 起，``//`` / ``#`` (排除 C 预处理) / ``/*`` / ``*`` 算注释
+      - 注释行之间的空行也归 header（保留 Copyright + 空行 + Author 这类格式）
+      - 一旦遇到非注释非空行，停止；最后一行注释之前的所有内容都是 header
+
+    返回 ``(header, body)`` 满足 ``header + body == text``。
+    无 leading comment 时返回 ``("", text)``。
+    """
+    if not text:
+        return "", text
+    lines = text.split("\n")
+    last_comment = -1
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            # 空行：暂归 header，等后续行决定
+            continue
+        if _is_comment_line(stripped):
+            last_comment = i
+            continue
+        break
+    if last_comment < 0:
+        return "", text
+    end = last_comment + 1
+    header = "\n".join(lines[:end])
+    body = "\n".join(lines[end:])
+    if end < len(lines):
+        # split + join 丢了行末换行符；header/body 衔接处补回
+        header += "\n"
+    return header, body
 
 
 def _pick_cut_points(
@@ -702,7 +767,7 @@ class Pipeline:
                 # render_code_files，按需 LLM 字符级修正每个 SourceFile
                 result = await self._code_pipeline(
                     page_queue, pages_ref, output_dir,
-                    llm, _report,
+                    llm, pii_cfg, _report,
                 )
             else:
                 result = await self._stream_process(
@@ -762,6 +827,7 @@ class Pipeline:
         pages_ref: list[PageOCR],
         output_dir: Path,
         llm: LLMConfig | None,
+        pii_cfg: PIIConfig,
         report_fn: ReportFn,
     ) -> PipelineResult:
         """AGE-8 代码模式分支：OCR 收齐 → 代码链 → render_code_files。
@@ -844,32 +910,47 @@ class Pipeline:
             message_params={"count": str(len(sources))},
         )
 
-        # 4. 可选 LLM 字符级精修（每个 SourceFile 独立调用，失败回退原文）
+        # 共享一个 refiner：PII 实体检测 + 代码字符级精修都用它
         llm_cfg = llm if llm is not None else self._config.llm
-        if llm_cfg.model and sources:
-            base = self._get_refiner(llm)
-            if isinstance(base, BaseLLMRefiner):
-                code_refiner = CodeLLMRefiner(base)
-                for i, src in enumerate(sources):
-                    try:
-                        result = await code_refiner.refine(src)
-                        src.merged_text = result.refined_text
-                        if result.flags:
-                            src.flags = list({*src.flags, *result.flags})
-                    except Exception:  # noqa: BLE001
-                        logger.exception(
-                            "代码模式 LLM 精修失败 (path=%s)，回退原文",
-                            src.path,
-                        )
-                    report_fn(
-                        "code_refine", i + 1, len(sources),
-                        f"LLM 精修 {i + 1}/{len(sources)}",
-                        message_key="progress.codeRefine",
-                        message_params={
-                            "current": str(i + 1),
-                            "total": str(len(sources)),
-                        },
+        base_refiner = (
+            self._get_refiner(llm)
+            if (llm_cfg.model and sources) else None
+        )
+        base_refiner_obj = (
+            base_refiner if isinstance(base_refiner, BaseLLMRefiner) else None
+        )
+
+        # 3.5 PII：仅对每个 SourceFile 的 leading comment block 脱敏
+        # （Copyright / 作者 / 邮箱 / 公司名）。正文 import 路径 / namespace
+        # 不动，避免破坏代码语义。
+        if pii_cfg.enable and sources:
+            await self._redact_code_headers(
+                sources, pii_cfg, base_refiner_obj,
+            )
+
+        # 4. 可选 LLM 字符级精修（每个 SourceFile 独立调用，失败回退原文）
+        if base_refiner_obj is not None:
+            code_refiner = CodeLLMRefiner(base_refiner_obj)
+            for i, src in enumerate(sources):
+                try:
+                    result = await code_refiner.refine(src)
+                    src.merged_text = result.refined_text
+                    if result.flags:
+                        src.flags = list({*src.flags, *result.flags})
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "代码模式 LLM 精修失败 (path=%s)，回退原文",
+                        src.path,
                     )
+                report_fn(
+                    "code_refine", i + 1, len(sources),
+                    f"LLM 精修 {i + 1}/{len(sources)}",
+                    message_key="progress.codeRefine",
+                    message_params={
+                        "current": str(i + 1),
+                        "total": str(len(sources)),
+                    },
+                )
 
         render_result = await render_code_files(sources, output_dir)
         report_fn(
@@ -891,6 +972,58 @@ class Pipeline:
                 f"{len(render_result.skipped)} skipped",
             ],
         )
+
+    async def _redact_code_headers(
+        self,
+        sources: list[SourceFile],
+        pii_cfg: PIIConfig,
+        refiner: BaseLLMRefiner | None,
+    ) -> None:
+        """对每个 SourceFile 的 leading comment block 跑 PII 脱敏（in-place）。
+
+        策略：拼接所有非空 header 一次性跑 LLM 实体检测拿全局 lexicon；每个
+        header 再分别跑 ``redact_snippet`` 做 regex + lexicon + 自定义敏感词。
+        ``person_names`` / ``org_names`` 来自 header 文本，不会污染正文里的
+        import 路径或 namespace 字面量。
+
+        ``refiner=None`` 时跳过实体检测，仅 regex + 自定义词。
+        实体检测失败 → 仅退化为 regex + 自定义词，不阻断流程。
+        """
+        from docrestore.privacy.redactor import EntityLexicon, PIIRedactor
+
+        if not sources:
+            return
+
+        headers: list[tuple[int, str, str]] = []  # (idx, header, body)
+        for i, src in enumerate(sources):
+            header, body = _split_leading_comment(src.merged_text)
+            if header:
+                headers.append((i, header, body))
+        if not headers:
+            return
+
+        redactor = PIIRedactor(pii_cfg)
+        lexicon: EntityLexicon | None = None
+        needs_lex = (
+            pii_cfg.redact_person_name or pii_cfg.redact_org_name
+        )
+        if needs_lex and refiner is not None:
+            combined = "\n\n".join(h for _, h, _ in headers)
+            try:
+                person, org = await refiner.detect_pii_entities(combined)
+                lexicon = EntityLexicon(
+                    person_names=tuple(person),
+                    org_names=tuple(org),
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "代码模式 PII 头部实体检测失败，仅 regex + 自定义词生效",
+                    exc_info=True,
+                )
+
+        for idx, header, body in headers:
+            new_header, _records = redactor.redact_snippet(header, lexicon)
+            sources[idx].merged_text = new_header + body
 
     async def _resolve_ocr_engine(
         self,
