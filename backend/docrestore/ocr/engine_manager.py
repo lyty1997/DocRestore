@@ -280,6 +280,10 @@ class EngineManager:
         self._current_model: str = ""
         self._current_gpu: str = ""
         self._current_gpu_name: str = ""
+        # paddle_pipeline 也是匹配维度：vl ↔ basic 切换需重启 worker
+        # （vl 需要 ppocr-server / basic 直接本地推理，行为完全不同；且
+        # basic 输出 text_lines 给 AGE-8 代码模式，vl 不输出）
+        self._current_pipeline: str = ""
         self._ppocr_server_proc: asyncio.subprocess.Process | None = None
         # ppocr-server 的 stdout/stderr drain task（防 pipe buffer 写满）
         self._ppocr_drain_tasks: list[asyncio.Task[None]] = []
@@ -351,16 +355,18 @@ class EngineManager:
             if on_progress is not None:
                 on_progress(msg)
 
+        target_pipeline = config.paddle_pipeline
+
         # 快速路径：引擎已匹配
-        if self._is_matched(target_model, target_gpu):
+        if self._is_matched(target_model, target_gpu, target_pipeline):
             return self._engine  # type: ignore[return-value]
 
         async with self._switch_lock:
             # 双重检查（另一个协程可能刚完成切换）
-            if self._is_matched(target_model, target_gpu):
+            if self._is_matched(target_model, target_gpu, target_pipeline):
                 return self._engine  # type: ignore[return-value]
 
-            self._log_switch_reason(target_model, target_gpu)
+            self._log_switch_reason(target_model, target_gpu, target_pipeline)
 
             # 获取 gpu_lock，等待当前 OCR 操作完成后再切换
             async with self._gpu_lock:
@@ -388,6 +394,7 @@ class EngineManager:
                     self._current_model = target_model
                     self._current_gpu = target_gpu
                     self._current_gpu_name = _lookup_gpu_name(target_gpu)
+                    self._current_pipeline = target_pipeline
                 except BaseException:
                     # 任何异常（含 CancelledError）都清理半成品状态
                     logger.info("引擎切换失败，清理资源...")
@@ -404,18 +411,26 @@ class EngineManager:
             await self._shutdown_current()
         logger.info("EngineManager 已关闭")
 
-    def _is_matched(self, target_model: str, target_gpu: str) -> bool:
-        """当前引擎的 model + gpu 是否匹配目标。"""
+    def _is_matched(
+        self, target_model: str, target_gpu: str, target_pipeline: str,
+    ) -> bool:
+        """当前引擎的 model + gpu + pipeline 是否匹配目标。
+
+        ``paddle_pipeline`` 是关键维度：vl 需要 ppocr-server 推理输出
+        ``raw_text``；basic 纯本地推理输出 ``text_lines`` 给 AGE-8 代码
+        模式。两者行为完全不同，不能共享 worker。
+        """
         return (
             self._engine is not None
             and self._current_model == target_model
             and self._current_gpu == target_gpu
+            and self._current_pipeline == target_pipeline
         )
 
     def _log_switch_reason(
-        self, target_model: str, target_gpu: str,
+        self, target_model: str, target_gpu: str, target_pipeline: str,
     ) -> None:
-        """记录引擎切换原因（模型变化 / GPU 变化）。"""
+        """记录引擎切换原因（模型 / GPU / pipeline 变化）。"""
         parts: list[str] = []
         if self._current_model != target_model:
             parts.append(
@@ -424,6 +439,10 @@ class EngineManager:
         if self._current_gpu != target_gpu:
             parts.append(
                 f"GPU {self._current_gpu or '(无)'} → {target_gpu}"
+            )
+        if self._current_pipeline != target_pipeline:
+            parts.append(
+                f"pipeline {self._current_pipeline or '(无)'} → {target_pipeline}"
             )
         logger.info("切换 OCR 引擎: %s", ", ".join(parts))
 
@@ -449,6 +468,7 @@ class EngineManager:
                 self._current_model = ""
                 self._current_gpu = ""
                 self._current_gpu_name = ""
+                self._current_pipeline = ""
 
     async def _start_ppocr_server(
         self,
