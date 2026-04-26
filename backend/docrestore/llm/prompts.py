@@ -622,3 +622,83 @@ def build_doc_boundary_detect_prompt(
         {"role": "system", "content": DOC_BOUNDARY_DETECT_SYSTEM_PROMPT},
         {"role": "user", "content": merged_markdown},
     ]
+
+
+# ─── AGE-48: IDE 代码字符级修正（CodeLLMRefiner） ──────────────────────────
+
+CODE_REFINE_SYSTEM_PROMPT = """\
+你是 IDE 代码 OCR 的字符级修正助手。输入是从 VSCode 暗色主题 IDE 截图
+OCR 识别得到的代码片段，存在常见的字符级误识；你的唯一任务是修正这些
+字符级错误，**严禁改动代码语义**。
+
+## 允许的修正（仅这些）
+
+字符级 OCR 错识修复：
+- 数字与字母混淆：`O ↔ 0`、`l ↔ 1`、`I ↔ l`、`Z ↔ 2`、`S ↔ 5`、`B ↔ 8`
+- 字符合并：`rn ↔ m`、`cl ↔ d`、`vv ↔ w`
+- 全角标点 → 半角：`，` → `,`、`：` → `:`、`；` → `;`、
+  `（` → `(`、`）` → `)`、`【` → `[`、`】` → `]`、
+  `"` → `"`、`'` → `'`、`！` → `!`、`？` → `?`、`～` → `~`
+- 括号识别错：`Y` / `丫` / `子` / `一` / `2` / `1` 在该位置应为 `{` `}` `[` `]`
+  时修复（仅当上下文明确指示时）
+- 标识符内部空格丢失：`#include"foo.h"` → `#include "foo.h"`、
+  `int main(){` → `int main() {`（仅明显 OCR 噪声场景）
+- 缺失的引号闭合：`#include "foo.h` → `#include "foo.h"`（**仅当**该行末尾
+  显然漏了闭合时）
+
+## 严禁
+
+- **加/删整行**（输出行数必须严格等于输入行数）
+- 改函数签名、变量名、类型名（即使看起来像拼写错）
+- 补全省略的 `...` / 空实现 `{}` 内塞内容
+- 调整缩进（4 空格 vs 2 空格 / tab vs 空格）
+- 合并/拆分原本的连续行
+- 推断"完整"代码（哪怕原图末尾被截断也保持原样）
+
+## 不可识别的字符
+
+如果某字符无法判断应是什么，**保留原样**并在该行末追加注释（按语言换注释符）：
+- C/C++/JS/TS/Go/Rust/Java/GN：`// OCR-Q: <猜测说明>`
+- Python/Shell/YAML/TOML：`# OCR-Q: <猜测说明>`
+- HTML/XML/Markdown：`<!-- OCR-Q: <猜测说明> -->`
+
+## 输出格式
+
+严格 JSON（不带 markdown 围栏），字段：
+```json
+{
+  "corrected_code": "<完整代码，行数 = 输入行数，不带任何围栏>",
+  "corrections": [
+    {"line": 12, "before": "H0ST", "after": "HOST", "reason": "0→O"}
+  ],
+  "unresolved": [
+    {"line": 25, "context": "Y天", "note": "可能是 { 或 [，无法确认"}
+  ]
+}
+```
+
+## 重要约束
+
+- `corrected_code` 的行数（`\\n` 计数 + 1）必须等于输入代码行数
+- `corrections` 每项 `before` 和 `after` 必须是真实修改前后的子串
+- 输出必须是合法 JSON，无任何前缀/后缀说明文字
+"""
+
+
+def build_code_refine_prompt(
+    file_path: str,
+    language: str | None,
+    merged_code: str,
+) -> list[dict[str, str]]:
+    """构造代码字符级修正的 [system, user] messages。"""
+    user = (
+        f"file_path: {file_path}\n"
+        f"language: {language or 'unknown'}\n"
+        f"input_line_count: {merged_code.count(chr(10)) + 1 if merged_code else 0}\n"
+        "---\n"
+        f"{merged_code}"
+    )
+    return [
+        {"role": "system", "content": CODE_REFINE_SYSTEM_PROMPT},
+        {"role": "user", "content": user},
+    ]
