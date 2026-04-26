@@ -16,6 +16,63 @@ limitations under the License.
 
 # DocRestore 开发进度
 
+## 2026-04-26 AGE-8 真端到端验证 — OCR 质量链 + 真 g++ 语法验证
+
+主题：用户回归代码模式发现两件大事，分别修复。
+
+### 链路 bug：前端代码模式形同虚设（commit 804f28c）
+- routes.py 算了 `code_cfg` 但调 `manager.create_task()` 时没传，
+  `Task / TaskManager / Pipeline.process_tree / process_many / _stream_pipeline`
+  整条链路都没 `code` 参数 → pipeline 永远只看启动配置
+  `self._config.code.enable=False`，前端勾代码模式只切了
+  PP-OCRv5 basic（变快），结果还是被当文档喂给 LLM 拼接
+- 修复：把 `code` 参数沿整条链路接通；DB tasks 表加 `code` 列 + 迁移；
+  `_stream_pipeline` 用 `code or self._config.code` 决定分支
+- 链路守护测试 `tests/api/test_create_task_code_mode.py` +2 条端到端
+  HTTP API → `task.code` 透传到 `_tasks` 验证
+
+### OCR 质量两层（commit 71e6465 + 8df8d71 + 4a8c9ea + e095fe2）
+**L1 规则纠错（保守、行数严格保持）**
+- `processing/ocr_postfix.py`：A 中英文标点统一 + B 标识符里 0→O
+  - 模式 `(?<=[A-Za-z_])0(?=[A-Za-z])` 仅前后字母时改
+  - hex（0xDEAD）/ 十进制（100）/ var0_name 不动；按字符串字面量
+    边界保护（用户中文文案不被改）
+  - render 之前对每个 `SourceFile.merged_text` 跑一遍
+- 30 条单元测试覆盖（含 spike 真实样本 + 边界反例）
+
+**L2 LLM refine prompt 加强**
+- `llm/prompts.py CODE_REFINE_SYSTEM_PROMPT` 告诉 LLM 上游已规则纠错，
+  重点修剩余的 D（粘连）/ E（IDE chrome 残留）/ 缺 = 号 等
+
+**实测 spike diff**：`k0mxStateInvalid → kOmxStateInvalid`、
+`kOmxStateExecuting g=4，→ kOmxStateExecuting g=4,`、
+`if（current_cpu → if(current_cpu` 等全部修正，无误伤。
+
+### 真 C/C++ 语法验证（不再 mock）
+- `scripts/age8_compile_check.py` 真起 `g++ -fsyntax-only` 子进程
+- `scripts/age8_stub_includes.py`：扫源文件 `#include` 自动落 stub header
+  - 标准库头跳过；EGL/ / base/logging.h / media/base/status.h 等关键
+    类型族注入 typedef stub 让 g++ 不一片红
+- 错误分类（区分 OCR 噪声 vs 缺 chromium sysroot）：
+  - `syntax_clean` / `syntax_dirty`（真 OCR 粘连）/ `sysroot_missing`（缺类型）
+    / `skipped`
+  - syntax patterns 只匹配强 OCR 信号（invalid preprocessing directive /
+    stray / unable to find numeric literal），cascade 错归 semantic 不污染指标
+- `scripts/age8_e2e_report.py` 一键端到端验收报告
+- 6 条**真起 g++ 子进程**的端到端集成测试 + 12 条分类单测 + 13 条 stub 单测
+
+### Chromium VDA 真任务回归
+- 输入 252 张 chromium VDA 模块照片 → 真 OCR + LLM refine + 后处理
+- 期望：files-index.json 落盘 + 文件树按 chromium 路径组织 + g++ syntax
+  报告 syntax_dirty 数尽量低（OCR postfix + LLM refine 应已处理大部分）
+- _typos.toml 加白名单：OCR 反例的故意错拼（dEfine / regsiter）需要豁免
+
+### 测试统计
+- pre-commit 全绿；mypy --strict + ruff --strict + typos
+- 915+ 单测 + 18 真 g++ 集成测试
+
+遗留问题：无（chromium 真任务回归正在跑）
+
 ## 2026-04-26 AGE-8 收官 — E2E + 代码模式视图
 
 主题：AGE-52 E2E + AGE-50 前端代码模式 + Pipeline 集成代码分支 + DB 历史任务自动 hydrate。
