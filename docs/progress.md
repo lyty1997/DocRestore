@@ -16,6 +16,24 @@ limitations under the License.
 
 # DocRestore 开发进度
 
+## 2026-04-26 AGE-8 收官 — E2E + 代码模式视图
+
+主题：AGE-52 E2E + AGE-50 前端代码模式 + Pipeline 集成代码分支 + DB 历史任务自动 hydrate。
+
+### AGE-52 E2E 端到端验收（commit 70607a0）
+- `tests/pipeline/test_age8_e2e.py`：8 张 spike 全链路 7 条断言（≥3 文件 / chromium 路径 / IDE UI 剥离 / 行号剥离 / 缩进保留 / index 字段完整 / 关键文件恢复）
+- LLM 精修验证（deepseek-v4-flash）：openmax_status.h 13 处字符级修正 100% 正确，行数严格保持
+
+### AGE-50 代码模式视图（commit df70356）
+- **Pipeline 集成 `_code_pipeline` 分支**：`code.enable=True` 时跳过 LLM 流式精修，OCR 收齐后跑 ide_layout → ide_meta_extract → code_assembly → group_into_files → 可选 CodeLLMRefiner → render_code_files
+- **API 端点**：`GET /tasks/{id}/files-index` + `GET /tasks/{id}/files/{path:path}`（路径穿越防护）
+- **TaskManager.load_persisted_tasks**：lifespan 启动时把 DB 历史任务装回内存，让 GET /tasks/{id} 等同步路由在重启后也能命中（解决 sidebar 列得到、详情页打不开的老 bug）
+- **前端 CodeViewer**：三栏布局（文件树 / 代码 / 原图），compile_failed 标红、compile_passed 加绿条，files-index.json 探测成功 → 启用「文档模式 ↔ 代码模式」toggle，三语 i18n
+- **视觉验证**：`scripts/age50_seed_fixture.py` 灌 fixture → Playwright 实际打开 → 文档/代码模式渲染、文件切换、原图列表对照全部正确
+
+### AGE-8 整体收尾
+所有 sub-issues 都已 In Review 或 Done：AGE-41/42/43/44 取消（v1 方案放弃）、AGE-45/46/47/48/49/51/52/53/54/55/50 全部完成。算法 + LLM 精修 + 编译验证 + 前端展示链路打通。
+
 ## 2026-04-25 AGE-8 设计反转 + v2 方案 100% 验证
 
 ### 背景
