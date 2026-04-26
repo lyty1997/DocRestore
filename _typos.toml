@@ -1,0 +1,14 @@
+# typos 拼写检查白名单。
+#
+# prompts.py 里的 OCR 错识反例（故意写错给 LLM 看）需要豁免。
+# 业务代码里如果真用到下列词请先评估是不是 typo。
+
+[default.extend-identifiers]
+# OCR 大小写错认反例（CODE_REFINE_SYSTEM_PROMPT）
+dEfine = "dEfine"
+ifndEf = "ifndEf"
+dEfineOMX_GPU_MEDIA = "dEfineOMX_GPU_MEDIA"
+
+[default.extend-words]
+# OCR 误改业务变量反例（演示 LLM 不该修业务拼写）
+regsiter = "regsiter"
