@@ -123,7 +123,12 @@ class ActionResponse(BaseModel):
 
 
 class TaskListItem(BaseModel):
-    """任务列表中的单项"""
+    """任务列表中的单项
+
+    pii_enable / ocr_model / llm_model 是给前端任务列表卡片直接展示的字段，
+    源头是 tasks 表里 llm/ocr/pii 三列的 JSON 快照（持久层已展开）。
+    llm_model 可能为空字符串（用户未启用 LLM 精修时）。
+    """
 
     task_id: str
     status: str
@@ -132,6 +137,9 @@ class TaskListItem(BaseModel):
     error: str | None = None
     created_at: str
     result_count: int = 0
+    pii_enable: bool = False
+    ocr_model: str = ""
+    llm_model: str = ""
 
 
 class TaskListResponse(BaseModel):

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from contextlib import suppress
 from dataclasses import dataclass
@@ -27,6 +28,38 @@ import aiosqlite
 from docrestore.pipeline.config import LLMConfig, OCRConfig, PIIConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_json_loads(raw: str | None) -> dict[str, object]:
+    """容错解析 JSON 快照列；解析失败/为 None 时返回空字典。
+
+    Why: list_tasks 在每页对每行做轻量字段提取，不应为脏数据整页 fail。
+    """
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _extract_llm_model(raw: str | None) -> str:
+    """从 tasks.llm JSON 快照取 model 字段；缺失时返回空字符串。"""
+    val = _safe_json_loads(raw).get("model")
+    return val if isinstance(val, str) else ""
+
+
+def _extract_ocr_model(raw: str | None) -> str:
+    """从 tasks.ocr JSON 快照取 model 字段；缺失时返回空字符串。"""
+    val = _safe_json_loads(raw).get("model")
+    return val if isinstance(val, str) else ""
+
+
+def _extract_pii_enable(raw: str | None) -> bool:
+    """从 tasks.pii JSON 快照取 enable 字段；缺失时视为未启用。"""
+    val = _safe_json_loads(raw).get("enable")
+    return bool(val)
 
 
 # ── 建表 SQL ──────────────────────────────────────────────
@@ -95,7 +128,12 @@ class ResultRow:
 
 @dataclass
 class TaskListItem:
-    """列表查询返回的精简任务信息"""
+    """列表查询返回的精简任务信息
+
+    pii_enable / ocr_model / llm_model 从 tasks.llm/ocr/pii JSON 快照展开，
+    用于在前端任务列表卡片直接显示，避免再次拉单任务详情。
+    llm_model 可为空字符串（用户未配置精修时），ocr_model 必为非空。
+    """
 
     task_id: str
     status: str
@@ -104,6 +142,9 @@ class TaskListItem:
     error: str | None
     created_at: str
     result_count: int
+    pii_enable: bool = False
+    ocr_model: str = ""
+    llm_model: str = ""
 
 
 @dataclass
@@ -306,11 +347,12 @@ class TaskDatabase:
         row = await cursor.fetchone()
         total: int = row[0] if row else 0
 
-        # 分页查询（LEFT JOIN 统计结果数）
+        # 分页查询（LEFT JOIN 统计结果数；llm/ocr/pii 取 JSON 快照用于卡片展示）
         offset = (page - 1) * page_size
         query = f"""\
             SELECT t.task_id, t.status, t.image_dir, t.output_dir,
                    t.error, t.created_at,
+                   t.llm, t.ocr, t.pii,
                    COUNT(r.id) AS result_count
             FROM tasks t
             LEFT JOIN task_results r ON t.task_id = r.task_id
@@ -329,7 +371,10 @@ class TaskDatabase:
                 output_dir=r[3],
                 error=r[4],
                 created_at=r[5],
-                result_count=r[6],
+                result_count=r[9],
+                llm_model=_extract_llm_model(r[6]),
+                ocr_model=_extract_ocr_model(r[7]),
+                pii_enable=_extract_pii_enable(r[8]),
             )
             for r in rows
         ]

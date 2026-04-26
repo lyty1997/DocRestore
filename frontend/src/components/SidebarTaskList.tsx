@@ -24,6 +24,19 @@ function shortId(id: string): string {
   return id.length > 8 ? id.slice(0, 8) : id;
 }
 
+/** 截短路径：长度过长时取末尾部分（保留更可识别的目录名） */
+function shortPath(path: string, max = 28): string {
+  if (path.length <= max) return path;
+  return `…${path.slice(path.length - max + 1)}`;
+}
+
+/** 模型名通常是 "provider/name"，去掉 provider 前缀后更短 */
+function shortModel(model: string): string {
+  const idx = model.indexOf("/");
+  if (idx === -1) return model;
+  return model.slice(idx + 1);
+}
+
 /** 格式化时间为短格式 */
 function shortTime(iso: string): string {
   try {
@@ -145,35 +158,91 @@ export const SidebarTaskList = forwardRef<
             <div className="stl-empty">{t("taskList.empty")}</div>
           )}
 
-          {tasks.map((task) => (
-            <button
-              key={task.task_id}
-              type="button"
-              className={[
-                "stl-item",
-                selectedTaskId === task.task_id ? "stl-item--active" : "",
-              ]
-                .filter(Boolean)
-                .join(" ")}
-              onClick={() => {
-                onSelect(task.task_id);
-              }}
-              title={`${task.task_id}\n${task.image_dir}`}
-            >
-              <span
-                className={`stl-dot ${statusModifier(task.status)}`}
-              />
-              <span className="stl-item-id">{shortId(task.task_id)}</span>
-              <span
-                className={`stl-item-status ${statusModifier(task.status)}`}
+          {tasks.map((task) => {
+            const ocrLabel =
+              task.ocr_model === "" ? "—" : shortModel(task.ocr_model);
+            const llmLabel =
+              task.llm_model === ""
+                ? t("taskList.llmDisabled")
+                : shortModel(task.llm_model);
+            const piiLabel = task.pii_enable
+              ? t("taskList.piiOn")
+              : t("taskList.piiOff");
+            return (
+              <button
+                key={task.task_id}
+                type="button"
+                className={[
+                  "stl-item",
+                  selectedTaskId === task.task_id ? "stl-item--active" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                onClick={() => {
+                  onSelect(task.task_id);
+                }}
+                title={[
+                  task.task_id,
+                  `${t("taskList.fieldPath")}: ${task.image_dir}`,
+                  `${t("taskList.fieldOcr")}: ${task.ocr_model || "—"}`,
+                  `${t("taskList.fieldLlm")}: ${task.llm_model || t("taskList.llmDisabled")}`,
+                  `${t("taskList.fieldPii")}: ${piiLabel}`,
+                ].join("\n")}
               >
-                {t(`status.${task.status}`)}
-              </span>
-              <span className="stl-item-time">
-                {shortTime(task.created_at)}
-              </span>
-            </button>
-          ))}
+                <span className="stl-item-row stl-item-row--head">
+                  <span
+                    className={`stl-dot ${statusModifier(task.status)}`}
+                  />
+                  <span className="stl-item-id">{shortId(task.task_id)}</span>
+                  <span
+                    className={`stl-item-status ${statusModifier(task.status)}`}
+                  >
+                    {t(`status.${task.status}`)}
+                  </span>
+                  <span className="stl-item-time">
+                    {shortTime(task.created_at)}
+                  </span>
+                </span>
+                <span className="stl-item-row stl-item-meta">
+                  <span className="stl-meta-item stl-meta-path">
+                    <span className="stl-meta-label">
+                      {t("taskList.fieldPath")}
+                    </span>
+                    <span className="stl-meta-value">
+                      {shortPath(task.image_dir)}
+                    </span>
+                  </span>
+                </span>
+                <span className="stl-item-row stl-item-meta">
+                  <span className="stl-meta-item">
+                    <span className="stl-meta-label">
+                      {t("taskList.fieldOcr")}
+                    </span>
+                    <span className="stl-meta-value">{ocrLabel}</span>
+                  </span>
+                  <span className="stl-meta-item">
+                    <span className="stl-meta-label">
+                      {t("taskList.fieldLlm")}
+                    </span>
+                    <span className="stl-meta-value">{llmLabel}</span>
+                  </span>
+                  <span
+                    className={[
+                      "stl-meta-item",
+                      task.pii_enable
+                        ? "stl-meta-pii--on"
+                        : "stl-meta-pii--off",
+                    ].join(" ")}
+                  >
+                    <span className="stl-meta-label">
+                      {t("taskList.fieldPii")}
+                    </span>
+                    <span className="stl-meta-value">{piiLabel}</span>
+                  </span>
+                </span>
+              </button>
+            );
+          })}
 
           {loading && <div className="stl-loading">{t("common.loading")}</div>}
 

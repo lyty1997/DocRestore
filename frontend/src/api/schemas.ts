@@ -49,7 +49,11 @@ export const TaskResultsResponseSchema = z.object({
 });
 export type TaskResultsResponse = z.infer<typeof TaskResultsResponseSchema>;
 
-/** 任务列表项 */
+/** 任务列表项
+ *
+ * pii_enable / ocr_model / llm_model 给侧边栏卡片直接展示用，
+ * 后端从 tasks.llm/ocr/pii JSON 快照展开。带默认值兼容老后端。
+ */
 export const TaskListItemSchema = z.object({
   task_id: z.string(),
   status: z.string(),
@@ -58,6 +62,9 @@ export const TaskListItemSchema = z.object({
   error: z.string().nullable().optional(),
   created_at: z.string(),
   result_count: z.number(),
+  pii_enable: z.boolean().default(false),
+  ocr_model: z.string().default(""),
+  llm_model: z.string().default(""),
 });
 export type TaskListItem = z.infer<typeof TaskListItemSchema>;
 

@@ -97,7 +97,8 @@ export function TaskDetail({
     setTaskError(undefined);
     try {
       const resp = await getTask(taskId);
-      /* getTask 返回 TaskResponse，手动构造 TaskListItem 兼容字段 */
+      /* getTask 返回 TaskResponse，手动构造 TaskListItem 兼容字段。
+         pii_enable / ocr_model / llm_model 在该入口不可得，置默认占位即可。 */
       setTask({
         task_id: resp.task_id,
         status: resp.status,
@@ -106,6 +107,9 @@ export function TaskDetail({
         error: resp.error ?? undefined,
         created_at: "",
         result_count: 0,
+        pii_enable: false,
+        ocr_model: "",
+        llm_model: "",
       });
     } catch {
       setTaskError(t("taskDetail.loadError"));

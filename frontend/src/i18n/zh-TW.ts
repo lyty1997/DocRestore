@@ -48,6 +48,13 @@ export const zhTW: Record<TranslationKey, string> = {
   "taskList.title": "任務列表",
   "taskList.empty": "暫無任務",
   "taskList.loadMore": "載入更多",
+  "taskList.fieldPath": "路徑",
+  "taskList.fieldOcr": "OCR",
+  "taskList.fieldLlm": "LLM",
+  "taskList.fieldPii": "脫敏",
+  "taskList.llmDisabled": "未啟用",
+  "taskList.piiOn": "已開",
+  "taskList.piiOff": "已關",
 
   // ── 任務表單 ──
   "taskForm.sourceLabel": "圖片來源",

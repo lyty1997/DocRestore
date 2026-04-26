@@ -49,6 +49,13 @@ export const en: Record<TranslationKey, string> = {
   "taskList.title": "Tasks",
   "taskList.empty": "No tasks yet",
   "taskList.loadMore": "Load More",
+  "taskList.fieldPath": "Path",
+  "taskList.fieldOcr": "OCR",
+  "taskList.fieldLlm": "LLM",
+  "taskList.fieldPii": "PII",
+  "taskList.llmDisabled": "Disabled",
+  "taskList.piiOn": "On",
+  "taskList.piiOff": "Off",
 
   // ── Task form ──
   "taskForm.sourceLabel": "Image Source",

@@ -233,10 +233,10 @@ body {
 
 .stl-item {
   display: flex;
-  align-items: center;
-  gap: 0.4rem;
+  flex-direction: column;
+  gap: 0.2rem;
   width: 100%;
-  padding: 0.4rem 1.25rem;
+  padding: 0.45rem 1.25rem;
   background: none;
   border: none;
   color: var(--color-text-secondary);
@@ -245,6 +245,63 @@ body {
   text-align: left;
   transition: background 0.15s;
   border-left: 3px solid transparent;
+}
+
+.stl-item-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+}
+
+.stl-item-meta {
+  font-size: 0.65rem;
+  color: var(--color-text-secondary);
+  opacity: 0.85;
+  padding-left: calc(6px + 0.4rem); /* 与状态点对齐 */
+  flex-wrap: wrap;
+  row-gap: 0.15rem;
+}
+
+.stl-meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  flex-shrink: 0;
+  max-width: 100%;
+}
+
+.stl-meta-path {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+.stl-meta-label {
+  font-size: 0.6rem;
+  color: var(--color-text-secondary);
+  opacity: 0.6;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.stl-meta-value {
+  font-family: monospace;
+  font-size: 0.65rem;
+  color: var(--color-text);
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.stl-meta-pii--on .stl-meta-value {
+  color: var(--color-success);
+  font-weight: 600;
+}
+
+.stl-meta-pii--off .stl-meta-value {
+  opacity: 0.5;
 }
 
 .stl-item:hover {

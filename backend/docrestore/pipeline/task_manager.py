@@ -415,6 +415,9 @@ class TaskManager:
                 error=t.error,
                 created_at=t.created_at.isoformat(),
                 result_count=len(t.results),
+                pii_enable=t.pii.enable if t.pii is not None else False,
+                ocr_model=t.ocr.model if t.ocr is not None else "",
+                llm_model=t.llm.model if t.llm is not None else "",
             )
             for t in all_tasks[start : start + page_size]
         ]

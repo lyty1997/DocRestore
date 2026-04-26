@@ -44,6 +44,13 @@ export const zhCN = {
   "taskList.title": "任务列表",
   "taskList.empty": "暂无任务",
   "taskList.loadMore": "加载更多",
+  "taskList.fieldPath": "路径",
+  "taskList.fieldOcr": "OCR",
+  "taskList.fieldLlm": "LLM",
+  "taskList.fieldPii": "脱敏",
+  "taskList.llmDisabled": "未启用",
+  "taskList.piiOn": "已开",
+  "taskList.piiOff": "已关",
 
   // ── 任务表单 ──
   "taskForm.sourceLabel": "图片来源",

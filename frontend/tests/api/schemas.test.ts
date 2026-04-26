@@ -128,6 +128,9 @@ describe("TaskListResponseSchema", () => {
           error: null,
           created_at: "2026-01-01",
           result_count: 3,
+          pii_enable: true,
+          ocr_model: "paddle-ocr/ppocr-v4",
+          llm_model: "openai/gpt-4o",
         },
       ],
       total: 1,
@@ -135,6 +138,30 @@ describe("TaskListResponseSchema", () => {
       page_size: 20,
     });
     expect(r.tasks[0]?.result_count).toBe(3);
+    expect(r.tasks[0]?.pii_enable).toBe(true);
+    expect(r.tasks[0]?.ocr_model).toBe("paddle-ocr/ppocr-v4");
+    expect(r.tasks[0]?.llm_model).toBe("openai/gpt-4o");
+  });
+
+  it("缺省 pii_enable / ocr_model / llm_model 时回落到默认值（兼容老后端）", () => {
+    const r = TaskListResponseSchema.parse({
+      tasks: [
+        {
+          task_id: "legacy",
+          status: "completed",
+          image_dir: "/i",
+          output_dir: "/o",
+          created_at: "2026-01-01",
+          result_count: 0,
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+    expect(r.tasks[0]?.pii_enable).toBe(false);
+    expect(r.tasks[0]?.ocr_model).toBe("");
+    expect(r.tasks[0]?.llm_model).toBe("");
   });
 });
 
