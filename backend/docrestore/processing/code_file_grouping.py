@@ -98,12 +98,169 @@ def group_into_files(page_columns: list[PageColumn]) -> list[SourceFile]:
             [pc], extra_flags=["code.grouping.no_filename"],
         ))
 
-    # 4. path 去重：决策 #3 拆出来的多个 sub_group 可能 canonical_path 相同
+    # 4. 同 dir 下 filename 极相似（OCR 字符噪声 / 截断）→ 小组并入大组
+    files = _merge_near_duplicate_filenames(files)
+
+    # 5. path 去重：决策 #3 拆出来的多个 sub_group 可能 canonical_path 相同
     # （都是 status.h），加 :col<i> 后缀避免 AGE-47 写文件时覆盖
     _disambiguate_duplicate_paths(files)
 
     files.sort(key=lambda f: f.path)
     return files
+
+
+#: 小组并入大组时，小组 page 数占两组之和的最大比例。超过此比例视为
+#: "两份真实不同的文件"，不合并。0.1 = 10% —— 经验值，DSC06873 typo
+#: 案例里 typo 组占 1/(1+255)=0.39%，远低于阈值。
+_NEAR_DUP_MAX_RATIO = 0.10
+
+#: filename 编辑距离阈值（≤ 视为同一份文件）。OCR 单字符多/少识/
+#: 误识在阈值内，全新文件名一般差距 > 2。
+_NEAR_DUP_MAX_EDIT_DISTANCE = 2
+
+
+def _merge_near_duplicate_filenames(  # noqa: C901 — 同步保护多条件 + 合并分支
+    files: list[SourceFile],
+) -> list[SourceFile]:
+    """同 dir 下 filename 仅差 1-2 字符（OCR 噪声）或一方是另一方后缀
+    （前缀截断）→ 小组并入大组（保留大组的 canonical 名称）。
+
+    保护：
+      - 必须同扩展名（``.cc`` 与 ``.h`` 永不合）
+      - 必须 dir 兼容（``_compact_dir`` 等价或互为后缀）
+      - 小组占比 ≤ ``_NEAR_DUP_MAX_RATIO``，否则视为真实独立文件
+    """
+    if len(files) < 2:
+        return files
+
+    # 按 (canonical_dir_compact, ext) 分桶：同桶内才尝试合并
+    buckets: dict[tuple[str, str], list[int]] = {}
+    for i, src in enumerate(files):
+        ext = src.filename.rsplit(".", 1)[-1].lower() if "." in src.filename else ""
+        dir_compact = (
+            src.path.rsplit("/", 1)[0].replace("/", "")
+            if "/" in src.path else ""
+        )
+        buckets.setdefault((dir_compact, ext), []).append(i)
+
+    merged_into: dict[int, int] = {}  # small_idx -> big_idx
+    for indices in buckets.values():
+        if len(indices) < 2:
+            continue
+        # 大组优先（page 数多）
+        sorted_idx = sorted(indices, key=lambda i: -len(files[i].pages))
+        for k, big_idx in enumerate(sorted_idx):
+            big = files[big_idx]
+            if big_idx in merged_into:
+                continue
+            for small_idx in sorted_idx[k + 1:]:
+                if small_idx in merged_into:
+                    continue
+                small = files[small_idx]
+                if not _is_near_duplicate(big, small):
+                    continue
+                ratio = len(small.pages) / max(
+                    1, len(big.pages) + len(small.pages),
+                )
+                if ratio > _NEAR_DUP_MAX_RATIO:
+                    continue
+                merged_into[small_idx] = big_idx
+
+    if not merged_into:
+        return files
+
+    # 把 merged-in 的 pages 加到 big，重新构建 SourceFile
+    for small_idx, big_idx in merged_into.items():
+        big = files[big_idx]
+        small = files[small_idx]
+        big.pages.extend(small.pages)
+        if "code.grouping.merged_near_duplicate" not in big.flags:
+            big.flags.append("code.grouping.merged_near_duplicate")
+        logger.debug(
+            "near-dup merge: %r ← %r (%d pages)",
+            big.filename, small.filename, len(small.pages),
+        )
+
+    # 重建合并后的 SourceFile（重新合 text、行号 gap、flags）
+    rebuilt: list[SourceFile] = []
+    for i, src in enumerate(files):
+        if i in merged_into:
+            continue
+        if any(small_big[1] == i for small_big in merged_into.items()):
+            # 大组：用最新 pages 重建
+            rebuilt.append(_rebuild_source_file(src))
+        else:
+            rebuilt.append(src)
+    return rebuilt
+
+
+def _is_near_duplicate(big: SourceFile, small: SourceFile) -> bool:
+    """两个 SourceFile 是否近重复：filename 编辑距离 ≤ 2 或一方是另一方后缀。"""
+    big_name = big.filename.lower()
+    small_name = small.filename.lower()
+    if big_name == small_name:
+        return True
+    # suffix 关系：``_decode_accelerator.cc`` 是 ``openmax_video_decode_
+    # accelerator.cc`` 的真后缀（小组的 stem 长度 < 大组的 stem 长度）
+    if (
+        len(small_name) < len(big_name)
+        and big_name.endswith(small_name)
+    ):
+        return True
+    # 编辑距离 ≤ 2：DSC06873 ``acceleratorr.cc`` vs ``accelerator.cc``
+    if abs(len(big_name) - len(small_name)) <= _NEAR_DUP_MAX_EDIT_DISTANCE:
+        return _edit_distance_within(
+            big_name, small_name, _NEAR_DUP_MAX_EDIT_DISTANCE,
+        )
+    return False
+
+
+def _edit_distance_within(a: str, b: str, threshold: int) -> bool:
+    """Levenshtein 距离是否 ≤ threshold（早停优化）。"""
+    if abs(len(a) - len(b)) > threshold:
+        return False
+    if len(a) > len(b):
+        a, b = b, a
+    prev = list(range(len(a) + 1))
+    for j, cb in enumerate(b, 1):
+        curr = [j] + [0] * len(a)
+        row_min = curr[0]
+        for i, ca in enumerate(a, 1):
+            curr[i] = (
+                prev[i - 1] if ca == cb
+                else 1 + min(prev[i - 1], prev[i], curr[i - 1])
+            )
+            row_min = min(row_min, curr[i])
+        if row_min > threshold:
+            return False
+        prev = curr
+    return prev[-1] <= threshold
+
+
+def _rebuild_source_file(merged: SourceFile) -> SourceFile:
+    """合并后用 merged.pages 重新计算 merged_text / line_no_range / flags。"""
+    pages = merged.pages
+    merged_text, line_no_range, gap_flags = _merge_columns_by_line_no(
+        pages, language=merged.language,
+    )
+    flags = [f for f in merged.flags if not f.startswith(
+        ("code.grouping.missing_line_nos=", "code.grouping.large_gap_collapsed"),
+    )]
+    flags.extend(gap_flags)
+    sorted_pages = sorted(
+        pages, key=lambda pc: _column_line_no_start(pc.column),
+    )
+    line_count = merged_text.count("\n") + 1 if merged_text else 0
+    return SourceFile(
+        path=merged.path,
+        filename=merged.filename,
+        language=merged.language,
+        pages=sorted_pages,
+        merged_text=merged_text,
+        line_count=line_count,
+        line_no_range=line_no_range,
+        flags=flags,
+    )
 
 
 def _disambiguate_duplicate_paths(files: list[SourceFile]) -> None:
@@ -254,8 +411,10 @@ def _build_source_file(
             language = pc.meta.language
             break
 
-    # 按行号合并代码
-    merged_text, line_no_range, gap_flags = _merge_columns_by_line_no(group)
+    # 按行号合并代码（language 用于决定大 gap 占位注释前缀）
+    merged_text, line_no_range, gap_flags = _merge_columns_by_line_no(
+        group, language=language,
+    )
 
     flags: list[str] = list(extra_flags or [])
     flags.extend(gap_flags)
@@ -291,10 +450,38 @@ def _column_line_no_start(column: CodeColumn) -> int:
     return min(line.line_no for line in column.lines)
 
 
+#: 单次行号 gap 超过此阈值 → 不再批量塞空行，改插单行注释占位。
+#: DSC06953/07002 错归案例里，错归 + 行号大跳跃产生过 587 个连续空行
+#: 把文件膨胀到肉眼不可读。50 行是经验值：50 行内的 gap 多是 OCR 漏识
+#: 或代码折叠，仍当作空白；超过就明显是结构性错误（错归 / 漏页），
+#: 用注释明确标注，避免污染。
+_GAP_FILL_THRESHOLD = 50
+
+#: 大 gap 注释占位的语言适配。除"#"系语言外，统一用 // —— C/C++/Java/
+#: JS/TS/Rust/Go/Swift/Kotlin/Scala/Dart/Groovy 等大多数曲线语言都接受。
+#: 未识别语言（language=None）走 //。
+_HASH_COMMENT_LANGUAGES: frozenset[str] = frozenset({
+    "python", "shell", "ruby", "yaml", "toml", "perl", "r",
+    "makefile", "dockerfile", "gn",
+})
+
+
+def _format_gap_marker(missing_count: int, language: str | None) -> str:
+    """大 gap 占位注释，按语言选 # 或 // 前缀"""
+    prefix = "# " if language in _HASH_COMMENT_LANGUAGES else "// "
+    return f"{prefix}... ({missing_count} lines missing, see flags) ..."
+
+
 def _merge_columns_by_line_no(
     group: list[PageColumn],
+    *,
+    language: str | None = None,
 ) -> tuple[str, tuple[int, int], list[str]]:
-    """按 line_no 合并多个 column，重复 line 取首次出现"""
+    """按 line_no 合并多个 column，重复 line 取首次出现。
+
+    行号 gap 处理：小 gap（≤ ``_GAP_FILL_THRESHOLD``）填空行；大 gap
+    改用单行注释占位避免空白行雪崩。``language`` 控制注释前缀。
+    """
     by_line_no: dict[int, str] = {}  # line_no -> 渲染后行（含缩进）
     for pc in group:
         for line in pc.column.lines:
@@ -318,11 +505,19 @@ def _merge_columns_by_line_no(
 
     parts: list[str] = []
     prev_no = lo - 1
+    saw_large_gap = False
     for no in sorted_nos:
         gap = no - prev_no - 1
         if gap > 0:
-            # 占位空行（不强插内容，让 LLM 阶段查原图补）
-            parts.extend([""] * gap)
+            if gap > _GAP_FILL_THRESHOLD:
+                # 大 gap：单行占位注释，避免肉眼不可读
+                parts.append(_format_gap_marker(gap, language))
+                saw_large_gap = True
+            else:
+                # 小 gap：保持空行兼容已有人工补全工作流
+                parts.extend([""] * gap)
         parts.append(by_line_no[no])
         prev_no = no
+    if saw_large_gap:
+        flags.append("code.grouping.large_gap_collapsed")
     return "\n".join(parts), (lo, hi), flags

@@ -110,6 +110,22 @@ class TestSingleColumn:
         assert m.path is None
         assert m.language == "cpp"
         assert "code.breadcrumb_missing" in m.flags
+        # 审计信号：本栏 filename 来自 tab 兜底
+        assert "code.tab_only_fallback" in m.flags
+
+    def test_breadcrumb_path_missing_flag_only_when_breadcrumb_wins(
+        self,
+    ) -> None:
+        """breadcrumb 解出 filename 但缺 path → breadcrumb_path_missing 才标。
+
+        反例：breadcrumb 啥都没解出、tab 兜底拿 filename 而 path 为 None
+        时不应错标 breadcrumb_path_missing（那是 breadcrumb 自己的问题）。
+        """
+        above = [_line((100, 100, 600, 130), "C+ foo.cc 4×")]
+        layout = _make_layout_with_above(above, anchor_count=1)
+        m = extract_ide_metas(layout)[0]
+        # tab 兜底场景不应出现 breadcrumb_path_missing
+        assert "code.breadcrumb_path_missing" not in m.flags
 
     def test_no_tab_no_breadcrumb(self) -> None:
         """两者都缺 → tab_unreadable flag"""
@@ -137,6 +153,143 @@ class TestSingleColumn:
         m = extract_ide_metas(layout)[0]
         # breadcrumb 末段含 `_ac` 没扩展名 → fallback 到 tab
         assert m.filename == "openmax_video_decode_accelerator.cc"
+
+    def test_breadcrumb_wins_over_tab_with_different_extension(
+        self,
+    ) -> None:
+        """回归 DSC06953/07002：IDE 多 tab + breadcrumb 指向 .h，
+        tab bar 同时显示 .cc 和 .h（split editor 共享 tab bar）。
+        breadcrumb 是当前打开的源文件，扩展名不能被 tab 翻覆。
+        """
+        above = [
+            # breadcrumb：当前栏打开的是 .h
+            _line(
+                (100, 100, 1500, 130),
+                "media >gpu >openmax > C openmax_video_decode_accelerator.h",
+            ),
+            # tab bar：同时显示多个 tab，包含别的扩展名
+            _line(
+                (100, 60, 800, 90),
+                "C+ gles2_dmabuf_to_egl_image_translator.cc 2×",
+            ),
+            _line(
+                (820, 60, 1500, 90),
+                "C+ openmax_video_decode_accelerator.cc 4×",
+            ),
+        ]
+        layout = _make_layout_with_above(above, anchor_count=1)
+        m = extract_ide_metas(layout)[0]
+        # 必须取 breadcrumb 的 .h，不能被 tab 的 .cc 覆盖
+        assert m.filename == "openmax_video_decode_accelerator.h"
+        assert m.path == (
+            "media/gpu/openmax/openmax_video_decode_accelerator.h"
+        )
+
+    def test_breadcrumb_wins_over_tab_completely_different_file(
+        self,
+    ) -> None:
+        """breadcrumb 给的文件名和 tab 完全不同 → 仍以 breadcrumb 为准。
+
+        IDE 顶部 tab bar 横跨整个窗口，多 tab 时 OCR 容易把 inactive tab
+        当 active 命中（例如未保存修改数 ``cc 2`` 被识为 ``cc 2×``）。
+        """
+        above = [
+            _line(
+                (100, 100, 1500, 130),
+                "media >gpu >openmax > foo.h",
+            ),
+            _line((100, 60, 800, 90), "C+ bar.cc 4×"),
+        ]
+        layout = _make_layout_with_above(above, anchor_count=1)
+        m = extract_ide_metas(layout)[0]
+        assert m.filename == "foo.h"
+        assert m.path == "media/gpu/openmax/foo.h"
+
+    def test_breadcrumb_fragments_stitched_with_overlap_dedup(self) -> None:
+        """回归 DSC06953：breadcrumb OCR 拆成多 bbox + 边界字符共享。
+
+        ``openmax_`` (x=611-769) + ``_video_decode_accelerator.cc`` (x=754-
+        1216) 在 x 重叠区共享 ``_``。stitch 后应去重，得到完整 filename，
+        不应因截断错归到 tab 里别的 .cc 文件。
+        """
+        above = [
+            # 同 y-band 的 breadcrumb 片段
+            _line((164, 145, 534, 191), "media >gpu >openmax"),
+            _line((569, 146, 607, 177), "C+"),
+            _line((611, 147, 769, 182), "openmax_"),
+            _line((754, 135, 1216, 180), "_video_decode_accelerator.cc"),
+            # tab bar：同时显示多个 .cc tab，无 active 标记
+            _line(
+                (920, 57, 1634, 107),
+                "C+gles2_dmabuf_to_egl_image_translator.cc 2",
+            ),
+            _line(
+                (161, 66, 826, 117),
+                "C+ openmax_video_decode_accelerator.cc 4",
+            ),
+        ]
+        layout = _make_layout_with_above(above, anchor_count=1)
+        m = extract_ide_metas(layout)[0]
+        assert m.filename == "openmax_video_decode_accelerator.cc"
+        assert m.path == (
+            "media/gpu/openmax/openmax_video_decode_accelerator.cc"
+        )
+
+    def test_breadcrumb_truncated_filename_completed_via_tab(self) -> None:
+        """回归 DSC07050：stitched breadcrumb 含 ``_decode_accelerator.cc``
+        （前缀被覆盖丢失），用同栏 tab 候选 suffix-match 补全完整名。
+        """
+        above = [
+            # breadcrumb 解出来 filename 是 ``_decode_accelerator.cc`` 截断版
+            _line(
+                (100, 100, 1500, 130),
+                "media > gpu > openmax > _decode_accelerator.cc",
+            ),
+            # tab bar：包含完整 openmax_video_decode_accelerator.cc，无 ×
+            _line(
+                (920, 57, 1634, 107),
+                "C+gles2_dmabuf_to_egl_image_translator.cc 2",
+            ),
+            _line(
+                (161, 66, 826, 117),
+                "C+ openmax_video_decode_accelerator.cc 4",
+            ),
+        ]
+        layout = _make_layout_with_above(above, anchor_count=1)
+        m = extract_ide_metas(layout)[0]
+        assert m.filename == "openmax_video_decode_accelerator.cc"
+        assert m.path == (
+            "media/gpu/openmax/openmax_video_decode_accelerator.cc"
+        )
+
+    def test_breadcrumb_path_segment_merged_with_filename(self) -> None:
+        """回归 DSC07050：OCR 漏 ``>`` 导致 dir ``openmax`` 与 filename
+        在同一段，path 应能补回 ``openmax`` 不丢失。
+        """
+        above = [_line(
+            (100, 100, 1500, 130),
+            "media > gpu > openmax C+ openmax_video_decode_accelerator.cc",
+        )]
+        layout = _make_layout_with_above(above, anchor_count=1)
+        m = extract_ide_metas(layout)[0]
+        assert m.filename == "openmax_video_decode_accelerator.cc"
+        assert m.path == (
+            "media/gpu/openmax/openmax_video_decode_accelerator.cc"
+        )
+
+    def test_icon_word_C_not_treated_as_dir(self) -> None:
+        """``C openmax.h`` 中 ``C`` 是 VSCode 图标，不能被视为 dir 段。"""
+        above = [_line(
+            (100, 100, 1200, 130),
+            "media > gpu > openmax > C openmax_video_decode_accelerator.h",
+        )]
+        layout = _make_layout_with_above(above, anchor_count=1)
+        m = extract_ide_metas(layout)[0]
+        assert m.filename == "openmax_video_decode_accelerator.h"
+        # path 不应混入额外的 ``C`` 段
+        assert m.path == (
+            "media/gpu/openmax/openmax_video_decode_accelerator.h"
+        )
 
     def test_extension_to_language_coverage(self) -> None:
         """常见后缀 → 语言映射"""

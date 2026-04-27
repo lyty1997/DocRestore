@@ -138,6 +138,65 @@ class TestBasicGrouping:
         assert any("missing_line_nos" in fl for fl in f.flags)
         # 中间 3 个空行占位
         assert f.merged_text == "L1\n\n\n\nL5"
+        # 小 gap 不触发 large_gap_collapsed flag
+        assert all(
+            "large_gap_collapsed" not in fl for fl in f.flags
+        )
+
+    def test_large_gap_uses_comment_marker(self) -> None:
+        """单次 gap > 50 → 不再批量塞空行，改单行注释占位
+
+        回归 DSC06953/07002 错归案例：行号从 1051 直接跳到 1639 时，
+        587 个连续空行把文件膨胀到肉眼不可读。新策略改为单行注释。
+        """
+        m = _meta("foo.cc", language="cpp")
+        pc = _pc("DSC1", 0, m, _column(
+            (1, "L1", 0), (1000, "L1000", 0),
+        ))
+        f = group_into_files([pc])[0]
+        # 总行数 = 1（L1）+ 1（注释占位）+ 1（L1000）= 3
+        assert f.line_count == 3
+        assert f.merged_text == (
+            "L1\n// ... (998 lines missing, see flags) ...\nL1000"
+        )
+        assert any("missing_line_nos" in fl for fl in f.flags)
+        assert "code.grouping.large_gap_collapsed" in f.flags
+
+    def test_large_gap_python_uses_hash_prefix(self) -> None:
+        """python/shell 等 # 注释语言 → 占位用 # 前缀"""
+        m = _meta("foo.py", language="python")
+        pc = _pc("DSC1", 0, m, _column(
+            (1, "import os", 0), (200, "main()", 0),
+        ))
+        f = group_into_files([pc])[0]
+        assert f.merged_text == (
+            "import os\n# ... (198 lines missing, see flags) ...\nmain()"
+        )
+
+    def test_mixed_gaps_small_keeps_blank_large_collapses(self) -> None:
+        """同文件混合：小 gap 仍空行（兼容人工补全工作流），大 gap 注释"""
+        m = _meta("foo.cc", language="cpp")
+        pc = _pc("DSC1", 0, m, _column(
+            (1, "L1", 0),
+            (4, "L4", 0),       # 小 gap (3) → 空行
+            (200, "L200", 0),   # 大 gap (>50) → 注释
+            (201, "L201", 0),   # 紧邻
+        ))
+        f = group_into_files([pc])[0]
+        text = f.merged_text
+        # 1, 2 空, 3 空, 4 → "L1\n\n\nL4"
+        assert text.startswith("L1\n\n\nL4\n")
+        assert "// ... (195 lines missing" in text
+        assert text.endswith("L200\nL201")
+        assert "code.grouping.large_gap_collapsed" in f.flags
+        # 单 gap 等于阈值（50）时仍走空行（边界条件）
+        m2 = _meta("bar.cc", language="cpp")
+        pc2 = _pc("DSC2", 0, m2, _column(
+            (1, "X", 0), (51, "Y", 0),  # gap=49，临界以下
+        ))
+        f2 = group_into_files([pc2])[0]
+        assert "code.grouping.large_gap_collapsed" not in f2.flags
+        assert f2.merged_text.count("\n") == 50  # 49 空行 + 2 实行
 
 
 class TestSamenameDifferentDir:
@@ -187,6 +246,91 @@ class TestSamenameDifferentDir:
         # canonical filename：长度+频次最大；3 个都是 8 字符，频次各 1，取首
         assert files[0].filename in {"BUILD.gn", "BUiLD.gn", "BUlLD.gn"}
         assert files[0].line_no_range == (1, 3)
+
+
+class TestNearDuplicateMerge:
+    """同 dir 下 filename 极相似（OCR 字符噪声 / 截断）的二次合并"""
+
+    def test_typo_one_extra_char_merged(self) -> None:
+        """回归 DSC06873：``acceleratorr.cc`` (1 page) 应并入
+        ``accelerator.cc`` (大量 pages) —— 编辑距离 1。"""
+        big_pages = [
+            _pc(f"DSC{i}", 0,
+                _meta("openmax_video_decode_accelerator.cc",
+                      "media/gpu/openmax/openmax_video_decode_accelerator.cc"),
+                _column((i, f"L{i}", 0)))
+            for i in range(1, 21)  # 20 pages
+        ]
+        small_page = _pc(
+            "DSC100", 0,
+            _meta("openmax_video_decode_acceleratorr.cc",
+                  "media/gpu/openmax/openmax_video_decode_acceleratorr.cc"),
+            _column((100, "TYPO_PAGE", 0)),
+        )
+        files = group_into_files([*big_pages, small_page])
+        assert len(files) == 1, [f.filename for f in files]
+        assert files[0].filename == "openmax_video_decode_accelerator.cc"
+        # typo page 的内容必须出现在合并后的文本里
+        assert "TYPO_PAGE" in files[0].merged_text
+        assert "code.grouping.merged_near_duplicate" in files[0].flags
+
+    def test_truncated_filename_merged_via_suffix(self) -> None:
+        """``_decode_accelerator.cc`` (1 page) 是 ``openmax_video_decode_
+        accelerator.cc`` 的真后缀 → 并入大组。"""
+        big_pages = [
+            _pc(f"DSC{i}", 0,
+                _meta("openmax_video_decode_accelerator.cc",
+                      "media/gpu/openmax/openmax_video_decode_accelerator.cc"),
+                _column((i, f"L{i}", 0)))
+            for i in range(1, 21)
+        ]
+        small = _pc(
+            "DSC99", 0,
+            _meta("_decode_accelerator.cc",
+                  "media/gpu/openmax/_decode_accelerator.cc"),
+            _column((99, "TRUNC_PAGE", 0)),
+        )
+        files = group_into_files([*big_pages, small])
+        assert len(files) == 1
+        assert files[0].filename == "openmax_video_decode_accelerator.cc"
+        assert "TRUNC_PAGE" in files[0].merged_text
+
+    def test_distinct_files_not_merged_when_balanced(self) -> None:
+        """两组规模相当（不满足 ratio 保护）→ 即使名字相似也不合并。"""
+        a_pages = [
+            _pc(f"DSCa{i}", 0,
+                _meta("foo.cc", "lib/foo.cc"),
+                _column((i, f"A{i}", 0)))
+            for i in range(1, 5)  # 4 pages
+        ]
+        b_pages = [
+            _pc(f"DSCb{i}", 0,
+                _meta("fop.cc", "lib/fop.cc"),  # 与 foo.cc 编辑距离 1
+                _column((i + 100, f"B{i}", 0)))
+            for i in range(1, 5)  # 4 pages
+        ]
+        files = group_into_files([*a_pages, *b_pages])
+        # 两组规模相同（4:4），不应合并
+        assert len(files) == 2
+        assert {f.filename for f in files} == {"foo.cc", "fop.cc"}
+
+    def test_different_extension_never_merged(self) -> None:
+        """``.h`` 和 ``.cc`` 永不合并，即使 stem 几乎相同。"""
+        cc_pages = [
+            _pc(f"DSC{i}", 0,
+                _meta("foo.cc", "lib/foo.cc"),
+                _column((i, f"L{i}", 0)))
+            for i in range(1, 21)
+        ]
+        h_page = _pc(
+            "DSC100", 0,
+            _meta("foo.h", "lib/foo.h"),
+            _column((100, "HEADER", 0)),
+        )
+        files = group_into_files([*cc_pages, h_page])
+        assert len(files) == 2
+        names = {f.filename for f in files}
+        assert names == {"foo.cc", "foo.h"}
 
 
 class TestNoFilename:

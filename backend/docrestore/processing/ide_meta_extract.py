@@ -189,26 +189,72 @@ def _reconcile_within_image(metas: list[IDEMeta]) -> None:
             m.flags.append("code.path_segments_recovered")
 
 
-def _extract_for_column(idx: int, lines: list[TextLine]) -> IDEMeta:
-    """从一栏的 above_code line 中解析 tab/breadcrumb"""
-    breadcrumb_lines, tab_lines = _split_lines_by_kind(lines)
+def _extract_for_column(idx: int, lines: list[TextLine]) -> IDEMeta:  # noqa: C901 — breadcrumb 唯一真相多分支
+    """从一栏的 above_code line 中解析 tab/breadcrumb。
 
-    # 1. 优先从 breadcrumb 拿 (path, filename)
-    path, filename = _first_breadcrumb_meta(breadcrumb_lines)
+    **真相约束**（用户决策 2026-04-26）：含 ``>`` 的 breadcrumb 行是
+    IDE 的"当前打开文件路径"显示，必然是该栏当前可见的源文件——必须
+    作为唯一真相。tab bar 文字会跨栏 leak（VSCode 顶部 tab 不分屏）、
+    OCR 又常把多 tab 误识为 active，所以 tab 只在 breadcrumb 完全
+    缺失时才作为兜底。
 
-    # 2. tab fallback：补全或纠正 filename + path
-    tab_filename = _pick_best_tab_filename(tab_lines)
-    filename, path = _reconcile_with_tab(filename, path, tab_filename)
+    **breadcrumb 片段拼接**（DSC06953/07050 回归修复）：
+    OCR 经常把一行 breadcrumb 拆成多个 bbox（``openmax_`` + ``_video_
+    decode_accelerator.cc`` 等），按 x 顺序拼接 + 边界字符去重后再走
+    单行 ``_parse_breadcrumb``，避免单段 fragment 被误识为 tab。
 
-    # 3. 语言 hint
+    **截断补全**：拼接后若 filename 仍以 ``_`` 开头或与某 tab 候选
+    suffix-match → 用 tab 完整版（DSC07050 ``_decode_accelerator.cc``
+    场景）。但若 filename 已是合法独立名，禁止 tab override（防 .h/.cc
+    误覆盖）。
+    """
+    band = _detect_breadcrumb_band(lines)
+    breadcrumb_lines, tab_lines = _split_lines_by_kind(lines, band=band)
+
+    # 1. 把 breadcrumb 行按 x 拼接成单行（处理 OCR 片段化），再常规解析
+    stitched = _stitch_breadcrumb_fragments(breadcrumb_lines)
+    path, filename = _parse_breadcrumb(stitched) if stitched else (None, None)
+    came_from_tab = False
+
+    # 2. 截断/被前缀吞掉的 filename（``_decode_accelerator.cc``）→ 用
+    # 同栏 tab 候选 suffix-match 补全（决策 2026-04-27）
+    if filename and _looks_truncated_filename(filename):
+        completed = _complete_via_tab_suffix(filename, tab_lines)
+        if completed:
+            if path and "/" in path:
+                path = path.rsplit("/", 1)[0] + "/" + completed
+            elif path:
+                path = completed
+            filename = completed
+
+    # 3. tab 仅在 breadcrumb 没解出 filename 时兜底；不允许 override
+    if not filename:
+        tab_filename = _pick_best_tab_filename(
+            tab_lines, hint_lines=breadcrumb_lines,
+        )
+        if tab_filename:
+            filename = tab_filename
+            came_from_tab = True
+
+    # 4. 语言 hint
     language = _filename_to_language(filename) if filename else None
 
-    # 4. quality flags
+    # 5. quality flags
     flags: list[str] = []
     if not filename:
         flags.append("code.tab_unreadable")
     if not breadcrumb_lines:
         flags.append("code.breadcrumb_missing")
+    elif filename and not path and not came_from_tab:
+        # breadcrumb 解出了 filename 但没解出 path（多见于 OCR 把分隔符
+        # 读丢只剩单段）。标 flag 让上层 _reconcile_within_image 借同图
+        # 其他栏的 dir 补全。
+        flags.append("code.breadcrumb_path_missing")
+    if came_from_tab:
+        # 审计信号：标识本栏 filename 来自 tab 兜底而非 breadcrumb，
+        # 准确度低于 breadcrumb-truth 路径。下游归类可据此降低权重，
+        # 或运维通过 quality_report 统计 tab 兜底比例评估 OCR 质量。
+        flags.append("code.tab_only_fallback")
 
     return IDEMeta(
         column_index=idx,
@@ -223,15 +269,51 @@ def _extract_for_column(idx: int, lines: list[TextLine]) -> IDEMeta:
     )
 
 
+def _detect_breadcrumb_band(
+    lines: list[TextLine],
+) -> tuple[int, int] | None:
+    """找到 breadcrumb 行所在的 y 区间。
+
+    任一含 ``>`` 的行就是 breadcrumb 锚点，取所有锚点 y 范围的并集。
+    返回 ``(y_top, y_bottom)`` 或 ``None``（无 breadcrumb）。
+    """
+    bc_anchors = [ln for ln in lines if ">" in ln.text]
+    if not bc_anchors:
+        return None
+    y_top = min(ln.bbox[1] for ln in bc_anchors)
+    y_bot = max(ln.bbox[3] for ln in bc_anchors)
+    return y_top, y_bot
+
+
+def _line_in_band(line: TextLine, band: tuple[int, int]) -> bool:
+    """文本行是否落在 y band 内（重叠占行高 ≥ 50%）。"""
+    line_top, line_bot = line.bbox[1], line.bbox[3]
+    band_top, band_bot = band
+    overlap = max(0, min(line_bot, band_bot) - max(line_top, band_top))
+    height = max(1, line_bot - line_top)
+    return overlap / height >= 0.5
+
+
 def _split_lines_by_kind(
     lines: list[TextLine],
+    *,
+    band: tuple[int, int] | None = None,
 ) -> tuple[list[TextLine], list[TextLine]]:
-    """把 lines 拆成 (breadcrumb, tab) 两组"""
+    """把 lines 拆成 (breadcrumb, tab) 两组。
+
+    给定 ``band`` 时优先按 y 带划分：落在 band 上的视为 breadcrumb 片段
+    （包括没有 ``>`` 的截断片段，如 DSC06953 ``_video_decode_accelerator
+    .cc``）。否则退回旧规则（含 ``>`` 视为 breadcrumb）。
+    """
     breadcrumb: list[TextLine] = []
     tab: list[TextLine] = []
     for ln in lines:
         text = ln.text.strip()
         if not text:
+            continue
+        in_band = band is not None and _line_in_band(ln, band)
+        if in_band:
+            breadcrumb.append(ln)
             continue
         if text.count(">") >= 2:
             breadcrumb.append(ln)
@@ -240,43 +322,78 @@ def _split_lines_by_kind(
     return breadcrumb, tab
 
 
-def _first_breadcrumb_meta(
-    breadcrumb_lines: list[TextLine],
-) -> tuple[str | None, str | None]:
-    """从多条 breadcrumb 取第一条解析成功的 (path, filename)"""
-    for bc in breadcrumb_lines:
-        path, filename = _parse_breadcrumb(bc.text)
-        if filename:
-            return path, filename
-    return None, None
+def _stitch_breadcrumb_fragments(lines: list[TextLine]) -> str:
+    """按 x 顺序拼接 breadcrumb 片段，对 bbox 重叠的相邻片段去重首尾共享字符。
 
+    OCR 把一行连续文字拆成多个 bbox 时，常在分割点处复制字符（``openmax_``
+    + ``_video_decode_accelerator.cc`` → 共享 ``_``）。重叠区域的首尾共享
+    字符 → 去重一份。
 
-def _reconcile_with_tab(
-    filename: str | None,
-    path: str | None,
-    tab_filename: str | None,
-) -> tuple[str | None, str | None]:
-    """tab 与 breadcrumb 的 filename 对齐：
-    - breadcrumb 缺失 → 用 tab.filename
-    - breadcrumb 末段被截（开头匹配但缺扩展名）→ 用 tab 替换并修 path
+    非重叠片段之间用空格分隔；重叠片段无空格直接拼。
     """
-    if not filename and tab_filename:
-        return tab_filename, path
-    if (
-        filename
-        and tab_filename
-        and tab_filename != filename
-        and (
-            filename in tab_filename
-            or tab_filename.startswith(filename.rsplit(".", 1)[0])
-        )
-    ):
-        if path and "/" in path:
-            path = f"{path.rsplit('/', 1)[0]}/{tab_filename}"
-        elif path:
-            path = tab_filename
-        filename = tab_filename
-    return filename, path
+    if not lines:
+        return ""
+    sorted_lines = sorted(lines, key=lambda ln: ln.bbox[0])
+    out_parts: list[str] = []
+    out = ""
+    prev_x_max = -1
+    for ln in sorted_lines:
+        text = ln.text.strip()
+        if not text:
+            continue
+        x_min, x_max = ln.bbox[0], ln.bbox[2]
+        if not out:
+            out = text
+        elif x_min < prev_x_max + 5:
+            # 相邻或重叠 → 尝试边界字符去重，无空格拼接
+            text = _dedup_overlap_boundary(out, text)
+            out += text
+        else:
+            out += " " + text
+        prev_x_max = max(prev_x_max, x_max)
+        out_parts.append(text)
+    return out
+
+
+def _dedup_overlap_boundary(prev: str, curr: str) -> str:
+    """两个相邻片段共享首尾字符时去重一份。
+
+    取最长共同 ``prev[-n:] == curr[:n]`` 的 n（≤ 8 防止误伤），从 curr
+    去掉前 n 个字符。无共享时返回原 curr。
+    """
+    max_n = min(8, len(prev), len(curr))
+    for n in range(max_n, 0, -1):
+        if prev[-n:] == curr[:n]:
+            return curr[n:]
+    return curr
+
+
+def _looks_truncated_filename(filename: str) -> bool:
+    """启发式：filename 看起来被前缀截断（OCR 在 ``_`` 处一刀切的产物）。
+
+    典型：以 ``_`` 开头（``_video_decode_accelerator.cc``）。
+    """
+    return filename.startswith("_")
+
+
+def _complete_via_tab_suffix(
+    partial: str, tab_lines: list[TextLine],
+) -> str | None:
+    """用同栏 tab 候选的完整名 suffix-match 补全 partial filename。
+
+    例：partial=``_decode_accelerator.cc``，tab 候选含
+    ``openmax_video_decode_accelerator.cc`` → 后者以前者结尾 → 用后者。
+    多个 tab 候选 endswith partial 时取最长（更具体）。
+    """
+    candidates: list[str] = []
+    for ln in tab_lines:
+        for m in FILENAME_RE.finditer(ln.text):
+            cand = _strip_attached_icon(m.group(1))
+            if cand != partial and cand.endswith(partial):
+                candidates.append(cand)
+    if not candidates:
+        return None
+    return max(candidates, key=len)
 
 
 def _filename_to_language(filename: str) -> str | None:
@@ -285,7 +402,7 @@ def _filename_to_language(filename: str) -> str | None:
     return EXT_TO_LANG.get(ext)
 
 
-def _parse_breadcrumb(text: str) -> tuple[str | None, str | None]:
+def _parse_breadcrumb(text: str) -> tuple[str | None, str | None]:  # noqa: C901 — 多分隔符 + path 兜底分支
     """从一行 breadcrumb 拆出 ``(path, filename)``。
 
     例：
@@ -304,13 +421,15 @@ def _parse_breadcrumb(text: str) -> tuple[str | None, str | None]:
     # 找最后一个含文件扩展名的段
     file_idx = -1
     filename: str | None = None
+    file_match: re.Match[str] | None = None
     for i in range(len(parts) - 1, -1, -1):
         m = FILENAME_RE.search(parts[i])
         if m:
             file_idx = i
             filename = _strip_attached_icon(m.group(1))
+            file_match = m
             break
-    if file_idx < 0 or filename is None:
+    if file_idx < 0 or filename is None or file_match is None:
         return None, None
 
     # 反向收集路径段，遇到 symbol/另一个 file/非法字符就停（spike DSC06837
@@ -327,6 +446,23 @@ def _parse_breadcrumb(text: str) -> tuple[str | None, str | None]:
         if not _is_valid_path_segment(cleaned):
             break
         path_segments.insert(0, cleaned)
+
+    # 文件段同时含路径前缀（DSC07050：``openmax C+openmax_video_decode_acc
+    # elerator.cc`` —— OCR 把分隔符 `>` 漏识，dir ``openmax`` 与 filename
+    # 同段）。把文件名前的空白分词逐个验证为路径段，追加到 path_segments
+    # 末尾。注意要剔除 VSCode tab 图标 OCR 噪声（``C+`` / ``C`` 等单字符
+    # icon），否则 ``C openmax.h`` 会误产生 ``C/openmax.h``。
+    prefix_text = parts[file_idx][: file_match.start(1)]
+    for word in prefix_text.split():
+        cleaned = _clean_segment(word)
+        if (
+            cleaned
+            and not FILENAME_RE.search(cleaned)
+            and _is_valid_path_segment(cleaned)
+            and not _looks_like_icon_word(cleaned)
+        ):
+            path_segments.append(cleaned)
+
     path_segments.append(filename)
     return "/".join(path_segments), filename
 
@@ -338,6 +474,17 @@ def _clean_segment(seg: str) -> str:
 
 _VALID_PATH_SEGMENT_RE = re.compile(r"^[\w\-.]+$")
 _CAMELCASE_SYMBOL_RE = re.compile(r"^[A-Z][a-z]+[A-Z]")
+
+#: VSCode tab 图标 OCR 残留，长度短且大写为主，不是合法 dir 名。
+#: 单字符 ``C`` / ``H`` / ``J`` / ``S`` / ``T`` 也算（icon 残留）。
+_ICON_WORDS: frozenset[str] = frozenset({
+    "C", "C+", "G", "G+", "H", "J", "S", "T", "TS", "JS", "JSX", "TSX",
+})
+
+
+def _looks_like_icon_word(seg: str) -> bool:
+    """判断段是 VSCode tab 图标 OCR 残留（不是合法路径段）。"""
+    return seg in _ICON_WORDS
 
 
 def _is_valid_path_segment(seg: str) -> bool:
@@ -371,13 +518,19 @@ _WINDOW_TITLE_RE = re.compile(r"\[SSH:|-src\[|\(.*@.*?\)|@\d+\.\d+\.\d+\.\d+")
 _ACTIVE_TAB_RE = re.compile(r"\.[a-zA-Z]+\d*\s*[×x]")
 
 
-def _pick_best_tab_filename(tab_lines: list[TextLine]) -> str | None:
+def _pick_best_tab_filename(  # noqa: C901 — tab 候选筛选 + hint 增强多分支
+    tab_lines: list[TextLine],
+    *,
+    hint_lines: list[TextLine] | None = None,
+) -> str | None:
     """从多个 tab line 中挑出最可信的 filename。
 
     优先级：
       1. 排除 window title（含 SSH / -src[/IP 地址等噪声特征）
       2. 优先 active tab（VSCode 当前激活 tab 紧跟 ``×`` 关闭按钮）
-      3. 否则取 y 最小的（最顶 tab bar 行）+ 第一个匹配扩展名的
+      3. 用 breadcrumb-row hint suffix-match 消歧（DSC06953 等场景：
+         tab bar 多 tab 都无 ``×``，但 breadcrumb 有截断片段透露 active）
+      4. 否则取 y 最小的（最顶 tab bar 行）+ 第一个匹配扩展名的
     """
     if not tab_lines:
         return None
@@ -399,10 +552,32 @@ def _pick_best_tab_filename(tab_lines: list[TextLine]) -> str | None:
             if m:
                 return _strip_attached_icon(m.group(1))
 
-    # 第三阶段：所有过滤后 tab 按 y 排序
+    # 第三阶段：breadcrumb-row hint 消歧（无 active 标记时）
+    if hint_lines:
+        hint_filenames = _collect_filename_hints(hint_lines)
+        for hint in hint_filenames:
+            for ln in filtered:
+                m = FILENAME_RE.search(ln.text)
+                if m:
+                    cand = _strip_attached_icon(m.group(1))
+                    if cand == hint or cand.endswith(hint):
+                        return cand
+
+    # 第四阶段：所有过滤后 tab 按 y 排序
     filtered.sort(key=lambda ln: ln.bbox[1])
     for ln in filtered:
         m = FILENAME_RE.search(ln.text)
         if m:
             return _strip_attached_icon(m.group(1))
     return None
+
+
+def _collect_filename_hints(lines: list[TextLine]) -> list[str]:
+    """从 breadcrumb-row 片段中收集所有 FILENAME_RE 命中的候选名。"""
+    hints: list[str] = []
+    for ln in lines:
+        for m in FILENAME_RE.finditer(ln.text):
+            cand = _strip_attached_icon(m.group(1))
+            if cand and cand not in hints:
+                hints.append(cand)
+    return hints
