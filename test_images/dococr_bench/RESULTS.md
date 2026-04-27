@@ -9,6 +9,8 @@
 
 ## ⚡ 0. 你应该先看这里（2026-04-27 之后的状态）
 
+> ⚠️ **关于 `main_doc_train/` 引用**：本文件后续多处提到的 `test_images/dococr_bench/main_doc_train/` 子目录（含训练数据集、checkpoint、inference 权重、训练流程文档与半自动标注工具）体量大（~270 MB），已通过 `.gitignore` 排除，**不随仓库分发**。fresh clone 后这些路径不存在；如需 PicoDet 训练流程、v0 权重或踩坑笔记，请联系仓库维护者从内部 NAS 取。仓库内可直接复用的产物只有 `scripts/paddle_sv3_worker.py` 与本目录下的 `scripts/`。
+
 **结论一句话**：PicoDet-S 主区域检测器 + PP-StructureV3 light 端到端通路已经搭好，**不再需要前端强制裁剪**。本文件下方第三节"中期 ColumnFilter 重标"方案已废弃（与"禁用固定几何阈值"原则冲突）。
 
 **新一张图来了，按这棵决策树走：**
