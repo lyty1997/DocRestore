@@ -202,10 +202,43 @@ class WorkerBackedOCREngine(ABC):
         stdout: asyncio.StreamReader,
         read_timeout: int,
     ) -> dict[str, object]:
-        """从 worker stdout 解析 JSON 响应。默认直接 json.loads。"""
-        del stdout, read_timeout  # 默认实现不读后续行
-        result: dict[str, object] = json.loads(raw.decode("utf-8"))
-        return result
+        """从 worker stdout 解析 JSON 响应。
+
+        worker stdout 不一定是干净的 ndjson —— PaddleOCR genai_server / vLLM /
+        transformers 偶发把空行或日志（如 ``INFO: ...``）刷到 stdout，与正
+        常的 JSON 协议响应混在同一通道。原先默认实现直接 ``json.loads``，
+        遇到空行就 ``JSONDecodeError`` 把整次 OCR 任务推到 task failed。
+
+        现行实现：
+          - 跳过 ``raw.decode().strip() == ""`` 的空行（worker EOL 残留 / IDE
+            打印 ``\\n`` 等）
+          - 跳过解析不出 JSON 的行（视为日志噪声），DEBUG 级日志记录前 200 字
+          - 直到拿到有效 JSON 或 readline 返回 EOF（worker 退出）/ 超时
+        """
+        buffered = raw
+        while True:
+            text = buffered.decode("utf-8").strip()
+            if text:
+                try:
+                    result: dict[str, object] = json.loads(text)
+                    return result
+                except json.JSONDecodeError:
+                    logger.debug(
+                        "%s worker stdout 跳过非 JSON 行: %s",
+                        self.engine_name, text[:200],
+                    )
+            try:
+                buffered = await asyncio.wait_for(
+                    stdout.readline(), timeout=read_timeout,
+                )
+            except TimeoutError:
+                msg = (
+                    f"{self.engine_name} worker 响应超时({read_timeout}s)"
+                )
+                raise RuntimeError(msg) from None
+            if not buffered:
+                # readline 返回空 bytes 即 EOF —— worker 退出
+                await self._raise_worker_exited()
 
     # ── 通用骨架 ──────────────────────────────────────────
 

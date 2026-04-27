@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import re
@@ -200,36 +199,9 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
                     os.killpg(pid, signal.SIGKILL)
                 await self._process.wait()
 
-    async def _read_response(
-        self,
-        raw: bytes,
-        stdout: asyncio.StreamReader,
-        read_timeout: int,
-    ) -> dict[str, object]:
-        """跳过 worker stdout 中混入的 vLLM/transformers 日志行。"""
-        buffered = raw
-        while True:
-            text = buffered.decode("utf-8").strip()
-            if text:
-                try:
-                    result: dict[str, object] = json.loads(text)
-                    return result
-                except json.JSONDecodeError:
-                    logger.debug(
-                        "跳过 worker stdout 非 JSON 行: %s", text[:200],
-                    )
-            try:
-                buffered = await asyncio.wait_for(
-                    stdout.readline(), timeout=read_timeout,
-                )
-            except TimeoutError:
-                msg = f"{self.engine_name} worker 响应超时({read_timeout}s)"
-                raise RuntimeError(msg) from None
-            if not buffered:
-                msg = (
-                    f"{self.engine_name} worker 在等待 JSON 响应时退出"
-                )
-                raise RuntimeError(msg)
+    # _read_response：跳过 worker stdout 混入的 vLLM/transformers 日志，
+    # 已上提到 ``base.WorkerBackedOCREngine._read_response``，DeepSeek 与
+    # PaddleOCR 共用同一套兜底（2026-04-27）。
 
     # ── OCR 主流程 ────────────────────────────────────────
 

@@ -567,3 +567,53 @@ async def test_resync_timeout_falls_back_to_restart(
         ):
             await engine._resync_if_needed()
             restart_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_initialize_skips_blank_and_log_lines(
+    paddle_config: OCRConfig,
+) -> None:
+    """回归 2026-04-27：worker stdout 在 init 期间夹带空行 / 日志行时，
+    不应抛 JSONDecodeError 把整个 task 推到 failed —— 应跳过非 JSON 行
+    继续读到合法响应。
+    """
+    proc = MockProcess()
+
+    # readline 返回序列：空行 → 日志噪声 → 合法 JSON
+    lines: list[bytes] = [
+        b"\n",                                        # 空行（用户报告的
+                                                      # 直接触发条件）
+        b"INFO 04-27 09:00 vllm.engine: warming up\n",  # vLLM 日志混入
+        b"\n",                                        # 又一个空行
+        b'{"ok": true}\n',                            # 合法响应
+    ]
+    idx = {"i": 0}
+
+    async def staged_readline() -> bytes:
+        i = idx["i"]
+        if i >= len(lines):
+            return b""
+        idx["i"] = i + 1
+        return lines[i]
+
+    proc.stdout.readline = staged_readline
+
+    original_exists = Path.exists
+
+    def mock_exists(path_self: Path) -> bool:
+        if str(path_self) == paddle_config.paddle_python:
+            return True
+        return original_exists(path_self)
+
+    with (
+        patch.object(Path, "exists", lambda p: mock_exists(p)),
+        patch(
+            "asyncio.create_subprocess_exec",
+            return_value=proc,
+        ),
+    ):
+        engine = PaddleOCREngine(paddle_config)
+        await engine.initialize()
+        assert engine.is_ready
+        # 4 行 stdout 全部消费完
+        assert idx["i"] == len(lines)
