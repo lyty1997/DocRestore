@@ -1,12 +1,56 @@
 #!/usr/bin/env bash
 # DocRestore 启动脚本
-# 用法：
-#   ./scripts/start.sh                # 同时启动后端 + 前端
-#   ./scripts/start.sh backend        # 仅启动后端
-#   ./scripts/start.sh frontend       # 仅启动前端
-#   ./scripts/start.sh ppocr-server   # 启动 PaddleOCR genai_server
+# 用法：./scripts/start.sh [backend|frontend|all|ppocr-server|-h|--help]
+# 详细说明请运行 `./scripts/start.sh --help`
 
 set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+DocRestore 启动脚本
+
+用法:
+  ./scripts/start.sh [MODE]
+
+模式 (MODE):
+  all            (默认) 同时启动后端 + 前端，启动后会等后端就绪再拉前端
+  backend        仅启动后端 (uvicorn + docrestore.api.app)
+  frontend       仅启动前端 (Vite dev server)
+  ppocr-server   仅启动 PaddleOCR genai_server (vLLM 后端)
+  -h, --help     显示本帮助
+
+环境变量 (可在命令前导出覆盖默认值):
+  后端:
+    BACKEND_HOST   后端监听地址 (默认 0.0.0.0)
+    BACKEND_PORT   后端监听端口 (默认 8000)
+  前端:
+    FRONTEND_PORT  Vite dev server 端口 (默认 5173)
+  PaddleOCR server:
+    PPOCR_GPU_ID   绑定 GPU 编号；留空则不导出 CUDA_VISIBLE_DEVICES，
+                   由 vLLM 自动枚举 + docrestore 内部按显存挑卡 (默认 留空)
+    PPOCR_PORT     genai_server 端口 (默认 8119)
+    PPOCR_MODEL    模型名 (默认 PaddleOCR-VL-1.5-0.9B)
+
+示例:
+  ./scripts/start.sh                                 # 后端 + 前端
+  BACKEND_PORT=8080 ./scripts/start.sh backend       # 后端改 8080
+  PPOCR_GPU_ID=1 ./scripts/start.sh ppocr-server     # 绑 GPU 1 启 OCR server
+  FRONTEND_PORT=3000 ./scripts/start.sh frontend     # 前端改 3000
+
+退出:
+  Ctrl+C 触发优雅关闭 (SIGTERM → 20s 等待 → SIGKILL 兜底)
+  连按两次 Ctrl+C 立即强杀所有子进程
+EOF
+}
+
+# help 分支必须在 trap cleanup 之前处理，否则退出时会触发 cleanup 打印
+# "正在关闭服务..." 干扰输出
+case "${1:-}" in
+    -h|--help|help)
+        usage
+        exit 0
+        ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -216,7 +260,7 @@ start_ppocr_server() {
     fi
 }
 
-# 解析参数
+# 解析参数（-h/--help 已在 trap 安装前处理）
 MODE="${1:-all}"
 
 case "$MODE" in
@@ -247,7 +291,8 @@ case "$MODE" in
         ;;
     *)
         err "未知参数: $MODE"
-        echo "用法: $0 [backend|frontend|all|ppocr-server]"
+        echo ""
+        usage >&2
         exit 1
         ;;
 esac
