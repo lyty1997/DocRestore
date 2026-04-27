@@ -127,7 +127,8 @@ class TaskListItem(BaseModel):
 
     pii_enable / ocr_model / llm_model 是给前端任务列表卡片直接展示的字段，
     源头是 tasks 表里 llm/ocr/pii 三列的 JSON 快照（持久层已展开）。
-    llm_model 可能为空字符串（用户未启用 LLM 精修时）。
+    llm_model 可能为空字符串（用户未启用 LLM 精修时）；
+    ocr_model 通常非空，但 JSON 快照缺失 / 解析失败 / 内存回退路径下也可能为空字符串。
     """
 
     task_id: str

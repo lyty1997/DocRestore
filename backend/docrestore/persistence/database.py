@@ -132,7 +132,9 @@ class TaskListItem:
 
     pii_enable / ocr_model / llm_model 从 tasks.llm/ocr/pii JSON 快照展开，
     用于在前端任务列表卡片直接显示，避免再次拉单任务详情。
-    llm_model 可为空字符串（用户未配置精修时），ocr_model 必为非空。
+    llm_model 可为空字符串（用户未配置精修时）；
+    ocr_model 通常非空，但 JSON 快照缺失 / 解析失败 / 内存回退路径下可能为空字符串，
+    前端展示时需处理 "" 占位（已用 "—" 渲染）。
     """
 
     task_id: str
