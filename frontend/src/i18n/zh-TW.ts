@@ -77,6 +77,13 @@ export const zhTW: Record<TranslationKey, string> = {
   "taskForm.gpuAutoWithHint": "自動（{hint}）",
   "taskForm.llmConfigExpanded": "▾ LLM 精修設定",
   "taskForm.llmConfigCollapsed": "▸ LLM 精修設定",
+  "taskForm.providerLabel": "Provider",
+  "taskForm.provider_cloud": "雲端 API",
+  "taskForm.provider_local": "本地服務",
+  "taskForm.providerHint_cloud":
+    "走 litellm 呼叫雲端模型，含 LLM 實體識別（PII 增強）。需要填寫 API Key。",
+  "taskForm.providerHint_local":
+    "透過本地 OpenAI 相容服務（vLLM / ollama / llama.cpp）呼叫，資料不出本地；PII 實體識別略過、僅 regex 去敏。API Base 填本地位址，例如 http://localhost:11434/v1。",
   "taskForm.modelName": "模型名稱",
   "taskForm.modelNamePlaceholder": "例如 openai/gpt-4o、openai/glm-5",
   "taskForm.apiBaseUrl": "API Base URL",

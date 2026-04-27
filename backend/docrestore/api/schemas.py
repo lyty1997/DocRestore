@@ -16,12 +16,19 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel
 
 
 class LLMConfigRequest(BaseModel):
     """LLM 配置（请求级覆盖）"""
 
+    #: provider 选择：``cloud`` 走云端 API（litellm 默认路径，含 PII 实体识别），
+    #: ``local`` 走本地 OpenAI 兼容服务（vLLM / ollama / llama.cpp 等，
+    #: 数据不出本地、跳过 LLM 实体识别只走 regex 脱敏）。
+    #: 用 Literal 严格校验，非法值（拼写错误等）直接 422 拒绝。
+    provider: Literal["cloud", "local"] | None = None
     model: str | None = None
     api_base: str | None = None
     api_key: str | None = None

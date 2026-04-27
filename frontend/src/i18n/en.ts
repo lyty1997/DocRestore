@@ -81,6 +81,13 @@ export const en: Record<TranslationKey, string> = {
   "taskForm.gpuAutoWithHint": "Auto ({hint})",
   "taskForm.llmConfigExpanded": "▾ LLM Refinement Settings",
   "taskForm.llmConfigCollapsed": "▸ LLM Refinement Settings",
+  "taskForm.providerLabel": "Provider",
+  "taskForm.provider_cloud": "Cloud API",
+  "taskForm.provider_local": "Local Service",
+  "taskForm.providerHint_cloud":
+    "Call cloud models via litellm, including LLM entity detection (PII enhancement). API Key required.",
+  "taskForm.providerHint_local":
+    "Call local OpenAI-compatible services (vLLM / ollama / llama.cpp); data stays local. LLM entity detection is skipped, only regex redaction runs. Set API Base to a local URL, e.g. http://localhost:11434/v1.",
   "taskForm.modelName": "Model Name",
   "taskForm.modelNamePlaceholder": "e.g. openai/gpt-4o, openai/glm-5",
   "taskForm.apiBaseUrl": "API Base URL",

@@ -16,10 +16,26 @@ type EngineStatus = "idle" | "warming" | "ready" | "error";
 /** localStorage 持久化的 LLM 配置 */
 const LLM_STORAGE_KEY = "docrestore_llm_config";
 
+/** LLM provider 取值（与后端 LLMConfig.provider 对齐） */
+export type LLMProvider = "cloud" | "local";
+
+const LLM_PROVIDER_VALUES: readonly LLMProvider[] = ["cloud", "local"];
+
+/** 默认 provider：保留与历史一致的云端行为 */
+const DEFAULT_LLM_PROVIDER: LLMProvider = "cloud";
+
 interface StoredLLMConfig {
+  provider: LLMProvider;
   model: string;
   api_base: string;
   api_key: string;
+}
+
+/** 收窄未知值到合法 LLMProvider，无效时回退默认 */
+function normalizeProvider(value: unknown): LLMProvider {
+  return LLM_PROVIDER_VALUES.includes(value as LLMProvider)
+    ? (value as LLMProvider)
+    : DEFAULT_LLM_PROVIDER;
 }
 
 /** 从 localStorage 读取已保存的 LLM 配置 */
@@ -31,6 +47,7 @@ function loadLlmConfig(): StoredLLMConfig | undefined {
     if (typeof parsed !== "object" || parsed === null) return undefined;
     const obj = parsed as Record<string, unknown>;
     return {
+      provider: normalizeProvider(obj.provider),
       model: typeof obj.model === "string" ? obj.model : "",
       api_base: typeof obj.api_base === "string" ? obj.api_base : "",
       api_key: typeof obj.api_key === "string" ? obj.api_key : "",
@@ -52,6 +69,7 @@ function clearLlmConfig(): void {
 
 /** LLM 配置（传递给后端的请求级覆盖） */
 export interface LLMConfig {
+  provider?: LLMProvider | undefined;
   model?: string | undefined;
   api_base?: string | undefined;
   api_key?: string | undefined;
@@ -130,6 +148,9 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
 
   /* LLM 配置（有已保存值时自动填充） */
   const [showLlmConfig, setShowLlmConfig] = useState(stored !== undefined);
+  const [llmProvider, setLlmProvider] = useState<LLMProvider>(
+    stored?.provider ?? DEFAULT_LLM_PROVIDER,
+  );
   const [llmModel, setLlmModel] = useState(stored?.model ?? "");
   const [llmApiBase, setLlmApiBase] = useState(stored?.api_base ?? "");
   const [llmApiKey, setLlmApiKey] = useState(stored?.api_key ?? "");
@@ -179,8 +200,18 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
 
   /** 将当前 LLM 配置同步到 localStorage */
   const persistLlmConfig = useCallback(
-    (model: string, apiBase: string, apiKey: string): void => {
-      saveLlmConfig({ model, api_base: apiBase, api_key: apiKey });
+    (
+      provider: LLMProvider,
+      model: string,
+      apiBase: string,
+      apiKey: string,
+    ): void => {
+      saveLlmConfig({
+        provider,
+        model,
+        api_base: apiBase,
+        api_key: apiKey,
+      });
     },
     [],
   );
@@ -188,14 +219,21 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
   /** rememberLlm / LLM 字段变更时自动同步 */
   useEffect(() => {
     if (rememberLlm) {
-      persistLlmConfig(llmModel, llmApiBase, llmApiKey);
+      persistLlmConfig(llmProvider, llmModel, llmApiBase, llmApiKey);
     }
-  }, [rememberLlm, llmModel, llmApiBase, llmApiKey, persistLlmConfig]);
+  }, [
+    rememberLlm,
+    llmProvider,
+    llmModel,
+    llmApiBase,
+    llmApiKey,
+    persistLlmConfig,
+  ]);
 
   const handleToggleRemember = (checked: boolean): void => {
     setRememberLlm(checked);
     if (checked) {
-      persistLlmConfig(llmModel, llmApiBase, llmApiKey);
+      persistLlmConfig(llmProvider, llmModel, llmApiBase, llmApiKey);
     } else {
       clearLlmConfig();
     }
@@ -322,9 +360,12 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
       if (!proceed) return;
     }
 
+    /* provider 非默认值（local）也算"显式覆盖"，需要透传给后端 */
+    const providerOverridden = llmProvider !== DEFAULT_LLM_PROVIDER;
     const llm: LLMConfig | undefined =
-      model || apiBase || apiKey
+      model || apiBase || apiKey || providerOverridden
         ? {
+            provider: providerOverridden ? llmProvider : undefined,
             model: model || undefined,
             api_base: apiBase || undefined,
             api_key: apiKey || undefined,
@@ -486,6 +527,38 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
 
         {showLlmConfig && (
           <div className="llm-config-fields">
+            <div className="llm-field llm-provider-field">
+              <span className="llm-provider-label">
+                {t("taskForm.providerLabel")}
+              </span>
+              <div className="llm-provider-options" role="radiogroup">
+                {LLM_PROVIDER_VALUES.map((value) => (
+                  <label
+                    key={value}
+                    className={
+                      llmProvider === value
+                        ? "llm-provider-option llm-provider-option--active"
+                        : "llm-provider-option"
+                    }
+                  >
+                    <input
+                      type="radio"
+                      name="llm-provider"
+                      value={value}
+                      checked={llmProvider === value}
+                      onChange={() => {
+                        setLlmProvider(value);
+                      }}
+                      disabled={disabled}
+                    />
+                    <span>{t(`taskForm.provider_${value}`)}</span>
+                  </label>
+                ))}
+              </div>
+              <p className="llm-provider-hint">
+                {t(`taskForm.providerHint_${llmProvider}`)}
+              </p>
+            </div>
             <div className="llm-field">
               <label htmlFor="llm-model">{t("taskForm.modelName")}</label>
               <input

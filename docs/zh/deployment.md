@@ -148,17 +148,35 @@ bash scripts/start.sh frontend  # 前端页面：http://localhost:5173
 
 ### 3.4 LLM API 配置
 
-创建 `.env` 文件：
+LLM 精修走 [litellm](https://docs.litellm.ai/) 调用，支持 **云端** 和 **本地** 两种 provider。
+
+#### 云端模式（默认）
+
+创建 `.env`，按所用模型选 key：
 
 ```bash
-# LLM API Key（根据所用模型选择）
+# LLM API Key（根据所用模型选择，litellm 按 model 名自动选用）
 GEMINI_API_KEY=sk-xxx
 OPENAI_API_KEY=sk-xxx
 GLM_API_KEY=sk-xxx
 
-# 或使用自定义 API base
+# 走中转站时另外指定 base
 OPENAI_API_BASE=https://your-proxy.com/v1
 ```
+
+云端模式额外做一次 LLM PII 实体识别（人名/机构名），与 regex 脱敏叠加。
+
+#### 本地模式（数据不出本地）
+
+接入任意 OpenAI 兼容的本地服务，无需 API Key：
+
+| 后端 | 启动示例 | 默认 api_base |
+|------|---------|--------------|
+| ollama | `ollama serve` + `ollama pull qwen2.5:14b` | `http://localhost:11434/v1` |
+| vLLM | `vllm serve Qwen/Qwen2.5-14B-Instruct --port 8001` | `http://localhost:8001/v1` |
+| llama.cpp | `llama-server -m model.gguf --port 8080` | `http://localhost:8080/v1` |
+
+本地模式下 `LocalLLMRefiner.detect_pii_entities` 默认返回空 → 跳过 LLM 实体识别，只跑 regex 脱敏；**数据不会发送到任何外部服务**。`.env` 里的 API Key 可留空。
 
 ## 4. OCR 引擎配置
 
@@ -231,13 +249,48 @@ huggingface-cli download deepseek-ai/DeepSeek-OCR-2 \
 
 ### 4.4 LLM 配置
 
+`LLMConfig` 字段（`backend/docrestore/pipeline/config.py`）：
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| `provider` | `"cloud"` | `"cloud"` 走 litellm + LLM PII 实体识别；`"local"` 走本地 OpenAI 兼容服务，跳过 LLM 实体识别只走 regex 脱敏 |
+| `model` | — | litellm 模型名；本地服务建议带 `openai/` 前缀（OpenAI schema 兜底） |
+| `api_base` | `""` | 自定义 API 地址；本地模式必填 |
+| `api_key` | `""` | 留空时由 litellm 从 `.env` 自动读取；本地模式可留空 |
+| `max_concurrent_requests` | `3` | 全局并发上限（跨 pipeline 共享 asyncio.Semaphore） |
+| `code_refine_mode` | `"refine"` | 代码模式：`refine` 行数守恒；`rewrite` 允许重排（需更强模型） |
+
+#### 云端示例
+
 ```yaml
 llm:
-  provider: "cloud"          # "cloud" 或 "local"
+  provider: "cloud"
   model: "openai/gemini-3-flash-preview-nothinking"
   api_base: "https://poloai.top/v1"
   api_key: ""                # 为空时从环境变量自动读取
 ```
+
+#### 本地示例（ollama）
+
+```yaml
+llm:
+  provider: "local"
+  model: "openai/qwen2.5:14b"            # ollama 拉取的模型 tag
+  api_base: "http://localhost:11434/v1"  # ollama OpenAI 兼容端点
+  api_key: ""                            # 本地服务无需鉴权
+```
+
+#### 本地示例（vLLM）
+
+```yaml
+llm:
+  provider: "local"
+  model: "openai/Qwen/Qwen2.5-14B-Instruct"
+  api_base: "http://localhost:8001/v1"
+  api_key: ""
+```
+
+> 前端 UI 上的"Provider"radio 与本字段一一对应；REST API 在 `POST /api/v1/tasks` 请求体的 `llm` 字段里传，详见 [API 文档](backend/api.md) 和 README §REST API 示例。
 
 ## 5. 验证安装
 

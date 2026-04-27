@@ -73,6 +73,13 @@ export const zhCN = {
   "taskForm.gpuAutoWithHint": "自动（{hint}）",
   "taskForm.llmConfigExpanded": "▾ LLM 精修配置",
   "taskForm.llmConfigCollapsed": "▸ LLM 精修配置",
+  "taskForm.providerLabel": "Provider",
+  "taskForm.provider_cloud": "云端 API",
+  "taskForm.provider_local": "本地服务",
+  "taskForm.providerHint_cloud":
+    "走 litellm 调用云端模型，含 LLM 实体识别（PII 增强）。需要填写 API Key。",
+  "taskForm.providerHint_local":
+    "通过本地 OpenAI 兼容服务（vLLM / ollama / llama.cpp）调用，数据不出本地；PII 实体识别跳过、仅 regex 脱敏。API Base 填本地地址，例如 http://localhost:11434/v1。",
   "taskForm.modelName": "模型名称",
   "taskForm.modelNamePlaceholder": "例如 openai/gpt-4o、openai/glm-5",
   "taskForm.apiBaseUrl": "API Base URL",
