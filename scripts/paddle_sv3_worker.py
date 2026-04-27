@@ -46,7 +46,9 @@
      "image_size": [W, H],                 # 原图尺寸（不是裁剪图）
      "image_count": N,
      "ocr_dir": "...",
-     "coordinates": [...],
+     "coordinates": [...],                  # bbox 已平移回原图坐标系，
+                                            # 与 image_size 同一参考系
+
      "main_region_bbox": [x1,y1,x2,y2]|null,
      "main_region_score": 0.xx}            # 0 表示无 detect
     {"ok": false, "error": "..."}
@@ -218,6 +220,10 @@ class Worker:
 
             # ── 2) 裁剪（如果检测有效）
             input_for_ocr = img_path
+            # 裁剪偏移量；OCR 跑在裁剪图上时，需要把坐标平移回原图坐标系，
+            # 否则下游 PaddleOCREngine._normalize_coordinates 用 image_size=原图尺寸
+            # 去归一化裁剪图坐标，会把侧栏检测压到错误的位置。
+            crop_offset = (0, 0)
             with Image.open(img_path) as im:
                 W, H = im.size
                 full_image_size = (W, H)
@@ -228,10 +234,14 @@ class Worker:
                     x2 = min(W, bbox[2] + pad)
                     y2 = min(H, bbox[3] + pad)
                     crop_path = ocr_dir / f"{stem}_main.jpg"
-                    im.crop((x1, y1, x2, y2)).save(
-                        crop_path, "JPEG", quality=92,
-                    )
+                    cropped = im.crop((x1, y1, x2, y2))
+                    # RGBA / palette / LA 等模式 PIL 不能直接存 JPEG，
+                    # 截图工具产物常见 RGBA PNG，必须先转 RGB。
+                    if cropped.mode != "RGB":
+                        cropped = cropped.convert("RGB")
+                    cropped.save(crop_path, "JPEG", quality=92)
                     input_for_ocr = crop_path
+                    crop_offset = (x1, y1)
 
             # ── 3) PP-StructureV3 light
             output = self._pipeline.predict(
@@ -249,6 +259,10 @@ class Worker:
                         if isinstance(d, dict) and "res" in d:
                             d = d["res"]
                         coordinates = self._extract_coordinates(d)
+                        if crop_offset != (0, 0):
+                            coordinates = self._shift_coordinates(
+                                coordinates, crop_offset,
+                            )
                     except Exception as e:
                         print(f"坐标提取失败: {e}", file=sys.stderr)
 
@@ -339,6 +353,31 @@ class Worker:
                 "text": str(item.get("block_content", "")),
             })
         return coordinates
+
+    @staticmethod
+    def _shift_coordinates(
+        coordinates: list[dict[str, object]],
+        offset: tuple[int, int],
+    ) -> list[dict[str, object]]:
+        """把裁剪图坐标平移回原图坐标系（image_size 字段始终是原图尺寸）。"""
+        dx, dy = offset
+        shifted: list[dict[str, object]] = []
+        for item in coordinates:
+            bbox = item.get("bbox")
+            if (
+                isinstance(bbox, list)
+                and len(bbox) == 4
+                and all(isinstance(v, int) for v in bbox)
+            ):
+                new_item = dict(item)
+                new_item["bbox"] = [
+                    bbox[0] + dx, bbox[1] + dy,
+                    bbox[2] + dx, bbox[3] + dy,
+                ]
+                shifted.append(new_item)
+            else:
+                shifted.append(item)
+        return shifted
 
     @staticmethod
     def _parse_bbox(bbox_data: object) -> list[int] | None:
