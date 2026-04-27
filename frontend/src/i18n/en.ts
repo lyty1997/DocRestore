@@ -288,4 +288,67 @@ export const en: Record<TranslationKey, string> = {
   "sourcePicker.goPath": "Go",
   "sourcePicker.sizeKB": "{size} KB",
   "sourcePicker.imageCount": "{count} images",
+
+  // ── API business errors ──
+  "errors.api.unauthorized": "Missing or invalid API Token",
+  "errors.api.service_not_initialized": "Service not initialized",
+  "errors.api.engine_manager_not_initialized": "OCR engine manager not initialized",
+  "errors.api.task_not_found": "Task not found",
+  "errors.api.task_result_not_ready": "Task is not completed or has failed",
+  "errors.api.task_no_results": "Task has no results yet (not completed or root error)",
+  "errors.api.task_action_conflict": "Task action conflict: {reason}",
+  "errors.api.asset_not_found": "Asset not found",
+  "errors.api.file_not_found": "File not found",
+  "errors.api.image_not_found": "Image not found",
+  "errors.api.code_dir_not_found": "Code directory not found",
+  "errors.api.files_index_not_found":
+    "Files index not generated (non-code mode or not finished)",
+  "errors.api.files_index_parse_error": "Failed to parse files index: {reason}",
+  "errors.api.files_index_bad_format": "Files index format invalid (not an array)",
+  "errors.api.read_failed": "Read failed: {reason}",
+  "errors.api.invalid_filename": "Invalid filename",
+  "errors.api.markdown_update_failed": "Save failed: {reason}",
+  "errors.api.upload_session_not_found": "Upload session not found",
+  "errors.api.upload_session_completed": "Session is finalized, cannot continue",
+  "errors.api.upload_session_no_files": "Session has no files",
+  "errors.api.upload_file_not_found": "Upload file not found",
+  "errors.api.cleanup_statuses_empty": "statuses must not be empty",
+  "errors.api.cleanup_statuses_invalid":
+    "Only completed / failed tasks may be cleaned up; invalid: {invalid}",
+  "errors.api.stage_paths_empty": "paths must not be empty",
+  "errors.api.stage_too_many_files": "At most {max} files per request",
+  "errors.api.stage_path_not_absolute": "Path must be absolute: {path}",
+  "errors.api.stage_path_unresolvable": "Path cannot be resolved: {path} ({reason})",
+  "errors.api.stage_path_not_file": "Not a regular file: {path}",
+  "errors.api.stage_path_bad_ext": "Unsupported file type: {path}",
+  "errors.api.stage_symlink_failed": "Failed to create symlink: {path} → {reason}",
+  "errors.api.browse_not_dir": "Path is not a directory: {path}",
+  "errors.api.browse_permission_denied": "Permission denied: {path}",
+
+  // ── HTTP status diagnostic hints ──
+  "errors.http.413":
+    "Request body too large (HTTP 413). Check starlette MultiPartParser / reverse proxy max body size.",
+  "errors.http.504":
+    "Gateway timeout (HTTP 504). Backend exceeded proxy timeout; tune vite proxyTimeout or backend keep-alive.",
+  "errors.http.5xx": "Backend error. Inspect backend logs for the stack trace.",
+
+  // ── Client-side errors ──
+  "errors.client.parseFailed": "Response parse failed: not valid JSON",
+  "errors.client.parseFailedHint":
+    "Backend may have returned HTML (502/504 gateway page) or been rewritten by middleware.",
+  "errors.client.uploadNetworkFailed":
+    "Upload failed ({count} files / {sizeMb} MB / {elapsedMs}ms): {detail}",
+  "errors.client.uploadNetworkFailedHint":
+    "Browser did not receive an HTTP response. Common causes: ① Vite proxy / reverse proxy timed out (raised to unlimited; older dev server needs restart); ② backend crashed or OOM (check backend logs); ③ /tmp full (df -h /tmp); ④ upload exceeded starlette MultiPartParser limit. Files in batch: {filenames}. Debug: open F12 Network for the exact net::ERR_*, or bypass the proxy via http://127.0.0.1:8000/api/v1.",
+
+  // ── Task / upload hook fallback ──
+  "errors.task.runFailed": "Task failed",
+  "errors.task.runFailedWithReason": "Task failed: {reason}",
+  "errors.task.createFailed": "Failed to create task",
+  "errors.upload.confirmFailed": "Failed to confirm upload",
+  "errors.upload.deleteFailed": "Failed to delete image",
+  "errors.upload.noneSucceeded": "No files uploaded successfully",
+  "errors.upload.batchFailed":
+    "Batch {batch}/{total} failed (succeeded {uploaded}/{count}):\n{cause}",
+  "errors.unknown": "Unknown error",
 };

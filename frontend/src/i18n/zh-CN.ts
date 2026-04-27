@@ -277,6 +277,68 @@ export const zhCN = {
   "sourcePicker.goPath": "跳转",
   "sourcePicker.sizeKB": "{size} KB",
   "sourcePicker.imageCount": "{count} 张",
+
+  // ── API 业务错误（与后端 APIErrorCode 一一对应，code 小写后查 errors.api.<code>）──
+  "errors.api.unauthorized": "缺少或无效的 API Token",
+  "errors.api.service_not_initialized": "服务未初始化",
+  "errors.api.engine_manager_not_initialized": "OCR 引擎管理器未初始化",
+  "errors.api.task_not_found": "任务不存在",
+  "errors.api.task_result_not_ready": "任务尚未完成或已失败",
+  "errors.api.task_no_results": "任务尚无结果（未完成或根级错误）",
+  "errors.api.task_action_conflict": "任务状态冲突：{reason}",
+  "errors.api.asset_not_found": "资源不存在",
+  "errors.api.file_not_found": "文件不存在",
+  "errors.api.image_not_found": "图片不存在",
+  "errors.api.code_dir_not_found": "代码目录不存在",
+  "errors.api.files_index_not_found": "任务未生成代码索引（非代码模式或未完成）",
+  "errors.api.files_index_parse_error": "代码索引解析失败：{reason}",
+  "errors.api.files_index_bad_format": "代码索引格式异常（非数组）",
+  "errors.api.read_failed": "读取失败：{reason}",
+  "errors.api.invalid_filename": "非法文件名",
+  "errors.api.markdown_update_failed": "保存失败：{reason}",
+  "errors.api.upload_session_not_found": "上传会话不存在",
+  "errors.api.upload_session_completed": "会话已完成，不可继续操作",
+  "errors.api.upload_session_no_files": "会话中无文件",
+  "errors.api.upload_file_not_found": "上传文件不存在",
+  "errors.api.cleanup_statuses_empty": "statuses 不能为空",
+  "errors.api.cleanup_statuses_invalid":
+    "仅允许清理终态任务（completed / failed），非法状态：{invalid}",
+  "errors.api.stage_paths_empty": "paths 不能为空",
+  "errors.api.stage_too_many_files": "单次最多 {max} 个文件",
+  "errors.api.stage_path_not_absolute": "路径必须为绝对路径：{path}",
+  "errors.api.stage_path_unresolvable": "路径无法解析：{path}（{reason}）",
+  "errors.api.stage_path_not_file": "不是普通文件：{path}",
+  "errors.api.stage_path_bad_ext": "不支持的文件类型：{path}",
+  "errors.api.stage_symlink_failed": "创建符号链接失败：{path} → {reason}",
+  "errors.api.browse_not_dir": "路径不是目录：{path}",
+  "errors.api.browse_permission_denied": "无权限访问：{path}",
+
+  // ── HTTP 状态码诊断 hint ──
+  "errors.http.413":
+    "请求体过大（HTTP 413）。检查 starlette MultiPartParser / 反向代理的 max body size。",
+  "errors.http.504":
+    "网关超时（HTTP 504）。后端处理超过代理超时阈值，可调大 vite proxyTimeout 或后端 keep-alive。",
+  "errors.http.5xx": "后端错误。查看 backend 日志确认堆栈。",
+
+  // ── 前端客户端层错误（network / parse） ──
+  "errors.client.parseFailed": "响应解析失败：非合法 JSON",
+  "errors.client.parseFailedHint":
+    "可能后端返回了 HTML（502/504 网关页）或被中间件改写。",
+  "errors.client.uploadNetworkFailed":
+    "上传失败（{count} 张 / {sizeMb} MB / {elapsedMs}ms）：{detail}",
+  "errors.client.uploadNetworkFailedHint":
+    "浏览器未拿到 HTTP 响应。常见原因：① Vite proxy / 反向代理超时断流（已加大到无限，旧 dev server 需重启生效）；② 后端进程崩溃或 OOM（看 backend 日志）；③ /tmp 写满（df -h /tmp）；④ 上传体积超出 starlette MultiPartParser 限制。本批文件：{filenames}。排查：F12 Network 看具体 net::ERR_*；或临时直连 http://127.0.0.1:8000/api/v1 旁路 proxy 复测。",
+
+  // ── 任务/上传 hook 兜底文案 ──
+  "errors.task.runFailed": "任务失败",
+  "errors.task.runFailedWithReason": "任务失败：{reason}",
+  "errors.task.createFailed": "创建任务失败",
+  "errors.upload.confirmFailed": "确认上传失败",
+  "errors.upload.deleteFailed": "删除图片失败",
+  "errors.upload.noneSucceeded": "没有文件上传成功",
+  "errors.upload.batchFailed":
+    "第 {batch}/{total} 批失败（已成功 {uploaded}/{count}）：\n{cause}",
+  "errors.unknown": "未知错误",
 } as const satisfies Record<string, string>;
 
 /** 翻译键类型——从 zhCN 自动推导，其他 locale 文件必须实现全部 key */

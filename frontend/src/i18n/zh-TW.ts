@@ -281,4 +281,66 @@ export const zhTW: Record<TranslationKey, string> = {
   "sourcePicker.goPath": "跳轉",
   "sourcePicker.sizeKB": "{size} KB",
   "sourcePicker.imageCount": "{count} 張",
+
+  // ── API 業務錯誤 ──
+  "errors.api.unauthorized": "缺少或無效的 API Token",
+  "errors.api.service_not_initialized": "服務未初始化",
+  "errors.api.engine_manager_not_initialized": "OCR 引擎管理器未初始化",
+  "errors.api.task_not_found": "任務不存在",
+  "errors.api.task_result_not_ready": "任務尚未完成或已失敗",
+  "errors.api.task_no_results": "任務尚無結果（未完成或根級錯誤）",
+  "errors.api.task_action_conflict": "任務狀態衝突：{reason}",
+  "errors.api.asset_not_found": "資源不存在",
+  "errors.api.file_not_found": "檔案不存在",
+  "errors.api.image_not_found": "圖片不存在",
+  "errors.api.code_dir_not_found": "程式碼目錄不存在",
+  "errors.api.files_index_not_found": "任務未產生程式碼索引（非程式碼模式或未完成）",
+  "errors.api.files_index_parse_error": "程式碼索引解析失敗：{reason}",
+  "errors.api.files_index_bad_format": "程式碼索引格式異常（非陣列）",
+  "errors.api.read_failed": "讀取失敗：{reason}",
+  "errors.api.invalid_filename": "非法檔名",
+  "errors.api.markdown_update_failed": "儲存失敗：{reason}",
+  "errors.api.upload_session_not_found": "上傳會話不存在",
+  "errors.api.upload_session_completed": "會話已完成，無法繼續操作",
+  "errors.api.upload_session_no_files": "會話中無檔案",
+  "errors.api.upload_file_not_found": "上傳檔案不存在",
+  "errors.api.cleanup_statuses_empty": "statuses 不能為空",
+  "errors.api.cleanup_statuses_invalid":
+    "僅允許清理終態任務（completed / failed），非法狀態：{invalid}",
+  "errors.api.stage_paths_empty": "paths 不能為空",
+  "errors.api.stage_too_many_files": "單次最多 {max} 個檔案",
+  "errors.api.stage_path_not_absolute": "路徑必須為絕對路徑：{path}",
+  "errors.api.stage_path_unresolvable": "路徑無法解析：{path}（{reason}）",
+  "errors.api.stage_path_not_file": "不是普通檔案：{path}",
+  "errors.api.stage_path_bad_ext": "不支援的檔案類型：{path}",
+  "errors.api.stage_symlink_failed": "建立符號連結失敗：{path} → {reason}",
+  "errors.api.browse_not_dir": "路徑不是目錄：{path}",
+  "errors.api.browse_permission_denied": "無權限存取：{path}",
+
+  // ── HTTP 狀態碼診斷 hint ──
+  "errors.http.413":
+    "請求體過大（HTTP 413）。檢查 starlette MultiPartParser / 反向代理的 max body size。",
+  "errors.http.504":
+    "閘道超時（HTTP 504）。後端處理超過代理超時閾值，可調大 vite proxyTimeout 或後端 keep-alive。",
+  "errors.http.5xx": "後端錯誤。查看 backend 日誌確認堆疊。",
+
+  // ── 前端客戶端層錯誤 ──
+  "errors.client.parseFailed": "回應解析失敗：非合法 JSON",
+  "errors.client.parseFailedHint":
+    "可能後端返回了 HTML（502/504 閘道頁）或被中介軟體改寫。",
+  "errors.client.uploadNetworkFailed":
+    "上傳失敗（{count} 張 / {sizeMb} MB / {elapsedMs}ms）：{detail}",
+  "errors.client.uploadNetworkFailedHint":
+    "瀏覽器未取得 HTTP 回應。常見原因：① Vite proxy / 反向代理超時斷流（已加大為無限，舊 dev server 需重啟才生效）；② 後端進程崩潰或 OOM（看 backend 日誌）；③ /tmp 寫滿（df -h /tmp）；④ 上傳體積超出 starlette MultiPartParser 限制。本批檔案：{filenames}。排查：F12 Network 看具體 net::ERR_*；或暫時直連 http://127.0.0.1:8000/api/v1 旁路 proxy 複測。",
+
+  // ── 任務/上傳 hook 兜底文案 ──
+  "errors.task.runFailed": "任務失敗",
+  "errors.task.runFailedWithReason": "任務失敗：{reason}",
+  "errors.task.createFailed": "建立任務失敗",
+  "errors.upload.confirmFailed": "確認上傳失敗",
+  "errors.upload.deleteFailed": "刪除圖片失敗",
+  "errors.upload.noneSucceeded": "沒有檔案上傳成功",
+  "errors.upload.batchFailed":
+    "第 {batch}/{total} 批失敗（已成功 {uploaded}/{count}）：\n{cause}",
+  "errors.unknown": "未知錯誤",
 };

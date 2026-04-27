@@ -14,13 +14,13 @@ import {
   TaskProgressSchema,
   type TaskResultResponse,
 } from "../../api/schemas";
+import { fromUnknown, type LocalizedError } from "../../i18n";
 import {
   mergeProgressFrame,
   type ProgressBuckets,
 } from "./progressPhase";
+export type { LlmUnavailableWarning } from "./useTaskProgress";
 import type { LlmUnavailableWarning } from "./useTaskProgress";
-
-export type { LlmUnavailableWarning };
 
 /** 页面状态 */
 type TaskStatus = "idle" | "pending" | "processing" | "completed" | "failed";
@@ -91,13 +91,13 @@ export function useTaskRunner(): UseTaskRunnerReturn {
   const [progresses, setProgresses] = useState<ProgressBuckets>({});
   const [llmUnavailable, setLlmUnavailable] = useState<
     LlmUnavailableWarning | undefined
-  >(undefined);
+  >();
   const [resultMarkdown, setResultMarkdown] = useState<string | undefined>();
   const [allResults, setAllResults] = useState<TaskResultResponse[]>([]);
   const [taskResult, setTaskResult] = useState<
     TaskResultResponse | undefined
   >();
-  const [error, setError] = useState<string | undefined>();
+  const [error, setError] = useState<LocalizedError | undefined>();
   const [wsState, setWsState] = useState<WsState>("closed");
   const [pollingEnabled, setPollingEnabled] = useState(false);
 
@@ -176,7 +176,15 @@ export function useTaskRunner(): UseTaskRunnerReturn {
         }
         case "failed": {
           setStatus("failed");
-          setError(resp.error ?? "任务失败");
+          setError(
+            resp.error
+              ? {
+                  key: "errors.task.runFailedWithReason",
+                  params: { reason: resp.error },
+                  fallback: `任务失败：${resp.error}`,
+                }
+              : { key: "errors.task.runFailed", fallback: "任务失败" },
+          );
           cleanup();
           setPollingEnabled(false);
           break;
@@ -282,7 +290,15 @@ export function useTaskRunner(): UseTaskRunnerReturn {
               }
               case "failed": {
                 setStatus("failed");
-                setError(resp.error ?? "任务失败");
+                setError(
+            resp.error
+              ? {
+                  key: "errors.task.runFailedWithReason",
+                  params: { reason: resp.error },
+                  fallback: `任务失败：${resp.error}`,
+                }
+              : { key: "errors.task.runFailed", fallback: "任务失败" },
+          );
                 cleanup();
                 break;
               }
@@ -356,9 +372,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
         } catch (error_: unknown) {
           if (!isMountedRef.current) return;
           setStatus("failed");
-          setError(
-            error_ instanceof Error ? error_.message : "创建任务失败",
-          );
+          setError(fromUnknown(error_, "errors.task.createFailed"));
         }
       })();
     },

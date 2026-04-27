@@ -81,41 +81,100 @@ function apiHeaders(extra?: Record<string, string>): Record<string, string> {
 /** API 错误分类：网络层未拿到响应 / HTTP 非 2xx / 响应解析失败 */
 export type ApiErrorKind = "network" | "http" | "parse";
 
-/** 统一 API 错误：携带 kind / httpStatus / hint，便于前端定位 */
+/** i18n 占位符的可序列化值（数字直显 / 字符串字面 / 数组拼接） */
+export type ApiErrorParams = Record<string, string | number | readonly string[]>;
+
+/** 统一 API 错误：携带后端 code/params + 前端 i18n key，UI 用 i18n 翻译。
+ *
+ * 主信息翻译优先级：
+ * 1. ``code`` 非空 → ``errors.api.<code-lowercase>``，``params`` 为占位符
+ * 2. ``code`` 为空（network/parse 等客户端错误）→ ``messageKey``
+ * 3. ``messageKey`` 也无 → ``message``（中文 fallback，开发友好）
+ *
+ * ``message`` 字段保留中文 fallback 便于 console.error 调试。
+ */
 export class ApiError extends Error {
   readonly kind: ApiErrorKind;
   readonly httpStatus?: number;
-  readonly hint?: string;
+  /** 后端 APIErrorCode（如 ``TASK_NOT_FOUND``）；网络/parse 错误为空 */
+  readonly code?: string;
+  /** 后端响应 params（路径 / 原因 / 上限值等占位符值） */
+  readonly params: ApiErrorParams;
+  /** 客户端兜底主信息 i18n key（仅在没有 ``code`` 时使用） */
+  readonly messageKey?: string;
+  readonly messageKeyParams?: ApiErrorParams;
+  /** HTTP 状态码诊断 hint i18n key（如 ``errors.http.504``） */
+  readonly hintKey?: string;
 
   constructor(
     message: string,
-    init: { kind: ApiErrorKind; httpStatus?: number; hint?: string; cause?: unknown },
+    init: {
+      kind: ApiErrorKind;
+      httpStatus?: number;
+      code?: string;
+      params?: ApiErrorParams;
+      messageKey?: string;
+      messageKeyParams?: ApiErrorParams;
+      hintKey?: string;
+      cause?: unknown;
+    },
   ) {
     super(message, init.cause === undefined ? undefined : { cause: init.cause });
     this.name = "ApiError";
     this.kind = init.kind;
     if (init.httpStatus !== undefined) this.httpStatus = init.httpStatus;
-    if (init.hint !== undefined) this.hint = init.hint;
-  }
-
-  /** 拼成"主信息 + 提示"，UI 直接展示 */
-  toDisplayString(): string {
-    return this.hint === undefined ? this.message : `${this.message}\n${this.hint}`;
+    if (init.code !== undefined) this.code = init.code;
+    this.params = init.params ?? {};
+    if (init.messageKey !== undefined) this.messageKey = init.messageKey;
+    if (init.messageKeyParams !== undefined) {
+      this.messageKeyParams = init.messageKeyParams;
+    }
+    if (init.hintKey !== undefined) this.hintKey = init.hintKey;
   }
 }
 
-/** HTTP 状态码 → 诊断提示 */
-function hintForStatus(status: number): string | undefined {
-  if (status === 413) {
-    return "请求体过大（HTTP 413）。检查 starlette MultiPartParser / 反向代理的 max body size。";
-  }
-  if (status === 504) {
-    return "网关超时（HTTP 504）。后端处理超过代理超时阈值，可调大 vite proxyTimeout 或后端 keep-alive。";
-  }
-  if (status >= 500) {
-    return "后端错误。查看 backend 日志确认堆栈。";
-  }
+/** HTTP 状态码 → 客户端诊断 hint i18n key（不含主错误，只是补充提示）。 */
+function hintKeyForStatus(status: number): string | undefined {
+  if (status === 413) return "errors.http.413";
+  if (status === 504) return "errors.http.504";
+  if (status >= 500) return "errors.http.5xx";
   return undefined;
+}
+
+/** 解析后端业务异常响应体（``ApiBusinessError`` 处理器输出形态）。 */
+function parseBusinessErrorBody(text: string): {
+  code?: string;
+  detail?: string;
+  params: ApiErrorParams;
+} {
+  try {
+    const data: unknown = JSON.parse(text);
+    if (typeof data !== "object" || data === null) return { params: {} };
+    const obj = data as Record<string, unknown>;
+    const code = typeof obj.code === "string" ? obj.code : undefined;
+    const detail = typeof obj.detail === "string" ? obj.detail : undefined;
+    const rawParams =
+      typeof obj.params === "object" && obj.params !== null ? obj.params : {};
+    /* params 只接收 string | number | string[]，其余字段静默忽略 */
+    const params: ApiErrorParams = {};
+    for (const [k, v] of Object.entries(rawParams)) {
+      if (typeof v === "string" || typeof v === "number") {
+        params[k] = v;
+      } else if (
+        Array.isArray(v) &&
+        v.every((item) => typeof item === "string")
+      ) {
+        params[k] = v as readonly string[];
+      }
+    }
+    return {
+      ...(code === undefined ? {} : { code }),
+      ...(detail === undefined ? {} : { detail }),
+      params,
+    };
+  } catch {
+    return { params: {} };
+  }
 }
 
 /** 统一错误处理 */
@@ -125,14 +184,18 @@ async function handleResponse<T>(
 ): Promise<T> {
   if (!response.ok) {
     const text = await response.text().catch(() => "");
+    const parsed = parseBusinessErrorBody(text);
+    const fallback = parsed.detail ?? (text || response.statusText);
     throw new ApiError(
-      `HTTP ${response.status.toString()}: ${text || response.statusText}`,
+      `HTTP ${response.status.toString()}: ${fallback}`,
       {
         kind: "http",
         httpStatus: response.status,
-        ...(hintForStatus(response.status) === undefined
+        ...(parsed.code === undefined ? {} : { code: parsed.code }),
+        params: parsed.params,
+        ...(hintKeyForStatus(response.status) === undefined
           ? {}
-          : { hint: hintForStatus(response.status) }),
+          : { hintKey: hintKeyForStatus(response.status) }),
       },
     );
   }
@@ -142,7 +205,8 @@ async function handleResponse<T>(
   } catch (error_: unknown) {
     throw new ApiError("响应解析失败：非合法 JSON", {
       kind: "parse",
-      hint: "可能后端返回了 HTML（502/504 网关页）或被中间件改写。",
+      messageKey: "errors.client.parseFailed",
+      hintKey: "errors.client.parseFailedHint",
       cause: error_,
     });
   }
@@ -420,14 +484,15 @@ export async function uploadFiles(
       `上传失败（${files.length.toString()} 张 / ${sizeMb} MB / ${elapsedMs.toString()}ms）：${detailMsg}`,
       {
         kind: "network",
-        hint:
-          "浏览器未拿到 HTTP 响应。常见原因：" +
-          "① Vite proxy / 反向代理超时断流（已加大到无限，旧 dev server 需重启生效）；" +
-          "② 后端进程崩溃或 OOM（看 backend 日志）；" +
-          "③ /tmp 写满（df -h /tmp）；" +
-          "④ 上传体积超出 starlette MultiPartParser 限制。" +
-          `本批文件：${filenamesPreview}。` +
-          "排查：F12 Network 看具体 net::ERR_*；或临时直连 http://127.0.0.1:8000/api/v1 旁路 proxy 复测。",
+        messageKey: "errors.client.uploadNetworkFailed",
+        messageKeyParams: {
+          count: files.length,
+          sizeMb,
+          elapsedMs,
+          detail: detailMsg,
+        },
+        hintKey: "errors.client.uploadNetworkFailedHint",
+        params: { filenames: filenamesPreview },
         cause: error_,
       },
     );

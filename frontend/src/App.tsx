@@ -9,7 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { cancelTask } from "./api/client";
 import { BackToTopButton } from "./components/BackToTopButton";
 import { Sidebar } from "./components/Sidebar";
-import { useTranslation } from "./i18n";
+import { renderLocalized, useTranslation } from "./i18n";
 import { useTheme } from "./hooks/useTheme";
 import type { SidebarTaskListHandle } from "./components/SidebarTaskList";
 import { TaskDetail } from "./components/TaskDetail";
@@ -139,7 +139,11 @@ function App(): React.JSX.Element {
               <section className="section-error">
                 <div className="error-box">
                   <h2>{t("app.processingFailed")}</h2>
-                  <p>{error ?? t("app.unknownError")}</p>
+                  <p>
+                    {error === undefined
+                      ? t("app.unknownError")
+                      : renderLocalized(error, t)}
+                  </p>
                   <button type="button" onClick={reset}>
                     {t("taskResult.resetBtn")}
                   </button>
