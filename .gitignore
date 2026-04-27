@@ -13,6 +13,21 @@ test_images/*_OCR
 test_images/linux_sdk
 test_images/TMedia_source_code
 
+# 外部数据软链接（指向 NAS / 本地大目录）
+test_images/chromium-decode
+test_images/finetune
+
+# dococr_bench 大数据/输出（仅保留 scripts/ + RESULTS.md）
+test_images/dococr_bench/precrop/
+test_images/dococr_bench/out/
+test_images/dococr_bench/out_dbscan/
+test_images/dococr_bench/out_recrop/
+test_images/dococr_bench/results/
+test_images/dococr_bench/main_doc_train/
+
+# 运行时日志
+logs/
+
 # llm 环境
 .env
 
