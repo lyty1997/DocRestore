@@ -16,6 +16,283 @@ limitations under the License.
 
 # DocRestore 开发进度
 
+## 2026-04-27 前端透出本地 LLM provider 选择
+
+主题：本地 LLM 后端早已实现（`LocalLLMRefiner` + `LLMConfig.provider`），但
+前端 `LLMConfigRequest` / `TaskForm` 没有透出 provider 字段，用户没法在 UI
+上选择"云端 / 本地"，只能改后端 yaml。补齐这块。
+
+完成内容：
+- `backend/docrestore/api/schemas.py::LLMConfigRequest` 新增
+  `provider: Literal["cloud", "local"] | None`，非法值会被 422 拒绝；路由
+  `model_copy(update=...)` 自动透传到 `LLMConfig.provider`，
+  `Pipeline._create_refiner` 既有分支无需改动
+- `frontend/src/components/TaskForm.tsx`：
+  - `LLMConfig` 接口加 `provider` 字段；新增 `LLMProvider` 类型 +
+    `DEFAULT_LLM_PROVIDER="cloud"` + `normalizeProvider()` 收窄旧 localStorage
+    数据
+  - LLM 区域顶部新增"云端 API / 本地服务"radio + 动态 hint（描述本地模式
+    PII 行为差异）
+  - localStorage `StoredLLMConfig` 加上 `provider` 持久化
+  - `handleSubmit` 仅在 provider 非默认值时才透传，避免污染默认请求
+- `frontend/src/App.css`：补 `.llm-provider-field/.llm-provider-options/
+  .llm-provider-option(--active)/.llm-provider-hint` 样式
+- 三语 i18n（zh-CN / zh-TW / en）补 `taskForm.providerLabel /
+  provider_cloud / provider_local / providerHint_cloud / providerHint_local`
+- 验证：mypy --strict / ruff / `pytest tests/test_config.py
+  tests/llm/test_local.py tests/llm/test_model_normalize.py`(53)/
+  `tests/api/test_routes.py`(14) 全绿；前端 tsc / eslint / vitest 37 个全绿
+- 文档批量补齐 LLM 接入说明（与代码同批落地）：
+  - `README.md` / `README.en.md`：「配置」节拆 cloud / local 两段，列
+    ollama / vLLM / llama.cpp 启动样例 + api_base；REST API cURL 增加传
+    `llm.provider` 的云端 / 本地两份示例 + `openai/` 前缀注意事项
+  - `docs/zh/deployment.md` / `docs/en/deployment.md` §3.4 + §4.4：扩为
+    `LLMConfig` 字段表 + cloud / ollama / vLLM 三段 yaml 范例，明确本地
+    模式跳过 LLM 实体识别只走 regex 的 PII 行为差异
+
+遗留问题：无（本地 LLM 端到端已可在 UI 直选；云端模式行为与历史完全一致）
+
+## 2026-04-27 代码模式归类 4 类回归修复（DSC06953/07050/06873 + UI 滚动）
+
+主题：跑 211 张 chromium IDE 截图后发现 4 个归类/UI bug，逐一修复
++ 补单测/playwright 截图验证。
+
+### #1 DSC06953 / DSC07002 col0 误归到 gles2_dmabuf_to_egl_image_translator.cc
+
+- 现象：本应归到 ``openmax_video_decode_accelerator.cc`` 的 col0，被错
+  归到同 col0 但完全不同的 gles2 文件
+- 根因：col0 breadcrumb OCR 拆成多 bbox（``openmax_`` + ``_video_decode_
+  accelerator.cc``），单段不含 ``>`` → ``_split_lines_by_kind`` 把它当
+  tab；``_pick_best_tab_filename`` 在 tab bar 同时显示 .cc tab、谁也
+  没 ``×`` 时退回 "y 最小者优先"，命中 gles2
+- 修复（``ide_meta_extract.py``）：
+  - ``_detect_breadcrumb_band``：以含 ``>`` 行的 y 范围定义 breadcrumb
+    带，同 y 带的所有片段都视为 breadcrumb（即使无 ``>``）
+  - ``_stitch_breadcrumb_fragments``：按 x 排序拼接，相邻 bbox 重叠时用
+    ``_dedup_overlap_boundary`` 去重首尾共享字符 1-8 个
+  - 拼接后走单行 ``_parse_breadcrumb`` —— ``openmax_`` 与 ``_video_
+    decode_accelerator.cc`` 在 ``_`` 处共享，去重后还原完整 filename
+  - 兜底：``_pick_best_tab_filename`` 加 ``hint_lines`` 参数，无 ``×``
+    标记时用 breadcrumb-row 片段 suffix-match 消歧 tab 候选
+
+### #3 DSC07050 col0 出现幽灵 _decode_accelerator.cc
+
+- 现象：1 page、24 行的 ``_decode_accelerator.cc`` 是不存在的文件
+- 根因：DSC07050 col0 breadcrumb 含 ``_decode_accelerator.cc>{}media>``
+  + ``openmax_video_`` 两片段，OCR 漏识 dir 与 filename 间的 ``>``，
+  解析出截断版 filename + 丢失 ``openmax`` 段路径
+- 修复（``ide_meta_extract.py``）：
+  - ``_looks_truncated_filename`` + ``_complete_via_tab_suffix``：
+    filename 以 ``_`` 开头且某 tab 候选 endswith 它 → 用 tab 完整版
+  - ``_parse_breadcrumb`` 文件段前缀提取：当 dir 与 filename 在同一段
+    （``openmax C+openmax_video_decode_accelerator.cc``），按空白分词
+    + ``_looks_like_icon_word`` 滤掉 ``C/C+/H/J`` 等图标残留 → 把
+    剩余的 ``openmax`` 追加进 path
+
+### #2 DSC06873 col0 拼写错 acceleratorr.cc 误成独立文件
+
+- 现象：1 page 的 ``openmax_video_decode_acceleratorr.cc``（OCR 多识
+  一个 ``r``）与 256 page 的正确版被识别成两份不同文件
+- 修复（``code_file_grouping.py``）：``group_into_files`` 末尾增 ``
+  _merge_near_duplicate_filenames`` 二次合并：
+  - 同 (compact_dir, ext) 桶内
+  - filename Levenshtein ≤ 2 或一方是另一方真后缀
+  - 小组占比 ≤ 10%（保护两份真实独立文件）
+  - 满足时小组并入大组、保留大组 canonical filename，重建 merged_text
+  - 标 ``code.grouping.merged_near_duplicate``
+
+### #4 右栏被 source_pages tag 列表撑满，原图缩略图被挤出可视区
+
+- 现象：长文件有 255 个 source_pages，``code-source-pages-list`` 渲染
+  全部 tag → 撑满 ``code-source-images`` 列高，``code-source-images-
+  list`` 被推到滚动区外
+- 修复（``CodeViewer.tsx`` + ``App.css`` + 三语 i18n）：
+  - 用 ``<details>`` 包裹页面 tag 列表（默认收起，summary 显示数量
+    "255 张原图来源（点击展开）"）
+  - ``.code-source-pages-details``：``max-height: 30%; overflow-y: auto``
+    展开时仅占右栏 30% 高度内自滚，images list 始终可见
+  - 加 i18n key ``codeViewer.sourcePagesCount``（zh-CN/zh-TW/en）
+  - playwright 截图验证收起/展开两态 OK
+
+### 测试
+
+- ``tests/processing/test_ide_meta_extract.py``：+4 回归用例（片段拼接
+  与 overlap 去重、tab suffix 截断补全、文件段含 path 前缀、icon word
+  ``C`` 不当作 dir）
+- ``tests/processing/test_code_file_grouping.py``：+4 回归用例（typo
+  并入大组、suffix-match 并入、规模相当不合并、扩展名不同永不合并）
+- 全量 ``tests/processing/`` + ``tests/llm/test_code_refine.py``：197
+  passed / 14 skipped
+- TS：``tsc --noEmit`` + ``eslint`` 无报错
+
+遗留问题：现有 chromium_v3 task 的 ``files-index.json`` 是修复前生成
+的，需重新跑该任务（或 resume）才能让 fix 生效到这份数据上。
+
+### #7 修复 OCR worker stdout 空行/日志行导致 task 整体失败
+
+- 现象：跑 chromium_v4 任务时，worker 在 init 期间 stdout 偶发出现空行或
+  vLLM/transformers 日志，命中 ``base.py::_read_response`` 的默认实现：
+  ``json.loads(b"\\n")`` → ``JSONDecodeError: Expecting value: line 2
+  column 1 (char 1)`` → 整个 task 推到 failed
+- traceback 链：``ocr.ocr → _restart_worker → initialize → _send_init_
+  command → _send_command → _read_next_response → _read_response → 抛``
+- 根因：``base.py`` 默认 ``_read_response`` 单纯 ``json.loads(raw)``，
+  对空行/日志噪声零容忍。``deepseek_ocr2.py`` 早就独立写了一个 robust 版
+  （``while True: skip blank/non-JSON; readline``），但 PaddleOCR 走默认
+  实现没受益
+- 修复：把 DeepSeek 的 robust 版上提到 ``base.WorkerBackedOCREngine.
+  _read_response``：跳过空行 + 跳过 ``json.JSONDecodeError`` 行（DEBUG
+  日志记录前 200 字），EOF 时调 ``_raise_worker_exited()``（拼 stderr_
+  tail，比原 deepseek 版的裸 RuntimeError 信息更丰富）
+- DeepSeek 的本地 ``_read_response`` 删除（避免重复）；同步删除已不再使用
+  的 ``import json``
+- 测试：``tests/ocr/test_paddle_ocr.py::test_initialize_skips_blank_and_
+  log_lines`` 直接复现原始崩溃路径——4 行 stdout 序列「空行 → vLLM
+  日志 → 空行 → 合法 JSON」，断言 ``initialize()`` 成功 + 4 行全消费
+- 全量回归：``tests/ocr/`` + ``tests/processing/`` + ``tests/llm/`` 共
+  395 passed / 20 skipped
+
+### #6 文档模式编辑器换 Tiptap WYSIWYG（类 Word，所见即所得）
+
+- 现象：原 ``DocCodePreview`` 编辑模式是裸 ``<textarea>``，用户看到的是
+  markdown 源码（``## 标题`` / ``| 表头 |``），不直观、不所见即所得
+- 用户要求："类 Word 的编辑体验，不要露出 markdown 源码"
+- 修复（前端纯前端改动）：
+  - 新增 ``MarkdownWysiwygEditor.tsx``（Tiptap 集成）：StarterKit + Image
+    + Link + Table 系列 + Placeholder + 自定义 ``PageAnchor`` Node
+    （把 ``<!-- page: X -->`` 当成 atom block 显示为「📄 X」灰条）
+  - 顶部 toolbar：标题级别下拉（正文/H1-H4）+ B/I/S/code + 列表（无序/
+    有序/引用/分隔线）+ 表格 + 链接 + 撤销/重做；按钮跟随光标位置高亮
+  - ``markdownRoundtrip.ts`` 双向转换：``marked`` (md→html) +
+    ``turndown + turndown-plugin-gfm`` (html→md)；自定义 turndown 规则
+    把 page-anchor div 还原为 HTML 注释
+  - Word 风格 CSS：白底文档纸面 / 衬线字体 / 1.75 行距 / 标题阶梯字号 /
+    表格全边框 + 表头灰底 + 行 hover 高亮 / 行内 code 灰底框
+  - 替换 ``DocCodePreview`` 编辑分支：``<textarea>`` → ``<MarkdownWysiwyg
+    Editor>``；``editText`` 状态保持不变，``onChange`` 收到的是 turndown
+    转回的 markdown，``handleSave`` 不变
+  - i18n 三语 key：``editor.placeholder`` / ``editor.h1-4`` / ``editor.bold``
+    / ``editor.bulletList`` / ``editor.insertTable`` / ``editor.linkPrompt``
+    等共 18 个
+  - playwright 截图验证：U-Boot 用户手册 task 进入编辑模式 → 标题渲染
+    为大字 / GFM 表格全边框 / 输入文字立即生效 / Save 按钮变绿
+- 测试：``tests/markdownRoundtrip.test.ts`` 11 用例 round-trip 验证
+  （headings / GFM table / lists / page-anchor / bold/italic/strike），
+  全部通过
+- TS：``tsc --noEmit`` 与 ``eslint`` 无报错
+- 用户偏好：AGE-48（code refine LLM）由用户关闭，专注文档模式 UX
+
+### #5 强化 code refine prompt + 加 rewrite 模式
+
+- 现象：LLM 修正后的代码仍残留大量 OCR 噪声 —— 行尾幽灵字符（`Y`/
+  `工`/`王`/`I`/`2`）、整行 `}` 错识为 `2`/`3`、标识符大小写漂移
+  （`oMX_`/`OMx_`/`oMx_` vs `OMX_`）、`OMX_HANDLETYPEhComponent` 之类
+  缺空格粘连
+- 原 prompt 偏保守，太多"仅当上下文明确指示时"的限定 → LLM 不敢动；
+  没明确"行尾孤立中文字符必删"的指令；没要求"全文标识符大小写归一"
+- 修复：
+  - ``CODE_REFINE_SYSTEM_PROMPT`` 重写：心态调到"大胆改"，加 8 条
+    "必修"清单（行尾幽灵 / 整行 1 字 / 标识符多数派归一 / 缺空格切分
+    / 闭合符号 / 全角半角 / 字符混淆 / IDE chrome 残留），每条带本数据集
+    的实测样例（`oMx_ErrorNone` / `OMX_HANDLETYPEhComponent` / `} Y`）
+  - 新增 ``CODE_REWRITE_SYSTEM_PROMPT``：允许 LLM 重排格式 / 合并断行 /
+    补编译必需的语法元素，**不强制行数守恒**；禁编造业务逻辑
+  - ``CodeLLMRefiner`` 加 ``mode="refine"|"rewrite"``：rewrite 模式解
+    析 ``rewritten_code``，flag 含 ``code.refine.mode=rewrite`` +
+    ``code.refine.line_delta=±N``
+  - ``LLMConfig.code_refine_mode`` 默认 ``"refine"``；
+    ``LLMConfigRequest`` 透出该字段，前端可在创建任务时选 rewrite
+- 测试：``test_code_refine.py`` +4 用例（rewrite 行数差异接受 / 空
+  payload 回退 / prompt template 切换 / 非法 mode 拒绝）；全量 312 个
+  llm+processing+zip_code 测试通过
+
+## 2026-04-26 代码模式回归 5 大问题修复 — 前后端组件解耦 + LLM provider 兜底
+
+主题：用户跑完 211 张 Chromium IDE 截图后发现 5 个回归问题，
+按优先级一并修复。
+
+### #5 LiteLLM provider 缺失（base.py + test_model_normalize.py）
+- 实测：UI 填 `model=deepseek-v4-flash` + `base_url=https://api.deepseek.com`
+  → litellm.BadRequestError "LLM Provider NOT provided"
+- 修复：`_normalize_model_id(model, api_base)` 在 `_build_kwargs` 入口归一：
+  - 已含 litellm 内置 provider 前缀 → 透传
+  - 否则 `api_base` 非空 → 自动加 `openai/`（DeepSeek/GLM/中转站/vLLM 都
+    走 OpenAI 兼容协议）
+  - `api_base` 为空 → 透传，让 litellm 按模型名 fallback
+- 单测 4 条覆盖：已知前缀透传 / 自定义 model + api_base / 无 api_base / 空字符串
+
+### #2 下载 zip 缺源文件（routes.py + test_zip_code_mode.py）
+- `_add_doc_to_zip` 历史只打 `document.md` + `images/`；代码模式还原出来
+  的 `files/` 整树和 `files-index.json` 不进 zip → 用户下载只看到文档
+- 修复：抽 `_add_subtree_to_zip(doc_dir, subdir, prefix)` 通用函数，
+  代码模式额外打 `files/` + `files-index.json` + `.quality_report.json`
+- 单测 4 条：纯文档模式不混入 / 代码模式三件套 / 字节内容一致 / 多子目录命名空间
+
+### #3 IDE meta：breadcrumb 是唯一真相（ide_meta_extract.py）
+- 实测 DSC06953/07002：col0 IDE 显示 `.h` 但被归到 `.cc`，根因是
+  `_reconcile_with_tab` 在"breadcrumb 末段截断 + tab 名是 prefix"时
+  让 tab 覆盖 breadcrumb，OCR 多 tab 噪声直接污染文件归类
+- 用户决策：含 `>` 的 breadcrumb 必然是当前打开的源文件（IDE 不会撒谎），
+  tab bar 跨栏 leak 不可信 —— breadcrumb 必须是唯一真相
+- 修复：删 `_reconcile_with_tab`；breadcrumb 给出 filename 后绝不让 tab
+  override，仅在 breadcrumb 完全没解出 filename 时回退 tab；保留同图栏间
+  路径补全（peer dir 借用 / 粘连段还原）
+- 新加单测 2 条：多 tab + 不同扩展名场景 / breadcrumb 给的文件名跟 tab
+  完全不同也以 breadcrumb 为准
+
+### #1 抽 DocCodePreview 共享组件（前端解耦）
+- 之前 TaskResult（新建任务后主视图）和 TaskDetail（任务列表详情页）
+  各自实现"文档/代码切换 + 多文档 tab + 编辑保存 + 源图同步滚动"，
+  TaskResult 漏了代码模式 toggle + CodeViewer
+- 抽 `DocCodePreview` 组件：探测 files-index → 渲染 view-mode toggle →
+  按 viewMode 路由到 CodeViewer 或 markdown 预览；TaskResult/TaskDetail
+  只负责任务级 header（标题/下载/删除）
+- TaskResult 用 `headerExtras` 注入下载按钮；TaskDetail 用上层 task header
+  自带 download
+
+### #4 ImageLightbox 抽组件 + CodeViewer 接入（视觉验证已截图）
+- `<ImageLightbox src onClose>`：useRef + useEffect 自动 focus，配合
+  `tabIndex={0}` 让 Esc 关闭可用；`role="button"` 保证可达性
+- SourceImagePanel 与 CodeViewer 都复用；CodeViewer 历史漏写 onClick，
+  CSS 只有 `cursor: pointer` 但点击无效 → 现已修
+- 视觉验证：`screenshots/code-mode-detail-doc.png` /
+  `code-mode-detail-code.png` / `code-mode-lightbox.png`，三栏布局正常、
+  缩略图点击放大 OK
+
+### 收益
+- `tests/llm/test_model_normalize.py` +4
+- `tests/api/test_zip_code_mode.py` +4
+- `tests/processing/test_ide_meta_extract.py` +2（DSC06953 回归守护）
+- 全量回归 135 passed / 4 skipped
+
+### 二阶段：遗留三项（用户后续决策"按你的修法修复"）
+**#A gap 填充加阈值**：`code_file_grouping._merge_columns_by_line_no` 单次
+gap > 50 行不再批量塞空行，改插单行注释占位（`// ... N lines missing ...`
+或 `# ... ...` 按 language 选）。回归 DSC06953 案例的 587 连续空行雪崩。
+新 flag `code.grouping.large_gap_collapsed` 标识被压缩。
++`tests/processing/test_code_file_grouping.py` 3 用例（cpp / python / 混合 gap）。
+
+**#C 熔断器 key 含 (model, api_base)**：`get_breaker(model, api_base="")`
++ 内部 `_endpoint_key`，同 model 不同中转站独立熔断。`get_breaker` 第 2
+位置参数从 `config` 改为 `api_base`，`config` 强制 keyword-only —— 旧调
+用 `get_breaker(m, my_config)` 必须改成 `get_breaker(m, config=my_config)`。
+`base.py::_call_llm` + `pipeline._subscribe_breaker` 都同步传 api_base。
++`tests/llm/test_circuit_breaker.py` 2 用例（同 model 不同 base 隔离 / 空
+api_base 与显式 base 区分）。
+
+**#B tab 仅观察 flag（无功能改动）**：`code.tab_only_fallback` 在 filename
+来自 tab 兜底（breadcrumb 失败）时标记，让运维 / quality_report 统计 tab
+兜底比例评估 OCR 质量。breadcrumb-truth 策略已在 #3 确立，未发现进一步
+切分必要；若未来再出归类异常，再考虑 tab x_center 严格栏内 + 多 active
+tab 区分。
++`tests/processing/test_ide_meta_extract.py` 1 用例（tab 兜底场景不应错
+标 breadcrumb_path_missing）。
+
+二阶段全量回归：150 passed / 7 skipped（含 LLM/processing/zip 全套）；
+pipeline 测试 181 passed 无破坏。
+
+---
+
 ## 2026-04-26 AGE-8 真端到端验证 — OCR 质量链 + 真 g++ 语法验证
 
 主题：用户回归代码模式发现两件大事，分别修复。

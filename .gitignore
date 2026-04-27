@@ -59,3 +59,12 @@ debug_image/
 # 并行测试数据集（含 symlink 形式，所以不加尾斜杠以匹配文件和目录）
 test_images/parallel_test
 test_images/Chromium_VDA_code
+
+# 裁剪对比测试数据（局部生成，按 CLAUDE.md 测试规则不入库）
+test_images/crop_compare/
+
+# 个人调试笔记，避免误入库
+项目经验.md
+
+# Pipeline 生成的 OCR 预览图，按需重新生成，不入库
+outputs/preview/
