@@ -86,7 +86,7 @@ export const zhCN = {
   "taskForm.llmHint":
     "不填则跳过 LLM 精修，仅输出 OCR 原始结果。模型名称使用 litellm 格式（provider/model）。",
   "taskForm.storageWarning": " 配置（含 API Key）将以明文存储在浏览器本地。",
-  "taskForm.codeModeTitle": "IDE 代码模式（AGE-8）",
+  "taskForm.codeModeTitle": "IDE 代码模式",
   "taskForm.codeModeDesc":
     "上传 IDE 编辑器截图时启用：输出独立源文件（.cc/.h/.gn/.py/...）到 files/，不再合成单份 Markdown。",
   "taskForm.piiTitle": "脱敏功能",

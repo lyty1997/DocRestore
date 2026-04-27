@@ -5,30 +5,21 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import Markdown from "react-markdown";
-import rehypeRaw from "rehype-raw";
-import remarkGfm from "remark-gfm";
 
 import {
   cancelTask,
   deleteTask,
   getDownloadUrl,
-  getFilesIndex,
   getTask,
   getTaskResults,
-  listSourceImages,
   resumeTask,
   retryTask,
-  updateResultMarkdown,
 } from "../api/client";
 import type { TaskListItem, TaskResultResponse } from "../api/schemas";
-import { preprocessMarkdown } from "../features/task/markdown";
 import { useTaskProgress } from "../features/task/useTaskProgress";
-import { useScrollSync } from "../hooks/useScrollSync";
 import { useTranslation } from "../i18n";
-import { CodeViewer } from "./CodeViewer";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { SourceImagePanel } from "./SourceImagePanel";
+import { DocCodePreview } from "./DocCodePreview";
 import { TaskProgress } from "./TaskProgress";
 
 /** 格式化时间（locale 由 i18n 提供） */
@@ -73,55 +64,13 @@ export function TaskDetail({
   const [taskLoading, setTaskLoading] = useState(true);
   const [taskError, setTaskError] = useState<string | undefined>();
 
-  /* 文档结果 */
+  /* 文档结果（DocCodePreview 内部维持 selectedIdx / source-images / 代码模式
+     探测 / 编辑状态，TaskDetail 只持有 results 顶层数组以便 retry 后刷新）。 */
   const [docResults, setDocResults] = useState<TaskResultResponse[]>([]);
-  const [selectedDocIdx, setSelectedDocIdx] = useState(0);
-  const [allSourceImages, setAllSourceImages] = useState<string[]>([]);
   const [resultsLoading, setResultsLoading] = useState(false);
-
-  /* 代码模式探测：files-index.json 存在则任务跑过代码模式 */
-  const [codeAvailable, setCodeAvailable] = useState(false);
-  const [viewMode, setViewMode] = useState<"doc" | "code">("doc");
-
-  /* 编辑 */
-  const [editMode, setEditMode] = useState(false);
-  const [editText, setEditText] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | undefined>();
 
   /* 确认弹窗 */
   const [confirm, setConfirm] = useState<ConfirmState | undefined>();
-
-  /* 左右预览同步滚动：SourceImagePanel 的 .source-images-list 与右侧
-     .markdown-preview 各挂一个 callback ref，把实际 DOM 元素塞到 state
-     里。state 变化触发 useScrollSync 内 useEffect 重新跑 → listener 绑上。
-     edit 模式或失败 tab 下右侧不是 markdown，禁用同步。 */
-  const [leftScrollEl, setLeftScrollEl] = useState<HTMLDivElement>();
-  const [rightScrollEl, setRightScrollEl] = useState<HTMLDivElement>();
-
-  const selectedDoc = docResults[selectedDocIdx];
-  /**
-   * 选中的子文档是否失败。失败 tab 不允许编辑、不展示 markdown 预览，
-   * 只展示 error 文本；成功 tab 行为与历史版本一致。
-   * zod 层 default("") 保证 error 始终为 string，这里直接比较空串即可。
-   */
-  const selectedDocFailed =
-    selectedDoc !== undefined && selectedDoc.error !== "";
-  const failedDocs = docResults.filter((d) => d.error !== "");
-  const completedDocCount = docResults.length - failedDocs.length;
-  const dirty =
-    editMode &&
-    selectedDoc !== undefined &&
-    editText !== selectedDoc.markdown;
-
-  /** 根据选中文档过滤源图片 */
-  const filteredImages = (() => {
-    if (selectedDoc?.doc_dir === undefined || selectedDoc.doc_dir === "") {
-      return allSourceImages;
-    }
-    const prefix = `${selectedDoc.doc_dir}/`;
-    return allSourceImages.filter((img) => img.startsWith(prefix));
-  })();
 
   /** 加载任务元信息 */
   const fetchTaskInfo = useCallback(async () => {
@@ -146,29 +95,16 @@ export function TaskDetail({
     }
   }, [taskId, t]);
 
-  /** 加载结果和源图片 */
+  /** 加载结果（源图 / 代码模式探测在 DocCodePreview 内完成） */
   const fetchResults = useCallback(async () => {
     setResultsLoading(true);
     try {
-      const [results, images] = await Promise.all([
-        getTaskResults(taskId),
-        listSourceImages(taskId),
-      ]);
+      const results = await getTaskResults(taskId);
       setDocResults(results.results);
-      setSelectedDocIdx(0);
-      setAllSourceImages(images.images);
     } catch {
       /* 未完成的任务没有结果，静默处理 */
     } finally {
       setResultsLoading(false);
-    }
-    /* 探测代码模式产物：files-index.json 存在 → 启用 toggle。
-       非代码模式任务返回 404，setCodeAvailable=false 不显示 toggle。 */
-    try {
-      const idx = await getFilesIndex(taskId);
-      setCodeAvailable(idx.length > 0);
-    } catch {
-      setCodeAvailable(false);
     }
   }, [taskId]);
 
@@ -176,14 +112,6 @@ export function TaskDetail({
     void fetchTaskInfo();
     void fetchResults();
   }, [fetchTaskInfo, fetchResults]);
-
-  useScrollSync(leftScrollEl, rightScrollEl, {
-    // 左侧是堆叠的小缩略图、右侧是长 markdown，形状差异大；用 start 对齐
-    // 更贴合用户直觉：看到哪张图"在顶部可见"，右侧 markdown 也滚到对应
-    // 段落"在顶部"，而不是把图居中。
-    align: "start",
-    enabled: !editMode && !selectedDocFailed,
-  });
 
   /* 实时进度订阅：pending/processing 时建 WS，终态自动停 + 刷新任务信息/结果 */
   const taskStatus = task?.status ?? "unknown";
@@ -207,34 +135,6 @@ export function TaskDetail({
     enabled: isLive,
     onTerminal: handleTerminal,
   });
-
-  /* 编辑相关 */
-  const enterEdit = (): void => {
-    if (selectedDoc !== undefined) {
-      setEditText(selectedDoc.markdown);
-      setEditMode(true);
-      setSaveError(undefined);
-    }
-  };
-
-  const handleSave = async (): Promise<void> => {
-    if (selectedDoc === undefined) return;
-    setSaving(true);
-    setSaveError(undefined);
-    try {
-      await updateResultMarkdown(taskId, selectedDocIdx, editText);
-      setDocResults((prev) =>
-        prev.map((doc, idx) =>
-          idx === selectedDocIdx ? { ...doc, markdown: editText } : doc,
-        ),
-      );
-      setEditMode(false);
-    } catch {
-      setSaveError(t("common.saveFailed"));
-    } finally {
-      setSaving(false);
-    }
-  };
 
   /* 操作 */
   const handleConfirm = async (): Promise<void> => {
@@ -422,204 +322,18 @@ export function TaskDetail({
         <div className="task-detail-loading">{t("taskDetail.loadingResults")}</div>
       )}
 
-      {/* 代码模式独立分支：files-index.json 存在 + 用户选了 code → CodeViewer */}
-      {codeAvailable && viewMode === "code" && (
+      {/* 文档/代码模式预览（共享组件） */}
+      {docResults.length > 0 && (
         <div className="task-detail-preview">
           <div className="preview-header">
             <h3>{t("taskDetail.docPreview")}</h3>
-            <div className="preview-actions">
-              <div className="view-mode-toggle">
-                <button
-                  type="button"
-                  className="toggle-btn"
-                  onClick={() => {
-                    setViewMode("doc");
-                  }}
-                >
-                  {t("taskDetail.viewModeDoc")}
-                </button>
-                <button
-                  type="button"
-                  className="toggle-btn active"
-                >
-                  {t("taskDetail.viewModeCode")}
-                </button>
-              </div>
-            </div>
           </div>
-          <CodeViewer
+          <DocCodePreview
             taskId={taskId}
-            allSourceImages={allSourceImages}
+            results={docResults}
+            onResultsChange={(next) => { setDocResults([...next]); }}
+            failedDocStyle="panel"
           />
-        </div>
-      )}
-
-      {/* 文档预览 */}
-      {(!codeAvailable || viewMode === "doc")
-        && docResults.length > 0 && selectedDoc !== undefined && (
-        <div className="task-detail-preview">
-          <div className="preview-header">
-            <h3>{t("taskDetail.docPreview")}</h3>
-            <div className="preview-actions">
-              {codeAvailable && (
-                <div className="view-mode-toggle">
-                  <button
-                    type="button"
-                    className="toggle-btn active"
-                  >
-                    {t("taskDetail.viewModeDoc")}
-                  </button>
-                  <button
-                    type="button"
-                    className="toggle-btn"
-                    onClick={() => {
-                      setViewMode("code");
-                    }}
-                  >
-                    {t("taskDetail.viewModeCode")}
-                  </button>
-                </div>
-              )}
-              {!selectedDocFailed && (
-                <>
-                  <div className="edit-preview-toggle">
-                    <button
-                      type="button"
-                      className={`toggle-btn ${editMode ? "" : "active"}`}
-                      onClick={() => {
-                        setEditMode(false);
-                      }}
-                    >
-                      {t("common.preview")}
-                    </button>
-                    <button
-                      type="button"
-                      className={`toggle-btn ${editMode ? "active" : ""}`}
-                      onClick={enterEdit}
-                    >
-                      {t("common.edit")}
-                    </button>
-                  </div>
-                  {editMode && (
-                    <button
-                      type="button"
-                      className="save-btn"
-                      disabled={saving || !dirty}
-                      onClick={() => {
-                        void handleSave();
-                      }}
-                    >
-                      {saving ? t("common.saving") : t("common.save")}
-                    </button>
-                  )}
-                  {saveError !== undefined && (
-                    <span className="save-error">{saveError}</span>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
-
-          {/* 多文档进度汇总（仅多文档场景） */}
-          {docResults.length > 1 && (
-            <div className="doc-summary">
-              {failedDocs.length > 0
-                ? t("taskDetail.docSummaryPartial", {
-                    done: completedDocCount,
-                    total: docResults.length,
-                    failed: failedDocs.length,
-                  })
-                : t("taskDetail.docSummaryAll", {
-                    total: docResults.length,
-                  })}
-            </div>
-          )}
-
-          {/* 多文档切换；失败子文档带 ✗ 徽章 */}
-          {docResults.length > 1 && (
-            <div className="doc-tabs">
-              {docResults.map((doc, idx) => {
-                const isFailed = doc.error !== "";
-                /* 优先展示 doc_title；缺失 → doc_dir；两者都空 → "文档 N" */
-                let label: string;
-                if (doc.doc_title !== undefined && doc.doc_title !== "") {
-                  label = doc.doc_title;
-                } else if (
-                  doc.doc_dir !== undefined && doc.doc_dir !== ""
-                ) {
-                  label = doc.doc_dir;
-                } else {
-                  label = t("taskResult.docTab", { index: idx + 1 });
-                }
-                return (
-                  <button
-                    key={doc.doc_dir ?? idx.toString()}
-                    type="button"
-                    className={
-                      "doc-tab "
-                      + (idx === selectedDocIdx ? "active " : "")
-                      + (isFailed ? "doc-tab--failed" : "doc-tab--ok")
-                    }
-                    onClick={() => {
-                      if (editMode) setEditMode(false);
-                      setSelectedDocIdx(idx);
-                    }}
-                    title={isFailed ? doc.error : ""}
-                  >
-                    <span className="doc-tab-badge" aria-hidden="true">
-                      {isFailed ? "✗" : "✓"}
-                    </span>
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-
-          <div className="preview-split">
-            <SourceImagePanel
-              ref={(el) => { setLeftScrollEl(el ?? undefined); }}
-              taskId={taskId}
-              images={filteredImages}
-            />
-            {selectedDocFailed && (
-              <div className="doc-failed-panel">
-                <h4>{t("taskDetail.docFailedTitle")}</h4>
-                <pre className="doc-failed-message">{selectedDoc.error}</pre>
-                <p className="doc-failed-hint">
-                  {t("taskDetail.docFailedHint")}
-                </p>
-              </div>
-            )}
-            {!selectedDocFailed && editMode && (
-              <div className="markdown-editor">
-                <textarea
-                  value={editText}
-                  onChange={(e) => {
-                    setEditText(e.target.value);
-                  }}
-                  spellCheck={false}
-                />
-              </div>
-            )}
-            {!selectedDocFailed && !editMode && (
-              <div
-                ref={(el) => { setRightScrollEl(el ?? undefined); }}
-                className="markdown-preview"
-              >
-                <Markdown
-                  remarkPlugins={[remarkGfm]}
-                  rehypePlugins={[rehypeRaw]}
-                >
-                  {preprocessMarkdown(
-                    selectedDoc.markdown,
-                    taskId,
-                    selectedDoc.doc_dir,
-                  )}
-                </Markdown>
-              </div>
-            )}
-          </div>
         </div>
       )}
 

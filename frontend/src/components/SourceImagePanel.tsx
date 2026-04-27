@@ -9,6 +9,7 @@ import { forwardRef, useState } from "react";
 
 import { getSourceImageUrl } from "../api/client";
 import { useTranslation } from "../i18n";
+import { ImageLightbox } from "./ImageLightbox";
 
 interface SourceImagePanelProps {
   readonly taskId: string;
@@ -47,21 +48,10 @@ export const SourceImagePanel = forwardRef<
           );
         })}
       </div>
-
-      {/* 点击放大遮罩 */}
-      {lightboxSrc !== undefined && (
-        <div
-          className="image-lightbox"
-          onClick={() => { setLightboxSrc(undefined); }}
-          role="button"
-          tabIndex={0}
-          onKeyDown={(e) => {
-            if (e.key === "Escape") setLightboxSrc(undefined);
-          }}
-        >
-          <img src={lightboxSrc} alt={t("sourceImages.lightboxAlt")} />
-        </div>
-      )}
+      <ImageLightbox
+        src={lightboxSrc}
+        onClose={() => { setLightboxSrc(undefined); }}
+      />
     </div>
   );
 });

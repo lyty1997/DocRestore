@@ -19,6 +19,7 @@ import {
 } from "../api/client";
 import type { FilesIndex, FilesIndexEntry } from "../api/schemas";
 import { useTranslation } from "../i18n";
+import { ImageLightbox } from "./ImageLightbox";
 
 interface CodeViewerProps {
   readonly taskId: string;
@@ -69,6 +70,7 @@ export function CodeViewer({
   const [content, setContent] = useState<string>("");
   const [contentLoading, setContentLoading] = useState(false);
   const [contentError, setContentError] = useState<string | undefined>();
+  const [lightboxSrc, setLightboxSrc] = useState<string | undefined>();
 
   const loadIndex = useCallback(async () => {
     setIndexLoading(true);
@@ -233,13 +235,20 @@ export function CodeViewer({
       <aside className="code-source-images">
         <h4>{t("codeViewer.sourcePagesTitle")}</h4>
         {selectedEntry !== undefined && selectedEntry.source_pages.length > 0 && (
-          <ul className="code-source-pages-list">
-            {selectedEntry.source_pages.map((sp) => (
-              <li key={sp} className="code-source-page-tag">
-                {sp}
-              </li>
-            ))}
-          </ul>
+          <details className="code-source-pages-details">
+            <summary>
+              {t("codeViewer.sourcePagesCount", {
+                count: selectedEntry.source_pages.length,
+              })}
+            </summary>
+            <ul className="code-source-pages-list">
+              {selectedEntry.source_pages.map((sp) => (
+                <li key={sp} className="code-source-page-tag">
+                  {sp}
+                </li>
+              ))}
+            </ul>
+          </details>
         )}
         <div className="code-source-images-list">
           {selectedImages.length === 0 && (
@@ -247,17 +256,25 @@ export function CodeViewer({
               {t("codeViewer.noSourceImages")}
             </div>
           )}
-          {selectedImages.map((name) => (
-            <img
-              key={name}
-              src={getSourceImageUrl(taskId, name)}
-              alt={name}
-              title={name}
-              className="code-source-image-item"
-            />
-          ))}
+          {selectedImages.map((name) => {
+            const src = getSourceImageUrl(taskId, name);
+            return (
+              <img
+                key={name}
+                src={src}
+                alt={name}
+                title={name}
+                className="code-source-image-item"
+                onClick={() => { setLightboxSrc(src); }}
+              />
+            );
+          })}
         </div>
       </aside>
+      <ImageLightbox
+        src={lightboxSrc}
+        onClose={() => { setLightboxSrc(undefined); }}
+      />
     </div>
   );
 }

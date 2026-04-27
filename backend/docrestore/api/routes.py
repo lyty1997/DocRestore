@@ -179,24 +179,59 @@ def _build_result_zip_bytes(output_dir: Path, doc_dirs: list[str]) -> bytes:
     return buf.getvalue()
 
 
+#: 代码模式额外打包内容：
+#: - ``files/`` 整树（还原出来的源文件）
+#: - ``files-index.json``（路径 + 行号 + 来源页 + flags 索引）
+#: - ``.quality_report.json``（debug，便于离线复盘）
+_CODE_MODE_EXTRA_FILES: tuple[str, ...] = (
+    "files-index.json",
+    ".quality_report.json",
+)
+_CODE_MODE_EXTRA_DIRS: tuple[str, ...] = ("files",)
+
+
 def _add_doc_to_zip(
     zf: zipfile.ZipFile,
     doc_dir: Path,
     prefix: str,
 ) -> None:
-    """将单个文档目录的 document.md + images/ 写入 zip。"""
+    """将单个文档目录写入 zip：
+    - 文档模式：``document.md`` + ``images/``
+    - 代码模式叠加：``files/`` 整树 + ``files-index.json``（+ debug 报告）
+    """
     doc_path = doc_dir / "document.md"
     if doc_path.exists():
         arcname = f"{prefix}/document.md" if prefix else "document.md"
         zf.write(doc_path, arcname=arcname)
 
-    images_dir = doc_dir / "images"
-    if images_dir.exists():
-        for p in sorted(images_dir.rglob("*")):
-            if p.is_file():
-                rel = p.relative_to(doc_dir).as_posix()
-                arcname = f"{prefix}/{rel}" if prefix else rel
-                zf.write(p, arcname=arcname)
+    _add_subtree_to_zip(zf, doc_dir, "images", prefix)
+
+    # 代码模式产物（仅在存在时写入；非代码模式静默跳过）
+    for extra_dir in _CODE_MODE_EXTRA_DIRS:
+        _add_subtree_to_zip(zf, doc_dir, extra_dir, prefix)
+    for extra_file in _CODE_MODE_EXTRA_FILES:
+        p = doc_dir / extra_file
+        if p.is_file():
+            arcname = f"{prefix}/{extra_file}" if prefix else extra_file
+            zf.write(p, arcname=arcname)
+
+
+def _add_subtree_to_zip(
+    zf: zipfile.ZipFile,
+    doc_dir: Path,
+    subdir: str,
+    prefix: str,
+) -> None:
+    """把 ``doc_dir/subdir/`` 整树写入 zip（保持相对路径）。不存在则跳过。"""
+    sub_root = doc_dir / subdir
+    if not sub_root.is_dir():
+        return
+    for p in sorted(sub_root.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(doc_dir).as_posix()
+        arcname = f"{prefix}/{rel}" if prefix else rel
+        zf.write(p, arcname=arcname)
 
 
 def _build_task_response(task_id: str) -> TaskResponse:

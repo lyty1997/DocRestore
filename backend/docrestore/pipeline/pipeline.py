@@ -752,10 +752,13 @@ class Pipeline:
         quality = QualityReport()
 
         # 熔断器告警订阅：OPEN 时推 `llm_unavailable` 进度帧给前端，
-        # finally 里无条件 unsubscribe 防止 listener 泄漏到后续任务
+        # finally 里无条件 unsubscribe 防止 listener 泄漏到后续任务。
+        # 传 (model, api_base) 与 BaseLLMRefiner._call_llm 用同一 key
         llm_cfg_for_breaker = llm if llm is not None else self._config.llm
         unsub_breaker = await self._subscribe_breaker(
-            llm_cfg_for_breaker.model, _report,
+            llm_cfg_for_breaker.model,
+            llm_cfg_for_breaker.api_base,
+            _report,
         )
 
         ocr_task = asyncio.create_task(
@@ -803,16 +806,18 @@ class Pipeline:
     @staticmethod
     async def _subscribe_breaker(
         model: str,
+        api_base: str,
         report_fn: ReportFn,
     ) -> Callable[[], None]:
-        """订阅 per-model 熔断器的 OPEN 事件，翻译为 `llm_unavailable` 进度帧。
+        """订阅 per-(model, api_base) 熔断器的 OPEN 事件，翻译为
+        ``llm_unavailable`` 进度帧。
 
         返回 unsubscribe 句柄；空 model 时返回 no-op。
         """
         if not model:
             return lambda: None
         from docrestore.llm.circuit_breaker import get_breaker
-        breaker = await get_breaker(model)
+        breaker = await get_breaker(model, api_base)
 
         def listener(m: str, open_until: float) -> None:
             remain_s = max(0.0, open_until - time.monotonic())

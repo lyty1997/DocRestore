@@ -65,7 +65,7 @@ async def test_consecutive_failures_trip_breaker_and_fail_fast() -> None:
     # 用紧阈值的 breaker 便于快速触发
     breaker = await get_breaker(
         "test-integration-model",
-        CircuitBreakerConfig(
+        config=CircuitBreakerConfig(
             min_failures=2,
             failure_rate_threshold=0.5,
             cool_down_seconds=5.0,
@@ -136,7 +136,7 @@ async def test_half_open_probe_success_restores_closed() -> None:
     """冷却到期 → 半开探测成功 → 关闭熔断，后续调用恢复正常。"""
     breaker = await get_breaker(
         "recovery-model",
-        CircuitBreakerConfig(
+        config=CircuitBreakerConfig(
             min_failures=2,
             failure_rate_threshold=0.5,
             cool_down_seconds=0.1,  # 短冷却便于测试
@@ -179,7 +179,7 @@ async def test_open_event_triggers_listener() -> None:
     """OPEN 翻转时订阅的监听器应被调用。"""
     breaker = await get_breaker(
         "listener-model",
-        CircuitBreakerConfig(
+        config=CircuitBreakerConfig(
             min_failures=2, failure_rate_threshold=0.5,
             cool_down_seconds=10.0,
         ),

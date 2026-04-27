@@ -301,3 +301,27 @@ class TestRegistry:
         reset_all_breakers()
         b2 = await get_breaker("m1")
         assert b1 is not b2
+
+    async def test_same_model_different_api_base_isolated(self) -> None:
+        """同 model 名走不同中转站 → 独立熔断实例
+
+        回归用户反馈：DeepSeek-v4-flash 在 api.deepseek.com 挂了，
+        若 key 只用 model 名会同时拒绝走自部署 vLLM 的同名调用。
+        """
+        reset_all_breakers()
+        b1 = await get_breaker("deepseek-v4-flash", "https://api.deepseek.com")
+        b2 = await get_breaker("deepseek-v4-flash", "https://my-vllm.local/v1")
+        assert b1 is not b2
+        # 同一 (model, api_base) 仍是单例
+        b3 = await get_breaker("deepseek-v4-flash", "https://api.deepseek.com")
+        assert b1 is b3
+
+    async def test_empty_api_base_distinct_from_set_one(self) -> None:
+        """api_base 留空（走 litellm 默认）与 api_base 显式给值 → 独立 key"""
+        reset_all_breakers()
+        b1 = await get_breaker("gpt-4o", "")
+        b2 = await get_breaker("gpt-4o", "https://proxy.example.com/v1")
+        assert b1 is not b2
+        # 不传 api_base 与传空字符串等价
+        b3 = await get_breaker("gpt-4o")
+        assert b1 is b3

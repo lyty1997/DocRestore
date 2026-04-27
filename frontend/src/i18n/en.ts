@@ -95,7 +95,7 @@ export const en: Record<TranslationKey, string> = {
     "Leave empty to skip LLM refinement and output raw OCR results. Model name uses litellm format (provider/model).",
   "taskForm.storageWarning":
     " Settings (including API Key) are stored in plaintext in your browser.",
-  "taskForm.codeModeTitle": "IDE Code Mode (AGE-8)",
+  "taskForm.codeModeTitle": "IDE Code Mode",
   "taskForm.codeModeDesc":
     "Enable when uploading IDE editor screenshots; output independent source files (.cc/.h/.gn/.py/...) under files/ instead of merged Markdown.",
   "taskForm.piiTitle": "Privacy Redaction",

@@ -84,6 +84,39 @@ def _ensure_timing_file_handler() -> None:
 _ensure_timing_file_handler()
 
 
+#: litellm 已知 provider 前缀（按 `provider/model` 解析时的左半段）。
+#: 用户在 UI 直接填 `gpt-4o` / `claude-sonnet-4` / `deepseek-chat` 等
+#: litellm 内置识别的模型名时不需要前缀；填了厂商自有 / 中转模型名
+#: （如 `deepseek-v4-flash`、`glm-5-air`）必须带前缀，否则 litellm 报
+#: "LLM Provider NOT provided"。
+_LITELLM_KNOWN_PROVIDERS: frozenset[str] = frozenset({
+    "openai", "azure", "anthropic", "bedrock", "cohere", "huggingface",
+    "ollama", "vertex_ai", "gemini", "google", "deepseek", "groq",
+    "mistral", "perplexity", "together_ai", "fireworks_ai", "replicate",
+    "openrouter", "xai", "watsonx", "sagemaker", "cloudflare", "nvidia_nim",
+    "deepinfra", "anyscale", "voyage", "custom_openai", "text-completion-openai",
+})
+
+
+def _normalize_model_id(model: str, api_base: str) -> str:
+    """litellm provider 兜底：用户传 `deepseek-v4-flash` + 自定义 `api_base`
+    时 litellm 不知道 provider，会抛 BadRequestError。规则：
+
+    - model 已含 `provider/...` 形式 → 原样透传（用户显式选择）
+    - 否则 api_base 非空 → 加 `openai/` 前缀（OpenAI 兼容协议通用兜底，
+      DeepSeek / GLM / 中转站 / vLLM 都走 OpenAI schema）
+    - api_base 为空 → 原样透传，让 litellm 按 model 名 fallback
+    """
+    if not model:
+        return model
+    head = model.split("/", 1)[0].lower()
+    if head in _LITELLM_KNOWN_PROVIDERS:
+        return model
+    if api_base:
+        return f"openai/{model}"
+    return model
+
+
 class LLMRefiner(Protocol):
     """LLM 精修器接口"""
 
@@ -193,7 +226,9 @@ class BaseLLMRefiner:
         宽限；litellm 的 num_retries 负责重试。
         """
         kwargs: dict[str, object] = {
-            "model": self._config.model,
+            "model": _normalize_model_id(
+                self._config.model, self._config.api_base,
+            ),
             "messages": messages,
             "num_retries": self._config.max_retries,
             "timeout": self._compute_timeout(messages),
@@ -233,6 +268,7 @@ class BaseLLMRefiner:
         """
         prof = current_profiler()
         model = str(kwargs.get("model", ""))
+        api_base = str(kwargs.get("base_url", ""))
         raw_messages = kwargs.get("messages", [])
         messages = raw_messages if isinstance(raw_messages, list) else []
         msg_chars = sum(
@@ -241,7 +277,8 @@ class BaseLLMRefiner:
             if isinstance(m, dict)
         )
 
-        breaker = await get_breaker(model)
+        # 熔断按 (model, api_base) 维度隔离：同 model 不同中转站独立计费
+        breaker = await get_breaker(model, api_base)
         try:
             await breaker.before_call()
         except LLMCircuitOpenError:

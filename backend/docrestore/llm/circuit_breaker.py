@@ -229,24 +229,40 @@ class LLMCircuitBreaker:
         )
 
 
-# 模块级注册表：per-model 单例
+def _endpoint_key(model: str, api_base: str) -> str:
+    """熔断器注册表 key：model + api_base 组合。
+
+    同一 ``model`` 名走不同中转站时（``deepseek-chat`` 走 ``api.deepseek.com``
+    或走自部署的 vLLM）应当独立熔断，避免一家挂掉触发另一家也 fail-fast。
+    """
+    return f"{model}|{api_base}" if api_base else model
+
+
+# 模块级注册表：per-(model, api_base) 单例
 _breakers: dict[str, LLMCircuitBreaker] = {}
 _registry_lock = asyncio.Lock()
 
 
 async def get_breaker(
     model: str,
+    api_base: str = "",
+    *,
     config: CircuitBreakerConfig | None = None,
 ) -> LLMCircuitBreaker:
-    """获取或创建 per-model 熔断器单例。
+    """获取或创建 per-(model, api_base) 熔断器单例。
 
+    api_base 默认空字符串（litellm 使用 provider 默认地址）。``config``
+    强制 keyword-only 调用避免与 api_base 位置参数撞 —— 历史调用
+    ``get_breaker(model, my_config)`` 必须改为
+    ``get_breaker(model, config=my_config)``。
     config 仅在首次创建时生效；后续调用忽略传入的 config。
     """
+    key = _endpoint_key(model, api_base)
     async with _registry_lock:
-        breaker = _breakers.get(model)
+        breaker = _breakers.get(key)
         if breaker is None:
-            breaker = LLMCircuitBreaker(model, config)
-            _breakers[model] = breaker
+            breaker = LLMCircuitBreaker(key, config)
+            _breakers[key] = breaker
         return breaker
 
 
