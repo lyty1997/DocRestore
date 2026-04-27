@@ -78,16 +78,74 @@ function apiHeaders(extra?: Record<string, string>): Record<string, string> {
   return { ...getAuthHeaders(), ...extra };
 }
 
+/** API 错误分类：网络层未拿到响应 / HTTP 非 2xx / 响应解析失败 */
+export type ApiErrorKind = "network" | "http" | "parse";
+
+/** 统一 API 错误：携带 kind / httpStatus / hint，便于前端定位 */
+export class ApiError extends Error {
+  readonly kind: ApiErrorKind;
+  readonly httpStatus?: number;
+  readonly hint?: string;
+
+  constructor(
+    message: string,
+    init: { kind: ApiErrorKind; httpStatus?: number; hint?: string; cause?: unknown },
+  ) {
+    super(message, init.cause === undefined ? undefined : { cause: init.cause });
+    this.name = "ApiError";
+    this.kind = init.kind;
+    if (init.httpStatus !== undefined) this.httpStatus = init.httpStatus;
+    if (init.hint !== undefined) this.hint = init.hint;
+  }
+
+  /** 拼成"主信息 + 提示"，UI 直接展示 */
+  toDisplayString(): string {
+    return this.hint === undefined ? this.message : `${this.message}\n${this.hint}`;
+  }
+}
+
+/** HTTP 状态码 → 诊断提示 */
+function hintForStatus(status: number): string | undefined {
+  if (status === 413) {
+    return "请求体过大（HTTP 413）。检查 starlette MultiPartParser / 反向代理的 max body size。";
+  }
+  if (status === 504) {
+    return "网关超时（HTTP 504）。后端处理超过代理超时阈值，可调大 vite proxyTimeout 或后端 keep-alive。";
+  }
+  if (status >= 500) {
+    return "后端错误。查看 backend 日志确认堆栈。";
+  }
+  return undefined;
+}
+
 /** 统一错误处理 */
 async function handleResponse<T>(
   response: Response,
   schema: { parse: (data: unknown) => T },
 ): Promise<T> {
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`HTTP ${response.status.toString()}: ${text}`);
+    const text = await response.text().catch(() => "");
+    throw new ApiError(
+      `HTTP ${response.status.toString()}: ${text || response.statusText}`,
+      {
+        kind: "http",
+        httpStatus: response.status,
+        ...(hintForStatus(response.status) === undefined
+          ? {}
+          : { hint: hintForStatus(response.status) }),
+      },
+    );
   }
-  const json: unknown = await response.json();
+  let json: unknown;
+  try {
+    json = await response.json();
+  } catch (error_: unknown) {
+    throw new ApiError("响应解析失败：非合法 JSON", {
+      kind: "parse",
+      hint: "可能后端返回了 HTML（502/504 网关页）或被中间件改写。",
+      cause: error_,
+    });
+  }
   return schema.parse(json);
 }
 
@@ -317,6 +375,13 @@ export async function uploadFiles(
   relativePaths?: readonly string[],
   signal?: AbortSignal,
 ): Promise<UploadFilesResponse> {
+  const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+  const sizeMb = (totalBytes / 1024 / 1024).toFixed(1);
+  const startedAt = Date.now();
+  const filenamesPreview =
+    files.slice(0, 3).map((f) => f.name).join(", ") +
+    (files.length > 3 ? ` …(+${(files.length - 3).toString()})` : "");
+
   const formData = new FormData();
   for (const file of files) {
     formData.append("files", file);
@@ -326,12 +391,47 @@ export async function uploadFiles(
       formData.append("paths", p);
     }
   }
-  const response = await fetch(`${API_BASE}/uploads/${sessionId}/files`, {
-    method: "POST",
-    headers: apiHeaders(),
-    body: formData,
-    signal,
-  });
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}/uploads/${sessionId}/files`, {
+      method: "POST",
+      headers: apiHeaders(),
+      body: formData,
+      signal,
+    });
+  } catch (error_: unknown) {
+    /* AbortError 透传给 hook 层做"用户取消"分支 */
+    if (error_ instanceof DOMException && error_.name === "AbortError") {
+      throw error_;
+    }
+    const elapsedMs = Date.now() - startedAt;
+    const detailMsg = error_ instanceof Error ? error_.message : String(error_);
+    /* 写一条结构化 console.error，便于在 F12 直接查诊断细节 */
+    console.error("[uploadFiles] 网络层失败 — 浏览器未拿到 HTTP 响应", {
+      sessionId,
+      fileCount: files.length,
+      totalBytes,
+      elapsedMs,
+      filenames: files.map((f) => f.name),
+      cause: error_,
+    });
+    throw new ApiError(
+      `上传失败（${files.length.toString()} 张 / ${sizeMb} MB / ${elapsedMs.toString()}ms）：${detailMsg}`,
+      {
+        kind: "network",
+        hint:
+          "浏览器未拿到 HTTP 响应。常见原因：" +
+          "① Vite proxy / 反向代理超时断流（已加大到无限，旧 dev server 需重启生效）；" +
+          "② 后端进程崩溃或 OOM（看 backend 日志）；" +
+          "③ /tmp 写满（df -h /tmp）；" +
+          "④ 上传体积超出 starlette MultiPartParser 限制。" +
+          `本批文件：${filenamesPreview}。` +
+          "排查：F12 Network 看具体 net::ERR_*；或临时直连 http://127.0.0.1:8000/api/v1 旁路 proxy 复测。",
+        cause: error_,
+      },
+    );
+  }
   return handleResponse(response, UploadFilesResponseSchema);
 }
 

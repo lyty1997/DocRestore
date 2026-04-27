@@ -1604,6 +1604,9 @@ body {
 .upload-error p {
   color: var(--color-error);
   margin-bottom: 0.5rem;
+  /* 诊断信息含换行（主信息 + hint），保留换行避免挤成一坨 */
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .upload-error button {

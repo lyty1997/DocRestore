@@ -5,6 +5,7 @@
 import { useCallback, useRef, useState } from "react";
 
 import {
+  ApiError,
   completeUpload,
   createUploadSession,
   deleteUploadSessionFile,
@@ -130,20 +131,37 @@ export function useFileUpload(): UseFileUploadReturn {
           const allFailed: string[] = [];
           let uploaded = 0;
 
+          const totalBatches = Math.ceil(files.length / BATCH_SIZE);
           for (let i = 0; i < files.length; i += BATCH_SIZE) {
             const batch = files.slice(i, i + BATCH_SIZE);
             const batchPaths = relativePaths?.slice(i, i + BATCH_SIZE);
-            const resp = await uploadFiles(
-              session.session_id,
-              batch,
-              batchPaths,
-              controller.signal,
-            );
-
-            uploaded += resp.uploaded.length;
-            allFailed.push(...resp.failed);
-            setUploadedCount(uploaded);
-            setFailedFiles([...allFailed]);
+            const batchIdx = Math.floor(i / BATCH_SIZE) + 1;
+            try {
+              const resp = await uploadFiles(
+                session.session_id,
+                batch,
+                batchPaths,
+                controller.signal,
+              );
+              uploaded += resp.uploaded.length;
+              allFailed.push(...resp.failed);
+              setUploadedCount(uploaded);
+              setFailedFiles([...allFailed]);
+            } catch (error_: unknown) {
+              /* 取消透传到外层 try 的 AbortError 分支 */
+              if (error_ instanceof DOMException && error_.name === "AbortError") {
+                throw error_;
+              }
+              /* 给单批失败拼上"第 N/M 批 + 已成功多少"的上下文 */
+              const baseMsg =
+                error_ instanceof ApiError
+                  ? error_.toDisplayString()
+                  : (error_ instanceof Error ? error_.message : "上传失败");
+              throw new Error(
+                `第 ${batchIdx.toString()}/${totalBatches.toString()} 批失败` +
+                  `（已成功 ${uploaded.toString()}/${files.length.toString()}）：\n${baseMsg}`,
+              );
+            }
           }
 
           if (uploaded === 0) {
@@ -161,7 +179,12 @@ export function useFileUpload(): UseFileUploadReturn {
             return;
           }
           setStage("error");
-          setError(error_ instanceof Error ? error_.message : "上传失败");
+          /* ApiError 走结构化展示，普通 Error 直接拿 message */
+          const msg =
+            error_ instanceof ApiError
+              ? error_.toDisplayString()
+              : (error_ instanceof Error ? error_.message : "上传失败");
+          setError(msg);
         } finally {
           abortRef.current = undefined;
         }
