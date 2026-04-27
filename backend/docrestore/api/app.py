@@ -30,6 +30,10 @@ from importlib.metadata import version as pkg_version
 from fastapi import Depends, FastAPI
 
 from docrestore.api.auth import configure_auth, require_auth
+from docrestore.api.errors import (
+    ApiBusinessError,
+    api_business_error_handler,
+)
 from docrestore.api.routes import router, set_task_manager, ws_router
 from docrestore.api.upload import (
     cleanup_all_sessions,
@@ -287,6 +291,10 @@ def create_app(  # noqa: C901
         version=pkg_version("docrestore"),
         lifespan=lifespan,
         redirect_slashes=False,
+    )
+    # 业务异常 → {code, detail, params} 响应体，前端按 code 走 i18n
+    app.add_exception_handler(
+        ApiBusinessError, api_business_error_handler,  # type: ignore[arg-type]
     )
     _auth_deps = [Depends(require_auth)]
     app.include_router(router, prefix="/api/v1", dependencies=_auth_deps)

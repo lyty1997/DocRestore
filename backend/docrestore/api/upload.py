@@ -26,9 +26,10 @@ from datetime import datetime
 from pathlib import Path
 
 import aiofiles
-from fastapi import APIRouter, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Form, UploadFile
 from fastapi.responses import FileResponse
 
+from docrestore.api.errors import APIErrorCode, ApiBusinessError
 from docrestore.api.schemas import (
     UploadCompleteResponse,
     UploadFilesResponse,
@@ -233,10 +234,15 @@ async def upload_files(
     """
     session = _sessions.get(session_id)
     if session is None:
-        raise HTTPException(status_code=404, detail="上传会话不存在")
+        raise ApiBusinessError(
+            APIErrorCode.UPLOAD_SESSION_NOT_FOUND, 404, "上传会话不存在",
+        )
 
     if session.completed:
-        raise HTTPException(status_code=400, detail="会话已完成，不可继续上传")
+        raise ApiBusinessError(
+            APIErrorCode.UPLOAD_SESSION_COMPLETED, 400,
+            "会话已完成，不可继续上传",
+        )
 
     uploaded: list[str] = []
     failed: list[str] = []
@@ -287,7 +293,9 @@ async def list_upload_session_files(session_id: str) -> UploadSessionFilesRespon
     """列出上传会话中的文件，用于上传后预览。"""
     session = _sessions.get(session_id)
     if session is None:
-        raise HTTPException(status_code=404, detail="上传会话不存在")
+        raise ApiBusinessError(
+            APIErrorCode.UPLOAD_SESSION_NOT_FOUND, 404, "上传会话不存在",
+        )
 
     items = [
         _build_upload_file_item(session_id, record)
@@ -306,15 +314,21 @@ async def get_upload_session_file(session_id: str, file_id: str) -> FileResponse
     """提供上传会话中的单个图片文件，用于上传后预览。"""
     session = _sessions.get(session_id)
     if session is None:
-        raise HTTPException(status_code=404, detail="上传会话不存在")
+        raise ApiBusinessError(
+            APIErrorCode.UPLOAD_SESSION_NOT_FOUND, 404, "上传会话不存在",
+        )
 
     record = session.files.get(file_id)
     if record is None:
-        raise HTTPException(status_code=404, detail="上传文件不存在")
+        raise ApiBusinessError(
+            APIErrorCode.UPLOAD_FILE_NOT_FOUND, 404, "上传文件不存在",
+        )
 
     target = (session.upload_dir / record.relative_path).resolve()
     if not target.is_relative_to(session.upload_dir.resolve()) or not target.is_file():
-        raise HTTPException(status_code=404, detail="上传文件不存在")
+        raise ApiBusinessError(
+            APIErrorCode.UPLOAD_FILE_NOT_FOUND, 404, "上传文件不存在",
+        )
 
     return FileResponse(path=target)
 
@@ -330,14 +344,21 @@ async def delete_upload_session_file(
     """删除上传会话中的单个文件。"""
     session = _sessions.get(session_id)
     if session is None:
-        raise HTTPException(status_code=404, detail="上传会话不存在")
+        raise ApiBusinessError(
+            APIErrorCode.UPLOAD_SESSION_NOT_FOUND, 404, "上传会话不存在",
+        )
 
     if session.completed:
-        raise HTTPException(status_code=400, detail="会话已完成，不可删除文件")
+        raise ApiBusinessError(
+            APIErrorCode.UPLOAD_SESSION_COMPLETED, 400,
+            "会话已完成，不可删除文件",
+        )
 
     record = session.files.get(file_id)
     if record is None:
-        raise HTTPException(status_code=404, detail="上传文件不存在")
+        raise ApiBusinessError(
+            APIErrorCode.UPLOAD_FILE_NOT_FOUND, 404, "上传文件不存在",
+        )
 
     target = session.upload_dir / record.relative_path
     target.unlink(missing_ok=True)  # noqa: ASYNC240
@@ -362,13 +383,19 @@ async def complete_upload(session_id: str) -> UploadCompleteResponse:
     """完成上传会话，返回可用于创建任务的 image_dir。"""
     session = _sessions.get(session_id)
     if session is None:
-        raise HTTPException(status_code=404, detail="上传会话不存在")
+        raise ApiBusinessError(
+            APIErrorCode.UPLOAD_SESSION_NOT_FOUND, 404, "上传会话不存在",
+        )
 
     if session.completed:
-        raise HTTPException(status_code=400, detail="会话已完成")
+        raise ApiBusinessError(
+            APIErrorCode.UPLOAD_SESSION_COMPLETED, 400, "会话已完成",
+        )
 
     if session.file_count == 0:
-        raise HTTPException(status_code=400, detail="会话中无文件")
+        raise ApiBusinessError(
+            APIErrorCode.UPLOAD_SESSION_NO_FILES, 400, "会话中无文件",
+        )
 
     session.completed = True
     logger.info(

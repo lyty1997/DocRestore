@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 
 from docrestore.api.auth import configure_auth, require_auth
+from docrestore.api.errors import ApiBusinessError, api_business_error_handler
 
 # 测试用 token
 _TEST_TOKEN = "test-secret-token-abc123"  # noqa: S105
@@ -35,6 +36,9 @@ _TEST_TOKEN = "test-secret-token-abc123"  # noqa: S105
 def _make_app(*, with_auth: bool = True) -> FastAPI:
     """构建带认证依赖的最小 FastAPI 应用。"""
     app = FastAPI()
+    app.add_exception_handler(
+        ApiBusinessError, api_business_error_handler,  # type: ignore[arg-type]
+    )
 
     @app.get(
         "/protected",
@@ -124,12 +128,14 @@ class TestAuthEnabled:
     async def test_error_body_is_structured(
         self, auth_client: AsyncClient,
     ) -> None:
-        """401 响应体应包含结构化错误信息。"""
+        """401 响应体应包含结构化错误信息（{code, detail, params}）。"""
         resp = await auth_client.get("/protected")
         body = resp.json()
-        detail = body["detail"]
-        assert detail["code"] == "UNAUTHORIZED"
-        assert "message" in detail
+        # ApiBusinessError 处理器：code 在顶层，detail 是中文 fallback
+        assert body["code"] == "UNAUTHORIZED"
+        assert isinstance(body["detail"], str)
+        assert body["detail"]
+        assert "params" in body
 
 
 class TestAuthDisabled:
