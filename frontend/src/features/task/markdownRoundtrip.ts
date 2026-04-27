@@ -52,6 +52,8 @@ function getTurndown(): TurndownService {
     strongDelimiter: "**",
     linkStyle: "inlined",
   });
+  // turndown-plugin-gfm 自带 .d.ts 不完整，gfm 推导成 unknown
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
   td.use(gfm);
 
   // 自定义规则：page-anchor div → HTML 注释
