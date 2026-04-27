@@ -952,7 +952,8 @@ class Pipeline:
 
         # 4. 可选 LLM 字符级精修（每个 SourceFile 独立调用，失败回退原文）
         if base_refiner_obj is not None:
-            code_refiner = CodeLLMRefiner(base_refiner_obj)
+            refine_mode = getattr(llm_cfg, "code_refine_mode", "refine")
+            code_refiner = CodeLLMRefiner(base_refiner_obj, mode=refine_mode)
             for i, src in enumerate(sources):
                 try:
                     result = await code_refiner.refine(src)

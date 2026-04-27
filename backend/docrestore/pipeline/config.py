@@ -230,6 +230,12 @@ class LLMConfig(BaseModel):
     # 精修结果磁盘缓存：写到 {output_dir}/.llm_cache/；同 input+model+prompt
     # 指纹的段自动命中，resume 任务可跳过已精修段。只缓存非截断的成功结果。
     enable_cache: bool = True
+    #: 代码模式 LLM 修正策略：
+    #:   - "refine"（默认）：字符级修正，**严格保持行数**，安全但部分
+    #:     OCR 损伤（如整行 `}` 错识为多字符）修不动
+    #:   - "rewrite"：允许 LLM 重新排版/合并断行/补编译必需的语法元素，
+    #:     不强制行数守恒；适合长文件 OCR 损伤密集的场景，但需要更强模型
+    code_refine_mode: str = "refine"
 
 
 class OutputConfig(BaseModel):

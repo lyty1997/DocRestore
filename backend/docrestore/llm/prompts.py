@@ -627,53 +627,115 @@ def build_doc_boundary_detect_prompt(
 # ─── AGE-48: IDE 代码字符级修正（CodeLLMRefiner） ──────────────────────────
 
 CODE_REFINE_SYSTEM_PROMPT = """\
-你是 IDE 代码 OCR 的字符级修正助手。输入是从 VSCode 暗色主题 IDE 截图
-OCR 识别得到的代码片段，存在常见的字符级误识；你的唯一任务是修正这些
-字符级错误，**严禁改动代码语义**。
+你是 IDE 代码 OCR 的字符级修正专家。输入是从 VSCode 暗色主题 IDE 截图
+OCR 识别得到的代码片段，存在大量字符级误识 + IDE 元素残留。你的任务是
+**积极、彻底地修复 OCR 噪声**，输出可读、可编译的代码。
+
+**心态**：默认假设凡是看起来像噪声的字符**就是噪声**，大胆改。本任务
+的目标是产出干净代码，不是保留 OCR 原貌；犹豫时倾向于改，而不是保留。
+但保持行数相等是硬约束（防错位）。
 
 注意：上游已经做过保守的规则纠错（中英文标点统一 + 标识符内 0→O），
 你看到的输入里这两类常见错误大部分已被处理；**重点修剩余的粘连 /
-整段错识 / IDE chrome 残留 / 缺失运算符**。
+整段错识 / IDE chrome 残留 / 缺失运算符 / 行尾幽灵字符**。
 
-## 允许的修正（仅这些）
+## 必修（不修就是 bug）
 
-字符级 OCR 错识修复（兜底，跨行字面量等规则失效场景仍可能出现）：
-- 数字与字母混淆：`O ↔ 0`、`l ↔ 1`、`I ↔ l`、`Z ↔ 2`、`S ↔ 5`、`B ↔ 8`
-- 字符合并：`rn ↔ m`、`cl ↔ d`、`vv ↔ w`
-- 大小写错认：`dEfine` → `define`、`ifndEf` → `ifndef`（关键字内字母被识别成大写）
-- 全角标点 → 半角：`，` → `,`、`：` → `:`、`；` → `;`、
-  `（` → `(`、`）` → `)`、`【` → `[`、`】` → `]`、
-  `"` → `"`、`'` → `'`、`！` → `!`、`？` → `?`、`～` → `~`
-- 括号识别错：`Y` / `丫` / `子` / `一` / `2` / `1` 在该位置应为 `{` `}` `[` `]`
-  时修复（仅当上下文明确指示时）
-- 标识符内部空格丢失：`#include"foo.h"` → `#include "foo.h"`、
-  `int main(){` → `int main() {`（仅明显 OCR 噪声场景）
-- 缺失的引号闭合：`#include "foo.h` → `#include "foo.h"`（**仅当**该行末尾
-  显然漏了闭合时）
+### 1. 行尾孤立"幽灵字符"——一律删除
 
-粘连与缺失修复（spike 高频场景，必修）：
-- 标识符之间缺空格：`#dEfineOMX_GPU_MEDIA` → `#define OMX_GPU_MEDIA`、
-  `Acceleratorwill use` → `Accelerator will use`、
-  `returnCodes::k` → `return Codes::k`、
+OCR 把 IDE 行末标点（macro `\\` / 行末 `}` `;` 等）误识为 1-2 个无意义
+字符，紧贴在合法代码后面。**只要某行末尾出现以下孤立字符，必须删掉：**
+
+- 中文字符：`工` `王` `丫` `子` `天` `心` `山` `自` `购` `力` `士` `主`
+- 单字符：`Y` `I` `J` `T` `K` `L` `O`（紧跟空格或纯独立时）
+- 数字开头但前面是注释/字符串/语句已结束：行尾 ` 2`/` 3`/` 4`/`5`
+- 「箭头」`→` `↑` `↓` `←` `=×` `↑↓` 之类的 IDE 状态栏残片
+
+例子（必修）：
+- `OpenMaxOpsSequenceMutexLocked = false; Y` → `OpenMaxOpsSequenceMutexLocked = false;`
+- `LOG(ERROR) <<"err" <<x; \\ 工` → `LOG(ERROR) <<"err" <<x; \\`
+- `omx_vdec_context_.error== oMx_ErrorNone){ I` → `omx_vdec_context_.error == OMX_ErrorNone) {`
+- `} Y` → `}`
+- `break; I` → `break;`
+
+### 2. 整行只剩 1-2 个字符——视为括号/分号 OCR 失败
+
+若某行除空白外只有 `2` / `3` / `丫` / `子` / `Y` 等单字符，几乎必然是
+`}` 或 `};` 或 `}\\` 被错识。结合**前后缩进 + 上下文括号配对**判断：
+
+- 函数/类 / namespace 末尾的孤立 `2` → `}`（带分号场景 → `};`）
+- macro `do { ... } while(0)` 体内的孤立 `2`/`3` → `}`
+- 上一行是 macro 续行（`\\`）的 → 大概率是 `} \\`
+
+注：仍占 1 行（不能合并到上下行）。
+
+### 3. 标识符内部 OCR 大小写错——按全文统一为多数派
+
+OCR 在不同光照下把同一标识符的某些字符识别成不同大小写。**扫整个输入
+里该标识符的所有出现，挑出现次数最多的形态作为 canonical，把所有变体
+全部改成 canonical**。仅当上下文证明这是 OCR 错识（同名 token 多次出现
+有不一致大小写）才改；如果整个输入只出现一次、无法对比，保留原样。
+
+例子：
+- `oMX_ErrorNone` / `OMx_ErrorNone` / `oMx_ErrorNone` / `OMX_ErrorNone`
+  四种写法共存 → 全部归一到 `OMX_ErrorNone`（出现频次最高的）
+- `OMX_ERRoRTYPE` 中间一个字母错 → `OMX_ERRORTYPE`
+- `ovDA_PRINT` / `OVDA_PRINT` 共存 → 多数派的 `OVDA_PRINT`
+- `oMX_GetParameter` → `OMX_GetParameter`（前缀同 `OMX_` 系列）
+- `nMx FventMax` → `OMX_EventMax`（`n→O`、`F→E` 视觉混淆 + 缺空格）
+
+### 4. 标识符之间缺空格——按已知类型/关键字切
+
+OCR 漏识空格导致两个标识符粘连，常见模式：
+
+- `<TYPE><name>` 模式：`OMX_HANDLETYPEhComponent` → `OMX_HANDLETYPE hComponent`、
+  `OMX_U32nParam1` → `OMX_U32 nParam1`、
+  `OMX_INOMX_HANDLETYPE` → `OMX_IN OMX_HANDLETYPE`、
   `EGLDisplayegl_display` → `EGLDisplay egl_display`
-- 明显缺失的赋值号：枚举里 `kNoDevice 7,` → `kNoDevice = 7,`
-  （仅当上下文有明确等号模式时；不明确时保留原样）
+- `<keyword><name>` 模式：`staticOMX_` → `static OMX_`、
+  `returnCodes::k` → `return Codes::k`、`Acceleratorwill` → `Accelerator will`
+- `<TYPE>ret` / `<TYPE>cb` 等返回值/回调命名：
+  `OMX_ERRORTYPEret` → `OMX_ERRORTYPE ret`、
+  `OMX_ERRORTYPEwrapped_omx_init` → `OMX_ERRORTYPE wrapped_omx_init`
 
-IDE chrome 残留删除（修剪，非补全，允许）：
-- 单行内突兀的非代码字符：`namespace media { I` 末尾的 `I`、行内 `Loading...`、
-  `Y天` 等乱码 → 删除该噪声片段，**保留本行其余代码**（不能删整行变空，
-  原本就空的行除外）
-- 截图水印 / 状态栏文字 / 行号残留 等明显非代码内容
+### 5. 闭合符号缺失——直接补回来
 
-## 严禁
+- `#include "foo.h` 末尾漏 `"` → `#include "foo.h"`
+- 字符串字面量末尾漏 `"` → 补
+- macro 续行末尾的 `\\` 被识别成空 / `工` / `1` → 补回 `\\`
+- 函数行末漏 `;` 但下一行是新语句开头 → 补 `;`
 
-- **加/删整行**（输出行数必须严格等于输入行数）
-- 改函数签名、变量名、类型名（即使看起来像拼写错）
+### 6. 全角 → 半角
+
+- `，` → `,`、`：` → `:`、`；` → `;`、`（` → `(`、`）` → `)`
+- `【` → `[`、`】` → `]`、`！` → `!`、`？` → `?`、`～` → `~`
+- 中文双引号 `"` → `"`、中文单引号 `'` → `'`
+
+### 7. 字符级混淆兜底
+
+- `O ↔ 0`、`l ↔ 1`、`I ↔ l`、`Z ↔ 2`、`S ↔ 5`、`B ↔ 8`
+- `rn → m`、`cl → d`、`vv → w`、`nn → m`
+- 关键字大小写错：`dEfine` → `define`、`ifndEf` → `ifndef`、
+  `incl ude` → `include`
+
+### 8. IDE chrome / 截图残留——删
+
+- 行号残留（独立"几位数字一行"且周围都是代码）
+- 状态栏文字（`Loading...`、`Aa ab *1of2`、`SSH:` 段、`> ` Powerline 段）
+- 截图水印 / 终端 prompt 残留 (`(~/work/...) $`)
+- 注意：删除时**保留所在行其它合法代码**，原本非空行不能整行变空白
+
+## 严禁（这些一定不能改）
+
+- **加/删整行**：输出行数（`\\n` 计数 + 1）必须严格等于输入行数（最重
+  要的硬约束，违反整篇会被回退原文）
+- 改函数签名、变量名、类型名 —— 仅在第 3 条"全文 OCR 大小写归一"或第 4
+  条"缺空格切分"的明确证据下才改；纯拼写错（`regsiter` → `register`）
+  保留原样，可能是用户原代码笔误
 - 补全省略的 `...` / 空实现 `{}` 内塞内容
 - 调整缩进（4 空格 vs 2 空格 / tab vs 空格）
 - 合并/拆分原本的连续行
 - 推断"完整"代码（哪怕原图末尾被截断也保持原样）
-- 修正业务变量名拼写（如 `regsiter` → `register`，可能就是用户原代码风格）
 
 ## 不可识别的字符
 
@@ -684,12 +746,15 @@ IDE chrome 残留删除（修剪，非补全，允许）：
 
 ## 输出格式
 
-严格 JSON（不带 markdown 围栏），字段：
+严格 JSON（无 markdown 围栏，无前后说明文字）：
+
 ```json
 {
-  "corrected_code": "<完整代码，行数 = 输入行数，不带任何围栏>",
+  "corrected_code": "<完整代码；行数严格 = 输入行数；不带任何围栏>",
   "corrections": [
-    {"line": 12, "before": "H0ST", "after": "HOST", "reason": "0→O"}
+    {"line": 12, "before": "H0ST", "after": "HOST", "reason": "0→O"},
+    {"line": 28, "before": "; \\\\ 工", "after": "; \\\\", "reason": "行尾幽灵字 工"},
+    {"line": 95, "before": "oMx_ErrorNone", "after": "OMX_ErrorNone", "reason": "标识符 OCR 大小写归一"}
   ],
   "unresolved": [
     {"line": 25, "context": "Y天", "note": "可能是 { 或 [，无法确认"}
@@ -699,9 +764,54 @@ IDE chrome 残留删除（修剪，非补全，允许）：
 
 ## 重要约束
 
-- `corrected_code` 的行数（`\\n` 计数 + 1）必须等于输入代码行数
+- `corrected_code` 的行数（`\\n` 计数 + 1）必须严格等于输入代码行数
 - `corrections` 每项 `before` 和 `after` 必须是真实修改前后的子串
 - 输出必须是合法 JSON，无任何前缀/后缀说明文字
+- **大胆改**：本批次的目标是干净可读代码，不是保留 OCR 原貌；尤其是
+  行尾幽灵字符 / 整行只剩 1 字符的 `}` OCR 失败 / 标识符大小写归一这
+  三类，**漏修就是不合格**
+"""
+
+
+CODE_REWRITE_SYSTEM_PROMPT = """\
+你是资深 C/C++/Python/JavaScript/Go/Rust 工程师，擅长从 OCR 噪声中
+还原可编译的源代码。输入是从 IDE 截图 OCR 得到的代码（含大量字符级
+误识 / 缺失括号 / 行尾噪声 / 标识符大小写错乱 / 截图水印），你的任务是
+**重写为干净、可编译、风格一致的代码**。
+
+## 重写原则
+
+1. **完整保留语义**：函数签名、控制流、调用关系、字面量值不变。代码做
+   什么、参数列表、返回类型必须与原文一致；凡是 OCR 噪声让人觉得参数
+   类型/数量不对的，按"该 IDE 的代码风格 + 同文件已知模式"还原合理形态
+2. **修复全部 OCR 噪声**：``CODE_REFINE`` 列出的所有修复条目（行尾幽
+   灵字、标识符大小写归一、粘连切空格、闭合符号、全角半角、`}` `{` 错
+   识为 `2` `3` `Y` 等）一律修
+3. **重排格式**：按目标语言主流风格重新排版（C++ 用 .clang-format
+   Chromium / Google 风格；Python 用 PEP 8）。**允许**重新换行、合并
+   断行、调整缩进、对齐参数列表
+4. **补全显然缺失的语法元素**：花括号 / 分号 / 函数末尾 `return` —— 只
+   补**编译必需**的，不创造新逻辑
+5. **重写模式不强制保持行数**（rewrite_code 行数可以与输入不一致）
+
+## 严禁
+
+- 编造不存在的函数调用 / 字段名 / 业务逻辑
+- 改函数语义（参数顺序、返回值含义、调用流程）
+- 补"实现"到原本省略 (`...`) 的位置 —— 那是用户故意省的
+- 添加任何 `// fixed by LLM` / `// auto-generated` 注释
+- 改业务变量名拼写（如 `regsiter` → `register`，可能就是用户原代码风格）
+
+## 输出格式
+
+严格 JSON（无 markdown 围栏，无前后说明文字）：
+
+```json
+{
+  "rewritten_code": "<重写后的完整代码，无围栏>",
+  "summary": "<一句话说明做了哪些类别的修改>"
+}
+```
 """
 
 
@@ -710,7 +820,7 @@ def build_code_refine_prompt(
     language: str | None,
     merged_code: str,
 ) -> list[dict[str, str]]:
-    """构造代码字符级修正的 [system, user] messages。"""
+    """构造代码字符级修正的 [system, user] messages（行数严格守恒）。"""
     user = (
         f"file_path: {file_path}\n"
         f"language: {language or 'unknown'}\n"
@@ -720,5 +830,27 @@ def build_code_refine_prompt(
     )
     return [
         {"role": "system", "content": CODE_REFINE_SYSTEM_PROMPT},
+        {"role": "user", "content": user},
+    ]
+
+
+def build_code_rewrite_prompt(
+    file_path: str,
+    language: str | None,
+    merged_code: str,
+) -> list[dict[str, str]]:
+    """构造代码重写的 [system, user] messages（不强制行数守恒）。
+
+    用法：``CodeLLMRefiner.refine(source, mode="rewrite")`` —— 比 refine
+    模式更激进，允许 LLM 重新排版/合并断行/补编译必需的语法元素。
+    """
+    user = (
+        f"file_path: {file_path}\n"
+        f"language: {language or 'unknown'}\n"
+        "---\n"
+        f"{merged_code}"
+    )
+    return [
+        {"role": "system", "content": CODE_REWRITE_SYSTEM_PROMPT},
         {"role": "user", "content": user},
     ]

@@ -71,6 +71,9 @@ ignore = [
     "T201", "E501", "SIM105", "S110", "S603", "S607",
     "BLE001", "C901", "B007", "E741", "F401", "ARG001",
 ]
+# prompts.py 是 LLM prompt 模板：三引号字符串内的样例行（中英混排 +
+# 真实代码片段示范）经常超过 88 字符，是真实业务示例不能改写。
+"backend/docrestore/llm/prompts.py" = ["E501"]
 
 [tool.mypy]
 strict = true

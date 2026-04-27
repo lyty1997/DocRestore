@@ -29,12 +29,20 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from docrestore.llm.base import BaseLLMRefiner
-from docrestore.llm.prompts import build_code_refine_prompt
+from docrestore.llm.prompts import (
+    build_code_refine_prompt,
+    build_code_rewrite_prompt,
+)
 
 if TYPE_CHECKING:
     from docrestore.processing.code_file_grouping import SourceFile
 
 logger = logging.getLogger(__name__)
+
+
+def _line_delta(before: str, after: str) -> int:
+    """rewrite 模式行数差，正数 = LLM 加了行；用于 flag/审计"""
+    return after.count("\n") - before.count("\n")
 
 
 @dataclass
@@ -72,13 +80,28 @@ class CodeLLMRefiner:
 
     用 ``BaseLLMRefiner._call_llm`` 走 litellm；不复用 markdown refine 的
     截断回退 / GAP 解析，逻辑独立。
+
+    两种模式：
+      - ``mode="refine"``（默认）：字符级修正，输出行数 == 输入行数；
+        解析键 ``corrected_code``、``corrections``、``unresolved``
+      - ``mode="rewrite"``：允许重排格式/合并断行/补编译必需语法元素；
+        输出行数可不等于输入；解析键 ``rewritten_code``、``summary``
     """
 
-    def __init__(self, base: BaseLLMRefiner) -> None:
+    def __init__(self, base: BaseLLMRefiner, *, mode: str = "refine") -> None:
         self._base = base
+        if mode not in ("refine", "rewrite"):
+            raise ValueError(
+                f"CodeLLMRefiner mode 必须是 refine|rewrite，收到 {mode!r}"
+            )
+        self._mode = mode
+
+    @property
+    def mode(self) -> str:
+        return self._mode
 
     async def refine(self, source: SourceFile) -> CodeRefineResult:
-        """对单个 SourceFile 跑字符级修正"""
+        """对单个 SourceFile 跑 LLM 修正（行为按 self._mode 切换）"""
         merged = source.merged_text
         if not merged.strip():
             return CodeRefineResult(
@@ -86,12 +109,24 @@ class CodeLLMRefiner:
                 flags=["code.refine.empty_input"],
             )
 
-        messages = build_code_refine_prompt(
-            file_path=source.path,
-            language=source.language,
-            merged_code=merged,
-        )
+        if self._mode == "rewrite":
+            messages = build_code_rewrite_prompt(
+                file_path=source.path,
+                language=source.language,
+                merged_code=merged,
+            )
+        else:
+            messages = build_code_refine_prompt(
+                file_path=source.path,
+                language=source.language,
+                merged_code=merged,
+            )
         kwargs = self._base._build_kwargs(messages)
+        # _build_kwargs 不主动设 max_tokens，对话路径靠 provider 默认（多数
+        # 4096）。代码路径输出 ≈ corrected_code(≈输入) + corrections + unresolved
+        # 三段 JSON，体积比输入还大，默认值很容易把响应截断成半截 JSON →
+        # 落到下面的 json_decode_error 分支。这里按 input 估算给个充裕上限。
+        kwargs["max_tokens"] = self._estimate_max_tokens(merged)
 
         try:
             response = await self._base._call_llm(kwargs)
@@ -106,6 +141,20 @@ class CodeLLMRefiner:
 
         return self._parse_and_validate(response, merged)
 
+    @staticmethod
+    def _estimate_max_tokens(merged_code: str) -> int:
+        """按 input 长度估算 max_tokens 上限。
+
+        - 代码主要英文/符号，1 token ≈ 4 chars 经验值；
+        - 输出含 corrected_code (≈输入) + corrections (~每条 100 chars) +
+          unresolved + JSON 字段开销，整体约 input × 1.6；
+        - 下限 2048（短文件别给太小，防 corrections 段挤破）；
+        - 上限 16384（防超长文件把 timeout / 账单顶天）。
+        """
+        approx_input_tokens = max(1, len(merged_code) // 4)
+        target = int(approx_input_tokens * 1.6) + 512
+        return max(2048, min(target, 16384))
+
     def _parse_and_validate(
         self, response: Any, original: str,
     ) -> CodeRefineResult:
@@ -116,14 +165,34 @@ class CodeLLMRefiner:
                 flags=["code.refine.empty_choices"],
             )
 
-        raw = response.choices[0].message.content or ""
+        choice = response.choices[0]
+        raw = choice.message.content or ""
+        finish_reason = getattr(choice, "finish_reason", None)
+
+        # 截断优先判定：finish_reason == "length" 时 raw 必然是半截 JSON，
+        # 不应该当作 json_decode_error 抹掉根因 —— 提示用户调大 max_tokens
+        # 或者拆小 SourceFile。
+        if finish_reason == "length":
+            logger.warning(
+                "CodeLLMRefiner 输出被 token 上限截断（finish_reason=length, "
+                "raw_len=%d, 末尾 80 字: %r），回退原文。"
+                "可能需要调大 max_tokens 或拆分 SourceFile。",
+                len(raw), raw[-80:] if len(raw) > 80 else raw,
+            )
+            return CodeRefineResult(
+                refined_text=original,
+                flags=["code.refine.truncated"],
+                raw_response=raw,
+            )
+
         payload = _extract_json_payload(raw)
         try:
             data = json.loads(payload)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
             logger.warning(
-                "CodeLLMRefiner JSON 解析失败，回退原文（前 200 字）: %s",
-                raw[:200],
+                "CodeLLMRefiner JSON 解析失败，回退原文 "
+                "(finish_reason=%s, raw_len=%d, 解析错误=%s, 前 200 字: %s)",
+                finish_reason, len(raw), exc, raw[:200],
             )
             return CodeRefineResult(
                 refined_text=original,
@@ -131,6 +200,29 @@ class CodeLLMRefiner:
                 raw_response=raw,
             )
 
+        # rewrite 模式：键名 rewritten_code，不强制行数相等
+        if self._mode == "rewrite":
+            refined = data.get("rewritten_code", "")
+            if not isinstance(refined, str) or not refined.strip():
+                return CodeRefineResult(
+                    refined_text=original,
+                    flags=["code.refine.bad_payload"],
+                    raw_response=raw,
+                )
+            summary = str(data.get("summary", ""))
+            return CodeRefineResult(
+                refined_text=refined,
+                corrections=[],
+                unresolved=[],
+                flags=[
+                    "code.refine.mode=rewrite",
+                    f"code.refine.rewrite_summary={summary[:120]}",
+                    f"code.refine.line_delta={_line_delta(original, refined):+d}",
+                ],
+                raw_response=raw,
+            )
+
+        # refine 模式：键名 corrected_code，行数严格守恒
         refined = data.get("corrected_code", "")
         if not isinstance(refined, str):
             return CodeRefineResult(
@@ -143,9 +235,14 @@ class CodeLLMRefiner:
         original_lines = original.count("\n") + 1
         refined_lines = refined.count("\n") + 1
         if refined_lines != original_lines:
+            delta = refined_lines - original_lines
+            # 末尾 60 字符通常能区分"末尾多/少 \n"vs"中间硬换行"两种偏差
+            tail_in = original[-60:].replace("\n", "⏎")
+            tail_out = refined[-60:].replace("\n", "⏎")
             logger.warning(
-                "CodeLLMRefiner 行数变化（input=%d, output=%d），回退原文",
-                original_lines, refined_lines,
+                "CodeLLMRefiner 行数变化（input=%d, output=%d, delta=%+d），"
+                "回退原文。input 末尾=%r，output 末尾=%r",
+                original_lines, refined_lines, delta, tail_in, tail_out,
             )
             return CodeRefineResult(
                 refined_text=original,

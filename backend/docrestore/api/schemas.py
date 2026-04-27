@@ -26,6 +26,9 @@ class LLMConfigRequest(BaseModel):
     api_base: str | None = None
     api_key: str | None = None
     max_chars_per_segment: int | None = None
+    #: 代码模式 LLM 修正策略：``refine``（行数守恒，安全） /
+    #: ``rewrite``（允许重排 + 补语法，激进，需更强模型）
+    code_refine_mode: str | None = None
 
 
 class OCRConfigRequest(BaseModel):
