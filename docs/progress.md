@@ -16,6 +16,60 @@ limitations under the License.
 
 # DocRestore 开发进度
 
+## 2026-04-27 错误信息全链路 i18n 重构（后端 ApiBusinessError + 前端 LocalizedError）
+
+主题：把"后端 HTTPException 中文 detail → 前端 setError(中文)"这条
+绕过 i18n 的硬编码链路全部改成"后端给 code + 前端按 code 翻译"。
+
+背景：i18n 系统级策略本身设计良好（zh-CN 真相源 + Record 严格 + 三层
+fallback + 占位符），但只在 JSX 层贯彻。后端 60+ 处 raise HTTPException
+直接塞中文 detail，前端 hook / api 层（不在组件树，不能 useTranslation）
+也大量 setError("中文 fallback")。结果：英文版 UI 触发任何错误时仍显示
+中文，i18n 形同虚设。
+
+完成内容：
+
+后端
+- 新增 backend/docrestore/api/errors.py：
+  - APIErrorCode(StrEnum) 列举 33 个业务错误码（TASK_NOT_FOUND /
+    UPLOAD_SESSION_NOT_FOUND / STAGE_PATH_NOT_ABSOLUTE / FILES_INDEX_PARSE_ERROR
+    / TASK_ACTION_CONFLICT 等）
+  - ApiBusinessError(HTTPException) 携带 code + params；detail 保留中文做
+    log/调试 fallback
+  - api_business_error_handler 把响应体扩成 {code, detail, params}
+- app.py 注册 exception_handler；auth / routes / upload 共 60+ 处 raise
+  替换为 ApiBusinessError(code, status, detail, params=...)
+- 测试：tests/api/test_auth.py 更新断言（顶层 code，body 含 params）；
+  pytest tests/ 不含 e2e 880 passed / 73 skipped
+
+前端
+- api/client.ts ApiError 重构：
+  - 新增 code / params / messageKey / hintKey 字段；保留 message 中文
+    fallback 给 console.error
+  - handleResponse 解析 ApiBusinessError 响应体（code/detail/params）；
+    hintForStatus 改返回 i18n key（errors.http.413/504/5xx）
+  - uploadFiles 网络层失败改 messageKey + hintKey 而非中文长串
+- 新增 i18n/errors.ts 工具：
+  - LocalizedError 类型 = { key, params?, hintKey?, hintParams?, fallback? }
+  - fromApiError / fromUnknown / localized / renderLocalized 四个 helper
+  - 渲染策略：t() 命中 → 翻译；返回 key 字面量且有 fallback → 用 fallback；
+    都失败 → key 字面量；hintKey 存在时主信息 + hint 用 \n 拼接
+- i18n 三语补 50+ 个键：errors.api.* 与后端 APIErrorCode 一一对应；
+  errors.http.* 是状态诊断；errors.client.* 是客户端层；
+  errors.task.* / errors.upload.* 是 hook fallback；errors.unknown 兜底
+- hook 改造：useFileUpload / useTaskRunner 的 error 类型从 string 改为
+  LocalizedError | undefined；setError 全部走 fromUnknown / localized /
+  显式构造对象（任务失败 reason 走 errors.task.runFailedWithReason）
+- 组件 App.tsx / FileUploader.tsx 用 renderLocalized(error, t) 渲染
+- 新增 tests/errors.test.ts 13 用例覆盖四个 helper 各分支；vitest 50 passed
+
+兼容性：后端 detail 中文字段保留 → 旧客户端不识别 code 时仍显示原文；
+前端 ApiError.message 也保留中文 fallback 给 console.error 调试。
+
+遗留问题：无（全栈错误链路已 i18n 化；新增业务错误时按 errors.api.<code>
+约定加 zh-CN 字典即可，en/zh-TW 因 Record<TranslationKey,string> 严格匹配
+会强制补齐）
+
 ## 2026-04-27 前端透出本地 LLM provider 选择
 
 主题：本地 LLM 后端早已实现（`LocalLLMRefiner` + `LLMConfig.provider`），但
