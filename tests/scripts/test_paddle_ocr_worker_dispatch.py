@@ -96,3 +96,45 @@ class TestSignatureSanity:
         assert m, "handle_initialize.pipeline 应有 default 值"
         # default 是 "vl" 因为旧文档模式默认走 vl
         assert m.group(1) == "vl"
+
+
+class TestBasicBranchWritesCanonicalResultMmd:
+    """basic pipeline 必须把 OCR 输出写成 result.mmd（OCR cache 统一约定）。
+
+    历史 bug：basic 分支误写 `{stem}.md` → paddle_ocr.py 的 cache 检查
+    `if result_mmd.exists()` 永远 False → 每次重跑 OCR；cleaner 也刷
+    "result.mmd 不存在，回退使用 raw_text" 警告。vl 分支通过
+    _reorganize_output 把 `{stem}.md` rename 成 result.mmd 没踩坑。
+    """
+
+    @staticmethod
+    def _extract_basic_branch() -> str:
+        """抓"循环外"那段写文件的 basic 分支（不是循环内 continue 的那个）。
+
+        worker 里有两处 `if pipeline_kind == "basic":`：
+        1. for 循环内：basic continue 跳过 markdown 解析；
+        2. 循环结束后：basic 分支写 result.mmd / text_lines.jsonl。
+        我们关心的是 (2)，取所有匹配里的最后一个。
+        """
+        src = WORKER_PATH.read_text(encoding="utf-8")
+        matches = list(re.finditer(
+            r'if pipeline_kind == "basic":\s*\n(.+?)\n\s*else:',
+            src, re.MULTILINE | re.DOTALL,
+        ))
+        assert matches, "无法定位 basic 分支代码块"
+        return textwrap.dedent(matches[-1].group(1))
+
+    def test_basic_branch_writes_result_mmd(self) -> None:
+        block = self._extract_basic_branch()
+        assert '"result.mmd"' in block, (
+            'basic 分支必须写 "result.mmd" 文件名；'
+            "否则 OCR cache 永远 miss + cleaner 走 raw_text fallback。\n"
+            f"basic 分支:\n{block}"
+        )
+
+    def test_basic_branch_does_not_write_stem_md(self) -> None:
+        block = self._extract_basic_branch()
+        assert 'f"{stem}.md"' not in block, (
+            "basic 分支不能写 `{stem}.md`（cache 命中条件是 result.mmd）。\n"
+            f"basic 分支:\n{block}"
+        )

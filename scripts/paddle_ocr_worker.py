@@ -183,14 +183,17 @@ class Worker:
 
             # vl: 整理 markdown + 图片；basic: 跳过（无 markdown 产物）
             if pipeline_kind == "basic":
-                md_path = ocr_dir / f"{stem}.md"
+                # 与 vl 分支统一用 "result.mmd"：paddle_ocr.py 的 OCR 缓存
+                # 检查 (`if result_mmd.exists()`) 和 cleaner 的读取路径都靠
+                # 这个固定文件名。曾经误写成 `{stem}.md` 导致 cache 永远 miss
+                # + cleaner 刷 "result.mmd 不存在，回退使用 raw_text" 警告。
+                md_path = ocr_dir / "result.mmd"
                 image_count = 0
                 # basic 模式 raw_text 用 lines 的 text 顺序拼接，给 OCR cache /
                 # 旧路径兼容（PageOCR.raw_text 仍非空）
                 raw_text = "\n".join(
                     str(ln.get("text", "")) for ln in text_lines
                 )
-                # 写一份简单 md（OCR cache 命中条件：result.mmd 存在）
                 md_path.write_text(raw_text, encoding="utf-8")
                 # 同时把行级数据 dump 出来供缓存命中时重建 PageOCR.text_lines
                 lines_path = ocr_dir / "text_lines.jsonl"
