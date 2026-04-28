@@ -32,6 +32,7 @@ DocRestore 将连续拍摄的文档照片还原为格式化的 Markdown 文档�
 ```
 docs/
 ├── README.md          # This file (bilingual index)
+├── progress.md        # Development progress log (Chinese)
 ├── en/                # English documentation
 │   ├── README.md
 │   ├── architecture.md
@@ -45,7 +46,13 @@ docs/
 │   │   ├── privacy.md
 │   │   ├── pipeline.md
 │   │   ├── api.md
+│   │   ├── age-8-ide-code.md
+│   │   ├── age-8-robustness-report.md
+│   │   ├── performance_toolkit.md
 │   │   └── references/
+│   │       ├── deepseek-ocr2.md
+│   │       ├── streaming-pipeline.md
+│   │       └── pipeline-parallel.md
 │   └── frontend/
 │       ├── README.md
 │       ├── tech-stack.md
@@ -54,7 +61,6 @@ docs/
     ├── README.md
     ├── architecture.md
     ├── deployment.md
-    ├── progress.md
     ├── backend/
     │   ├── README.md
     │   ├── data-models.md
@@ -64,7 +70,13 @@ docs/
     │   ├── privacy.md
     │   ├── pipeline.md
     │   ├── api.md
+    │   ├── age-8-ide-code.md
+    │   ├── age-8-robustness-report.md
+    │   ├── performance_toolkit.md
     │   └── references/
+    │       ├── deepseek-ocr2.md
+    │       ├── streaming-pipeline.md
+    │       └── pipeline-parallel.md
     └── frontend/
         ├── README.md
         ├── tech-stack.md

@@ -16,7 +16,42 @@ limitations under the License.
 
 # DocRestore 开发进度
 
-## 2026-04-27 错误信息全链路 i18n 重构（后端 ApiBusinessError + 前端 LocalizedError）
+## 2026-04-27 英文文档全量同步（zh → en，补 zh-only + 重译 streaming-pipeline）
+
+主题：把 4-15 ~ 4-25 累积的 zh-only 文档与 4-22 大改的 streaming-pipeline 同步到
+`docs/en/`，让英文目录与中文目录达到结构一致。
+
+完成内容：
+- 顶层 `docs/README.md` 索引修正：补 `progress.md` 真实位置（在 `docs/progress.md`，
+  不是 zh 子目录）；补全 `references/` 子目录列表；新增 age-8-* /
+  performance_toolkit / pipeline-parallel 列表项
+- 翻译 4 篇 zh-only 文档（结构 1:1，标题节点数 zh==en 全等）：
+  - `docs/en/backend/age-8-ide-code.md`：339 行（zh 338）
+  - `docs/en/backend/age-8-robustness-report.md`：227 行（zh 235）
+  - `docs/en/backend/performance_toolkit.md`：394 行（zh 393，含 license header）
+  - `docs/en/backend/references/pipeline-parallel.md`：553 行（zh 494，英文行更长）
+- 全量重译 `docs/en/backend/references/streaming-pipeline.md` 至 824 行（zh 786）：
+  - 老版 4-16 还包含已删的 DocumentState / `_handle_refined_result` /
+    `_split_refined_at_boundary` / `_finalize_document` / `_move_to_root`
+  - 新版按 4-22 zh 结构重排：4.3 DocumentState (Removed) / 5.4 RateController
+    切段精修 / 5.5 _finalize_single_doc / 5.6 RateController / 5.7 process_tree
+    Parallel Branch (Warmup Cold Start) / 7. PipelineResult Temporary Sorting
+    Field (Removed)
+- ASCII 时序图里残留的中文标注做了二次补译（gpu_lock 锁等待图、performance
+  data flow 图、`logger.warning` 日志样本、NullProfiler/MemoryProfiler docstring）
+- 已确认保留的中文：NAS 路径里的中文段（`Linux系统/视频子系统/...`）/
+  Linear URL slug（`ide-代码照片-源文件还原`）/ 真实代码里的 Chinese exception
+  消息和 pytest skip reason —— 翻译这些会让样例与生产代码漂移
+- 同行数 zh/en 对（architecture / deployment / backend README / api / data-models
+  / pipeline / processing / llm / privacy / ocr / frontend 三件 / deepseek-ocr2）
+  4-22 已统一同步过，本次确认无漂移
+
+兼容性：英文目录从 9 篇扩到 13 篇（+age-8-ide-code, age-8-robustness-report,
+performance_toolkit, references/pipeline-parallel），结构与中文 1:1。
+
+遗留问题：无（zh ↔ en 文档对达成结构一致；下一次 zh 新增/重构时按本次链路补 en 即可）
+
+
 
 主题：把"后端 HTTPException 中文 detail → 前端 setError(中文)"这条
 绕过 i18n 的硬编码链路全部改成"后端给 code + 前端按 code 翻译"。
