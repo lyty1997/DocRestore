@@ -69,7 +69,7 @@ export function useTaskProgress(
   const [pollingEnabled, setPollingEnabled] = useState(false);
   const [llmUnavailable, setLlmUnavailable] = useState<
     LlmUnavailableWarning | undefined
-  >(undefined);
+  >();
 
   const wsRef = useRef<WebSocket | undefined>(undefined);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | undefined>(

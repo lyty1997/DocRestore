@@ -12,7 +12,7 @@
     → _stream_pipeline 走 _code_pipeline 分支
     → render_code_files 写 files-index.json + files/
 
-OCR 用 spike lines.jsonl 注入 text_lines（绕过 GPU/PaddleOCR）。
+OCR 用测试内构造的 lines.jsonl 注入 text_lines（绕过 GPU/PaddleOCR）。
 LLM 关闭（model=""）避免依赖网络/key；只验证规则引擎产物正确。
 """
 
@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -37,27 +36,65 @@ from docrestore.pipeline.task_manager import TaskManager
 
 from tests.support.code_ocr_engine import CodeFixtureOCREngine
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_SPIKE_IMAGES = _REPO_ROOT / "test_images" / "age8-spike"
-_SPIKE_LINES = _REPO_ROOT / "output" / "age8-probe-basic"
+_FIXTURE_STEM = "code_fixture_page"
+
+
+def _write_code_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    """在 tmp_path 内构造代码模式所需图片和 OCR lines，不依赖 output。"""
+    from PIL import Image
+
+    image_dir = tmp_path / "imgs"
+    lines_root = tmp_path / "lines"
+    lines_dir = lines_root / _FIXTURE_STEM
+    image_dir.mkdir()
+    lines_dir.mkdir(parents=True)
+
+    Image.new("RGB", (1200, 800), color="white").save(
+        image_dir / f"{_FIXTURE_STEM}.jpg",
+    )
+
+    rows: list[dict[str, object]] = [{
+        "bbox": [100, 50, 900, 80],
+        "text": "media > gpu > openmax > foo.cc",
+        "score": 0.99,
+    }]
+    code_lines = [
+        "#include <stdint.h>",
+        "namespace media {",
+        "int OpenmaxValue() {",
+        "  return 42;",
+        "}",
+        "}  // namespace media",
+    ]
+    for idx, text in enumerate(code_lines, start=1):
+        y1 = 120 + idx * 30
+        rows.append({"bbox": [100, y1, 130, y1 + 24], "text": str(idx), "score": 0.99})
+        rows.append({"bbox": [180, y1, 900, y1 + 24], "text": text, "score": 0.99})
+
+    (lines_dir / "lines.jsonl").write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    return image_dir, lines_root
 
 
 @pytest.fixture
-def code_image_dir(tmp_path: Path) -> Path:
-    """复制 spike JPG 到 tmp_path（OCR 引擎 scan_images 要求真实文件）。"""
-    if not _SPIKE_IMAGES.exists() or not _SPIKE_LINES.exists():
-        pytest.skip("spike 数据未生成（需 test_images/age8-spike + age8-probe-basic）")
-    img_dir = tmp_path / "imgs"
-    img_dir.mkdir()
-    for jpg in sorted(_SPIKE_IMAGES.glob("DSC*.JPG")):
-        if (_SPIKE_LINES / jpg.stem / "lines.jsonl").exists():
-            shutil.copy(jpg, img_dir / jpg.name)
-    return img_dir
+def code_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    """构造自包含代码模式 fixture：(image_dir, lines_root)。"""
+    return _write_code_fixture(tmp_path)
+
+
+@pytest.fixture
+def code_image_dir(code_fixture: tuple[Path, Path]) -> Path:
+    """返回含测试图片的目录。"""
+    image_dir, _ = code_fixture
+    return image_dir
 
 
 @pytest.fixture
 async def code_api_client(
     tmp_path: Path,
+    code_fixture: tuple[Path, Path],
 ) -> AsyncIterator[AsyncClient]:
     """使用 CodeFixtureOCREngine + 关闭 LLM 的 API client。
 
@@ -65,12 +102,13 @@ async def code_api_client(
     依赖外部 API key，只验证 routes/TaskManager/Pipeline/render_code_files
     的核心链路。LLM 路径有单独的 cloud/local 单元测试覆盖。
     """
+    _, lines_root = code_fixture
     config = PipelineConfig(
         llm=LLMConfig(model=""),
         db_path=str(tmp_path / "test.db"),
     )
     pipeline = Pipeline(config)
-    engine = CodeFixtureOCREngine(_SPIKE_LINES)
+    engine = CodeFixtureOCREngine(lines_root)
     pipeline.set_ocr_engine(engine)
     await pipeline.initialize()
 

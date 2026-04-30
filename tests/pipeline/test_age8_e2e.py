@@ -11,8 +11,7 @@
 完整链路：lines.jsonl (PaddleOCR basic) → ide_layout → ide_meta_extract
 → code_assembly → code_file_grouping → code_renderer → compile_check
 
-数据：``output/age8-probe-basic/<stem>/lines.jsonl``（已用 PaddleOCR-VL
-basic pipeline 跑过的 8 张 spike）。
+数据：``tests/fixtures/age8-probe-basic/<stem>/lines.jsonl``。
 
 如果 spike 数据不存在则 skip（CI 无 GPU/无 spike 数据时合理跳过）。
 """
@@ -37,7 +36,7 @@ from docrestore.processing.ide_meta_extract import extract_ide_metas
 
 _SPIKE_LINES_DIR = (
     Path(__file__).resolve().parents[1].parent
-    / "output" / "age8-probe-basic"
+    / "tests" / "fixtures" / "age8-probe-basic"
 )
 _SPIKE_IMAGE_DIR = (
     Path(__file__).resolve().parents[1].parent
@@ -81,7 +80,7 @@ def _load_page_columns(stem: str) -> list[PageColumn]:
 @pytest.fixture
 def spike_stems() -> list[str]:
     if not _SPIKE_LINES_DIR.exists():
-        pytest.skip("age8-probe-basic 数据未生成（需要先跑 OCR probe）")
+        pytest.skip("tests/fixtures/age8-probe-basic fixture 不存在")
     return sorted(
         d.name for d in _SPIKE_LINES_DIR.iterdir()
         if (d / "lines.jsonl").exists()

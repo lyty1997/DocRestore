@@ -180,10 +180,10 @@ class TestGapDetection:
         assert 3 in col.line_gaps
 
 
-# ---------- spike 真实数据集成测试 ----------
+# ---------- spike fixture 集成测试 ----------
 
 SPIKE_LINES_DIR = (
-    Path(__file__).resolve().parents[2] / "output" / "age8-probe-basic"
+    Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "age8-probe-basic"
 )
 SPIKE_IMAGE_DIR = (
     Path(__file__).resolve().parents[2] / "test_images" / "age8-spike"
@@ -219,7 +219,7 @@ def _load_spike(stem: str) -> tuple[list[TextLine], tuple[int, int]]:
 
 @pytest.mark.skipif(
     not _list_spike_stems(),
-    reason="age8-probe-basic 数据未生成（先跑 scripts/age8_probe_basic_ocr.py）",
+    reason="tests/fixtures/age8-probe-basic fixture 不存在",
 )
 class TestSpike:
     """对 8 张 spike 集成验证：assemble 不崩溃 + 输出 sanity"""

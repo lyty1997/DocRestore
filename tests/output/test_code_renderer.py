@@ -172,7 +172,7 @@ class TestEmptyInput:
 
 
 _SPIKE_LINES_DIR = (
-    Path(__file__).resolve().parents[2] / "output" / "age8-probe-basic"
+    Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "age8-probe-basic"
 )
 _SPIKE_IMAGE_DIR = (
     Path(__file__).resolve().parents[2] / "test_images" / "age8-spike"
@@ -185,7 +185,7 @@ class TestSpikeIntegration:
     @pytest.mark.asyncio
     async def test_spike_full_pipeline(self, tmp_path: Path) -> None:
         if not _SPIKE_LINES_DIR.exists():
-            pytest.skip("age8-probe-basic 数据未生成")
+            pytest.skip("tests/fixtures/age8-probe-basic fixture 不存在")
 
         from PIL import Image
 

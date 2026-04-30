@@ -78,7 +78,7 @@ export function TaskProgress({
         </span>
       </div>
 
-      {llmUnavailable !== undefined ? (
+      {llmUnavailable === undefined ? undefined : (
         <div
           className="llm-unavailable-banner"
           role="alert"
@@ -86,7 +86,7 @@ export function TaskProgress({
         >
           {llmWarningText}
         </div>
-      ) : undefined}
+      )}
 
       {/* 单目录任务且主桶已有帧时才渲染主进度双轨。
           - 任务初始 / 并行多子目录：主桶恒为空（process_tree 下所有帧都带非空

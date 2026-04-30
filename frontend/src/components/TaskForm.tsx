@@ -100,10 +100,15 @@ export interface OCRConfig {
 
 /** OCR 引擎值常量（label/desc 通过 i18n 获取） */
 const OCR_ENGINE_VALUES = ["paddle-ocr/ppocr-v4", "deepseek/ocr-2"] as const;
-const OCR_ENGINE_KEYS: Record<string, { label: string; desc: string }> = {
+type OcrEngineValue = (typeof OCR_ENGINE_VALUES)[number];
+const OCR_ENGINE_KEYS: Record<OcrEngineValue, { label: string; desc: string }> = {
   "paddle-ocr/ppocr-v4": { label: "taskForm.paddleOcrName", desc: "taskForm.paddleOcrDesc" },
   "deepseek/ocr-2": { label: "taskForm.deepseekOcrName", desc: "taskForm.deepseekOcrDesc" },
 };
+
+function isOcrEngineValue(value: string): value is OcrEngineValue {
+  return OCR_ENGINE_VALUES.includes(value as OcrEngineValue);
+}
 
 /** GPU 下拉 "自动" 选项的 value；与后端 OCRConfig.gpu_id=None 对应 */
 const GPU_AUTO_VALUE = "";
@@ -508,7 +513,7 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
           </div>
         </div>
         <p className="ocr-engine-hint">
-          {t(OCR_ENGINE_KEYS[ocrModel]?.desc ?? "")}
+          {isOcrEngineValue(ocrModel) ? t(OCR_ENGINE_KEYS[ocrModel].desc) : ""}
         </p>
       </div>
 

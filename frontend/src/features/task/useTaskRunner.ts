@@ -52,7 +52,7 @@ interface UseTaskRunnerReturn {
   /** 结构化结果（第一篇，向下兼容） */
   taskResult: TaskResultResponse | undefined;
   /** 错误信息 */
-  error: string | undefined;
+  error: LocalizedError | undefined;
   /** WS 连接状态 */
   wsState: WsState;
   /** 是否在轮询 */

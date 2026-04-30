@@ -58,6 +58,7 @@ select = [
     "ASYNC",   # async
     "SIM105",  # contextlib.suppress
     "PT",      # pytest
+    "RUF006",  # asyncio dangling task
 ]
 ignore = [
     "RUF001", "RUF002", "RUF003",  # unicode 字符

@@ -186,6 +186,7 @@ async function handleResponse<T>(
     const text = await response.text().catch(() => "");
     const parsed = parseBusinessErrorBody(text);
     const fallback = parsed.detail ?? (text || response.statusText);
+    const hintKey = hintKeyForStatus(response.status);
     throw new ApiError(
       `HTTP ${response.status.toString()}: ${fallback}`,
       {
@@ -193,9 +194,7 @@ async function handleResponse<T>(
         httpStatus: response.status,
         ...(parsed.code === undefined ? {} : { code: parsed.code }),
         params: parsed.params,
-        ...(hintKeyForStatus(response.status) === undefined
-          ? {}
-          : { hintKey: hintKeyForStatus(response.status) }),
+        ...(hintKey === undefined ? {} : { hintKey }),
       },
     );
   }
@@ -458,12 +457,13 @@ export async function uploadFiles(
 
   let response: Response;
   try {
-    response = await fetch(`${API_BASE}/uploads/${sessionId}/files`, {
+    const init: RequestInit = {
       method: "POST",
       headers: apiHeaders(),
       body: formData,
-      signal,
-    });
+    };
+    if (signal !== undefined) init.signal = signal;
+    response = await fetch(`${API_BASE}/uploads/${sessionId}/files`, init);
   } catch (error_: unknown) {
     /* AbortError 透传给 hook 层做"用户取消"分支 */
     if (error_ instanceof DOMException && error_.name === "AbortError") {

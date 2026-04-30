@@ -2,13 +2,13 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 
-"""代码模式专用的测试 OCR 引擎：从 spike lines.jsonl 喂 text_lines。
+"""代码模式专用的测试 OCR 引擎：从 fixture lines.jsonl 喂 text_lines。
 
 仅 tests/ 使用，不属于产品代码。代码模式 (`code.enable=True`) 需要
 ``PageOCR.text_lines`` 而非 ``raw_text``，文档模式的 FixtureOCREngine 不适用。
 
-数据源：``output/age8-probe-basic/<stem>/lines.jsonl``（已用 PaddleOCR-VL
-basic pipeline 跑过的 8 张 chromium spike）。
+数据源：测试传入的 ``<lines_root>/<stem>/lines.jsonl``；调用方负责构造
+自包含 fixture，不能依赖 ``output/`` 运行产物。
 """
 
 from __future__ import annotations

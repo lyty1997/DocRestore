@@ -54,9 +54,12 @@ const BATCH_SIZE = 3;
 
 /** 内部封装：把单批失败的 ``LocalizedError`` 通过 throw 透传到外层 catch */
 class BatchUploadError extends Error {
-  constructor(public readonly localized: LocalizedError) {
+  readonly localized: LocalizedError;
+
+  constructor(localized: LocalizedError) {
     super(localized.fallback ?? localized.key);
     this.name = "BatchUploadError";
+    this.localized = localized;
   }
 }
 

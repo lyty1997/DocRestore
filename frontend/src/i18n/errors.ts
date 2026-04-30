@@ -11,6 +11,8 @@
 import { ApiError, type ApiErrorParams } from "../api/client";
 import type { TranslationFn } from "./config";
 
+type TranslationParams = Record<string, string | number>;
+
 /** 本地化错误：携带 i18n key + 占位符值，UI 用 ``renderLocalized`` 渲染。 */
 export interface LocalizedError {
   /** 主信息 i18n key（如 ``errors.api.task_not_found``）。 */
@@ -76,16 +78,30 @@ export function localized(
   return params === undefined ? { key } : { key, params };
 }
 
+function toTranslationParams(
+  params: ApiErrorParams | undefined,
+): TranslationParams | undefined {
+  if (params === undefined) return undefined;
+  const normalized: TranslationParams = {};
+  for (const [key, value] of Object.entries(params)) {
+    normalized[key] =
+      typeof value === "string" || typeof value === "number"
+        ? value
+        : value.join(", ");
+  }
+  return normalized;
+}
+
 /** 渲染：主信息（+ 可选 hint，用换行分隔）。 */
 export function renderLocalized(
   err: LocalizedError,
   t: TranslationFn,
 ): string {
-  const main = t(err.key, err.params);
+  const main = t(err.key, toTranslationParams(err.params));
   /* 翻译失败 → t() 回落到 key 字面量；这时若有 fallback 中文用 fallback */
   const mainText =
     main === err.key && err.fallback !== undefined ? err.fallback : main;
   if (err.hintKey === undefined) return mainText;
-  const hint = t(err.hintKey, err.hintParams);
+  const hint = t(err.hintKey, toTranslationParams(err.hintParams));
   return `${mainText}\n${hint}`;
 }

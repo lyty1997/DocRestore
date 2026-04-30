@@ -346,7 +346,7 @@ class TestNoFilename:
 # ---------- spike 集成测试 ----------
 
 SPIKE_LINES_DIR = (
-    Path(__file__).resolve().parents[2] / "output" / "age8-probe-basic"
+    Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "age8-probe-basic"
 )
 SPIKE_IMAGE_DIR = (
     Path(__file__).resolve().parents[2] / "test_images" / "age8-spike"
@@ -395,7 +395,7 @@ def _build_page_columns_for_stem(stem: str) -> list[PageColumn]:
 
 @pytest.mark.skipif(
     not _list_spike_stems(),
-    reason="age8-probe-basic 数据未生成",
+    reason="tests/fixtures/age8-probe-basic fixture 不存在",
 )
 class TestSpikeAggregation:
     """8 张 spike 总聚合：按已知 file 数量验证分组数"""

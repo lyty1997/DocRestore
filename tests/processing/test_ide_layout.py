@@ -10,7 +10,7 @@
 
 策略：
   - 合成 fixture：手工构造 list[TextLine] 模拟 1/2/3 栏 IDE
-  - spike fixture：从 output/age8-probe-basic/<stem>/lines.jsonl 读真数据
+  - spike fixture：从 tests/fixtures/age8-probe-basic/<stem>/lines.jsonl 读真数据
     （CI 无该数据时 skip，遵循 CLAUDE.md 测试规则）
 """
 
@@ -220,7 +220,9 @@ class TestThresholds:
 
 # ---------- spike 真实数据 fixture ----------
 
-SPIKE_LINES_DIR = Path(__file__).resolve().parents[2] / "output" / "age8-probe-basic"
+SPIKE_LINES_DIR = (
+    Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "age8-probe-basic"
+)
 
 
 def _list_spike_stems() -> list[str]:
@@ -258,7 +260,7 @@ def _load_spike(stem: str) -> tuple[list[TextLine], tuple[int, int]]:
 
 @pytest.mark.skipif(
     not _list_spike_stems(),
-    reason="age8-probe-basic 数据未生成（需先跑 scripts/age8_probe_basic_ocr.py）",
+    reason="tests/fixtures/age8-probe-basic fixture 不存在",
 )
 class TestSpikeImages:
     """8 张 spike 集成验证（已知 100% 单调命中）"""
