@@ -1980,8 +1980,9 @@ class Pipeline:
         - 二分子段调用异常 → 整段回退原文（保守）
         - 拼回时按原顺序 join，gaps 合并
 
-        first_result 仅作 API 对称传入（与 ui_noise / dup_h2 retry 保持一致），
-        当前实现不读取它（截断信号判定在调用方上一层做）。
+        first_result 表示首轮截断输出。长段优先二分；短段无法二分时，
+        带 retry_hint 对同一输入重试一次，避免 1KB 左右的小段因偶发短输出
+        只能直接回退原文。
 
         重要：拼回的 markdown 长度可以 > LLM 单次 max_tokens，因为它由多段
         独立 refine 拼接，不再受单次响应 token 上限约束 —— 这正是修复
@@ -2014,26 +2015,9 @@ class Pipeline:
         if halves is None or any(
             len(h) < min_chunk_chars for h in halves
         ):
-            logger.warning(
-                "段 %d 截断但无法继续二分（input=%d 字符）→ 回退原文",
-                ctx.segment_index, len(text),
+            return await Pipeline._handle_unsplittable_truncation(
+                refiner, text, ctx, first_result, llm_cfg, quality, depth,
             )
-            if quality is not None:
-                await quality.add(QualityIssue(
-                    stage="llm_segment",
-                    code="llm.seg_truncation_unrecoverable",
-                    severity="warn",
-                    message=(
-                        f"段 {ctx.segment_index} 截断且无法继续二分"
-                        f"（input={len(text)} 字符），回退原文"
-                    ),
-                    segment_index=ctx.segment_index,
-                    metadata={
-                        "input_chars": len(text),
-                        "depth": depth,
-                    },
-                ))
-            return RefinedResult(markdown=text, gaps=[], truncated=True)
 
         sub_ctx_template = RefineContext(
             segment_index=ctx.segment_index,
@@ -2097,6 +2081,101 @@ class Pipeline:
             gaps=merged_gaps,
             truncated=any_truncated,
         )
+
+    @staticmethod
+    async def _handle_unsplittable_truncation(
+        refiner: LLMRefiner,
+        text: str,
+        ctx: RefineContext,
+        first_result: RefinedResult,
+        llm_cfg: LLMConfig,
+        quality: QualityReport | None,
+        depth: int,
+    ) -> RefinedResult:
+        """处理短到无法继续二分的截断段。"""
+        if not ctx.retry_hint:
+            retry_result = await Pipeline._retry_short_truncated_segment(
+                refiner, text, ctx, first_result, llm_cfg, quality,
+            )
+            if retry_result is not None:
+                return retry_result
+
+        logger.warning(
+            "段 %d 截断但无法继续二分（input=%d 字符）→ 回退原文",
+            ctx.segment_index, len(text),
+        )
+        if quality is not None:
+            await quality.add(QualityIssue(
+                stage="llm_segment",
+                code="llm.seg_truncation_unrecoverable",
+                severity="warn",
+                message=(
+                    f"段 {ctx.segment_index} 截断且无法继续二分"
+                    f"（input={len(text)} 字符），回退原文"
+                ),
+                segment_index=ctx.segment_index,
+                metadata={
+                    "input_chars": len(text),
+                    "depth": depth,
+                },
+            ))
+        return RefinedResult(markdown=text, gaps=[], truncated=True)
+
+    @staticmethod
+    async def _retry_short_truncated_segment(
+        refiner: LLMRefiner,
+        text: str,
+        ctx: RefineContext,
+        first_result: RefinedResult,
+        llm_cfg: LLMConfig,
+        quality: QualityReport | None,
+    ) -> RefinedResult | None:
+        """短段无法二分时，同段带提示重试一次；成功则返回结果。"""
+        retry_ctx = RefineContext(
+            segment_index=ctx.segment_index,
+            total_segments=ctx.total_segments,
+            overlap_before=ctx.overlap_before,
+            overlap_after=ctx.overlap_after,
+            retry_hint=(
+                "上一轮精修输出疑似被截断，且当前段较短无法继续二分。"
+                "请完整保留输入全部内容，只修复 Markdown 格式，"
+                "不要省略、总结或提前结束。"
+            ),
+        )
+        try:
+            retry_result = await refiner.refine(text, retry_ctx)
+        except Exception:
+            logger.warning(
+                "段 %d 短段截断重试失败，回退原文",
+                ctx.segment_index, exc_info=True,
+            )
+            return None
+
+        retry_truncated = (
+            retry_result.truncated
+            or Pipeline._heuristic_truncated(
+                text, retry_result.markdown, llm_cfg,
+            )
+        )
+        if quality is not None:
+            await quality.add(QualityIssue(
+                stage="llm_segment",
+                code="llm.seg_truncation_short_retry",
+                severity="info",
+                message=(
+                    f"段 {ctx.segment_index} 短段截断同段重试"
+                    + ("（仍截断）" if retry_truncated else "（已恢复）")
+                ),
+                segment_index=ctx.segment_index,
+                metadata={
+                    "input_chars": len(text),
+                    "retry_truncated": retry_truncated,
+                    "first_output_chars": len(first_result.markdown),
+                },
+            ))
+        if retry_truncated:
+            return None
+        return retry_result
 
     @staticmethod
     async def _maybe_retry_refine_on_ui_noise(

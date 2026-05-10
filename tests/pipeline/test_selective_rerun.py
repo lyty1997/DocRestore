@@ -443,9 +443,9 @@ async def test_truncation_max_depth_falls_back_to_raw() -> None:
 
 @pytest.mark.asyncio
 async def test_truncation_too_short_to_split() -> None:
-    """段太短无法二分 → 直接回退原文。"""
-    short_text = "短输入只有 2 行\n第二行"  # 远 < min_chunk_chars*2
-    refiner = _FakeRefiner([])  # 不应被调用
+    """段太短无法二分，重试仍截断 → 回退原文。"""
+    short_text = "\n".join(f"line {i}" for i in range(80))
+    refiner = _FakeRefiner(["x"])
     first = RefinedResult(markdown="x", truncated=True)
     quality = QualityReport()
     result = await Pipeline._maybe_retry_on_truncation(
@@ -454,9 +454,33 @@ async def test_truncation_too_short_to_split() -> None:
     )
     assert result.markdown == short_text
     assert result.truncated is True
-    assert len(refiner.calls) == 0
+    assert len(refiner.calls) == 1
     codes = {i.code for i in quality.issues}
+    assert "llm.seg_truncation_short_retry" in codes
     assert "llm.seg_truncation_unrecoverable" in codes
+
+
+@pytest.mark.asyncio
+async def test_truncation_short_retry_recovers() -> None:
+    """914 字符级短段无法二分时，同段重试成功则采用重试结果。"""
+    short_text = "\n".join(f"line {i}" for i in range(80))
+    retry_output = "\n".join(f"out {i}" for i in range(80))
+    refiner = _FakeRefiner([retry_output])
+    first = RefinedResult(markdown="x", truncated=True)
+    quality = QualityReport()
+
+    result = await Pipeline._maybe_retry_on_truncation(
+        _as_refiner(refiner), short_text, _ctx(), first, _llm_cfg(), quality,
+        min_chunk_chars=800,
+    )
+
+    assert result.markdown == retry_output
+    assert result.truncated is False
+    assert len(refiner.calls) == 1
+    assert refiner.calls[0].retry_hint != ""
+    codes = {i.code for i in quality.issues}
+    assert "llm.seg_truncation_short_retry" in codes
+    assert "llm.seg_truncation_unrecoverable" not in codes
 
 
 @pytest.mark.asyncio
