@@ -200,6 +200,7 @@ class DocumentSegmenter:
 
 _HEADING_RE = re.compile(r"^#{1,6}\s+")
 _PAGE_MARKER_PREFIX = "<!-- page:"
+_PAGE_MARKER_AVOID_CHARS = 600
 
 
 class StreamSegmentExtractor:
@@ -231,7 +232,8 @@ class StreamSegmentExtractor:
 
         - full_text[offset:] 长度 < max_chars 返回 None（等更多文本）
         - 否则在 [offset + max_chars*0.8, offset + max_chars*1.2] 内按
-          heading > page marker > 空行 > 任意换行 的优先级搜切点
+          heading > 空行 > 任意换行 的优先级搜切点，但避开 page marker
+          前后窗口，避免把跨页拍照重叠字段拆给不同 LLM 请求
         - 超出 1.2 倍仍无切点 → 在 offset + max_chars 强制切
 
         返回 (segment_text_with_backward_overlap, new_offset)。
@@ -243,6 +245,8 @@ class StreamSegmentExtractor:
         cut_pos = self._find_cut_position(
             full_text, offset, max_chars,
         )
+        if cut_pos is None:
+            return None
         actual = full_text[offset:cut_pos]
         seg_text = self._compose_with_overlap(actual)
         self._update_tail(actual)
@@ -268,7 +272,7 @@ class StreamSegmentExtractor:
 
     def _find_cut_position(
         self, text: str, offset: int, max_chars: int,
-    ) -> int:
+    ) -> int | None:
         """在 [offset + 0.8*max, offset + 1.2*max] 搜最优切点。
 
         切点取 `\\n` 之后的行起始位置（即从 cut_pos 开始是新一行）。
@@ -283,29 +287,36 @@ class StreamSegmentExtractor:
 
         line_starts = self._line_starts_in(text, min_cut, max_cut)
         if not line_starts:
+            if self._range_near_page_marker(text, offset, max_cut):
+                return None
             # 搜索窗口内一个换行都没有 → 强制在 max_cut 切
             return offset + max_chars
 
         cut = self._select_best_cut(text, line_starts)
-        return cut if cut >= 0 else offset + max_chars
+        if cut >= 0:
+            return cut
+        if self._range_near_page_marker(text, offset, max_cut):
+            return None
+        return offset + max_chars
 
     def _select_best_cut(
         self, text: str, line_starts: list[int],
     ) -> int:
-        """按优先级（heading > page_marker > blank > any）选首个匹配位置。"""
+        """按优先级（heading > blank > any）选首个安全切点。"""
         buckets: dict[str, int] = {
             "heading": -1,
-            "page_marker": -1,
             "blank": -1,
             "any": -1,
         }
         for pos in line_starts:
+            if self._near_page_marker(text, pos):
+                continue
             if buckets["any"] < 0:
                 buckets["any"] = pos
             kind = self._classify_line(text, pos)
             if kind is not None and buckets[kind] < 0:
                 buckets[kind] = pos
-        for key in ("heading", "page_marker", "blank", "any"):
+        for key in ("heading", "blank", "any"):
             if buckets[key] >= 0:
                 return buckets[key]
         return -1
@@ -320,9 +331,21 @@ class StreamSegmentExtractor:
             return "blank"
         if _HEADING_RE.match(line):
             return "heading"
-        if stripped.startswith(_PAGE_MARKER_PREFIX):
-            return "page_marker"
         return None
+
+    @staticmethod
+    def _near_page_marker(text: str, pos: int) -> bool:
+        """判断切点是否落在 page marker 前后的重叠高风险窗口内。"""
+        start = max(0, pos - _PAGE_MARKER_AVOID_CHARS)
+        end = min(len(text), pos + _PAGE_MARKER_AVOID_CHARS)
+        return _PAGE_MARKER_PREFIX in text[start:end]
+
+    @staticmethod
+    def _range_near_page_marker(text: str, from_pos: int, to_pos: int) -> bool:
+        """判断当前候选窗口是否与 page marker 风险窗口相交。"""
+        start = max(0, from_pos - _PAGE_MARKER_AVOID_CHARS)
+        end = min(len(text), to_pos + _PAGE_MARKER_AVOID_CHARS)
+        return _PAGE_MARKER_PREFIX in text[start:end]
 
     @staticmethod
     def _line_starts_in(

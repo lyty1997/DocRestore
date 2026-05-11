@@ -16,6 +16,147 @@ limitations under the License.
 
 # DocRestore 开发进度
 
+## 2026-05-11 流式分段避开跨页重叠区
+
+时间：2026-05-11 13:36:12 CST
+
+主题：避免把跨页拍照重叠字段拆给不同 LLM 请求，降低段级精修误判整页重复的概率。
+
+完成内容：
+- 明确云端 KV/prompt cache 不能作为跨请求正文记忆使用；重复判断必须让重复对出现在同一次 LLM 输入里。
+- 调整 `StreamSegmentExtractor`：
+  - 不再把 `<!-- page: ... -->` 作为优先切点。
+  - page marker 前后 600 字符内不切段，避免把“前页末尾 + 后页开头”的重叠对拆开。
+  - 如果当前窗口只有 page marker 高风险区，则返回 `None` 等待更多 OCR 文本；只有无 page marker 风险时才按旧逻辑强制切。
+- 更新 `tests/processing/test_stream_segmenter.py` 覆盖：
+  - page marker 高风险区内不切，等待更多文本。
+  - 文本足够后切到 marker 风险区之后，并保证 marker 留在同一段输入中。
+
+验证：
+- `python -m pytest -q tests/processing/test_stream_segmenter.py tests/pipeline/test_selective_rerun.py tests/llm/test_prompts.py`：55 passed。
+- `ruff check backend/docrestore/processing/segmenter.py tests/processing/test_stream_segmenter.py backend/docrestore/pipeline/pipeline.py backend/docrestore/llm/prompts.py tests/pipeline/test_selective_rerun.py`：通过。
+
+遗留问题：
+- 该策略会让某些段略长，可能增加单段 LLM 延迟；但相比跨请求误删有效内容，这是可接受的保守取舍。
+- 若连续多页都在很短间隔内出现 page marker，可能需要后续增加“最大等待字符数”护栏；当前先按实际拍照重叠场景收窄处理。
+
+## 2026-05-10 LLM 短段截断无法二分恢复
+
+时间：2026-05-10 22:37:30 CST
+
+主题：处理任务日志中 `RateController cold start timeout` 与 `段 2 截断但无法继续二分（input=914 字符）` 现场，补齐短段截断恢复路径。
+
+完成内容：
+- 确认 `RateController cold start timeout (60.0s), samples=1` 是多子目录 warmup 采样不足后的保守段长 fallback，不会中断任务。
+- 修复短段截断路径：当段落被判定截断但低于二分安全下限时，先带 `retry_hint` 对同一输入重试一次；重试成功则采用重试结果，重试仍截断或异常才回退原文。
+- 保留原有长段递归二分策略与“截断输出不进入最终文档”的安全策略。
+- 新增 `docs/zh/known-issues.md`，沉淀短段截断无法二分的现象与处理策略。
+- 新增/更新 `tests/pipeline/test_selective_rerun.py` 覆盖短段重试恢复和重试仍截断回退。
+- 复查 `test_images/crop_compare/AI子系统-裁剪/Linux_AI子系统_开发指南`：
+  - 视觉对照 `DSC07966.JPG` / `DSC07967.JPG` 确认二者是拍照重叠页，不是整页重复。
+  - 定位到 `seg_0b8cd2de12a092b74adbf7ec734f2725.json` 段级 LLM 缓存已把 `DSC07966.JPG` 替换成 `<!-- 本页内容与上一页完全重复，已去除 -->`，说明误删发生在段级精修阶段。
+  - 更新 refine/final_refine prompt：HTML `<img src="...">` 与 Markdown 图片占位符同等保留；禁止用“本页重复已去除”注释替代页面。
+  - 新增段级防护 `_maybe_retry_refine_on_page_drop()`：检测整页误删注释后带提示重试，仍失败则回退原段并标记 `truncated=True`，防止坏输出写入缓存。
+
+验证：
+- `python -m pytest -q tests/pipeline/test_selective_rerun.py`：27 passed。
+- `python -m pytest -q tests/pipeline/test_truncation.py tests/pipeline/test_selective_rerun.py`：27 passed, 11 skipped。
+- `ruff check backend/docrestore/pipeline/pipeline.py tests/pipeline/test_selective_rerun.py`：通过。
+- `python -m pytest -q tests/pipeline/test_selective_rerun.py tests/llm/test_prompts.py`：42 passed。
+- `ruff check backend/docrestore/pipeline/pipeline.py backend/docrestore/llm/prompts.py tests/pipeline/test_selective_rerun.py`：通过。
+
+遗留问题：
+- 本次未重跑真实 OCR/LLM 端到端任务；真实 provider 若持续对短段返回 `finish_reason=length`，最终仍会按安全策略回退原文并保留告警。
+- 新 prompt 会让 LLM 段级缓存 key 变化，后续重跑不会命中本次问题中的旧坏缓存；但 `/tmp/docrestore_10c60875/.../.llm_cache/seg_0b8...json` 作为历史产物仍保留旧内容。
+
+## 2026-05-08 GPU 自动选卡策略回归修复
+
+主题：对比 OCR/GPU 相关历史 diff，定位默认预热从 GPU1 跑偏到 A2 的回归来源，并修正自动推荐策略。
+
+完成内容：
+- 对比提交 `267374c feat(core): 流式 Pipeline v2 + GPU 自动探测 + 断点续跑 + 部分失败可见`：
+  - 该提交将 `OCRConfig.gpu_id` 从默认 `"1"` 改成 `None`。
+  - `scripts/start.sh` 同时将 `PPOCR_GPU_ID` 默认 `"1"` 改成空，未显式指定时不再固定 4070。
+  - `pick_best_gpu()` 原策略按 `memory_total_mb DESC`，当前 A2 总显存 15GB 大于 4070 SUPER 12GB，因此默认预热会选 GPU0/A2。
+- 修复 `backend/docrestore/ocr/gpu_detect.py::pick_best_gpu()`：
+  - 自动推荐改为优先 CUDA compute capability，其次空闲显存、总显存、索引升序。
+  - 显式 `gpu_id`、前端下拉选择、`PPOCR_GPU_ID` 仍完全优先生效。
+- 新增 `tests/ocr/test_gpu_detect.py` 覆盖：
+  - A2(8.6/15GB) + 4070 SUPER(8.9/12GB) 时自动推荐 GPU1。
+  - 同架构设备按空闲显存选择。
+  - 完全同规格时按索引升序稳定选择。
+- 同步 zh/en 文档中 GPU 推荐策略说明，去掉“显存最大”旧描述。
+
+验证：
+- `conda run -n docrestore python -m pytest -q tests/ocr/test_gpu_detect.py`：3 passed。
+- `conda run -n docrestore python -m pytest -q tests/test_config.py`：41 passed。
+- `conda run -n docrestore ruff check backend/docrestore/ocr/gpu_detect.py tests/ocr/test_gpu_detect.py`：通过。
+- 手工调用 `pick_best_gpu([A2, 4070 SUPER])` 返回 `"1"`。
+
+遗留问题：
+- `tests/api/test_ocr_endpoints.py` 本次单独运行超过 45s 无输出，已终止；此前与本次改动直接相关的 `gpu_detect` 策略测试已覆盖。
+- 当前机器 NVML/CUDA 仍有独立故障：`nvidia-smi` 对 GPU0 报 Unknown Error，PyTorch 在 OCR conda 环境中 `CUDA_VISIBLE_DEVICES=1` 仍可能初始化失败。策略修复能避免默认再主动选 A2，但不能替代系统层 GPU/驱动修复。
+
+## 2026-05-08 OCR 引擎切换真实启动验证
+
+主题：真实启动后端，验证 OCR 引擎/GPU 预加载切换是否能落到后端与 GPU 初始化。
+
+完成内容：
+- 启动 `bash scripts/start.sh backend`，后端正常完成 lifespan startup。
+- 调用 `GET /api/v1/gpus` 成功枚举两张 GPU：
+  - GPU 0：NVIDIA A2，15356 MB，总显存最大，被后端推荐为 `recommended="0"`。
+  - GPU 1：NVIDIA GeForce RTX 4070 SUPER，12282 MB。
+- 默认 PaddleOCR-VL 预热尝试启动 ppocr-server，但 vLLM 初始化失败；`/ocr/status` 回到空闲态。
+- 显式调用 `POST /api/v1/ocr/warmup`：
+  - `{"model":"paddle-ocr/ppocr-v4","gpu_id":"1"}` 返回 `accepted`，说明后端收到目标 GPU，但 ppocr-server 仍失败。
+  - `{"model":"deepseek/ocr-2","gpu_id":"1"}` 返回 `accepted`，但 DeepSeek worker 初始化失败。
+- 在 `deepseek_ocr` 与 `ppocr_vlm` 环境中执行 `CUDA_VISIBLE_DEVICES=1` 的 PyTorch 探测，均得到 `torch.cuda.device_count() == 0`，并出现 `Can't initialize NVML / CUDA unknown error`。
+- 后端已优雅停止，未发现 ppocr-server / worker / uvicorn 残留。
+
+结论：
+- 前端/API 层的 OCR 引擎与 GPU 切换请求能到达后端；当前真实启动失败不是“切换不生效”，而是系统 GPU/NVML 层异常。
+- 关键现场：`nvidia-smi` 现在对物理 GPU0 报 `Unable to determine the device handle ... Unknown Error`，即使设置 `CUDA_VISIBLE_DEVICES=1`，PyTorch 仍无法初始化 CUDA。
+
+遗留问题：
+- 需要先恢复 NVIDIA 驱动/NVML 对 GPU0 的正常访问，或从系统层屏蔽故障 GPU0；否则 PaddleOCR-VL 与 DeepSeek-OCR-2 都无法真实初始化。
+- GPU 恢复后建议重跑：`GET /gpus` → 显式 warmup GPU 1 → 切回 GPU 0 或自动 → 观察 `/ocr/status.current_gpu` 与 `EngineManager.ensure()` 日志。
+
+## 2026-05-07 预加载引擎 GPU 切换修复
+
+主题：修复前端任务表单中 OCR 预加载在切换 GPU 时可能不生效或状态误判的问题。
+
+完成内容：
+- `frontend/src/components/TaskForm.tsx`：
+  - 预加载轮询绑定当前 `{model, gpuId}` 目标，切换 OCR 引擎或 GPU 时立即停止旧轮询，避免旧目标把新选择误标为“已就绪”。
+  - 当 `/ocr/warmup` 返回 `switching` 时，前端会继续轮询；待后端不再切换且目标仍未就绪时，自动重发当前目标的 warmup 请求，避免后端正在切换期间吞掉用户新选 GPU。
+  - 轮询超时从 60s 调整到 120s，匹配 PaddleOCR-VL 冷启动可能超过 60s 的实际情况；超时后将当前目标标记为错误，避免按钮长期卡在“加载中”。
+- `frontend/src/App.css`：
+  - OCR 引擎 / GPU / 预加载状态区域改为响应式 grid，小宽度下状态文字不再被按钮和下拉框挤压。
+
+验证：
+- `npm run typecheck`：通过。
+- `npm run lint`：通过（仅保留 ESLint 多 tsconfig 性能提示）。
+- Playwright 模拟：第一次 `/ocr/warmup` 返回 `switching`，后端空闲后前端第二次 POST 仍携带 `gpu_id: "0"`，最终状态显示“已就绪”。
+- 视觉验证：`scripts/screenshot.js` 当前不存在，改用 Playwright 保存并查看 `screenshots/current.png`，未发现 OCR/GPU/预加载区域文字挤压。
+
+遗留问题：未接入真实多 GPU OCR 进程验证，当前验证基于前端路由模拟；真实机器上仍需观察后端 `EngineManager.ensure()` 日志确认物理 GPU 切换耗时与状态一致。
+
+## 2026-05-07 Codex MCP 服务迁移配置
+
+主题：将此前 Claude Code 中已安装的 `chrome-devtools`、`context7`、`playwright`
+MCP 服务迁移到 Codex 全局配置。
+
+完成内容：
+- 从 `/home/lyty/.claude.json` 中定位 Claude Code 的 `mcpServers` 配置，确认
+  三个服务均为 stdio 模式，启动命令通过 `npx` 执行。
+- 使用 `codex mcp add` 写入 Codex 全局配置，新增服务名保持为
+  `chrome-devtools`、`context7`、`playwright`。
+- 运行 `codex mcp list` 验证 Codex 已列出新增服务，状态均为 `enabled`；
+  原有 `pencil` 服务保持不变。
+
+遗留问题：当前会话已经启动，新增 MCP 工具通常需要重启 Codex 会话后才会注入到
+可用工具列表。
+
 ## 2026-04-27 英文文档全量同步（zh → en，补 zh-only + 重译 streaming-pipeline）
 
 主题：把 4-15 ~ 4-25 累积的 zh-only 文档与 4-22 大改的 streaming-pipeline 同步到

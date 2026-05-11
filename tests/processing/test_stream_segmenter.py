@@ -26,7 +26,7 @@ class TestNotEnoughText:
 
 
 class TestCutPriority:
-    """切点优先级：heading > page marker > 空行 > 任意行起始。
+    """切点优先级：heading > 空行 > 任意行起始，且避开 page marker。
 
     `try_extract` 要求 `text[offset:]` 长度 ≥ `max_chars`，所以 pad 至少
     放到 `max_chars` 之后才会触发切段。下面统一用 max_chars=100 + pad=95
@@ -36,7 +36,7 @@ class TestCutPriority:
     def test_heading_wins(self) -> None:
         ex = StreamSegmentExtractor(overlap_lines=0)
         pad = "x" * 95  # 95 char 全是非换行填充
-        tail = "\n\ncontent\n## My Heading\nfoo\n<!-- page: a.jpg -->\nbar\n"
+        tail = "\n\ncontent\n## My Heading\nfoo\nbar\n"
         text = pad + tail  # 总长 ≈ 150，max_chars=100 → 窗口 [80, 120]
         result = ex.try_extract(text, offset=0, max_chars=100)
         assert result is not None
@@ -44,16 +44,31 @@ class TestCutPriority:
         heading_pos = text.find("## My Heading")
         assert new_offset == heading_pos
 
-    def test_page_marker_when_no_heading(self) -> None:
+    def test_avoids_page_marker_zone(self) -> None:
         ex = StreamSegmentExtractor(overlap_lines=0)
-        pad = "x" * 95
-        tail = "\nline\n<!-- page: a.jpg -->\nfoo\nbar\nbaz\n"
-        text = pad + tail
-        result = ex.try_extract(text, offset=0, max_chars=100)
+        before = "a" * 360
+        marker = "<!-- page: a.jpg -->\n"
+        # marker 后这段是典型跨页重叠区；如果在 marker 处切，LLM 看不到
+        # 前页末尾和后页开头的重复对。
+        overlap_zone = "重复字段\n" * 12
+        safe_tail = ("safe line\n" * 90)
+        text = before + "\n" + marker + overlap_zone + safe_tail
+        result = ex.try_extract(text, offset=0, max_chars=500)
+        assert result is None
+
+    def test_waits_until_safe_after_page_marker_zone(self) -> None:
+        ex = StreamSegmentExtractor(overlap_lines=0)
+        before = "a" * 360
+        marker = "<!-- page: a.jpg -->\n"
+        overlap_zone = "重复字段\n" * 12
+        safe_tail = ("safe line\n" * 180)
+        text = before + "\n" + marker + overlap_zone + safe_tail
+        result = ex.try_extract(text, offset=0, max_chars=1000)
         assert result is not None
         _, new_offset = result
         marker_pos = text.find("<!-- page: a.jpg -->")
-        assert new_offset == marker_pos
+        assert new_offset > marker_pos + 600
+        assert "<!-- page: a.jpg -->" in text[:new_offset]
 
     def test_blank_line_when_no_heading_or_marker(self) -> None:
         ex = StreamSegmentExtractor(overlap_lines=0)
