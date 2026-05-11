@@ -13,6 +13,11 @@ import { SourcePicker } from "./SourcePicker";
 /** OCR 引擎状态 */
 type EngineStatus = "idle" | "warming" | "ready" | "error";
 
+interface OcrWarmupTarget {
+  model: string;
+  gpuId: string;
+}
+
 /** localStorage 持久化的 LLM 配置 */
 const LLM_STORAGE_KEY = "docrestore_llm_config";
 
@@ -172,6 +177,27 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
   const [recommendedGpu, setRecommendedGpu] = useState<string | undefined>();
   const [engineStatus, setEngineStatus] = useState<EngineStatus>("idle");
   const pollRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+  const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const selectedWarmupTargetRef = useRef<OcrWarmupTarget>({
+    model: DEFAULT_OCR_MODEL,
+    gpuId: GPU_AUTO_VALUE,
+  });
+
+  const stopWarmupPolling = useCallback((): void => {
+    if (pollRef.current !== undefined) {
+      clearInterval(pollRef.current);
+      pollRef.current = undefined;
+    }
+    if (pollTimeoutRef.current !== undefined) {
+      clearTimeout(pollTimeoutRef.current);
+      pollTimeoutRef.current = undefined;
+    }
+  }, []);
+
+  const isCurrentWarmupTarget = useCallback((target: OcrWarmupTarget): boolean => {
+    const current = selectedWarmupTargetRef.current;
+    return current.model === target.model && current.gpuId === target.gpuId;
+  }, []);
 
   /* 挂载时拉取 GPU 列表 */
   useEffect(() => {
@@ -263,6 +289,10 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
     setSensitiveWords((prev) => prev.filter((w) => w.word !== word));
   };
 
+  useEffect(() => {
+    selectedWarmupTargetRef.current = { model: ocrModel, gpuId };
+  }, [ocrModel, gpuId]);
+
   /* 挂载时查询默认引擎预热状态 */
   useEffect(() => {
     let cancelled = false;
@@ -288,16 +318,23 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
   /* 清理轮询定时器 */
   useEffect(() => {
     return (): void => {
-      if (pollRef.current !== undefined) clearInterval(pollRef.current);
+      stopWarmupPolling();
     };
-  }, []);
+  }, [stopWarmupPolling]);
 
   /** 轮询引擎状态直到就绪或超时 */
   const pollEngineReady = useCallback(
-    (targetModel: string, targetGpu: string): void => {
-      if (pollRef.current !== undefined) clearInterval(pollRef.current);
+    (targetModel: string, targetGpu: string, retryWhenIdle: boolean): void => {
+      stopWarmupPolling();
+      const target: OcrWarmupTarget = { model: targetModel, gpuId: targetGpu };
+      let retryingWarmup = false;
+      let shouldRetryWarmup = retryWhenIdle;
       const id = setInterval(() => {
         void (async (): Promise<void> => {
+          if (!isCurrentWarmupTarget(target)) {
+            stopWarmupPolling();
+            return;
+          }
           try {
             const s = await getOcrStatus();
             const gpuMatches =
@@ -308,43 +345,73 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
               s.is_ready
             ) {
               setEngineStatus("ready");
-              clearInterval(id);
-              pollRef.current = undefined;
+              stopWarmupPolling();
+              return;
+            }
+            if (shouldRetryWarmup && !s.is_switching && !retryingWarmup) {
+              retryingWarmup = true;
+              try {
+                const resp = await warmupOcrEngine(targetModel, targetGpu);
+                shouldRetryWarmup = resp.status === "switching";
+              } finally {
+                retryingWarmup = false;
+              }
             }
           } catch {
             /* 静默重试 */
           }
-        })();
+        })().catch((): void => {
+          /* 异常已在轮询体内处理；这里兜底满足 Promise 消费约束。 */
+        });
       }, 3000);
       pollRef.current = id;
-      /* 60s 超时自动停止 */
-      setTimeout(() => {
+      /* 120s 超时自动停止；PaddleOCR-VL 冷启动可能超过 60s */
+      pollTimeoutRef.current = setTimeout(() => {
         if (pollRef.current === id) {
-          clearInterval(id);
-          pollRef.current = undefined;
+          stopWarmupPolling();
+          if (isCurrentWarmupTarget(target)) setEngineStatus("error");
         }
-      }, 60_000);
+      }, 120_000);
     },
-    [],
+    [isCurrentWarmupTarget, stopWarmupPolling],
   );
 
   /** 预加载引擎：调 warmup API 并启动轮询 */
   const handleWarmup = useCallback((): void => {
+    const target: OcrWarmupTarget = { model: ocrModel, gpuId };
+    selectedWarmupTargetRef.current = target;
     setEngineStatus("warming");
     void (async (): Promise<void> => {
       try {
         const resp = await warmupOcrEngine(ocrModel, gpuId);
+        if (!isCurrentWarmupTarget(target)) return;
         if (resp.status === "ready") {
           setEngineStatus("ready");
           return;
         }
         /* accepted 或 switching → 开始轮询 */
-        pollEngineReady(ocrModel, gpuId);
+        pollEngineReady(ocrModel, gpuId, resp.status === "switching");
       } catch {
-        setEngineStatus("error");
+        if (isCurrentWarmupTarget(target)) setEngineStatus("error");
       }
-    })();
-  }, [ocrModel, gpuId, pollEngineReady]);
+    })().catch((): void => {
+      /* 异常已在预加载流程内处理；这里兜底满足 Promise 消费约束。 */
+    });
+  }, [ocrModel, gpuId, isCurrentWarmupTarget, pollEngineReady]);
+
+  const handleOcrModelChange = (value: string): void => {
+    stopWarmupPolling();
+    selectedWarmupTargetRef.current = { model: value, gpuId };
+    setOcrModel(value);
+    setEngineStatus("idle");
+  };
+
+  const handleGpuIdChange = (value: string): void => {
+    stopWarmupPolling();
+    selectedWarmupTargetRef.current = { model: ocrModel, gpuId: value };
+    setGpuId(value);
+    setEngineStatus("idle");
+  };
 
   const handleSourceComplete = useCallback((dir: string): void => {
     setImageDir(dir);
@@ -453,8 +520,7 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
               className="ocr-engine-select"
               value={ocrModel}
               onChange={(e) => {
-                setOcrModel(e.target.value);
-                setEngineStatus("idle");
+                handleOcrModelChange(e.target.value);
               }}
               disabled={disabled}
             >
@@ -472,8 +538,7 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
               className="gpu-select"
               value={gpuId}
               onChange={(e) => {
-                setGpuId(e.target.value);
-                setEngineStatus("idle");
+                handleGpuIdChange(e.target.value);
               }}
               disabled={disabled}
             >

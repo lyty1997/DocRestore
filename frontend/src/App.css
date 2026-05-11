@@ -2955,18 +2955,18 @@ body {
 }
 
 .ocr-engine-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(10rem, 1fr);
   gap: 0.75rem;
   align-items: flex-end;
 }
 
 .ocr-engine-field {
-  flex: 1;
+  min-width: 0;
 }
 
 .ocr-gpu-field {
-  flex: 0 0 auto;
-  min-width: 10rem;
+  min-width: 0;
 }
 
 .ocr-engine-select,
@@ -2999,7 +2999,8 @@ body {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  flex: 0 0 auto;
+  grid-column: 1 / -1;
+  min-width: 0;
 }
 
 .btn-warmup {
@@ -3025,7 +3026,18 @@ body {
 
 .engine-status {
   font-size: 0.8rem;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (width >= 72rem) {
+  .ocr-engine-row {
+    grid-template-columns: minmax(12rem, 1fr) minmax(10rem, 1fr) auto;
+  }
+
+  .ocr-warmup-area {
+    grid-column: auto;
+  }
 }
 
 .engine-status--ready {
@@ -3716,4 +3728,3 @@ body {
 .code-viewer-error {
   color: var(--color-error);
 }
-
