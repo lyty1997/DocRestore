@@ -239,7 +239,7 @@ Contains many fields, grouped by sub-feature:
 - `normalize_mean: tuple[float, float, float] = (0.5, 0.5, 0.5)` / `normalize_std`
 - `ngram_size=20` / `ngram_window_size=90` / `ngram_whitelist_token_ids={128821, 128822}`
 - `prompt: str` -- OCR prompt template (contains `<|grounding|>`)
-- `gpu_id: str | None = None` -- `CUDA_VISIBLE_DEVICES`, shared by both engines; `None` means auto — `EngineManager.ensure()` calls `gpu_detect.pick_best_gpu()` to pick the GPU with the most VRAM
+- `gpu_id: str | None = None` -- `CUDA_VISIBLE_DEVICES`, shared by both engines; `None` means auto — `EngineManager.ensure()` calls `gpu_detect.pick_best_gpu()` to recommend the default OCR GPU
 
 **Sidebar filtering**
 - `enable_column_filter: bool = False` -- disabled by default due to insufficient PaddleOCR precision

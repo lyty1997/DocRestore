@@ -126,7 +126,7 @@ After the services are running:
 | `BACKEND_HOST` | `0.0.0.0` | Backend listen address |
 | `BACKEND_PORT` | `8000` | Backend listen port |
 | `FRONTEND_PORT` | `5173` | Frontend dev server port |
-| `PPOCR_GPU_ID` | empty (auto) | GPU used by PaddleOCR server; when empty, `gpu_detect.pick_best_gpu` selects the one with the most VRAM |
+| `PPOCR_GPU_ID` | empty (auto) | GPU used by PaddleOCR server; when empty, `gpu_detect.pick_best_gpu` recommends one automatically |
 | `PPOCR_PORT` | `8119` | PaddleOCR server port |
 | `PPOCR_MODEL` | `PaddleOCR-VL-1.5-0.9B` | PaddleOCR model name |
 
@@ -191,7 +191,7 @@ Specified via `OCRConfig.model`. Supported identifiers:
 | `deepseek/ocr-2` | DeepSeek-OCR-2 | High-accuracy grounding OCR |
 | `deepseek` | DeepSeek-OCR-2 | Short form |
 
-**GPU selection**: `OCRConfig.gpu_id` (default `None`) controls which GPU both engines use. When unset, the backend calls `docrestore.ocr.gpu_detect.pick_best_gpu()` before starting ppocr-server and picks the GPU with the most VRAM. The frontend task form fetches the list via `GET /api/v1/gpus` so users can override it, and `PPOCR_GPU_ID` can pin it explicitly.
+**GPU selection**: `OCRConfig.gpu_id` (default `None`) controls which GPU both engines use. When unset, the backend calls `docrestore.ocr.gpu_detect.pick_best_gpu()` before starting ppocr-server and recommends a GPU by CUDA compute capability first, then free VRAM and total VRAM. The frontend task form fetches the list via `GET /api/v1/gpus` so users can override it, and `PPOCR_GPU_ID` can pin it explicitly.
 
 ### 4.2 PaddleOCR Configuration
 

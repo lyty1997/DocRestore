@@ -443,7 +443,7 @@ The frontend `FileUploader` component uses the following flow:
 #### GET /api/v1/gpus -- Enumerate visible GPUs + recommendation
 
 - Returns `GPUListResponse { gpus: GPUInfoResponse[], recommended: str | None }`. `docrestore.ocr.gpu_detect.list_gpus()` prefers pynvml and falls back to `nvidia-smi`; results are cached process-wide.
-- `recommended` comes from `pick_best_gpu()` (VRAM descending, tie-break by ascending index).
+- `recommended` comes from `pick_best_gpu()` (CUDA compute capability first, then free VRAM, total VRAM, and ascending index).
 - The frontend TaskForm fetches this on mount; on empty results or failures the UI degrades to "Auto only".
 
 #### POST /api/v1/ocr/warmup -- Trigger engine warmup

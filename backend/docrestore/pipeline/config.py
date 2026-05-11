@@ -100,7 +100,7 @@ class OCRConfig(BaseModel):
 
     # GPU 选择（两个引擎通用，前端可选）
     # None 表示 "自动"：engine_manager 组装 CUDA_VISIBLE_DEVICES 时会调
-    # gpu_detect.pick_best_gpu() 选显存最大的一张，保持跨机器可移植。
+    # gpu_detect.pick_best_gpu() 选 OCR 默认卡，保持跨机器可移植。
     # 显式传入如 "0"/"1" 时以配置为准。
     gpu_id: str | None = None
 

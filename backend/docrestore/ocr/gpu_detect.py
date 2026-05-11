@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GPU 设备探测 — 用户未显式指定 gpu_id 时按显存降序自动挑选。
+"""GPU 设备探测 — 用户未显式指定 gpu_id 时自动挑选 OCR 默认卡。
 
 优先 pynvml（随 torch 带上，无需额外依赖）；pynvml 不可用时回退
 `nvidia-smi --query-gpu=...`。两条路径都失败则返回空列表，由调用方决定是
@@ -85,22 +85,41 @@ def refresh() -> list[GPUInfo]:
 
 
 def pick_best_gpu(gpus: Sequence[GPUInfo] | None = None) -> str | None:
-    """按显存降序选第一张，空列表返回 None。
+    """为 OCR/vLLM 自动选择默认 GPU，空列表返回 None。
 
-    排序关键字：`memory_total_mb DESC, memory_free_mb DESC (None 视为 -1), index ASC`。
-    tie-breaker 用物理索引升序，保证同构多卡下行为稳定。
+    排序关键字：
+    `compute_capability DESC, memory_free_mb DESC, memory_total_mb DESC, index ASC`。
+
+    这里不按总显存优先：A2 这类推理卡可能比桌面 Ada 卡显存更大，
+    但 OCR/vLLM 的实际吞吐与可用算子更依赖 CUDA 架构。显式选择
+    `gpu_id` 时仍完全尊重用户配置。
     """
     candidates = list(gpus) if gpus is not None else list_gpus()
     if not candidates:
         return None
 
-    def _sort_key(g: GPUInfo) -> tuple[int, int, int]:
+    def _compute_capability_value(value: str | None) -> tuple[int, int]:
+        if value is None:
+            return (-1, -1)
+        parts = value.split(".", maxsplit=1)
+        try:
+            major = int(parts[0])
+        except (IndexError, ValueError):
+            major = -1
+        try:
+            minor = int(parts[1]) if len(parts) > 1 else 0
+        except ValueError:
+            minor = -1
+        return (major, minor)
+
+    def _sort_key(g: GPUInfo) -> tuple[int, int, int, int, int]:
+        major, minor = _compute_capability_value(g.compute_capability)
         free = g.memory_free_mb if g.memory_free_mb is not None else -1
         try:
             idx_num = int(g.index)
         except ValueError:
             idx_num = 1 << 30  # 非数字索引排最后
-        return (-g.memory_total_mb, -free, idx_num)
+        return (-major, -minor, -free, -g.memory_total_mb, idx_num)
 
     return sorted(candidates, key=_sort_key)[0].index
 

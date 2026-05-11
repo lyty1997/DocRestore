@@ -439,7 +439,7 @@ doc-2/images/...
 #### GET /api/v1/gpus — 枚举可用 GPU + 推荐索引
 
 - 返回 `GPUListResponse { gpus: GPUInfoResponse[], recommended: str | None }`；`docrestore.ocr.gpu_detect.list_gpus()` 优先 pynvml、退回 `nvidia-smi`，结果进程级缓存
-- `recommended` 来自 `pick_best_gpu()`（显存降序，tie-break 用索引升序）
+- `recommended` 来自 `pick_best_gpu()`（优先 CUDA compute capability，其次空闲显存、总显存、索引升序）
 - 前端 TaskForm 挂载时调用；返回为空或接口失败时 UI 降级为"仅 '自动' 一项"
 
 #### POST /api/v1/ocr/warmup — 触发引擎预热

@@ -239,7 +239,7 @@ class ColumnFilterThresholds(BaseModel):
 - `normalize_mean: tuple[float, float, float] = (0.5, 0.5, 0.5)` / `normalize_std`
 - `ngram_size=20` / `ngram_window_size=90` / `ngram_whitelist_token_ids={128821, 128822}`
 - `prompt: str` — OCR 提示词模板（含 `<|grounding|>`）
-- `gpu_id: str | None = None` — `CUDA_VISIBLE_DEVICES`，两引擎通用；`None` 表示自动，`EngineManager.ensure()` 调 `gpu_detect.pick_best_gpu()` 按显存降序挑一张
+- `gpu_id: str | None = None` — `CUDA_VISIBLE_DEVICES`，两引擎通用；`None` 表示自动，`EngineManager.ensure()` 调 `gpu_detect.pick_best_gpu()` 推荐 OCR 默认卡
 
 **侧栏过滤**
 - `enable_column_filter: bool = False` — 默认关闭，PaddleOCR 精度不足
