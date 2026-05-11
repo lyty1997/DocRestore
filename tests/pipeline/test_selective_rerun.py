@@ -217,6 +217,63 @@ async def test_retry_marked_context_does_not_trigger_again() -> None:
     assert len(refiner.calls) == 0
 
 
+# ---------------- 信号 3: LLM 整页误删注释 → 段级重试 ----------------
+
+
+@pytest.mark.asyncio
+async def test_page_drop_retry_recovers() -> None:
+    """LLM 把整页替换成重复删除注释 → 带提示重试，成功则采用重试版。"""
+    text = (
+        "<!-- page: DSC07966.JPG -->\n"
+        "## 概述\n"
+        "<div><img src=\"DSC07966_OCR/images/0.jpg\" /></div>\n"
+        "1. Per-layer API\n"
+    )
+    first = RefinedResult(
+        markdown=(
+            "<!-- page: DSC07966.JPG -->\n"
+            "<!-- 本页内容与上一页完全重复，已去除 -->\n"
+        ),
+    )
+    refiner = _FakeRefiner([text])
+    quality = QualityReport()
+
+    result = await Pipeline._maybe_retry_refine_on_page_drop(
+        _as_refiner(refiner), text, _ctx(), first, quality,
+    )
+
+    assert result.markdown == text
+    assert result.truncated is False
+    assert len(refiner.calls) == 1
+    assert refiner.calls[0].retry_hint != ""
+    codes = {i.code for i in quality.issues}
+    assert "llm.seg_page_drop_retry" in codes
+
+
+@pytest.mark.asyncio
+async def test_page_drop_retry_still_bad_falls_back_to_raw() -> None:
+    """重试仍输出整页误删注释 → 回退原文并标记 truncated，避免写缓存。"""
+    text = "<!-- page: DSC07966.JPG -->\n有效正文\n"
+    bad = (
+        "<!-- page: DSC07966.JPG -->\n"
+        "<!-- 本页内容与上一页完全重复，已去除 -->\n"
+    )
+    first = RefinedResult(markdown=bad)
+    refiner = _FakeRefiner([bad])
+    quality = QualityReport()
+
+    result = await Pipeline._maybe_retry_refine_on_page_drop(
+        _as_refiner(refiner), text, _ctx(), first, quality,
+    )
+
+    assert result.markdown == text
+    assert result.truncated is True
+    assert len(refiner.calls) == 1
+    issue = quality.issues[0]
+    assert issue.code == "llm.seg_page_drop_retry"
+    assert issue.metadata["retry_still_bad"] is True
+
+
 # ---------------- 信号 4: final_refine 重复 H2 重做 ----------------
 
 

@@ -126,6 +126,9 @@ class ReportFn(Protocol):
 
 # page marker 正则
 _PAGE_MARKER_RE = re.compile(r"<!--\s*page:\s*(.+?)\s*-->")
+_PAGE_DROP_COMMENT_RE = re.compile(
+    r"<!--\s*本页内容与上一页[^>]*(?:重复|已去除)[^>]*-->",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1811,6 +1814,13 @@ class Pipeline:
                 refiner, text, ctx, result, llm_cfg, quality,
             )
 
+        # A-2 信号 3：LLM 越权把整页替换成"本页重复已去除"注释。
+        # 拍照页允许有大面积重叠，但不能用解释性注释代表整页内容；这会把
+        # 重叠区中真实的新增文字和插图引用一起删掉。
+        result = await Pipeline._maybe_retry_refine_on_page_drop(
+            refiner, text, ctx, result, quality,
+        )
+
         # A-2 选择性重跑：段输出仍含 UI 噪音 → 最多重试 1 次，带重试提示
         result = await Pipeline._maybe_retry_refine_on_ui_noise(
             refiner, text, ctx, result, quality,
@@ -2178,6 +2188,60 @@ class Pipeline:
         return retry_result
 
     @staticmethod
+    async def _maybe_retry_refine_on_page_drop(
+        refiner: LLMRefiner,
+        text: str,
+        ctx: RefineContext,
+        first_result: RefinedResult,
+        quality: QualityReport | None,
+    ) -> RefinedResult:
+        """LLM 把整页替换为重复删除注释时，重试一次；失败则回退原文。"""
+        if _PAGE_DROP_COMMENT_RE.search(first_result.markdown) is None:
+            return first_result
+        if ctx.retry_hint:
+            return RefinedResult(markdown=text, gaps=[], truncated=True)
+
+        retry_ctx = RefineContext(
+            segment_index=ctx.segment_index,
+            total_segments=ctx.total_segments,
+            overlap_before=ctx.overlap_before,
+            overlap_after=ctx.overlap_after,
+            retry_hint=(
+                "上一轮输出把某一整页替换成“本页内容与上一页完全重复，"
+                "已去除”这类解释性注释，这是错误的。拍照页可能高度重叠，"
+                "但必须保留每个 page marker 后的有效正文和所有图片引用；"
+                "只允许删除逐字重复的句子，不允许整页删除或添加解释性注释。"
+            ),
+        )
+        try:
+            retry_result = await refiner.refine(text, retry_ctx)
+        except Exception:
+            logger.warning(
+                "段 %d 整页误删重试失败，回退原文",
+                ctx.segment_index, exc_info=True,
+            )
+            return RefinedResult(markdown=text, gaps=[], truncated=True)
+
+        retry_still_bad = (
+            _PAGE_DROP_COMMENT_RE.search(retry_result.markdown) is not None
+        )
+        if quality is not None:
+            await quality.add(QualityIssue(
+                stage="llm_segment",
+                code="llm.seg_page_drop_retry",
+                severity="warn" if retry_still_bad else "info",
+                message=(
+                    f"段 {ctx.segment_index} 整页误删重试"
+                    + ("（仍误删，回退原文）" if retry_still_bad else "（已恢复）")
+                ),
+                segment_index=ctx.segment_index,
+                metadata={"retry_still_bad": retry_still_bad},
+            ))
+        if retry_still_bad:
+            return RefinedResult(markdown=text, gaps=[], truncated=True)
+        return retry_result
+
+    @staticmethod
     async def _maybe_retry_refine_on_ui_noise(
         refiner: LLMRefiner,
         text: str,
@@ -2204,7 +2268,7 @@ class Pipeline:
             overlap_after=ctx.overlap_after,
             retry_hint=(
                 f"上一轮输出仍含 {len(first_hits)} 处网页 UI 噪音"
-                f"（如 `{first_hits[0]}`）。请按 system 规则 10-12"
+                f"（如 `{first_hits[0]}`）。请按 system 规则 11-13"
                 "逐行删除所有 `{语言} 复制代码` / 独立 `复制代码` /"
                 "以 `▶▼☐` 开头的视觉 UI 行；若留在代码块内，"
                 "剥离后保持代码块闭合。"
