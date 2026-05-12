@@ -149,7 +149,14 @@ docrestore/
 - LLM 精修：实现 `LLMRefiner` Protocol
 - PII 脱敏：实现 `PIIRedactor` 接口
 
-### 6.2 未来扩展方向
+### 6.2 代码模式的 OCR 契约
+- 代码模式不绑定具体 OCR provider，不应在 API 或配置层强制切换到 PaddleOCR。
+- 代码模式只依赖抽象产物 `PageOCR.text_lines`：任意 OCR 引擎只要填充行级
+  `bbox/text/score`，即可接入 IDE 布局分析链路。
+- 当前 OCR 引擎未提供 `text_lines` 时，代码模式应明确失败并提示能力缺失，
+  而不是静默跳过页面或退化为文档模式。
+
+### 6.3 未来扩展方向
 - IDE 代码照片 → 源文件
 - PDF 输入支持
 - 流式并行 Pipeline 实施（AGE-16，设计已完成）

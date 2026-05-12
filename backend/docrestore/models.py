@@ -34,11 +34,11 @@ class Region:
 
 @dataclass
 class TextLine:
-    """单行文字识别结果（PaddleOCR basic pipeline 行级 bbox + text）
+    """单行文字识别结果（OCR 引擎提供的行级 bbox + text）
 
-    用于 AGE-8 IDE 代码场景：从 PageOCR 的行级输出做布局聚类，
-    比 layout block 级别细 6 倍以上，每个 IDE 元素（tab、行号、代码行、
-    terminal 行）都是独立 TextLine。
+    用于 AGE-8 IDE 代码场景：从 PageOCR 的行级输出做布局聚类。代码模式
+    只依赖这个抽象产物，不依赖具体 OCR provider；任意引擎只要填充
+    ``PageOCR.text_lines`` 即可接入。
     """
 
     bbox: tuple[int, int, int, int]  # (x1, y1, x2, y2) 像素坐标
@@ -57,8 +57,8 @@ class PageOCR:
     regions: list[Region] = field(default_factory=list)
     output_dir: Path | None = None  # {output_dir}/{image_stem}_OCR/
     has_eos: bool = True  # 是否正常结束
-    #: 行级 bbox + text + score；basic pipeline 填充，vl 模式留空。
-    #: AGE-8 IDE 代码场景必填，用于行号列锚点布局识别。
+    #: 行级 bbox + text + score。代码模式必填，用于行号列锚点布局识别。
+    #: 不支持行级输出的 OCR 引擎可留空，代码模式会给出能力错误。
     text_lines: list[TextLine] = field(default_factory=list)
 
 

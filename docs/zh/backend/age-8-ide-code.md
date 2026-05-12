@@ -136,7 +136,7 @@ class IDELayout:
 3. **缩进保留**：`(code_line.bbox.x1 - anchor.x2_max) / char_width` = 缩进字符数。`char_width` 从单字符 line 或 (x2-x1)/len(text) 估算
 4. **缺行检测**：行号 num_range 跳号 → 标 `code.line_gap_at_<n>` + 占位注释
 
-### 2.3 OCR pipeline 切换（AGE-55，待实施）
+### 2.3 OCR 行级输出契约（AGE-55）
 
 让 `OCRConfig` 支持 `paddle_pipeline: Literal["basic", "vl"]`：
 - `vl`（默认）：PaddleOCR-VL（vllm-server 模式），文档场景沿用，输出 markdown
@@ -148,7 +148,9 @@ class IDELayout:
 - worker 处理 OCR 命令时，basic 模式额外 dump rec_boxes/rec_texts/rec_scores
 - `PaddleOCREngine.ocr` 把 worker 返回的 lines 填入 `PageOCR.text_lines`
 - `EngineManager`：basic 模式不需要拉 vllm-server，节省 GPU
-- `CodeRestoreConfig.enable=True` 时自动 override `paddle_pipeline="basic"`
+- `CodeRestoreConfig.enable=True` 不自动改写 OCR provider 或 `paddle_pipeline`；
+  代码模式只校验 `PageOCR.text_lines` 是否存在。PaddleOCR 可通过显式选择
+  `paddle_pipeline="basic"` 提供该能力，其他 OCR 引擎也可填充同一抽象字段接入。
 
 **MinerU 借鉴的初始化参数**（`scripts/age8_probe_basic_ocr.py` 已部分用上）：
 ```python

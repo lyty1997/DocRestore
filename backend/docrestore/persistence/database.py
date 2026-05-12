@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
@@ -65,7 +66,8 @@ CREATE TABLE IF NOT EXISTS task_results (
     task_id     TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
     output_path TEXT NOT NULL,
     doc_title   TEXT NOT NULL DEFAULT '',
-    doc_dir     TEXT NOT NULL DEFAULT ''
+    doc_dir     TEXT NOT NULL DEFAULT '',
+    error       TEXT NOT NULL DEFAULT ''
 )"""
 
 _CREATE_RESULTS_IDX = (
@@ -98,6 +100,7 @@ class ResultRow:
     output_path: str
     doc_title: str
     doc_dir: str
+    error: str
 
 
 @dataclass
@@ -148,6 +151,9 @@ class TaskDatabase:
 
         for col in ("llm", "ocr", "pii", "code"):
             await self._migrate_add_column("tasks", col, "TEXT")
+        await self._migrate_add_column(
+            "task_results", "error", "TEXT NOT NULL DEFAULT ''",
+        )
 
         await self._db.commit()
 
@@ -230,19 +236,31 @@ class TaskDatabase:
     async def insert_results(
         self,
         task_id: str,
-        results: list[tuple[str, str, str]],
+        results: Sequence[
+            tuple[str, str, str] | tuple[str, str, str, str]
+        ],
     ) -> None:
         """批量插入任务结果。
 
         参数:
-            results: [(output_path, doc_title, doc_dir), ...]
+            results: [(output_path, doc_title, doc_dir, error), ...]
+                兼容旧调用方的三元组，缺省 error 视为空串。
         """
         db = self._get_db()
+        normalized: list[tuple[str, str, str, str]] = []
+        for row in results:
+            if len(row) == 3:
+                output_path, doc_title, doc_dir = row
+                normalized.append((output_path, doc_title, doc_dir, ""))
+            else:
+                output_path, doc_title, doc_dir, error = row
+                normalized.append((output_path, doc_title, doc_dir, error))
         await db.executemany(
             """\
-            INSERT INTO task_results (task_id, output_path, doc_title, doc_dir)
-            VALUES (?, ?, ?, ?)""",
-            [(task_id, *r) for r in results],
+            INSERT INTO task_results
+                (task_id, output_path, doc_title, doc_dir, error)
+            VALUES (?, ?, ?, ?, ?)""",
+            [(task_id, *r) for r in normalized],
         )
         await db.commit()
 
@@ -278,7 +296,7 @@ class TaskDatabase:
         db = self._get_db()
         cursor = await db.execute(
             """\
-            SELECT task_id, output_path, doc_title, doc_dir
+            SELECT task_id, output_path, doc_title, doc_dir, error
             FROM task_results WHERE task_id=?
             ORDER BY id""",
             (task_id,),
@@ -290,6 +308,7 @@ class TaskDatabase:
                 output_path=r[1],
                 doc_title=r[2],
                 doc_dir=r[3],
+                error=r[4] or "",
             )
             for r in rows
         ]

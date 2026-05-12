@@ -36,6 +36,7 @@ import pytest
 
 from docrestore.models import PipelineResult, TaskProgress
 from docrestore.persistence.database import TaskDatabase, TaskRow
+from docrestore.pipeline.config import CodeRestoreConfig
 from docrestore.pipeline.task_manager import Task, TaskManager, TaskStatus
 
 
@@ -352,6 +353,91 @@ class TestRetryTask:
         assert new.task_id != failed.task_id
         assert new.status is TaskStatus.PENDING
         assert new.image_dir == failed.image_dir
+
+    @pytest.mark.asyncio
+    async def test_retry_preserves_code_config(self) -> None:
+        mgr = _make_manager()
+        failed = Task(
+            task_id="failed-code",
+            status=TaskStatus.FAILED,
+            image_dir="/orig/imgs",
+            output_dir="/orig/out",
+            code=CodeRestoreConfig(enable=True, output_files_dir="src"),
+        )
+        mgr._tasks[failed.task_id] = failed
+
+        new = await mgr.retry_task(failed.task_id)
+
+        assert isinstance(new, Task)
+        assert new.code == failed.code
+
+    @pytest.mark.asyncio
+    async def test_retry_infers_legacy_code_mode_from_output(
+        self, tmp_path: Path,
+    ) -> None:
+        mgr = _make_manager()
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "files-index.json").write_text("[]", encoding="utf-8")
+        failed = Task(
+            task_id="legacy-code",
+            status=TaskStatus.FAILED,
+            image_dir="/orig/imgs",
+            output_dir=str(out),
+            code=None,
+        )
+        mgr._tasks[failed.task_id] = failed
+
+        new = await mgr.retry_task(failed.task_id)
+
+        assert isinstance(new, Task)
+        assert new.code is not None
+        assert new.code.enable is True
+
+
+class TestResumeTask:
+    """resume_task 保留 output_dir，并延续代码模式配置"""
+
+    @pytest.mark.asyncio
+    async def test_resume_preserves_code_config(self) -> None:
+        mgr = _make_manager()
+        failed = Task(
+            task_id="failed-code",
+            status=TaskStatus.FAILED,
+            image_dir="/orig/imgs",
+            output_dir="/orig/out",
+            code=CodeRestoreConfig(enable=True, output_files_dir="src"),
+        )
+        mgr._tasks[failed.task_id] = failed
+
+        new = await mgr.resume_task(failed.task_id)
+
+        assert isinstance(new, Task)
+        assert new.output_dir == failed.output_dir
+        assert new.code == failed.code
+
+    @pytest.mark.asyncio
+    async def test_resume_infers_legacy_code_mode_from_output(
+        self, tmp_path: Path,
+    ) -> None:
+        mgr = _make_manager()
+        out = tmp_path / "out"
+        (out / "files").mkdir(parents=True)
+        failed = Task(
+            task_id="legacy-code",
+            status=TaskStatus.FAILED,
+            image_dir="/orig/imgs",
+            output_dir=str(out),
+            code=None,
+        )
+        mgr._tasks[failed.task_id] = failed
+
+        new = await mgr.resume_task(failed.task_id)
+
+        assert isinstance(new, Task)
+        assert new.output_dir == failed.output_dir
+        assert new.code is not None
+        assert new.code.enable is True
 
 
 class TestListTasksInMemory:

@@ -192,6 +192,7 @@ class TaskManager:
                         markdown=markdown,
                         doc_title=r.doc_title or "",
                         doc_dir=r.doc_dir or "",
+                        error=r.error or "",
                     ))
                 self._tasks[task.task_id] = task
                 loaded += 1
@@ -512,7 +513,7 @@ class TaskManager:
             await self._db.update_status(task_id, status, error=error)
             if results:
                 rows = [
-                    (str(r.output_path), r.doc_title, r.doc_dir)
+                    (str(r.output_path), r.doc_title, r.doc_dir, r.error)
                     for r in results
                 ]
                 await self._db.insert_results(task_id, rows)
@@ -881,11 +882,13 @@ class TaskManager:
             return f"任务状态为 {task.status.value}，仅失败任务可重试"
 
         # 用原任务配置创建新任务
+        code = self._retry_code_config(task)
         return self.create_task(
             image_dir=task.image_dir,
             llm=task.llm,
             ocr=task.ocr,
             pii=task.pii,
+            code=code,
         )
 
     async def resume_task(self, task_id: str) -> Task | str | None:
@@ -907,10 +910,31 @@ class TaskManager:
         if task.status != TaskStatus.FAILED:
             return f"任务状态为 {task.status.value}，仅失败任务可继续"
 
+        code = self._retry_code_config(task)
         return self.create_task(
             image_dir=task.image_dir,
             output_dir=task.output_dir,  # 关键：复用 → OCR cache 命中
             llm=task.llm,
             ocr=task.ocr,
             pii=task.pii,
+            code=code,
         )
+
+    @staticmethod
+    def _retry_code_config(task: Task) -> CodeRestoreConfig | None:
+        """重试/继续时恢复代码模式配置。
+
+        正常路径直接沿用 ``task.code``。兼容旧 bug：历史 retry/resume 任务可能
+        丢失 code 快照但 output_dir 已有代码模式产物，此时补一个最小 code 配置，
+        让后续重试继续走代码分支。
+        """
+        if task.code is not None:
+            return task.code
+
+        output_dir = Path(task.output_dir)
+        if (
+            (output_dir / "files-index.json").exists()
+            or (output_dir / "files").is_dir()
+        ):
+            return CodeRestoreConfig(enable=True)
+        return None

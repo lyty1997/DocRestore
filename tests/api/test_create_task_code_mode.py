@@ -1,6 +1,6 @@
 # Copyright 2026 @lyty1997
 
-"""AGE-51 API 接受 code 字段 + 自动 override OCR pipeline 的单测"""
+"""AGE-51 API 接受 code 字段且不耦合具体 OCR provider 的单测"""
 
 from __future__ import annotations
 
@@ -51,10 +51,10 @@ class TestCreateTaskRequestSchema:
         assert req.code.enable is True
 
 
-class TestCodeOcrOverride:
-    """验证 code.enable=True 时 PipelineConfig 自动 override paddle_pipeline"""
+class TestCodeOcrIndependence:
+    """验证 code.enable=True 不隐式改写 OCR provider 专用配置"""
 
-    def test_pipeline_config_override(self) -> None:
+    def test_pipeline_config_keeps_default_ocr_config(self) -> None:
         from docrestore.pipeline.config import (
             CodeRestoreConfig,
             PipelineConfig,
@@ -62,8 +62,7 @@ class TestCodeOcrOverride:
         cfg = PipelineConfig(
             code=CodeRestoreConfig(enable=True),
         )
-        # PipelineConfig.model_validator 自动 override
-        assert cfg.ocr.paddle_pipeline == "basic"
+        assert cfg.ocr.paddle_pipeline == "vl"
 
     def test_pipeline_config_no_override_when_disabled(self) -> None:
         from docrestore.pipeline.config import (
@@ -123,9 +122,8 @@ class TestCreateTaskCodeFlowsToManager:
         assert task.code is not None, "routes 没有把 code 透传给 TaskManager"
         assert task.code.enable is True
         assert task.code.output_files_dir == "src"
-        # OCR pipeline 也应同步切到 basic
-        assert task.ocr is not None
-        assert task.ocr.paddle_pipeline == "basic"
+        # code 模式不应隐式改写 OCR 配置；行级输出能力由 PageOCR.text_lines 体现
+        assert task.ocr is None
 
     @pytest.mark.asyncio
     async def test_code_omitted_keeps_task_code_none(

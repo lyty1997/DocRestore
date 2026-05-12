@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ColumnFilterThresholds(BaseModel):
@@ -317,17 +317,6 @@ class PipelineConfig(BaseModel):
     pii: PIIConfig = Field(default_factory=PIIConfig)
     code: CodeRestoreConfig = Field(default_factory=CodeRestoreConfig)
     db_path: str = "data/docrestore.db"  # SQLite 持久化路径
-
-    @model_validator(mode="after")
-    def _apply_code_mode_defaults(self) -> PipelineConfig:
-        """code.enable=True 时自动把 OCR 切到 basic pipeline。
-
-        IDE 代码场景必须用行级 OCR（PP-OCRv5）才能拿到 ``PageOCR.text_lines``
-        供 ide_layout 锚点识别。这里只在用户没显式覆盖（仍是默认 vl）时改写。
-        """
-        if self.code.enable and self.ocr.paddle_pipeline == "vl":
-            self.ocr.paddle_pipeline = "basic"
-        return self
     debug: bool = True  # 落盘各阶段中间结果到 output_dir/debug/
 
     # 性能调试开关：开启后 Pipeline 全流程埋点，任务结束写 profile.json

@@ -6,7 +6,7 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""AGE-55 + AGE-51 P0 配置单测：CodeRestoreConfig + paddle_pipeline 切换"""
+"""AGE-55 + AGE-51 P0 配置单测：CodeRestoreConfig 与 OCR 配置解耦"""
 
 from __future__ import annotations
 
@@ -40,13 +40,13 @@ class TestPaddlePipelineSwitch:
         assert cfg.paddle_pipeline == "basic"
 
 
-class TestCodeModeAutoOverride:
-    """code.enable=True 自动 override paddle_pipeline → basic"""
+class TestCodeModeOcrDecoupling:
+    """code.enable=True 不自动改写 OCR provider 专用参数"""
 
-    def test_code_enabled_overrides_default_vl(self) -> None:
+    def test_code_enabled_keeps_default_vl(self) -> None:
         cfg = PipelineConfig(code=CodeRestoreConfig(enable=True))
         assert cfg.code.enable is True
-        assert cfg.ocr.paddle_pipeline == "basic"
+        assert cfg.ocr.paddle_pipeline == "vl"
 
     def test_code_disabled_keeps_vl(self) -> None:
         cfg = PipelineConfig()
@@ -58,8 +58,8 @@ class TestCodeModeAutoOverride:
         cfg = PipelineConfig(ocr=OCRConfig(paddle_pipeline="basic"))
         assert cfg.ocr.paddle_pipeline == "basic"
 
-    def test_code_on_with_explicit_basic_unchanged(self) -> None:
-        """code 模式 + 用户显式 basic → 仍是 basic"""
+    def test_code_on_with_explicit_basic_preserved(self) -> None:
+        """code 模式不覆盖用户显式配置"""
         cfg = PipelineConfig(
             code=CodeRestoreConfig(enable=True),
             ocr=OCRConfig(paddle_pipeline="basic"),

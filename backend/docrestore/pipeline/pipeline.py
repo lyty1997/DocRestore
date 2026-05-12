@@ -879,11 +879,13 @@ class Pipeline:
             message_params={"total": str(len(pages_ref))},
         )
         all_pcs: list[PageColumn] = []
+        missing_line_pages: list[str] = []
         for i, page in enumerate(pages_ref):
             text_lines = page.text_lines
             if not text_lines:
+                missing_line_pages.append(page.image_path.name)
                 logger.warning(
-                    "代码模式：page %s 无 text_lines（OCR pipeline 非 basic？）",
+                    "代码模式：page %s 无 text_lines（当前 OCR 引擎未提供行级输出）",
                     page.image_path.stem,
                 )
                 continue
@@ -916,6 +918,21 @@ class Pipeline:
                     "total": str(len(pages_ref)),
                 },
             )
+
+        if not all_pcs:
+            if missing_line_pages:
+                pages = ", ".join(missing_line_pages[:5])
+                suffix = ""
+                if len(missing_line_pages) > 5:
+                    suffix = f" 等 {len(missing_line_pages)} 页"
+                msg = (
+                    "代码模式需要 OCR 引擎在 PageOCR.text_lines 中提供行级 bbox；"
+                    f"当前任务未获得任何行级 OCR 输出（{pages}{suffix}）。"
+                    "请切换到支持行级输出的 OCR 引擎，或为当前引擎实现 text_lines。"
+                )
+            else:
+                msg = "代码模式已获得行级 OCR 输出，但未识别出可组装的代码列。"
+            raise RuntimeError(msg)
 
         # 3. 跨张归类 + 落盘
         sources = group_into_files(all_pcs)
