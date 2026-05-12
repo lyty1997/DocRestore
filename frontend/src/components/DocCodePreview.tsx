@@ -22,6 +22,7 @@ import {
 } from "../api/client";
 import type { TaskResultResponse } from "../api/schemas";
 import { preprocessMarkdown } from "../features/task/markdown";
+import { filterImagesForDoc } from "../features/task/sourceImages";
 import { useScrollSync } from "../hooks/useScrollSync";
 import { useTranslation } from "../i18n";
 import { CodeViewer } from "./CodeViewer";
@@ -40,18 +41,6 @@ interface DocCodePreviewProps {
   readonly headerExtras?: React.ReactNode;
   /** 是否显示 header 区（含 view mode + edit toggle）。默认 true。 */
   readonly showHeader?: boolean;
-}
-
-/**
- * 计算选中子文档的源图列表（按 doc_dir 前缀过滤）。
- */
-function filterImagesForDoc(
-  allImages: readonly string[],
-  docDir: string | undefined,
-): readonly string[] {
-  if (docDir === undefined || docDir === "") return allImages;
-  const prefix = `${docDir}/`;
-  return allImages.filter((img) => img.startsWith(prefix));
 }
 
 export function DocCodePreview({
@@ -97,6 +86,7 @@ export function DocCodePreview({
   const filteredImages = filterImagesForDoc(
     allSourceImages,
     selectedDoc?.doc_dir,
+    selectedDoc?.markdown ?? "",
   );
 
   /* results 长度变化时收敛 selectedIdx */
