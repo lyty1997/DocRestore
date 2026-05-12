@@ -9,6 +9,7 @@
  * 2. 右滚 → 左同步到同 data-page 锚点居中
  * 3. 防递归：程序化滚动不触发反向再同步
  * 4. enabled=false 时不绑定事件（edit 模式禁用）
+ * 5. continuous 模式按视口中心在 page 区间内的比例连续映射
  */
 
 import { act, renderHook } from "@testing-library/react";
@@ -18,10 +19,14 @@ import { useScrollSync } from "../../src/hooks/useScrollSync";
 
 /**
  * 给 jsdom 里的元素补上 getBoundingClientRect / clientHeight / scrollHeight
- * 等布局属性，让 findActivePageKey + scrollElementIntoContainer 能算出位置。
+ * 等布局属性，让滚动同步 hook 能算出位置。
  */
 function makeContainer(
-  anchors: readonly { readonly key: string; readonly top: number }[],
+  anchors: readonly {
+    readonly key: string;
+    readonly top: number;
+    readonly height?: number;
+  }[],
   opts: {
     readonly containerTop?: number;
     readonly viewportHeight?: number;
@@ -35,19 +40,19 @@ function makeContainer(
   document.body.append(container);
 
   const anchorEls: HTMLElement[] = [];
-  for (const { key, top } of anchors) {
+  for (const { key, top, height = 0 } of anchors) {
     const el = document.createElement("span");
     el.dataset.page = key;
     container.append(el);
-    // 虚拟锚点高度 0
+    // 虚拟锚点默认高度 0；图片锚点测试可显式传 height。
     Object.defineProperty(el, "getBoundingClientRect", {
       value: () => ({
         top: containerTop + top - container.scrollTop,
-        bottom: containerTop + top - container.scrollTop,
+        bottom: containerTop + top + height - container.scrollTop,
         left: 0,
         right: 0,
         width: 0,
-        height: 0,
+        height,
         x: 0,
         y: containerTop + top - container.scrollTop,
         toJSON: () => ({}),
@@ -245,6 +250,94 @@ describe("useScrollSync", () => {
 
     // align=start → right.scrollTop 应为 1680（不是中心对齐的其他值）
     expect(right.container.scrollTop).toBe(1680);
+  });
+
+  it("continuous 模式：按源侧视口中心在 page 区间内的比例连续映射", async () => {
+    const text = makeContainer(
+      [
+        { key: "1.jpg", top: 0 },
+        { key: "2.jpg", top: 1000 },
+      ],
+      { viewportHeight: 400, scrollHeight: 2400 },
+    );
+    const images = makeContainer(
+      [
+        { key: "1.jpg", top: 0, height: 800 },
+        { key: "2.jpg", top: 900, height: 800 },
+      ],
+      { viewportHeight: 400, scrollHeight: 2000 },
+    );
+
+    renderHook(() => {
+      useScrollSync(text.container, images.container, { align: "continuous" });
+    });
+
+    // 文本滚到 centerY = 500，处在 1.jpg → 2.jpg 区间 50%。
+    // 原图同区间为 0 → 900，映射点 450 居中后 scrollTop = 250。
+    simulateScroll(text.container, 300);
+    await flushRaf();
+
+    expect(images.container.scrollTop).toBe(250);
+  });
+
+  it("continuous 模式：源侧连续滚动不会被程序化同步标记吞掉", async () => {
+    const text = makeContainer(
+      [
+        { key: "1.jpg", top: 0 },
+        { key: "2.jpg", top: 1000 },
+      ],
+      { viewportHeight: 400, scrollHeight: 2400 },
+    );
+    const images = makeContainer(
+      [
+        { key: "1.jpg", top: 0, height: 800 },
+        { key: "2.jpg", top: 900, height: 800 },
+      ],
+      { viewportHeight: 400, scrollHeight: 2000 },
+    );
+
+    renderHook(() => {
+      useScrollSync(text.container, images.container, { align: "continuous" });
+    });
+
+    simulateScroll(text.container, 300);
+    await flushRaf();
+    expect(images.container.scrollTop).toBe(250);
+
+    // 未等待 150ms 程序化标记过期，继续滚源侧；新的同步仍应生效。
+    simulateScroll(text.container, 500);
+    await flushRaf();
+
+    // centerY = 700，比例 70%；目标点 630，居中后 scrollTop = 430。
+    expect(images.container.scrollTop).toBe(430);
+  });
+
+  it("continuous 模式：最后一页没有下一锚点时仍按剩余内容连续映射", async () => {
+    const text = makeContainer(
+      [
+        { key: "1.jpg", top: 0 },
+        { key: "2.jpg", top: 1000 },
+      ],
+      { viewportHeight: 400, scrollHeight: 2400 },
+    );
+    const images = makeContainer(
+      [
+        { key: "1.jpg", top: 0, height: 800 },
+        { key: "2.jpg", top: 900, height: 800 },
+      ],
+      { viewportHeight: 400, scrollHeight: 2000 },
+    );
+
+    renderHook(() => {
+      useScrollSync(text.container, images.container, { align: "continuous" });
+    });
+
+    // centerY = 1500，处在最后一页剩余区间 1000 → 2400 的 5/14。
+    simulateScroll(text.container, 1300);
+    await flushRaf();
+
+    // 目标最后一张图高度 800，映射点为 900 + 800 * 5/14，再居中。
+    expect(images.container.scrollTop).toBeCloseTo(985.714, 3);
   });
 
   it("卸载时移除事件监听（不泄漏）", async () => {

@@ -138,7 +138,7 @@ export function DocCodePreview({
   }, [taskId]);
 
   useScrollSync(leftScrollEl, rightScrollEl, {
-    align: "start",
+    align: "continuous",
     enabled: !editMode && !selectedDocFailed && viewMode === "doc",
   });
 

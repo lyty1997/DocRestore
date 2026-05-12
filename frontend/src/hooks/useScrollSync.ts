@@ -6,9 +6,9 @@
  *
  * 工作流：
  * 1. 监听两侧 `scroll` 事件（rAF 节流）
- * 2. 被滚动侧：找 "距离容器视口中心最近的锚点" → 取其 `data-page`
- * 3. 对侧：找 `data-page === X` 的锚点，滚到它对齐容器视口中心
- * 4. 程序化滚动期间设 `isSyncing=true` 跳过对侧的 scroll 事件，防递归
+ * 2. 被滚动侧：按配置找活跃锚点，或按视口中心计算同页区间进度
+ * 3. 对侧：滚到同 `data-page` 锚点，或滚到同页区间的连续进度位置
+ * 4. 程序化滚动期间标记被同步侧，跳过它随后的 scroll 事件，防递归
  *
  * 设计决策：
  * - instant 对齐（非 smooth），跟手无延迟
@@ -20,8 +20,8 @@
 import { useEffect, useRef } from "react";
 
 export interface ScrollSyncOptions {
-  /** 对齐方式：center（居中）/ start（顶部） */
-  readonly align?: "center" | "start";
+  /** 对齐方式：center（居中）/ start（顶部）/ continuous（中心点连续映射） */
+  readonly align?: "center" | "start" | "continuous";
   /** 是否启用（关闭时不绑定 scroll 事件，供 edit 模式禁用） */
   readonly enabled?: boolean;
 }
@@ -46,22 +46,22 @@ export function useScrollSync(
 ): void {
   const { align = "center", enabled = true } = options;
 
-  //  程序化滚动时置 true，忽略被动触发的 scroll 事件，防止循环
-  const isSyncingRef = useRef(false);
+  //  程序化滚动时只忽略被同步侧的 scroll 事件，避免吞掉用户持续滚动源侧。
+  const programmaticTargetRef = useRef<HTMLElement | undefined>(undefined);
   const syncResetTimerRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     if (!enabled) return;
     if (!left || !right) return;
 
-    const markProgrammatic = (): void => {
-      isSyncingRef.current = true;
+    const markProgrammatic = (target: HTMLElement): void => {
+      programmaticTargetRef.current = target;
       if (syncResetTimerRef.current !== undefined) {
         globalThis.clearTimeout(syncResetTimerRef.current);
       }
       // 150ms 窗口覆盖 instant 滚动触发的异步 scroll event
       syncResetTimerRef.current = globalThis.setTimeout(() => {
-        isSyncingRef.current = false;
+        programmaticTargetRef.current = undefined;
         syncResetTimerRef.current = undefined;
       }, 150);
     };
@@ -72,18 +72,14 @@ export function useScrollSync(
     ): (() => void) => {
       let rafId: number | undefined;
       return () => {
-        if (isSyncingRef.current) return;
+        if (programmaticTargetRef.current === source) return;
         if (rafId !== undefined) return;
         rafId = globalThis.requestAnimationFrame(() => {
           rafId = undefined;
-          const key = findActivePageKey(source, align);
-          if (key === undefined) return;
-          const targetEl = target.querySelector<HTMLElement>(
-            `[data-page="${cssEscape(key)}"]`,
-          );
-          if (targetEl === null) return;
-          markProgrammatic();
-          scrollElementIntoContainer(target, targetEl, align);
+          const targetTop = getTargetScrollTop(source, target, align);
+          if (targetTop === undefined) return;
+          markProgrammatic(target);
+          target.scrollTop = targetTop;
         });
       };
     };
@@ -101,8 +97,15 @@ export function useScrollSync(
         globalThis.clearTimeout(syncResetTimerRef.current);
         syncResetTimerRef.current = undefined;
       }
+      programmaticTargetRef.current = undefined;
     };
   }, [left, right, align, enabled]);
+}
+
+interface AnchorMetric {
+  readonly key: string;
+  readonly top: number;
+  readonly height: number;
 }
 
 /**
@@ -165,16 +168,127 @@ function findActivePageKey(
 }
 
 /**
+ * 计算对侧容器应滚到的位置。
+ */
+function getTargetScrollTop(
+  source: HTMLElement,
+  target: HTMLElement,
+  align: "center" | "start" | "continuous",
+): number | undefined {
+  if (align === "continuous") {
+    return getContinuousTargetScrollTop(source, target);
+  }
+
+  const key = findActivePageKey(source, align);
+  if (key === undefined) return undefined;
+  const targetEl = target.querySelector<HTMLElement>(
+    `[data-page="${cssEscape(key)}"]`,
+  );
+  if (targetEl === null) return undefined;
+  return getAlignedScrollTop(target, targetEl, align);
+}
+
+/**
+ * 连续同步：取源容器视口中心落入的 page 区间，计算它从当前 page 到下一 page
+ * 的比例，再映射到目标容器的同名 page 区间，并让该映射点保持在目标视口中心。
+ */
+function getContinuousTargetScrollTop(
+  source: HTMLElement,
+  target: HTMLElement,
+): number | undefined {
+  const sourcePosition = getCenterPagePosition(source);
+  if (sourcePosition === undefined) return undefined;
+
+  const targetAnchors = getAnchorMetrics(target);
+  const targetIdx = targetAnchors.findIndex(
+    (anchor) => anchor.key === sourcePosition.key,
+  );
+  const targetAnchor = targetAnchors[targetIdx];
+  if (targetAnchor === undefined) return undefined;
+
+  const nextTargetAnchor = targetAnchors[targetIdx + 1];
+  const targetY = nextTargetAnchor === undefined
+    ? targetAnchor.top
+      + getAnchorSpanToEnd(target, targetAnchor) * sourcePosition.ratio
+    : targetAnchor.top
+      + (nextTargetAnchor.top - targetAnchor.top) * sourcePosition.ratio;
+
+  return clampScrollTop(target, targetY - target.clientHeight / 2);
+}
+
+/**
+ * 返回源容器视口中心对应的 page key，以及它在当前 page 到下一 page
+ * 区间里的比例。最后一页没有下一锚点时，若锚点元素自身有高度，则用自身高度。
+ */
+function getCenterPagePosition(
+  container: HTMLElement,
+): { readonly key: string; readonly ratio: number } | undefined {
+  const anchors = getAnchorMetrics(container);
+  if (anchors.length === 0) return undefined;
+
+  const probeY = container.scrollTop + container.clientHeight / 2;
+  let currentIdx = 0;
+  let idx = 0;
+  for (const anchor of anchors) {
+    if (anchor.top > probeY) break;
+    currentIdx = idx;
+    idx += 1;
+  }
+
+  const current = anchors[currentIdx];
+  if (current === undefined) return undefined;
+
+  const next = anchors[currentIdx + 1];
+  const span =
+    next === undefined
+      ? getAnchorSpanToEnd(container, current)
+      : next.top - current.top;
+  const ratio = span > 0 ? (probeY - current.top) / span : 0;
+  return {
+    key: current.key,
+    ratio: Math.max(0, Math.min(ratio, 1)),
+  };
+}
+
+/**
+ * 读取容器内锚点在容器内容坐标系中的位置。
+ */
+function getAnchorMetrics(container: HTMLElement): AnchorMetric[] {
+  const containerRect = container.getBoundingClientRect();
+  return [...container.querySelectorAll<HTMLElement>("[data-page]")]
+    .map((el): AnchorMetric | undefined => {
+      const key = el.dataset.page;
+      if (key === undefined) return undefined;
+      const rect = el.getBoundingClientRect();
+      return {
+        key,
+        top: rect.top - containerRect.top + container.scrollTop,
+        height: rect.height,
+      };
+    })
+    .filter((anchor): anchor is AnchorMetric => anchor !== undefined);
+}
+
+function getAnchorSpanToEnd(
+  container: HTMLElement,
+  anchor: AnchorMetric,
+): number {
+  return anchor.height > 0
+    ? anchor.height
+    : Math.max(0, container.scrollHeight - anchor.top);
+}
+
+/**
  * 把 child 滚到相对 container 视口的 align 位置（center/start）。
  *
  * 用 `container.scrollTop` 而不是 `scrollIntoView`：后者会滚动最近可滚动的祖先，
  * 可能把整个页面也滚起来；手动计算只动 container 自己。
  */
-function scrollElementIntoContainer(
+function getAlignedScrollTop(
   container: HTMLElement,
   child: HTMLElement,
   align: "center" | "start",
-): void {
+): number {
   const containerRect = container.getBoundingClientRect();
   const childRect = child.getBoundingClientRect();
   // child 在 container 内的偏移（相对 container 内坐标系）
@@ -186,12 +300,13 @@ function scrollElementIntoContainer(
       ? offsetInContainer - container.clientHeight / 2 + childRect.height / 2
       : offsetInContainer;
 
-  container.scrollTop = Math.max(
+  return clampScrollTop(container, targetTop);
+}
+
+function clampScrollTop(container: HTMLElement, value: number): number {
+  return Math.max(
     0,
-    Math.min(
-      targetTop,
-      container.scrollHeight - container.clientHeight,
-    ),
+    Math.min(value, container.scrollHeight - container.clientHeight),
   );
 }
 
