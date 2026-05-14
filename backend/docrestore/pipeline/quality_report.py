@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any
 import aiofiles
 
 if TYPE_CHECKING:
+    from docrestore.processing.code_diagnostics import CodeDiagnostic
     from docrestore.processing.code_file_grouping import SourceFile
 
 logger = logging.getLogger(__name__)
@@ -333,6 +334,7 @@ async def detect_code_mode_quality(
     sources: list[SourceFile],
     *,
     skipped_paths: list[tuple[str, str]] | None = None,
+    diagnostics: list[CodeDiagnostic] | None = None,
 ) -> None:
     """代码模式：汇总 SourceFile / PageColumn / CodeColumn 的风险 flags。
 
@@ -353,6 +355,9 @@ async def detect_code_mode_quality(
             message=f"代码文件路径 {raw_path!r} 因 {reason} 降级到 _unknown",
             metadata={"path": raw_path, "reason": reason},
         ))
+
+    for diagnostic in diagnostics or []:
+        await _record_code_diagnostic_issue(report, diagnostic)
 
 
 def _collect_source_code_flags(src: SourceFile) -> list[str]:
@@ -416,6 +421,34 @@ async def _record_source_flag_issues(
             message=risk.message.format(path=src.path),
             metadata=issue_metadata,
         ))
+
+
+async def _record_code_diagnostic_issue(
+    report: QualityReport,
+    diagnostic: CodeDiagnostic,
+) -> None:
+    """把代码诊断结果写入质量报告。"""
+    risk = _classify_code_diagnostic(diagnostic.status)
+    if risk is None:
+        return
+    await report.add(QualityIssue(
+        stage=risk.stage,
+        code=risk.code,
+        severity=risk.severity,
+        message=risk.message.format(path=diagnostic.path),
+        metadata={
+            "path": diagnostic.path,
+            "language": diagnostic.language,
+            "status": diagnostic.status,
+            "category": diagnostic.category,
+            "summary": diagnostic.summary,
+            "failing_lines": diagnostic.failing_lines,
+            "syntax_errors": diagnostic.syntax_errors,
+            "semantic_errors": diagnostic.semantic_errors,
+            "tool": diagnostic.tool,
+            "duration_ms": diagnostic.duration_ms,
+        },
+    ))
 
 
 @dataclass(frozen=True)
@@ -529,6 +562,30 @@ _CODE_FLAG_RISKS: dict[str, _CodeFlagRisk] = {
         severity="info",
         message="代码文件 {path} 的 OCR 后处理保留了原始行数",
     ),
+    "code.diagnostic.syntax_dirty": _CodeFlagRisk(
+        code="code.diagnostic.syntax_dirty",
+        stage="code_diagnostic",
+        severity="warn",
+        message="代码文件 {path} 存在语法诊断失败行，需进入 LLM 修复窗口",
+    ),
+    "code.diagnostic.semantic_dirty": _CodeFlagRisk(
+        code="code.diagnostic.semantic_dirty",
+        stage="code_diagnostic",
+        severity="info",
+        message="代码文件 {path} 存在语义诊断失败，可能缺少项目上下文或依赖",
+    ),
+    "code.diagnostic.tool_unavailable": _CodeFlagRisk(
+        code="code.diagnostic.tool_unavailable",
+        stage="code_diagnostic",
+        severity="info",
+        message="代码文件 {path} 的诊断工具不可用，已跳过该语言检查",
+    ),
+    "code.diagnostic.failed": _CodeFlagRisk(
+        code="code.diagnostic.failed",
+        stage="code_diagnostic",
+        severity="warn",
+        message="代码文件 {path} 的诊断命令运行失败",
+    ),
 }
 
 
@@ -547,3 +604,16 @@ def _classify_code_flag(flag: str) -> _CodeFlagRisk | None:
     if flag.startswith("code.grouping.merged_pages="):
         return None
     return _CODE_FLAG_RISKS.get(flag)
+
+
+def _classify_code_diagnostic(status: str) -> _CodeFlagRisk | None:
+    """把诊断状态映射为质量报告 risk。"""
+    if status == "syntax_dirty":
+        return _CODE_FLAG_RISKS["code.diagnostic.syntax_dirty"]
+    if status == "semantic_dirty":
+        return _CODE_FLAG_RISKS["code.diagnostic.semantic_dirty"]
+    if status == "tool_unavailable":
+        return _CODE_FLAG_RISKS["code.diagnostic.tool_unavailable"]
+    if status == "failed":
+        return _CODE_FLAG_RISKS["code.diagnostic.failed"]
+    return None

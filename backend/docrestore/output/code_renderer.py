@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import asdict, dataclass, field
@@ -30,6 +31,10 @@ import aiofiles
 
 if TYPE_CHECKING:
     from docrestore.processing.code_file_grouping import PageColumn, SourceFile
+    from docrestore.processing.code_diagnostics import (
+        CodeDiagnostic,
+        CodeDiagnosticRunner,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +54,8 @@ class CodeRenderResult:
     written_files: list[Path]       # 实际写出的源文件路径
     skipped: list[tuple[str, str]] = field(default_factory=list)
     # ↑ (canonical_path, reason) 路径被拒/降级的记录
+    diagnostics: list[CodeDiagnostic] = field(default_factory=list)
+    # ↑ AGE-65 多语言语法诊断结果
 
 
 async def render_code_files(
@@ -56,6 +63,8 @@ async def render_code_files(
     output_dir: Path,
     *,
     files_subdir: str = "files",
+    enable_diagnostics: bool = False,
+    diagnostic_runner: CodeDiagnosticRunner | None = None,
 ) -> CodeRenderResult:
     """把 list[SourceFile] 写出到 output_dir，附带索引与兼容 markdown。
 
@@ -63,6 +72,8 @@ async def render_code_files(
         sources: ``code_file_grouping.group_into_files()`` 的输出
         output_dir: 任务输出根目录（``output/<task>/``）
         files_subdir: 源文件子目录名（默认 ``files``）
+        enable_diagnostics: 是否运行 AGE-65 多语言轻量诊断
+        diagnostic_runner: 测试/定制时注入的诊断运行器
 
     Returns:
         CodeRenderResult：files_dir / index_path / document_path 等。
@@ -70,9 +81,14 @@ async def render_code_files(
     files_dir = output_dir / files_subdir
     files_dir.mkdir(parents=True, exist_ok=True)
     from docrestore.processing.code_file_grouping import segment_from_page_column
+    from docrestore.processing.code_diagnostics import (
+        CodeDiagnosticRunner,
+        CodeDiagnosticTarget,
+    )
 
     written: list[Path] = []
     skipped: list[tuple[str, str]] = []
+    safe_sources: list[tuple[SourceFile, str, Path]] = []
     index_entries: list[dict[str, object]] = []
     document_chunks: list[str] = []
 
@@ -87,9 +103,26 @@ async def render_code_files(
             if src.merged_text and not src.merged_text.endswith("\n"):
                 await f.write("\n")
         written.append(target)
+        safe_sources.append((src, rel_path, target))
 
+    diagnostics: list[CodeDiagnostic] = []
+    if enable_diagnostics and safe_sources:
+        runner = diagnostic_runner or CodeDiagnosticRunner()
+        targets = [
+            CodeDiagnosticTarget(
+                path=rel_path,
+                file_path=target,
+                language=src.language,
+            )
+            for src, rel_path, target in safe_sources
+        ]
+        diagnostics = await asyncio.to_thread(runner.run_targets, targets)
+    diagnostics_by_path = {item.path: item for item in diagnostics}
+
+    for src, rel_path, _target in safe_sources:
         flags = _collect_code_flags(src)
-        index_entries.append({
+        diagnostic = diagnostics_by_path.get(rel_path)
+        entry: dict[str, object] = {
             "path": rel_path,
             "filename": src.filename,
             "language": src.language,
@@ -125,8 +158,11 @@ async def render_code_files(
             "source_segments": [
                 asdict(segment_from_page_column(p)) for p in src.pages
             ],
-            "quality": _quality_summary(flags),
-        })
+            "quality": _quality_summary(flags, diagnostic),
+        }
+        if diagnostic is not None:
+            entry.update(_diagnostic_index_fields(diagnostic))
+        index_entries.append(entry)
 
         document_chunks.append(_render_document_chunk(rel_path, src))
 
@@ -144,6 +180,7 @@ async def render_code_files(
         document_path=document_path,
         written_files=written,
         skipped=skipped,
+        diagnostics=diagnostics,
     )
 
 
@@ -217,10 +254,17 @@ def _collect_code_flags(src: SourceFile) -> list[str]:
     return flags
 
 
-def _quality_summary(flags: list[str]) -> dict[str, object]:
+def _quality_summary(
+    flags: list[str],
+    diagnostic: CodeDiagnostic | None = None,
+) -> dict[str, object]:
     """给 files-index.json 提供向后兼容的轻量质量摘要。"""
     risk_codes = [_flag_to_risk_code(flag) for flag in flags]
     risk_codes = [code for code in risk_codes if code]
+    if diagnostic is not None:
+        risk = _diagnostic_risk_code(diagnostic)
+        if risk:
+            risk_codes.append(risk)
     severity = "ok"
     if any(code in _WARN_RISK_CODES for code in risk_codes):
         severity = "warn"
@@ -240,6 +284,8 @@ _WARN_RISK_CODES: frozenset[str] = frozenset({
     "code.grouping.path_safety",
     "code.assembly.no_char_width",
     "code.assembly.no_line_height",
+    "code.diagnostic.syntax_dirty",
+    "code.diagnostic.failed",
 })
 
 
@@ -254,6 +300,46 @@ def _flag_to_risk_code(flag: str) -> str:
     if flag.startswith("code.grouping.merged_pages="):
         return ""
     return flag
+
+
+def _diagnostic_index_fields(
+    diagnostic: CodeDiagnostic,
+) -> dict[str, object]:
+    """生成新 diagnostic 字段和旧 compile_* 兼容字段。"""
+    fields: dict[str, object] = {
+        "diagnostic": diagnostic.to_index_dict(),
+        "compile_status": _legacy_compile_status(diagnostic.status),
+        "compile_failing_lines": list(diagnostic.failing_lines),
+        "compile_syntax_errors": diagnostic.syntax_errors,
+        "compile_semantic_errors": diagnostic.semantic_errors,
+    }
+    if diagnostic.summary:
+        fields["compile_error"] = diagnostic.summary[:1000]
+    if diagnostic.status in {"tool_unavailable", "unsupported"}:
+        fields["compile_skip_reason"] = diagnostic.summary
+    return fields
+
+
+def _legacy_compile_status(status: str) -> str:
+    """把 AGE-65 诊断状态映射到旧前端可识别 compile_status。"""
+    if status == "syntax_clean":
+        return "passed"
+    if status in {"tool_unavailable", "unsupported"}:
+        return "skipped"
+    return "failed"
+
+
+def _diagnostic_risk_code(diagnostic: CodeDiagnostic) -> str:
+    """把诊断状态映射为质量摘要 code。"""
+    if diagnostic.status == "syntax_dirty":
+        return "code.diagnostic.syntax_dirty"
+    if diagnostic.status == "semantic_dirty":
+        return "code.diagnostic.semantic_dirty"
+    if diagnostic.status == "tool_unavailable":
+        return "code.diagnostic.tool_unavailable"
+    if diagnostic.status == "failed":
+        return "code.diagnostic.failed"
+    return ""
 
 
 def _source_path_confidence(src: SourceFile) -> float:

@@ -20,6 +20,10 @@ from docrestore.output.code_renderer import (
     render_code_files,
 )
 from docrestore.processing.code_assembly import CodeColumn, CodeLine
+from docrestore.processing.code_diagnostics import (
+    CodeDiagnosticRunner,
+    CommandRunResult,
+)
 from docrestore.processing.code_file_grouping import PageColumn, SourceFile
 from docrestore.processing.ide_meta_extract import IDEMeta, PathCandidate
 
@@ -156,6 +160,40 @@ class TestBasicRender:
         ]
         assert entry["quality"]["severity"] == "warn"
         assert "code.refine.truncated" in entry["quality"]["risk_codes"]
+
+    @pytest.mark.asyncio
+    async def test_index_exposes_diagnostics_and_legacy_compile_fields(
+        self, tmp_path: Path,
+    ) -> None:
+        sources = [_make_source(
+            "src/foo.cc", "int main(\n",
+            language="cpp",
+        )]
+
+        def run(
+            cmd: list[str], cwd: Path, timeout_s: int,
+        ) -> CommandRunResult:
+            assert cmd[0] == "g++"
+            return CommandRunResult(
+                returncode=1,
+                stderr="foo.cc:1:10: error: expected ')' before end of input",
+            )
+
+        result = await render_code_files(
+            sources,
+            tmp_path,
+            enable_diagnostics=True,
+            diagnostic_runner=CodeDiagnosticRunner(
+                tool_resolver=lambda _tool: "/usr/bin/tool",
+                command_runner=run,
+            ),
+        )
+        entry = json.loads(result.index_path.read_text())[0]
+        assert entry["diagnostic"]["status"] == "syntax_dirty"
+        assert entry["compile_status"] == "failed"
+        assert entry["compile_failing_lines"] == [1]
+        assert "code.diagnostic.syntax_dirty" in entry["quality"]["risk_codes"]
+        assert result.diagnostics[0].path == "src/foo.cc"
 
     @pytest.mark.asyncio
     async def test_file_content_preserved(self, tmp_path: Path) -> None:

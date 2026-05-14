@@ -31,6 +31,7 @@ from docrestore.pipeline.quality_report import (
     detect_merger_quality,
 )
 from docrestore.processing.code_assembly import CodeColumn, CodeLine
+from docrestore.processing.code_diagnostics import CodeDiagnostic
 from docrestore.processing.code_file_grouping import PageColumn, SourceFile
 from docrestore.processing.ide_meta_extract import IDEMeta
 
@@ -315,6 +316,28 @@ class TestDetectCodeModeQuality:
         issue = report.issues[0]
         assert issue.code == "code.render.path_safety_fallback"
         assert issue.metadata["reason"] == "traversal"
+
+    @pytest.mark.asyncio
+    async def test_code_diagnostic_recorded(self) -> None:
+        report = QualityReport()
+        diagnostic = CodeDiagnostic(
+            path="src/foo.cc",
+            language="cpp",
+            status="syntax_dirty",
+            category="syntax",
+            summary="foo.cc:3:1: error: expected ';'",
+            failing_lines=[3],
+            syntax_errors=1,
+            tool="g++",
+            duration_ms=12,
+        )
+        await detect_code_mode_quality(report, [], diagnostics=[diagnostic])
+        assert len(report.issues) == 1
+        issue = report.issues[0]
+        assert issue.code == "code.diagnostic.syntax_dirty"
+        assert issue.stage == "code_diagnostic"
+        assert issue.metadata["failing_lines"] == [3]
+        assert issue.metadata["tool"] == "g++"
 
     @pytest.mark.asyncio
     async def test_no_overlap_low_similarity_no_issue(self) -> None:

@@ -998,10 +998,15 @@ class Pipeline:
                     },
                 )
 
-        render_result = await render_code_files(sources, output_dir)
+        render_result = await render_code_files(
+            sources, output_dir, enable_diagnostics=True,
+        )
         if quality is not None:
             await detect_code_mode_quality(
-                quality, sources, skipped_paths=render_result.skipped,
+                quality,
+                sources,
+                skipped_paths=render_result.skipped,
+                diagnostics=render_result.diagnostics,
             )
         report_fn(
             "code_render", 1, 1,
