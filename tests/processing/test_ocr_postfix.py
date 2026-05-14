@@ -19,7 +19,11 @@ from __future__ import annotations
 
 import pytest
 
-from docrestore.processing.ocr_postfix import correct_ocr_artifacts
+from docrestore.processing.ocr_postfix import (
+    clean_code_ocr_text,
+    comment_prefix_for_language,
+    correct_ocr_artifacts,
+)
 
 
 class TestAPunctuation:
@@ -170,3 +174,77 @@ class TestSafetyAndRobustness:
         result = correct_ocr_artifacts(f"x{ch}y", "cpp")
         # 不应残留中文标点（除非在字符串字面量内）
         assert ch not in result
+
+
+class TestCodeUINoiseFilter:
+    """IDE UI 噪声过滤：整行强信号置空并保留行数。"""
+
+    def test_filters_vscode_panel_noise_preserving_line_count(self) -> None:
+        text = (
+            "int main() {\n"
+            "PROBLEMS OUTPUT DEBUG CONSOLE TERMINAL PORTS\n"
+            "  return 0;\n"
+            "Loading...\n"
+            "}\n"
+        )
+        result = clean_code_ocr_text(text, "cpp")
+        assert result.text.count("\n") == text.count("\n")
+        assert "PROBLEMS" not in result.text
+        assert "Loading" not in result.text
+        assert result.text.split("\n")[1] == ""
+        assert result.text.split("\n")[3] == ""
+        assert "code.noise.filtered_ui_lines=2" in result.flags
+        assert "code.ocr_postfix.line_count_preserved" in result.flags
+
+    def test_filters_marketplace_and_search_noise(self) -> None:
+        text = (
+            "def run():\n"
+            "Search Marketplace\n"
+            "The Marketplace has extensions to help with code.\n"
+            "    return True\n"
+        )
+        result = clean_code_ocr_text(text, "python")
+        assert "Search Marketplace" not in result.text
+        assert "Marketplace has extensions" not in result.text
+        assert "code.noise.filtered_ui_lines=2" in result.flags
+
+    def test_filters_single_ocr_glyph_noise(self) -> None:
+        text = "int x = 1;\n工\nint y = 2;"
+        result = clean_code_ocr_text(text, "cpp")
+        assert result.text == "int x = 1;\n\nint y = 2;"
+        assert "code.noise.filtered_ocr_glyphs=1" in result.flags
+
+    def test_does_not_filter_code_line_containing_noise_word(self) -> None:
+        text = 'const char* status = "Loading...";\nreturn status;'
+        result = clean_code_ocr_text(text, "cpp")
+        assert result.text == text
+        assert result.flags == []
+
+
+class TestLanguageAwareRules:
+    """需要语言上下文的确定性纠错。"""
+
+    def test_slash_comment_ocr_prefix_for_cpp(self) -> None:
+        result = correct_ocr_artifacts("  1/ TODO: fix branch", "cpp")
+        assert result == "  // TODO: fix branch"
+
+    def test_slash_comment_rule_not_applied_to_python(self) -> None:
+        result = correct_ocr_artifacts("  1/ TODO: not a comment", "python")
+        assert result == "  1/ TODO: not a comment"
+
+    def test_preprocessor_directive_case_normalized_for_cpp(self) -> None:
+        result = correct_ocr_artifacts("#dEfine FOO 1", "cpp")
+        assert result == "#define FOO 1"
+
+    def test_preprocessor_rule_not_applied_to_python(self) -> None:
+        result = correct_ocr_artifacts("#dEfine is just text", "python")
+        assert result == "#dEfine is just text"
+
+    @pytest.mark.parametrize(
+        ("language", "prefix"),
+        [("cpp", "//"), ("python", "#"), ("gn", "#"), ("json", None)],
+    )
+    def test_comment_prefix_registry(
+        self, language: str, prefix: str | None,
+    ) -> None:
+        assert comment_prefix_for_language(language) == prefix

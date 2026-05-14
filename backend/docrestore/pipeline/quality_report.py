@@ -511,6 +511,24 @@ _CODE_FLAG_RISKS: dict[str, _CodeFlagRisk] = {
         severity="info",
         message="代码文件 {path} 的部分路径分段由同图上下文恢复",
     ),
+    "code.noise.filtered_ui_lines": _CodeFlagRisk(
+        code="code.noise.filtered_ui_lines",
+        stage="code_postfix",
+        severity="info",
+        message="代码文件 {path} 的 IDE UI 噪声行已在 OCR 后处理中置空",
+    ),
+    "code.noise.filtered_ocr_glyphs": _CodeFlagRisk(
+        code="code.noise.filtered_ocr_glyphs",
+        stage="code_postfix",
+        severity="info",
+        message="代码文件 {path} 的孤立 OCR 伪字形噪声行已在 OCR 后处理中置空",
+    ),
+    "code.ocr_postfix.line_count_preserved": _CodeFlagRisk(
+        code="code.ocr_postfix.line_count_preserved",
+        stage="code_postfix",
+        severity="info",
+        message="代码文件 {path} 的 OCR 后处理保留了原始行数",
+    ),
 }
 
 
@@ -522,6 +540,10 @@ def _classify_code_flag(flag: str) -> _CodeFlagRisk | None:
         return _CODE_FLAG_RISKS["code.assembly.unpaired_codes"]
     if flag.startswith("code.line_gap_count="):
         return _CODE_FLAG_RISKS["code.assembly.line_gap_count"]
+    if flag.startswith("code.noise.filtered_ui_lines="):
+        return _CODE_FLAG_RISKS["code.noise.filtered_ui_lines"]
+    if flag.startswith("code.noise.filtered_ocr_glyphs="):
+        return _CODE_FLAG_RISKS["code.noise.filtered_ocr_glyphs"]
     if flag.startswith("code.grouping.merged_pages="):
         return None
     return _CODE_FLAG_RISKS.get(flag)

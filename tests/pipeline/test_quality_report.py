@@ -284,6 +284,28 @@ class TestDetectCodeModeQuality:
         assert "code.assembly.unpaired_codes" in codes
 
     @pytest.mark.asyncio
+    async def test_code_postfix_noise_flags_recorded(self) -> None:
+        report = QualityReport()
+        src = _make_code_source([
+            "code.noise.filtered_ui_lines=2",
+            "code.noise.filtered_ocr_glyphs=1",
+            "code.ocr_postfix.line_count_preserved",
+        ])
+        await detect_code_mode_quality(report, [src])
+        codes = {issue.code for issue in report.issues}
+        assert "code.noise.filtered_ui_lines" in codes
+        assert "code.noise.filtered_ocr_glyphs" in codes
+        assert "code.ocr_postfix.line_count_preserved" in codes
+        ui_issue = next(
+            issue for issue in report.issues
+            if issue.code == "code.noise.filtered_ui_lines"
+        )
+        assert ui_issue.stage == "code_postfix"
+        assert "code.noise.filtered_ui_lines=2" in (
+            ui_issue.metadata["matched_flags"]
+        )
+
+    @pytest.mark.asyncio
     async def test_render_path_safety_fallback_recorded(self) -> None:
         report = QualityReport()
         await detect_code_mode_quality(

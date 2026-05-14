@@ -945,14 +945,15 @@ class Pipeline:
             message_params={"count": str(len(sources))},
         )
 
-        # 3.1 OCR 后处理：标点统一 + 标识符 0→O（保守、行数严格保持）。
+        # 3.1 OCR 后处理：过滤 IDE UI 噪声 + 保守 OCR 纠错（行数保持）。
         # 必须在 PII 脱敏 / LLM refine 之前 —— 让下游看到的就是已纠错文本，
         # PII regex 才能正确命中邮箱里的 0/O，LLM 也少花精力修这类小毛病。
-        from docrestore.processing.ocr_postfix import correct_ocr_artifacts
+        from docrestore.processing.ocr_postfix import clean_code_ocr_text
         for src in sources:
-            src.merged_text = correct_ocr_artifacts(
-                src.merged_text, src.language,
-            )
+            postfix_result = clean_code_ocr_text(src.merged_text, src.language)
+            src.merged_text = postfix_result.text
+            if postfix_result.flags:
+                src.flags = list({*src.flags, *postfix_result.flags})
 
         # 共享一个 refiner：PII 实体检测 + 代码字符级精修都用它
         llm_cfg = llm if llm is not None else self._config.llm
