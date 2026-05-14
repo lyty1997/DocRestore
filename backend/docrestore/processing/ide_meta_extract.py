@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Literal
 
 from docrestore.models import TextLine
 from docrestore.processing.ide_layout import IDELayout
@@ -90,6 +91,19 @@ _ATTACHED_ICON_RE = re.compile(
 
 
 @dataclass
+class PathCandidate:
+    """单个路径候选及其置信度来源。"""
+
+    path: str | None
+    filename: str | None
+    language: str | None
+    source: Literal["breadcrumb", "tab", "peer", "reference", "content"]
+    confidence: float
+    raw_text: str = ""
+    flags: list[str] = field(default_factory=list)
+
+
+@dataclass
 class IDEMeta:
     """单个编辑器栏的元数据"""
 
@@ -102,6 +116,8 @@ class IDEMeta:
     raw_tab_lines: list[str] = field(default_factory=list)
     raw_breadcrumb_lines: list[str] = field(default_factory=list)
     flags: list[str] = field(default_factory=list)
+    path_candidates: list[PathCandidate] = field(default_factory=list)
+    path_confidence: float = 0.0
 
 
 def extract_ide_metas(layout: IDELayout) -> list[IDEMeta]:
@@ -176,6 +192,16 @@ def _reconcile_within_image(metas: list[IDEMeta]) -> None:
         if m.path is None:
             m.path = f"{most_common_dir}/{m.filename}"
             m.flags.append("code.path_inferred_from_peer")
+            m.path_candidates.append(PathCandidate(
+                path=m.path,
+                filename=m.filename,
+                language=m.language,
+                source="peer",
+                confidence=0.72,
+                raw_text=most_common_dir,
+                flags=["code.path_inferred_from_peer"],
+            ))
+            m.path_confidence = max(m.path_confidence, 0.72)
             continue
         # 场景 2：粘连还原（"gpuopenmax" → "gpu/openmax"）
         if "/" not in m.path:
@@ -187,6 +213,16 @@ def _reconcile_within_image(metas: list[IDEMeta]) -> None:
         ):
             m.path = f"{most_common_dir}/{m.filename}"
             m.flags.append("code.path_segments_recovered")
+            m.path_candidates.append(PathCandidate(
+                path=m.path,
+                filename=m.filename,
+                language=m.language,
+                source="peer",
+                confidence=0.78,
+                raw_text=most_common_dir,
+                flags=["code.path_segments_recovered"],
+            ))
+            m.path_confidence = max(m.path_confidence, 0.78)
 
 
 def _extract_for_column(idx: int, lines: list[TextLine]) -> IDEMeta:  # noqa: C901 — breadcrumb 唯一真相多分支
@@ -215,6 +251,31 @@ def _extract_for_column(idx: int, lines: list[TextLine]) -> IDEMeta:  # noqa: C9
     stitched = _stitch_breadcrumb_fragments(breadcrumb_lines)
     path, filename = _parse_breadcrumb(stitched) if stitched else (None, None)
     came_from_tab = False
+    candidates: list[PathCandidate] = []
+    if filename:
+        candidates.append(PathCandidate(
+            path=path,
+            filename=filename,
+            language=_filename_to_language(filename),
+            source="breadcrumb",
+            confidence=0.95 if path else 0.66,
+            raw_text=stitched,
+            flags=[] if path else ["code.breadcrumb_path_missing"],
+        ))
+
+    tab_filename = _pick_best_tab_filename(
+        tab_lines, hint_lines=breadcrumb_lines,
+    )
+    if tab_filename:
+        candidates.append(PathCandidate(
+            path=None,
+            filename=tab_filename,
+            language=_filename_to_language(tab_filename),
+            source="tab",
+            confidence=0.48,
+            raw_text="\n".join(ln.text for ln in tab_lines),
+            flags=["code.tab_candidate"],
+        ))
 
     # 2. 截断/被前缀吞掉的 filename（``_decode_accelerator.cc``）→ 用
     # 同栏 tab 候选 suffix-match 补全（决策 2026-04-27）
@@ -226,12 +287,18 @@ def _extract_for_column(idx: int, lines: list[TextLine]) -> IDEMeta:  # noqa: C9
             elif path:
                 path = completed
             filename = completed
+            candidates.append(PathCandidate(
+                path=path,
+                filename=filename,
+                language=_filename_to_language(filename),
+                source="tab",
+                confidence=0.82 if path else 0.58,
+                raw_text="\n".join(ln.text for ln in tab_lines),
+                flags=["code.filename_completed_from_tab"],
+            ))
 
     # 3. tab 仅在 breadcrumb 没解出 filename 时兜底；不允许 override
     if not filename:
-        tab_filename = _pick_best_tab_filename(
-            tab_lines, hint_lines=breadcrumb_lines,
-        )
         if tab_filename:
             filename = tab_filename
             came_from_tab = True
@@ -256,6 +323,13 @@ def _extract_for_column(idx: int, lines: list[TextLine]) -> IDEMeta:  # noqa: C9
         # 或运维通过 quality_report 统计 tab 兜底比例评估 OCR 质量。
         flags.append("code.tab_only_fallback")
 
+    path_confidence = _selected_path_confidence(
+        path=path,
+        filename=filename,
+        came_from_tab=came_from_tab,
+        candidates=candidates,
+    )
+
     return IDEMeta(
         column_index=idx,
         filename=filename,
@@ -266,7 +340,30 @@ def _extract_for_column(idx: int, lines: list[TextLine]) -> IDEMeta:  # noqa: C9
         raw_tab_lines=[ln.text for ln in tab_lines],
         raw_breadcrumb_lines=[ln.text for ln in breadcrumb_lines],
         flags=flags,
+        path_candidates=candidates,
+        path_confidence=path_confidence,
     )
+
+
+def _selected_path_confidence(
+    *,
+    path: str | None,
+    filename: str | None,
+    came_from_tab: bool,
+    candidates: list[PathCandidate],
+) -> float:
+    """当前 IDEMeta 选中路径/文件名的置信度。"""
+    if not filename:
+        return 0.0
+    if came_from_tab:
+        return max(
+            (c.confidence for c in candidates if c.source == "tab"),
+            default=0.48,
+        )
+    for c in candidates:
+        if c.path == path and c.filename == filename:
+            return c.confidence
+    return 0.66 if path else 0.48
 
 
 def _detect_breadcrumb_band(

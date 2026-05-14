@@ -21,7 +21,7 @@ from docrestore.output.code_renderer import (
 )
 from docrestore.processing.code_assembly import CodeColumn, CodeLine
 from docrestore.processing.code_file_grouping import PageColumn, SourceFile
-from docrestore.processing.ide_meta_extract import IDEMeta
+from docrestore.processing.ide_meta_extract import IDEMeta, PathCandidate
 
 
 def _make_source(
@@ -41,6 +41,17 @@ def _make_source(
             path=path, language=language,
             tab_readable=True, breadcrumb_readable=True,
             flags=meta_flags or [],
+            path_confidence=0.91,
+            path_candidates=[
+                PathCandidate(
+                    path=path,
+                    filename=path.rsplit("/", 1)[-1],
+                    language=language,
+                    source="breadcrumb",
+                    confidence=0.91,
+                    raw_text=path.replace("/", " > "),
+                )
+            ],
         )
         col = CodeColumn(
             column_index=0, bbox=(0, 0, 1, 1),
@@ -111,6 +122,12 @@ class TestBasicRender:
         ]
         assert entry["source_page_count"] == 2
         assert entry["source_column_count"] == 2
+        assert entry["path_confidence"] == 0.91
+        assert entry["source_segments"][0]["page_stem"] == "DSC1"
+        assert entry["source_segments"][0]["selected_path"] == "src/foo.cc"
+        assert entry["source_segments"][0]["path_candidates"][0]["source"] == (
+            "breadcrumb"
+        )
         assert "code.grouping.merged_pages=2" in entry["flags"]
         assert entry["line_no_range"][0] == 1
 

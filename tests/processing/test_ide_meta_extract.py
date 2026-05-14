@@ -77,6 +77,9 @@ class TestSingleColumn:
         assert m.language == "cpp"
         assert m.breadcrumb_readable is True
         assert m.tab_readable is True
+        assert m.path_confidence == 0.95
+        assert m.path_candidates[0].source == "breadcrumb"
+        assert m.path_candidates[0].path == "media/gpu/openmax/foo.cc"
 
     def test_breadcrumb_with_icon_prefix(self) -> None:
         """OCR 把 VSCode 文件图标识别成 'C ' 前缀，应清洗"""
@@ -109,6 +112,9 @@ class TestSingleColumn:
         assert m.filename == "foo.cc"
         assert m.path is None
         assert m.language == "cpp"
+        assert m.path_confidence == 0.48
+        assert m.path_candidates[0].source == "tab"
+        assert m.path_candidates[0].filename == "foo.cc"
         assert "code.breadcrumb_missing" in m.flags
         # 审计信号：本栏 filename 来自 tab 兜底
         assert "code.tab_only_fallback" in m.flags
@@ -183,6 +189,10 @@ class TestSingleColumn:
         assert m.filename == "openmax_video_decode_accelerator.h"
         assert m.path == (
             "media/gpu/openmax/openmax_video_decode_accelerator.h"
+        )
+        assert [c.source for c in m.path_candidates] == ["breadcrumb", "tab"]
+        assert m.path_candidates[1].filename == (
+            "gles2_dmabuf_to_egl_image_translator.cc"
         )
 
     def test_breadcrumb_wins_over_tab_completely_different_file(
@@ -327,6 +337,8 @@ class TestWithinImageReconcile:
         assert metas[0].filename == "openmax_status.h"
         assert metas[0].path == "media/gpu/openmax/openmax_status.h"
         assert "code.path_inferred_from_peer" in metas[0].flags
+        assert metas[0].path_confidence == 0.72
+        assert metas[0].path_candidates[-1].source == "peer"
 
     def test_path_segments_recovered(self) -> None:
         """col_0 的 path 段粘连（gpuopenmax）→ 用 col_1 的细分版本替换"""
@@ -346,6 +358,8 @@ class TestWithinImageReconcile:
         metas = extract_ide_metas(layout)
         assert metas[0].path == "media/gpu/openmax/foo.cc"
         assert "code.path_segments_recovered" in metas[0].flags
+        assert metas[0].path_confidence == 0.95
+        assert metas[0].path_candidates[-1].source == "peer"
 
     def test_no_reconcile_when_no_peer_path(self) -> None:
         """所有栏都 path=None → 无可借用，保持 None"""

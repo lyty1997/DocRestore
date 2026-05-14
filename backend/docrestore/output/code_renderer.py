@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -69,6 +69,7 @@ async def render_code_files(
     """
     files_dir = output_dir / files_subdir
     files_dir.mkdir(parents=True, exist_ok=True)
+    from docrestore.processing.code_file_grouping import segment_from_page_column
 
     written: list[Path] = []
     skipped: list[tuple[str, str]] = []
@@ -119,6 +120,10 @@ async def render_code_files(
                 }
                 for p in src.pages
                 if p.meta.flags or p.column.flags
+            ],
+            "path_confidence": _source_path_confidence(src),
+            "source_segments": [
+                asdict(segment_from_page_column(p)) for p in src.pages
             ],
             "quality": _quality_summary(flags),
         })
@@ -249,6 +254,18 @@ def _flag_to_risk_code(flag: str) -> str:
     if flag.startswith("code.grouping.merged_pages="):
         return ""
     return flag
+
+
+def _source_path_confidence(src: SourceFile) -> float:
+    """SourceFile 的保守路径置信度：取来源 column 的最低非零值。"""
+    values = [
+        page.meta.path_confidence
+        for page in src.pages
+        if page.meta.path_confidence > 0
+    ]
+    if not values:
+        return 0.0
+    return round(min(values), 3)
 
 
 def _column_line_no_start(page: PageColumn) -> int:

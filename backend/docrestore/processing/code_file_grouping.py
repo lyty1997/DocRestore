@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from docrestore.processing.code_assembly import CodeColumn
-    from docrestore.processing.ide_meta_extract import IDEMeta
+    from docrestore.processing.ide_meta_extract import IDEMeta, PathCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,21 @@ class PageColumn:
 
 
 @dataclass
+class CodeSegment:
+    """分组前的最小可审计代码来源单元。"""
+
+    page_stem: str
+    column_index: int
+    bbox: tuple[int, int, int, int]
+    line_no_range: tuple[int, int]
+    path_candidates: list[PathCandidate]
+    selected_path: str | None
+    selected_path_confidence: float
+    language: str | None
+    flags: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SourceFile:
     """跨张聚合后的源文件"""
 
@@ -63,6 +78,27 @@ class SourceFile:
     line_count: int
     line_no_range: tuple[int, int]
     flags: list[str] = field(default_factory=list)
+
+
+def segment_from_page_column(page: PageColumn) -> CodeSegment:
+    """把现有 PageColumn 转成 AGE-62 CodeSegment 审计模型。"""
+    return CodeSegment(
+        page_stem=page.page_stem,
+        column_index=page.column_index,
+        bbox=page.column.bbox,
+        line_no_range=(
+            _column_line_no_start(page.column),
+            _column_line_no_end(page.column),
+        ),
+        path_candidates=list(page.meta.path_candidates),
+        selected_path=page.meta.path,
+        selected_path_confidence=page.meta.path_confidence,
+        language=page.meta.language,
+        flags=[
+            *page.meta.flags,
+            *page.column.flags,
+        ],
+    )
 
 
 def group_into_files(page_columns: list[PageColumn]) -> list[SourceFile]:
@@ -448,6 +484,13 @@ def _column_line_no_start(column: CodeColumn) -> int:
     if not column.lines:
         return 0
     return min(line.line_no for line in column.lines)
+
+
+def _column_line_no_end(column: CodeColumn) -> int:
+    """CodeColumn 的结束行号。"""
+    if not column.lines:
+        return 0
+    return max(line.line_no for line in column.lines)
 
 
 #: 单次行号 gap 超过此阈值 → 不再批量塞空行，改插单行注释占位。

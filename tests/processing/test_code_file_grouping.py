@@ -21,9 +21,14 @@ from docrestore.processing.code_file_grouping import (
     PageColumn,
     SourceFile,
     group_into_files,
+    segment_from_page_column,
 )
 from docrestore.processing.ide_layout import analyze_layout
-from docrestore.processing.ide_meta_extract import IDEMeta, extract_ide_metas
+from docrestore.processing.ide_meta_extract import (
+    IDEMeta,
+    PathCandidate,
+    extract_ide_metas,
+)
 
 
 def _meta(filename: str, path: str | None = None, language: str = "cpp") -> IDEMeta:
@@ -34,6 +39,16 @@ def _meta(filename: str, path: str | None = None, language: str = "cpp") -> IDEM
         language=language,
         tab_readable=True,
         breadcrumb_readable=True,
+        path_confidence=0.9,
+        path_candidates=[
+            PathCandidate(
+                path=path or filename,
+                filename=filename,
+                language=language,
+                source="breadcrumb",
+                confidence=0.9,
+            )
+        ],
     )
 
 
@@ -73,6 +88,29 @@ def _pc(stem: str, col_idx: int, meta: IDEMeta, column: CodeColumn) -> PageColum
 class TestBasicGrouping:
     def test_empty_input(self) -> None:
         assert group_into_files([]) == []
+
+    def test_segment_from_page_column_preserves_provenance(self) -> None:
+        meta = _meta("foo.cc", "src/foo.cc")
+        meta.flags.append("code.tab_only_fallback")
+        column = _column(
+            (10, "int x;", 0),
+            (11, "return;", 2),
+            column_index=1,
+            bbox=(10, 20, 300, 500),
+        )
+        column.flags.append("code.assembly.unpaired_codes=1")
+        segment = segment_from_page_column(_pc("DSC1", 1, meta, column))
+        assert segment.page_stem == "DSC1"
+        assert segment.column_index == 1
+        assert segment.bbox == (10, 20, 300, 500)
+        assert segment.line_no_range == (10, 11)
+        assert segment.selected_path == "src/foo.cc"
+        assert segment.selected_path_confidence == 0.9
+        assert segment.path_candidates[0].source == "breadcrumb"
+        assert segment.flags == [
+            "code.tab_only_fallback",
+            "code.assembly.unpaired_codes=1",
+        ]
 
     def test_single_file_single_page(self) -> None:
         pcs = [_pc(
