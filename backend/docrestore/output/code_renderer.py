@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 import aiofiles
 
 if TYPE_CHECKING:
-    from docrestore.processing.code_file_grouping import SourceFile
+    from docrestore.processing.code_file_grouping import PageColumn, SourceFile
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,7 @@ async def render_code_files(
                 await f.write("\n")
         written.append(target)
 
+        flags = _collect_code_flags(src)
         index_entries.append({
             "path": rel_path,
             "filename": src.filename,
@@ -94,9 +95,32 @@ async def render_code_files(
             "source_pages": [
                 f"{p.page_stem}.col{p.column_index}" for p in src.pages
             ],
+            "source_page_ranges": [
+                {
+                    "page": f"{p.page_stem}.col{p.column_index}",
+                    "start_line": _column_line_no_start(p),
+                    "end_line": _column_line_no_end(p),
+                }
+                for p in src.pages
+            ],
+            "source_page_count": len(src.pages),
+            "source_column_count": len({
+                f"{p.page_stem}.col{p.column_index}" for p in src.pages
+            }),
             "line_count": src.line_count,
             "line_no_range": list(src.line_no_range),
-            "flags": src.flags,
+            "flags": flags,
+            "source_file_flags": list(src.flags),
+            "source_column_flags": [
+                {
+                    "page": f"{p.page_stem}.col{p.column_index}",
+                    "meta_flags": list(p.meta.flags),
+                    "column_flags": list(p.column.flags),
+                }
+                for p in src.pages
+                if p.meta.flags or p.column.flags
+            ],
+            "quality": _quality_summary(flags),
         })
 
         document_chunks.append(_render_document_chunk(rel_path, src))
@@ -149,8 +173,9 @@ def _safe_relative_path(raw_path: str) -> tuple[str, str | None]:
 def _render_document_chunk(rel_path: str, src: SourceFile) -> str:
     """单个 SourceFile 的 markdown 块（H2 + 围栏代码）"""
     lang = src.language or ""
+    flags = _collect_code_flags(src)
     flag_line = (
-        f"<!-- flags: {', '.join(src.flags)} -->\n" if src.flags else ""
+        f"<!-- flags: {', '.join(flags)} -->\n" if flags else ""
     )
     pages_line = (
         "<!-- source_pages: "
@@ -165,3 +190,76 @@ def _render_document_chunk(rel_path: str, src: SourceFile) -> str:
         f"{src.merged_text}\n"
         f"```"
     )
+
+
+def _collect_code_flags(src: SourceFile) -> list[str]:
+    """收集 SourceFile 及其来源 column 的代码质量 flags。"""
+    flags: list[str] = []
+    seen: set[str] = set()
+
+    def add(flag: str) -> None:
+        if flag and flag not in seen:
+            seen.add(flag)
+            flags.append(flag)
+
+    for flag in src.flags:
+        add(flag)
+    for page in src.pages:
+        for flag in page.meta.flags:
+            add(flag)
+        for flag in page.column.flags:
+            add(flag)
+    return flags
+
+
+def _quality_summary(flags: list[str]) -> dict[str, object]:
+    """给 files-index.json 提供向后兼容的轻量质量摘要。"""
+    risk_codes = [_flag_to_risk_code(flag) for flag in flags]
+    risk_codes = [code for code in risk_codes if code]
+    severity = "ok"
+    if any(code in _WARN_RISK_CODES for code in risk_codes):
+        severity = "warn"
+    elif risk_codes:
+        severity = "info"
+    return {
+        "severity": severity,
+        "risk_codes": risk_codes,
+        "flag_count": len(flags),
+    }
+
+
+_WARN_RISK_CODES: frozenset[str] = frozenset({
+    "code.refine.truncated",
+    "code.grouping.large_gap_collapsed",
+    "code.grouping.no_filename",
+    "code.grouping.path_safety",
+    "code.assembly.no_char_width",
+    "code.assembly.no_line_height",
+})
+
+
+def _flag_to_risk_code(flag: str) -> str:
+    """把内部 flag 归一为稳定风险 code；未知 flag 原样保留。"""
+    if flag.startswith("code.grouping.missing_line_nos="):
+        return "code.grouping.missing_line_nos"
+    if flag.startswith("code.line_gap_count="):
+        return "code.assembly.line_gap_count"
+    if flag.startswith("code.assembly.unpaired_codes="):
+        return "code.assembly.unpaired_codes"
+    if flag.startswith("code.grouping.merged_pages="):
+        return ""
+    return flag
+
+
+def _column_line_no_start(page: PageColumn) -> int:
+    """返回来源页代码列的最小行号。"""
+    if not page.column.lines:
+        return 0
+    return min(line.line_no for line in page.column.lines)
+
+
+def _column_line_no_end(page: PageColumn) -> int:
+    """返回来源页代码列的最大行号。"""
+    if not page.column.lines:
+        return 0
+    return max(line.line_no for line in page.column.lines)

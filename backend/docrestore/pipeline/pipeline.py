@@ -43,6 +43,7 @@ from docrestore.pipeline.quality_report import (
     QualityIssue,
     QualityReport,
     detect_cleaner_quality,
+    detect_code_mode_quality,
     detect_final_refine_quality,
     detect_llm_segment_quality,
     find_duplicate_h2_titles,
@@ -781,7 +782,7 @@ class Pipeline:
                 # render_code_files，按需 LLM 字符级修正每个 SourceFile
                 result = await self._code_pipeline(
                     page_queue, pages_ref, output_dir,
-                    llm, pii_cfg, _report,
+                    llm, pii_cfg, _report, quality=quality,
                 )
             else:
                 result = await self._stream_process(
@@ -845,6 +846,7 @@ class Pipeline:
         llm: LLMConfig | None,
         pii_cfg: PIIConfig,
         report_fn: ReportFn,
+        quality: QualityReport | None = None,
     ) -> PipelineResult:
         """AGE-8 代码模式分支：OCR 收齐 → 代码链 → render_code_files。
 
@@ -996,6 +998,10 @@ class Pipeline:
                 )
 
         render_result = await render_code_files(sources, output_dir)
+        if quality is not None:
+            await detect_code_mode_quality(
+                quality, sources, skipped_paths=render_result.skipped,
+            )
         report_fn(
             "code_render", 1, 1,
             f"代码模式：写出 {len(render_result.written_files)} 个文件",

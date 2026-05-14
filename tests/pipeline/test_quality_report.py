@@ -24,11 +24,55 @@ import pytest
 from docrestore.pipeline.quality_report import (
     QualityIssue,
     QualityReport,
+    detect_code_mode_quality,
     detect_cleaner_quality,
     detect_final_refine_quality,
     detect_llm_segment_quality,
     detect_merger_quality,
 )
+from docrestore.processing.code_assembly import CodeColumn, CodeLine
+from docrestore.processing.code_file_grouping import PageColumn, SourceFile
+from docrestore.processing.ide_meta_extract import IDEMeta
+
+
+def _make_code_source(
+    flags: list[str],
+    *,
+    meta_flags: list[str] | None = None,
+    column_flags: list[str] | None = None,
+) -> SourceFile:
+    meta = IDEMeta(
+        column_index=0,
+        filename="foo.cc",
+        path="src/foo.cc",
+        language="cpp",
+        flags=meta_flags or [],
+    )
+    column = CodeColumn(
+        column_index=0,
+        bbox=(0, 0, 1, 1),
+        code_text="int x;",
+        lines=[CodeLine(line_no=1, text="int x;", indent=0)],
+        char_width=12.0,
+        avg_line_height=30,
+        flags=column_flags or [],
+    )
+    page = PageColumn(
+        page_stem="DSC1",
+        column_index=0,
+        meta=meta,
+        column=column,
+    )
+    return SourceFile(
+        path="src/foo.cc",
+        filename="foo.cc",
+        language="cpp",
+        pages=[page],
+        merged_text="int x;",
+        line_count=1,
+        line_no_range=(1, 1),
+        flags=flags,
+    )
 
 
 @pytest.mark.asyncio
@@ -203,6 +247,52 @@ class TestDetectMergerQuality:
             overlap_lines=3, similarity=0.95,
         )
         assert report.issues == []
+
+
+class TestDetectCodeModeQuality:
+    @pytest.mark.asyncio
+    async def test_refine_truncated_and_gap_flags_recorded(self) -> None:
+        report = QualityReport()
+        src = _make_code_source([
+            "code.refine.truncated",
+            "code.grouping.large_gap_collapsed",
+            "code.grouping.missing_line_nos=12",
+            "code.grouping.merged_pages=253",
+        ])
+        await detect_code_mode_quality(report, [src])
+        codes = {issue.code for issue in report.issues}
+        assert "code.refine.truncated" in codes
+        assert "code.grouping.large_gap_collapsed" in codes
+        assert "code.grouping.missing_line_nos" in codes
+        assert "code.grouping.merged_pages" not in codes
+        first = report.issues[0]
+        assert first.metadata["path"] == "src/foo.cc"
+        assert first.metadata["source_pages"] == ["DSC1.col0"]
+        assert "code.refine.truncated" in first.metadata["flags"]
+
+    @pytest.mark.asyncio
+    async def test_meta_and_column_flags_recorded(self) -> None:
+        report = QualityReport()
+        src = _make_code_source(
+            [],
+            meta_flags=["code.tab_only_fallback"],
+            column_flags=["code.assembly.unpaired_codes=3"],
+        )
+        await detect_code_mode_quality(report, [src])
+        codes = {issue.code for issue in report.issues}
+        assert "code.meta.tab_only_fallback" in codes
+        assert "code.assembly.unpaired_codes" in codes
+
+    @pytest.mark.asyncio
+    async def test_render_path_safety_fallback_recorded(self) -> None:
+        report = QualityReport()
+        await detect_code_mode_quality(
+            report, [], skipped_paths=[("../x", "traversal")],
+        )
+        assert len(report.issues) == 1
+        issue = report.issues[0]
+        assert issue.code == "code.render.path_safety_fallback"
+        assert issue.metadata["reason"] == "traversal"
 
     @pytest.mark.asyncio
     async def test_no_overlap_low_similarity_no_issue(self) -> None:

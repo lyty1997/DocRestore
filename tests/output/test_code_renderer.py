@@ -30,6 +30,8 @@ def _make_source(
     *,
     language: str = "cpp",
     flags: list[str] | None = None,
+    meta_flags: list[str] | None = None,
+    column_flags: list[str] | None = None,
     page_stems: list[str] | None = None,
 ) -> SourceFile:
     pages = []
@@ -38,12 +40,14 @@ def _make_source(
             column_index=0, filename=path.rsplit("/", 1)[-1],
             path=path, language=language,
             tab_readable=True, breadcrumb_readable=True,
+            flags=meta_flags or [],
         )
         col = CodeColumn(
             column_index=0, bbox=(0, 0, 1, 1),
             code_text=code_text,
             lines=[CodeLine(line_no=1, text=code_text.rstrip(), indent=0)],
             char_width=12.0, avg_line_height=30,
+            flags=column_flags or [],
         )
         pages.append(PageColumn(
             page_stem=stem, column_index=0, meta=meta, column=col,
@@ -101,8 +105,40 @@ class TestBasicRender:
         assert entry["language"] == "cpp"
         assert "DSC1.col0" in entry["source_pages"]
         assert "DSC2.col0" in entry["source_pages"]
+        assert entry["source_page_ranges"] == [
+            {"page": "DSC1.col0", "start_line": 1, "end_line": 1},
+            {"page": "DSC2.col0", "start_line": 1, "end_line": 1},
+        ]
+        assert entry["source_page_count"] == 2
+        assert entry["source_column_count"] == 2
         assert "code.grouping.merged_pages=2" in entry["flags"]
         assert entry["line_no_range"][0] == 1
+
+    @pytest.mark.asyncio
+    async def test_index_exposes_combined_quality_flags(self, tmp_path: Path) -> None:
+        sources = [_make_source(
+            "src/foo.cc", "int x;\n",
+            flags=["code.refine.truncated"],
+            meta_flags=["code.tab_only_fallback"],
+            column_flags=["code.assembly.unpaired_codes=2"],
+        )]
+        result = await render_code_files(sources, tmp_path)
+        entry = json.loads(result.index_path.read_text())[0]
+        assert entry["source_file_flags"] == ["code.refine.truncated"]
+        assert entry["source_column_flags"] == [
+            {
+                "page": "DSC1.col0",
+                "meta_flags": ["code.tab_only_fallback"],
+                "column_flags": ["code.assembly.unpaired_codes=2"],
+            }
+        ]
+        assert entry["flags"] == [
+            "code.refine.truncated",
+            "code.tab_only_fallback",
+            "code.assembly.unpaired_codes=2",
+        ]
+        assert entry["quality"]["severity"] == "warn"
+        assert "code.refine.truncated" in entry["quality"]["risk_codes"]
 
     @pytest.mark.asyncio
     async def test_file_content_preserved(self, tmp_path: Path) -> None:

@@ -38,9 +38,12 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiofiles
+
+if TYPE_CHECKING:
+    from docrestore.processing.code_file_grouping import SourceFile
 
 logger = logging.getLogger(__name__)
 
@@ -323,3 +326,202 @@ async def detect_final_refine_quality(
             ),
             metadata={"duplicates": duplicates},
         ))
+
+
+async def detect_code_mode_quality(
+    report: QualityReport,
+    sources: list[SourceFile],
+    *,
+    skipped_paths: list[tuple[str, str]] | None = None,
+) -> None:
+    """代码模式：汇总 SourceFile / PageColumn / CodeColumn 的风险 flags。
+
+    只读取已有产物，不重新推断分组质量。``merged_pages`` 只作为规模信息
+    记录，不单独产生 issue。
+    """
+    for src in sources:
+        flags = _collect_source_code_flags(src)
+        if not flags:
+            continue
+        await _record_source_flag_issues(report, src, flags)
+
+    for raw_path, reason in skipped_paths or []:
+        await report.add(QualityIssue(
+            stage="code_render",
+            code="code.render.path_safety_fallback",
+            severity="warn",
+            message=f"代码文件路径 {raw_path!r} 因 {reason} 降级到 _unknown",
+            metadata={"path": raw_path, "reason": reason},
+        ))
+
+
+def _collect_source_code_flags(src: SourceFile) -> list[str]:
+    """收集单个 SourceFile 及其来源 column 的 flags，保留出现顺序。"""
+    flags: list[str] = []
+    seen: set[str] = set()
+
+    def add(flag: str) -> None:
+        if flag and flag not in seen:
+            seen.add(flag)
+            flags.append(flag)
+
+    for flag in src.flags:
+        add(flag)
+    for page in src.pages:
+        for flag in page.meta.flags:
+            add(flag)
+        for flag in page.column.flags:
+            add(flag)
+    return flags
+
+
+async def _record_source_flag_issues(
+    report: QualityReport,
+    src: SourceFile,
+    flags: list[str],
+) -> None:
+    """按稳定 code 聚合单文件 flags，并写入质量报告。"""
+    source_pages = [
+        f"{p.page_stem}.col{p.column_index}" for p in src.pages
+    ]
+    metadata: dict[str, Any] = {
+        "path": src.path,
+        "filename": src.filename,
+        "language": src.language,
+        "line_count": src.line_count,
+        "line_no_range": list(src.line_no_range),
+        "source_page_count": len(src.pages),
+        "source_column_count": len(set(source_pages)),
+        "source_pages": source_pages,
+        "flags": flags,
+    }
+
+    grouped: dict[str, list[str]] = {}
+    risks_by_code: dict[str, _CodeFlagRisk] = {}
+    for flag in flags:
+        risk = _classify_code_flag(flag)
+        if risk is None:
+            continue
+        grouped.setdefault(risk.code, []).append(flag)
+        risks_by_code[risk.code] = risk
+
+    for code, matched_flags in grouped.items():
+        risk = risks_by_code[code]
+        issue_metadata = dict(metadata)
+        issue_metadata["matched_flags"] = matched_flags
+        await report.add(QualityIssue(
+            stage=risk.stage,
+            code=code,
+            severity=risk.severity,
+            message=risk.message.format(path=src.path),
+            metadata=issue_metadata,
+        ))
+
+
+@dataclass(frozen=True)
+class _CodeFlagRisk:
+    code: str
+    stage: str
+    severity: str
+    message: str
+
+
+_CODE_FLAG_RISKS: dict[str, _CodeFlagRisk] = {
+    "code.refine.truncated": _CodeFlagRisk(
+        code="code.refine.truncated",
+        stage="code_refine",
+        severity="warn",
+        message="代码文件 {path} 的 LLM 精修被 token 上限截断，已回退原文",
+    ),
+    "code.grouping.large_gap_collapsed": _CodeFlagRisk(
+        code="code.grouping.large_gap_collapsed",
+        stage="code_grouping",
+        severity="warn",
+        message="代码文件 {path} 存在大段行号缺口折叠，请人工复核来源页",
+    ),
+    "code.grouping.missing_line_nos": _CodeFlagRisk(
+        code="code.grouping.missing_line_nos",
+        stage="code_grouping",
+        severity="info",
+        message="代码文件 {path} 存在缺失行号，可能是 OCR 漏行或拍照缺页",
+    ),
+    "code.grouping.no_filename": _CodeFlagRisk(
+        code="code.grouping.no_filename",
+        stage="code_grouping",
+        severity="warn",
+        message="代码文件 {path} 缺少可信文件名，已降级为未知文件",
+    ),
+    "code.assembly.unpaired_codes": _CodeFlagRisk(
+        code="code.assembly.unpaired_codes",
+        stage="code_assembly",
+        severity="info",
+        message="代码文件 {path} 的部分 OCR 文本未能配对到行号",
+    ),
+    "code.assembly.line_gap_count": _CodeFlagRisk(
+        code="code.assembly.line_gap_count",
+        stage="code_assembly",
+        severity="info",
+        message="代码文件 {path} 的来源 column 存在行号缺口",
+    ),
+    "code.assembly.no_char_width": _CodeFlagRisk(
+        code="code.assembly.no_char_width",
+        stage="code_assembly",
+        severity="warn",
+        message="代码文件 {path} 的来源 column 无法估算字符宽度",
+    ),
+    "code.assembly.no_line_height": _CodeFlagRisk(
+        code="code.assembly.no_line_height",
+        stage="code_assembly",
+        severity="warn",
+        message="代码文件 {path} 的来源 column 无法估算行高",
+    ),
+    "code.tab_unreadable": _CodeFlagRisk(
+        code="code.meta.tab_unreadable",
+        stage="code_meta",
+        severity="warn",
+        message="代码文件 {path} 的来源页存在不可读 tab / 文件名",
+    ),
+    "code.tab_only_fallback": _CodeFlagRisk(
+        code="code.meta.tab_only_fallback",
+        stage="code_meta",
+        severity="info",
+        message="代码文件 {path} 的部分路径来自 tab 兜底，可信度低于 breadcrumb",
+    ),
+    "code.breadcrumb_missing": _CodeFlagRisk(
+        code="code.meta.breadcrumb_missing",
+        stage="code_meta",
+        severity="info",
+        message="代码文件 {path} 的来源页缺少 breadcrumb",
+    ),
+    "code.breadcrumb_path_missing": _CodeFlagRisk(
+        code="code.meta.breadcrumb_path_missing",
+        stage="code_meta",
+        severity="info",
+        message="代码文件 {path} 的来源页 breadcrumb 缺少完整路径",
+    ),
+    "code.path_inferred_from_peer": _CodeFlagRisk(
+        code="code.meta.path_inferred_from_peer",
+        stage="code_meta",
+        severity="info",
+        message="代码文件 {path} 的部分路径由同图其他 column 推断",
+    ),
+    "code.path_segments_recovered": _CodeFlagRisk(
+        code="code.meta.path_segments_recovered",
+        stage="code_meta",
+        severity="info",
+        message="代码文件 {path} 的部分路径分段由同图上下文恢复",
+    ),
+}
+
+
+def _classify_code_flag(flag: str) -> _CodeFlagRisk | None:
+    """把内部 code flag 映射到稳定质量报告 code。"""
+    if flag.startswith("code.grouping.missing_line_nos="):
+        return _CODE_FLAG_RISKS["code.grouping.missing_line_nos"]
+    if flag.startswith("code.assembly.unpaired_codes="):
+        return _CODE_FLAG_RISKS["code.assembly.unpaired_codes"]
+    if flag.startswith("code.line_gap_count="):
+        return _CODE_FLAG_RISKS["code.assembly.line_gap_count"]
+    if flag.startswith("code.grouping.merged_pages="):
+        return None
+    return _CODE_FLAG_RISKS.get(flag)
