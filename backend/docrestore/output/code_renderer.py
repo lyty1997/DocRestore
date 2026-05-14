@@ -288,6 +288,8 @@ _WARN_RISK_CODES: frozenset[str] = frozenset({
     "code.diagnostic.failed",
     "code.repair.truncated",
     "code.repair.reject_diagnostic_worse",
+    "code.audit.reject_diagnostic_worse",
+    "code.audit.reject_readonly_patch",
 })
 
 
@@ -305,6 +307,10 @@ def _flag_to_risk_code(flag: str) -> str:
         return "code.repair.unresolved"
     if flag.startswith("code.repair.reject_diagnostic_worse"):
         return "code.repair.reject_diagnostic_worse"
+    if flag.startswith("code.audit.reject_diagnostic_worse"):
+        return "code.audit.reject_diagnostic_worse"
+    if flag.startswith("code.audit.reject_readonly_patch"):
+        return "code.audit.reject_readonly_patch"
     if flag.startswith("code.grouping.merged_pages="):
         return ""
     return flag

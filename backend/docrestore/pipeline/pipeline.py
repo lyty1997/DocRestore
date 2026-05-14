@@ -27,6 +27,7 @@ import logging
 import re
 import time
 from collections.abc import AsyncIterator, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -1000,11 +1001,15 @@ class Pipeline:
 
         # 4. 可选 LLM 字符级精修（每个 SourceFile 独立调用，失败回退原文）
         if base_refiner_obj is not None:
-            from docrestore.llm.code_repair import DiagnosticCodeRepairer
+            from docrestore.llm.code_repair import (
+                CodeConsistencyAuditor,
+                DiagnosticCodeRepairer,
+            )
 
             refine_mode = getattr(llm_cfg, "code_refine_mode", "refine")
             code_refiner = CodeLLMRefiner(base_refiner_obj, mode=refine_mode)
             code_repairer = DiagnosticCodeRepairer(base_refiner_obj)
+            code_auditor = CodeConsistencyAuditor(base_refiner_obj)
             for i, src in enumerate(sources):
                 try:
                     diagnostics = pre_refine_diagnostics_by_path.get(
@@ -1016,6 +1021,24 @@ class Pipeline:
                             diagnostics,
                             related_sources=sources,
                         )
+                        audit_source = replace(
+                            src,
+                            merged_text=result.refined_text,
+                            line_count=(
+                                result.refined_text.count("\n") + 1
+                                if result.refined_text else 0
+                            ),
+                        )
+                        audit_result = await code_auditor.audit(
+                            audit_source,
+                            diagnostics,
+                            previous_result=result,
+                            related_sources=sources,
+                        )
+                        if audit_result.refined_text != audit_source.merged_text:
+                            result.refined_text = audit_result.refined_text
+                        result.flags = list({*result.flags, *audit_result.flags})
+                        result.unresolved = audit_result.unresolved
                     elif (
                         src.line_count
                         > _CODE_REPAIR_LARGE_FILE_LINE_THRESHOLD

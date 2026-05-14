@@ -13,12 +13,16 @@ from unittest.mock import AsyncMock
 import pytest
 
 from docrestore.llm.base import BaseLLMRefiner
+from docrestore.llm.code_refine import CodeRefineResult
 from docrestore.llm.code_repair import (
     CodeEditRange,
+    CodeConsistencyAuditor,
     DiagnosticCodeRepairer,
     ScopedPatch,
     apply_scoped_patch,
+    build_consistency_audit_context,
     build_repair_contexts,
+    parse_consistency_audit_response,
     parse_repair_response,
 )
 from docrestore.pipeline.config import LLMConfig
@@ -184,3 +188,146 @@ class TestDiagnosticCodeRepairer:
         assert result.refined_text == source.merged_text
         assert result.unresolved[0].note == "unclear"
         assert "code.repair.unresolved" in result.flags
+
+
+class TestConsistencyAudit:
+    def test_audit_context_uses_editable_and_readonly_excerpts(self) -> None:
+        source = _source("H0ST = 1\nHOST = 2\nprint(HOST)\n")
+        context = build_consistency_audit_context(
+            source,
+            [],
+            previous_result=CodeRefineResult(
+                refined_text=source.merged_text,
+                flags=["code.repair.applied=1"],
+            ),
+            related_sources=[],
+            excerpt_radius=1,
+        )
+        assert context.editable_ranges
+        assert any(
+            "read_only_excerpts are evidence only" in item
+            for item in context.constraints
+        )
+        assert context.repeated_ocr_confusions[0]["variants"] == ["H0ST", "HOST"]
+        editable_lines = {
+            line_no
+            for edit_range in context.editable_ranges
+            for line_no in range(edit_range.start_line, edit_range.end_line + 1)
+        }
+        assert all(
+            int(excerpt.split(":", 1)[0]) not in editable_lines
+            for excerpt in context.read_only_excerpts
+        )
+
+    def test_parse_keeps_readonly_patch_for_later_rejection(self) -> None:
+        source = _source("a = 1\nb = 2\nbad = 3\nc = 4\nz = 5")
+        context = build_consistency_audit_context(
+            source,
+            [_diag(3)],
+            previous_result=CodeRefineResult(refined_text=source.merged_text),
+            related_sources=[],
+        )
+        payload = json.dumps({
+            "plan": "fix outside",
+            "patches": [{
+                "start_line": 1,
+                "end_line": 1,
+                "replacement_lines": ["a = 2"],
+                "evidence": "not editable",
+            }],
+            "candidate_ranges": [],
+            "unresolved": [],
+        })
+        attempt = parse_consistency_audit_response(_response(payload), context)
+        assert attempt.patches[0].patch.start_line == 1
+
+    @pytest.mark.asyncio
+    async def test_audit_applies_patch_inside_editable_range(self) -> None:
+        source = _source("H0ST = 1\nHOST = 2\nprint(HOST)")
+        payload = json.dumps({
+            "plan": "normalize symbol",
+            "patches": [{
+                "start_line": 1,
+                "end_line": 1,
+                "replacement_lines": ["HOST = 1"],
+                "evidence": "matches line 2",
+            }],
+            "candidate_ranges": [],
+            "unresolved": [],
+        })
+        result = await CodeConsistencyAuditor(_base(payload)).audit(
+            source,
+            [],
+            previous_result=CodeRefineResult(refined_text=source.merged_text),
+            related_sources=[],
+        )
+        assert result.refined_text.startswith("HOST = 1\nHOST = 2")
+        assert "code.audit.patches=1" in result.flags
+
+    @pytest.mark.asyncio
+    async def test_audit_rejects_readonly_patch(self) -> None:
+        source = _source("a = 1\nb = 2\nbad = 3\nc = 4\nz = 5")
+        payload = json.dumps({
+            "plan": "bad scope",
+            "patches": [{
+                "start_line": 1,
+                "end_line": 1,
+                "replacement_lines": ["a = 2"],
+                "evidence": "outside editable range",
+            }],
+            "candidate_ranges": [],
+            "unresolved": [],
+        })
+        result = await CodeConsistencyAuditor(_base(payload)).audit(
+            source,
+            [_diag(3)],
+            previous_result=CodeRefineResult(refined_text=source.merged_text),
+            related_sources=[],
+        )
+        assert result.refined_text == source.merged_text
+        assert "code.audit.reject_readonly_patch" in result.flags
+
+    @pytest.mark.asyncio
+    async def test_audit_candidate_range_without_patch(self) -> None:
+        source = _source("a = 1\nbad = 2\nc = 3")
+        payload = json.dumps({
+            "plan": "needs larger range",
+            "patches": [],
+            "candidate_ranges": [{
+                "start_line": 1,
+                "end_line": 3,
+                "reason": "block imbalance",
+            }],
+            "unresolved": [],
+        })
+        result = await CodeConsistencyAuditor(_base(payload)).audit(
+            source,
+            [_diag(2)],
+            previous_result=CodeRefineResult(refined_text=source.merged_text),
+            related_sources=[],
+        )
+        assert result.refined_text == source.merged_text
+        assert "code.audit.candidate_ranges=1" in result.flags
+
+    @pytest.mark.asyncio
+    async def test_audit_rejects_diagnostic_worse(self) -> None:
+        source = _source("H0ST = 1\nHOST = 2")
+        payload = json.dumps({
+            "plan": "bad patch",
+            "patches": [{
+                "start_line": 1,
+                "end_line": 1,
+                "replacement_lines": ["H0ST ="],
+                "evidence": "bad",
+            }],
+            "candidate_ranges": [],
+            "unresolved": [],
+        })
+        result = await CodeConsistencyAuditor(_base(payload)).audit(
+            source,
+            [],
+            previous_result=CodeRefineResult(refined_text=source.merged_text),
+            related_sources=[],
+        )
+        assert result.refined_text == source.merged_text
+        assert "code.audit.reject_diagnostic_worse" in result.flags

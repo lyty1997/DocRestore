@@ -610,27 +610,59 @@ _CODE_FLAG_RISKS: dict[str, _CodeFlagRisk] = {
         severity="info",
         message="代码文件 {path} 过大且缺少诊断窗口，已跳过整文件 LLM 精修",
     ),
+    "code.audit.reject_readonly_patch": _CodeFlagRisk(
+        code="code.audit.reject_readonly_patch",
+        stage="code_audit",
+        severity="warn",
+        message="代码文件 {path} 的全文件审计 patch 试图修改只读范围，已回退",
+    ),
+    "code.audit.reject_diagnostic_worse": _CodeFlagRisk(
+        code="code.audit.reject_diagnostic_worse",
+        stage="code_audit",
+        severity="warn",
+        message="代码文件 {path} 的全文件审计 patch 导致诊断恶化，已回退",
+    ),
+    "code.audit.truncated": _CodeFlagRisk(
+        code="code.audit.truncated",
+        stage="code_audit",
+        severity="warn",
+        message="代码文件 {path} 的全文件审计输出被截断，已回退",
+    ),
+    "code.audit.candidate_ranges": _CodeFlagRisk(
+        code="code.audit.candidate_ranges",
+        stage="code_audit",
+        severity="info",
+        message="代码文件 {path} 的全文件审计发现未授权候选修复范围",
+    ),
 }
+
+_CODE_FLAG_PREFIX_RISKS: tuple[tuple[str, str], ...] = (
+    ("code.grouping.missing_line_nos=", "code.grouping.missing_line_nos"),
+    ("code.assembly.unpaired_codes=", "code.assembly.unpaired_codes"),
+    ("code.line_gap_count=", "code.assembly.line_gap_count"),
+    ("code.noise.filtered_ui_lines=", "code.noise.filtered_ui_lines"),
+    ("code.noise.filtered_ocr_glyphs=", "code.noise.filtered_ocr_glyphs"),
+    ("code.repair.truncated", "code.repair.truncated"),
+    ("code.repair.unresolved", "code.repair.unresolved"),
+    (
+        "code.repair.reject_diagnostic_worse",
+        "code.repair.reject_diagnostic_worse",
+    ),
+    ("code.audit.reject_readonly_patch", "code.audit.reject_readonly_patch"),
+    (
+        "code.audit.reject_diagnostic_worse",
+        "code.audit.reject_diagnostic_worse",
+    ),
+    ("code.audit.truncated", "code.audit.truncated"),
+    ("code.audit.candidate_ranges=", "code.audit.candidate_ranges"),
+)
 
 
 def _classify_code_flag(flag: str) -> _CodeFlagRisk | None:
     """把内部 code flag 映射到稳定质量报告 code。"""
-    if flag.startswith("code.grouping.missing_line_nos="):
-        return _CODE_FLAG_RISKS["code.grouping.missing_line_nos"]
-    if flag.startswith("code.assembly.unpaired_codes="):
-        return _CODE_FLAG_RISKS["code.assembly.unpaired_codes"]
-    if flag.startswith("code.line_gap_count="):
-        return _CODE_FLAG_RISKS["code.assembly.line_gap_count"]
-    if flag.startswith("code.noise.filtered_ui_lines="):
-        return _CODE_FLAG_RISKS["code.noise.filtered_ui_lines"]
-    if flag.startswith("code.noise.filtered_ocr_glyphs="):
-        return _CODE_FLAG_RISKS["code.noise.filtered_ocr_glyphs"]
-    if flag.startswith("code.repair.truncated"):
-        return _CODE_FLAG_RISKS["code.repair.truncated"]
-    if flag.startswith("code.repair.unresolved"):
-        return _CODE_FLAG_RISKS["code.repair.unresolved"]
-    if flag.startswith("code.repair.reject_diagnostic_worse"):
-        return _CODE_FLAG_RISKS["code.repair.reject_diagnostic_worse"]
+    for prefix, risk_code in _CODE_FLAG_PREFIX_RISKS:
+        if flag.startswith(prefix):
+            return _CODE_FLAG_RISKS[risk_code]
     if flag.startswith("code.grouping.merged_pages="):
         return None
     return _CODE_FLAG_RISKS.get(flag)

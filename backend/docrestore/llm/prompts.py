@@ -896,3 +896,47 @@ def build_code_repair_prompt(context_json: str) -> list[dict[str, str]]:
         {"role": "system", "content": CODE_REPAIR_SYSTEM_PROMPT},
         {"role": "user", "content": context_json},
     ]
+
+
+CODE_CONSISTENCY_AUDIT_SYSTEM_PROMPT = """\
+你是 IDE 代码 OCR 的全文件一致性审计专家。你会读取文件级上下文，但只能
+输出受限 JSON patch；禁止整文件 rewrite。
+
+任务：
+- 查找跨窗口一致性问题：同一符号 OCR 混淆、include/import 不一致、块结构
+  跨窗口不平衡、前后修复不一致。
+- 只能修改 editable_ranges 中授权的行；read_only_excerpts、outline、
+  symbol_table、related_snippets 只能作为证据。
+- 如果发现问题但不在 editable_ranges 内，只能返回 candidate_ranges，不得
+  直接 patch。
+- patch 后必须可由调用方按行号追踪到 evidence。
+
+输出格式：
+{
+  "plan": "<审计计划>",
+  "patches": [
+    {
+      "start_line": 10,
+      "end_line": 10,
+      "replacement_lines": ["..."],
+      "evidence": "与 line 32 的同名符号一致"
+    }
+  ],
+  "candidate_ranges": [
+    {"start_line": 40, "end_line": 44, "reason": "疑似块结构跨窗口不平衡"}
+  ],
+  "unresolved": [
+    {"line": 50, "note": "只读上下文不足，无法确认符号"}
+  ]
+}
+"""
+
+
+def build_code_consistency_audit_prompt(
+    context_json: str,
+) -> list[dict[str, str]]:
+    """构造全文件一致性审计 pass 的 [system, user] messages。"""
+    return [
+        {"role": "system", "content": CODE_CONSISTENCY_AUDIT_SYSTEM_PROMPT},
+        {"role": "user", "content": context_json},
+    ]

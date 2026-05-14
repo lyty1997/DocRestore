@@ -19,7 +19,10 @@ from typing import TYPE_CHECKING, Any
 
 from docrestore.llm.base import BaseLLMRefiner
 from docrestore.llm.code_refine import CodeRefineResult, CodeUnresolved
-from docrestore.llm.prompts import build_code_repair_prompt
+from docrestore.llm.prompts import (
+    build_code_consistency_audit_prompt,
+    build_code_repair_prompt,
+)
 from docrestore.processing.code_diagnostics import (
     CodeDiagnostic,
     CodeDiagnosticRunner,
@@ -83,6 +86,57 @@ class CodeRepairAttempt:
     patch: ScopedPatch | None = None
     plan: str = ""
     dependency_assessment: str = ""
+    unresolved: list[CodeUnresolved] = field(default_factory=list)
+    flags: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class CandidateRange:
+    """审计发现但未授权修改的候选范围。"""
+
+    start_line: int
+    end_line: int
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class AuditPatch:
+    """全文件一致性审计返回的 patch。"""
+
+    patch: ScopedPatch
+    evidence: str = ""
+
+
+@dataclass(frozen=True)
+class CodeConsistencyAuditContext:
+    """全文件一致性审计 prompt 上下文。"""
+
+    file_path: str
+    language: str | None
+    editable_ranges: list[CodeEditRange]
+    read_only_excerpts: list[str]
+    file_outline: list[str]
+    symbol_table: list[str]
+    diagnostics: list[dict[str, object]]
+    previous_repairs: list[str]
+    repeated_ocr_confusions: list[dict[str, object]]
+    unresolved_items: list[dict[str, object]]
+    related_snippets: list[str]
+    constraints: list[str]
+
+    def to_prompt_json(self) -> str:
+        """序列化为 prompt JSON。"""
+        return json.dumps(asdict(self), ensure_ascii=False, indent=2)
+
+
+@dataclass(frozen=True)
+class CodeConsistencyAuditAttempt:
+    """全文件一致性审计 LLM 响应。"""
+
+    context: CodeConsistencyAuditContext
+    patches: list[AuditPatch] = field(default_factory=list)
+    plan: str = ""
+    candidate_ranges: list[CandidateRange] = field(default_factory=list)
     unresolved: list[CodeUnresolved] = field(default_factory=list)
     flags: list[str] = field(default_factory=list)
 
@@ -187,6 +241,117 @@ class DiagnosticCodeRepairer:
         return parse_repair_response(response, context)
 
 
+class CodeConsistencyAuditor:
+    """小窗口修复后的全文件一致性审计 pass。"""
+
+    def __init__(
+        self,
+        base: BaseLLMRefiner,
+        *,
+        diagnostic_runner: CodeDiagnosticRunner | None = None,
+        excerpt_radius: int = 4,
+    ) -> None:
+        self._base = base
+        self._diagnostic_runner = diagnostic_runner
+        self._excerpt_radius = excerpt_radius
+
+    async def audit(
+        self,
+        source: SourceFile,
+        diagnostics: list[CodeDiagnostic],
+        *,
+        previous_result: CodeRefineResult,
+        related_sources: list[SourceFile] | None = None,
+    ) -> CodeRefineResult:
+        """审计全文件一致性，只应用授权范围内的 scoped patches。"""
+        context = build_consistency_audit_context(
+            source,
+            diagnostics,
+            previous_result=previous_result,
+            related_sources=related_sources or [],
+            excerpt_radius=self._excerpt_radius,
+        )
+        if not context.editable_ranges:
+            return CodeRefineResult(
+                refined_text=source.merged_text,
+                unresolved=list(previous_result.unresolved),
+                flags=["code.audit.no_editable_ranges"],
+            )
+        attempt = await self._run_audit(context)
+        if attempt.patches == []:
+            return CodeRefineResult(
+                refined_text=source.merged_text,
+                unresolved=[*previous_result.unresolved, *attempt.unresolved],
+                flags=attempt.flags or [
+                    f"code.audit.candidate_ranges={len(attempt.candidate_ranges)}"
+                ],
+            )
+
+        original = source.merged_text
+        current = original
+        applied = 0
+        for audit_patch in attempt.patches:
+            edit_range = _range_authorizing_patch(
+                audit_patch.patch, context.editable_ranges,
+            )
+            if edit_range is None:
+                attempt = _with_audit_flag(
+                    attempt, "code.audit.reject_readonly_patch",
+                )
+                continue
+            patched = apply_scoped_patch(current, edit_range, audit_patch.patch)
+            if patched is None:
+                attempt = _with_audit_flag(attempt, "code.audit.reject_scope")
+                continue
+            post = diagnose_text(
+                path=source.path,
+                language=source.language,
+                text=patched,
+                runner=self._diagnostic_runner,
+            )
+            if _diagnostic_score([post]) > _diagnostic_score(diagnostics):
+                attempt = _with_audit_flag(
+                    attempt, "code.audit.reject_diagnostic_worse",
+                )
+                continue
+            current = patched
+            applied += 1
+
+        flags = [
+            f"code.audit.patches={applied}",
+            f"code.audit.candidate_ranges={len(attempt.candidate_ranges)}",
+            *attempt.flags,
+        ]
+        if current == original:
+            return CodeRefineResult(
+                refined_text=original,
+                unresolved=[*previous_result.unresolved, *attempt.unresolved],
+                flags=flags or ["code.audit.no_change"],
+            )
+        return CodeRefineResult(
+            refined_text=current,
+            unresolved=[*previous_result.unresolved, *attempt.unresolved],
+            flags=flags,
+        )
+
+    async def _run_audit(
+        self,
+        context: CodeConsistencyAuditContext,
+    ) -> CodeConsistencyAuditAttempt:
+        messages = build_code_consistency_audit_prompt(context.to_prompt_json())
+        kwargs = self._base._build_kwargs(messages)
+        kwargs["max_tokens"] = 4096
+        try:
+            response = await self._base._call_llm(kwargs)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("CodeConsistencyAudit LLM 调用失败，跳过: %s", exc)
+            return CodeConsistencyAuditAttempt(
+                context=context,
+                flags=[f"code.audit.llm_error={type(exc).__name__}"],
+            )
+        return parse_consistency_audit_response(response, context)
+
+
 def build_repair_contexts(
     source: SourceFile,
     diagnostics: list[CodeDiagnostic],
@@ -234,6 +399,44 @@ def build_repair_contexts(
         )
         for edit_range in ranges
     ]
+
+
+def build_consistency_audit_context(
+    source: SourceFile,
+    diagnostics: list[CodeDiagnostic],
+    *,
+    previous_result: CodeRefineResult,
+    related_sources: list[SourceFile],
+    excerpt_radius: int = 4,
+) -> CodeConsistencyAuditContext:
+    """组织全文件一致性审计上下文。"""
+    lines = source.merged_text.split("\n")
+    editable_ranges = _audit_editable_ranges(
+        source, diagnostics, previous_result, lines,
+    )
+    return CodeConsistencyAuditContext(
+        file_path=source.path,
+        language=source.language,
+        editable_ranges=editable_ranges,
+        read_only_excerpts=_read_only_excerpts(
+            lines, editable_ranges, excerpt_radius,
+        ),
+        file_outline=_file_outline(lines),
+        symbol_table=_symbol_table(lines),
+        diagnostics=[diagnostic.to_index_dict() for diagnostic in diagnostics],
+        previous_repairs=list(previous_result.flags),
+        repeated_ocr_confusions=_find_repeated_ocr_confusions(lines),
+        unresolved_items=[
+            asdict(item) for item in previous_result.unresolved
+        ],
+        related_snippets=_related_snippets(source, related_sources),
+        constraints=[
+            "patches must stay inside editable_ranges",
+            "read_only_excerpts are evidence only and cannot be modified",
+            "return candidate_ranges for issues outside editable_ranges",
+            "do not rewrite the full file",
+        ],
+    )
 
 
 def apply_scoped_patch(
@@ -298,6 +501,41 @@ def parse_repair_response(
     )
 
 
+def parse_consistency_audit_response(
+    response: Any,
+    context: CodeConsistencyAuditContext,
+) -> CodeConsistencyAuditAttempt:
+    """解析全文件一致性审计 JSON。"""
+    if not response.choices:
+        return CodeConsistencyAuditAttempt(
+            context=context, flags=["code.audit.empty_choices"],
+        )
+    choice = response.choices[0]
+    raw = choice.message.content or ""
+    if getattr(choice, "finish_reason", None) == "length":
+        return CodeConsistencyAuditAttempt(
+            context=context, flags=["code.audit.truncated"],
+        )
+    try:
+        data = json.loads(_extract_json(raw))
+    except json.JSONDecodeError:
+        return CodeConsistencyAuditAttempt(
+            context=context, flags=["code.audit.json_decode_error"],
+        )
+
+    patches = _parse_audit_patches(data.get("patches"))
+    candidate_ranges = _parse_candidate_ranges(data.get("candidate_ranges"))
+    unresolved = _parse_unresolved(data.get("unresolved"))
+    return CodeConsistencyAuditAttempt(
+        context=context,
+        patches=patches,
+        plan=str(data.get("plan", "")),
+        candidate_ranges=candidate_ranges,
+        unresolved=unresolved,
+        flags=[],
+    )
+
+
 def _merge_line_windows(
     failing_lines: list[int], line_count: int, radius: int,
 ) -> list[CodeEditRange]:
@@ -312,6 +550,112 @@ def _merge_line_windows(
         else:
             ranges.append(CodeEditRange(start, end))
     return ranges
+
+
+def _audit_editable_ranges(
+    source: SourceFile,
+    diagnostics: list[CodeDiagnostic],
+    previous_result: CodeRefineResult,
+    lines: list[str],
+) -> list[CodeEditRange]:
+    candidate_lines: set[int] = set()
+    for diagnostic in diagnostics:
+        if diagnostic.status == "syntax_dirty":
+            candidate_lines.update(
+                line for line in diagnostic.failing_lines if line > 0
+            )
+    candidate_lines.update(
+        item.line for item in previous_result.unresolved if item.line > 0
+    )
+    for confusion in _find_repeated_ocr_confusions(lines):
+        raw_lines = confusion.get("lines", [])
+        if isinstance(raw_lines, list):
+            candidate_lines.update(
+                line for line in raw_lines if isinstance(line, int) and line > 0
+            )
+    line_count = max(1, source.line_count)
+    return _merge_line_windows(sorted(candidate_lines), line_count, radius=1)
+
+
+def _read_only_excerpts(
+    lines: list[str],
+    editable_ranges: list[CodeEditRange],
+    radius: int,
+) -> list[str]:
+    if not editable_ranges:
+        return []
+    excerpts: list[str] = []
+    editable_line_nos = {
+        line_no
+        for edit_range in editable_ranges
+        for line_no in range(edit_range.start_line, edit_range.end_line + 1)
+    }
+    included: set[int] = set()
+    for edit_range in editable_ranges:
+        start = max(1, edit_range.start_line - radius)
+        end = min(len(lines), edit_range.end_line + radius)
+        for line_no in range(start, end + 1):
+            if line_no in editable_line_nos or line_no in included:
+                continue
+            included.add(line_no)
+            excerpts.append(f"{line_no}: {lines[line_no - 1]}")
+    return excerpts[:120]
+
+
+def _symbol_table(lines: list[str]) -> list[str]:
+    symbols: list[str] = []
+    token_re = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b")
+    seen: set[str] = set()
+    for line in lines:
+        for token in token_re.findall(line):
+            if token in seen:
+                continue
+            seen.add(token)
+            symbols.append(token)
+            if len(symbols) >= 200:
+                return symbols
+    return symbols
+
+
+def _find_repeated_ocr_confusions(
+    lines: list[str],
+) -> list[dict[str, object]]:
+    token_re = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b")
+    by_key: dict[str, dict[str, set[int]]] = {}
+    for line_no, line in enumerate(lines, start=1):
+        for token in token_re.findall(line):
+            key = _ocr_confusion_key(token)
+            by_key.setdefault(key, {}).setdefault(token, set()).add(line_no)
+
+    out: list[dict[str, object]] = []
+    for key, variants in by_key.items():
+        if len(variants) < 2:
+            continue
+        if key == "":
+            continue
+        all_lines = sorted({
+            line_no for line_set in variants.values() for line_no in line_set
+        })
+        out.append({
+            "key": key,
+            "variants": sorted(variants),
+            "lines": all_lines,
+        })
+        if len(out) >= 20:
+            break
+    return out
+
+
+def _ocr_confusion_key(token: str) -> str:
+    table = str.maketrans({
+        "0": "o",
+        "O": "o",
+        "o": "o",
+        "1": "l",
+        "I": "l",
+        "l": "l",
+    })
+    return token.translate(table).lower()
 
 
 def _numbered_lines(lines: list[str], edit_range: CodeEditRange) -> list[str]:
@@ -401,6 +745,60 @@ def _parse_unresolved(raw: object) -> list[CodeUnresolved]:
     return out
 
 
+def _parse_audit_patches(
+    raw: object,
+) -> list[AuditPatch]:
+    if not isinstance(raw, list):
+        return []
+    out: list[AuditPatch] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        patch = _parse_patch(item)
+        if patch is None:
+            continue
+        out.append(AuditPatch(
+            patch=patch,
+            evidence=str(item.get("evidence", "")),
+        ))
+    return out
+
+
+def _parse_candidate_ranges(raw: object) -> list[CandidateRange]:
+    if not isinstance(raw, list):
+        return []
+    out: list[CandidateRange] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start_line = int(item.get("start_line", 0))
+            end_line = int(item.get("end_line", 0))
+        except (TypeError, ValueError):
+            continue
+        if start_line <= 0 or end_line < start_line:
+            continue
+        out.append(CandidateRange(
+            start_line=start_line,
+            end_line=end_line,
+            reason=str(item.get("reason", "")),
+        ))
+    return out
+
+
+def _range_authorizing_patch(
+    patch: ScopedPatch,
+    editable_ranges: list[CodeEditRange],
+) -> CodeEditRange | None:
+    for edit_range in editable_ranges:
+        if (
+            patch.start_line >= edit_range.start_line
+            and patch.end_line <= edit_range.end_line
+        ):
+            return edit_range
+    return None
+
+
 def _extract_json(raw: str) -> str:
     text = raw.strip()
     if text.startswith("```"):
@@ -434,6 +832,20 @@ def _with_flag(attempt: CodeRepairAttempt, flag: str) -> CodeRepairAttempt:
         patch=attempt.patch,
         plan=attempt.plan,
         dependency_assessment=attempt.dependency_assessment,
+        unresolved=attempt.unresolved,
+        flags=[*attempt.flags, flag],
+    )
+
+
+def _with_audit_flag(
+    attempt: CodeConsistencyAuditAttempt,
+    flag: str,
+) -> CodeConsistencyAuditAttempt:
+    return CodeConsistencyAuditAttempt(
+        context=attempt.context,
+        patches=attempt.patches,
+        plan=attempt.plan,
+        candidate_ranges=attempt.candidate_ranges,
         unresolved=attempt.unresolved,
         flags=[*attempt.flags, flag],
     )
