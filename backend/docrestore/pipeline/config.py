@@ -305,6 +305,13 @@ class CodeRestoreConfig(BaseModel):
     file_grouping_strategy: Literal["tab_breadcrumb", "content_only"] = (
         "tab_breadcrumb"
     )
+    #: 是否在首轮整图 OCR 找到 IDE column 后，对每个代码 column 裁剪增强并
+    #: 重跑 OCR。默认关闭，避免对不支持临时图片 OCR 的测试/轻量环境增加成本。
+    secondary_column_ocr: bool = False
+    secondary_column_ocr_scale: int = 2
+    secondary_column_ocr_padding_px: int = 6
+    secondary_column_ocr_contrast: float = 1.35
+    secondary_column_ocr_sharpness: float = 1.4
 
 
 class PipelineConfig(BaseModel):

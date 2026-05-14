@@ -75,6 +75,11 @@ class CodeRestoreConfigRequest(BaseModel):
 
     enable: bool | None = None
     output_files_dir: str | None = None
+    secondary_column_ocr: bool | None = None
+    secondary_column_ocr_scale: int | None = None
+    secondary_column_ocr_padding_px: int | None = None
+    secondary_column_ocr_contrast: float | None = None
+    secondary_column_ocr_sharpness: float | None = None
 
 
 class CreateTaskRequest(BaseModel):

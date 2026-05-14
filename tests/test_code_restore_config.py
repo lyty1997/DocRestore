@@ -23,10 +23,21 @@ class TestCodeRestoreConfig:
         assert cfg.enable is False
         assert cfg.output_files_dir == "files"
         assert cfg.file_grouping_strategy == "tab_breadcrumb"
+        assert cfg.secondary_column_ocr is False
+        assert cfg.secondary_column_ocr_scale == 2
 
     def test_can_enable(self) -> None:
         cfg = CodeRestoreConfig(enable=True)
         assert cfg.enable is True
+
+    def test_can_enable_secondary_column_ocr(self) -> None:
+        cfg = CodeRestoreConfig(
+            enable=True,
+            secondary_column_ocr=True,
+            secondary_column_ocr_scale=3,
+        )
+        assert cfg.secondary_column_ocr is True
+        assert cfg.secondary_column_ocr_scale == 3
 
 
 class TestPaddlePipelineSwitch:

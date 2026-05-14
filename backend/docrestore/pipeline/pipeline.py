@@ -797,7 +797,8 @@ class Pipeline:
                 # render_code_files，按需 LLM 字符级修正每个 SourceFile
                 result = await self._code_pipeline(
                     page_queue, pages_ref, output_dir,
-                    llm, pii_cfg, _report, quality=quality,
+                    llm, pii_cfg, _report, ocr, code_cfg,
+                    quality=quality,
                 )
             else:
                 result = await self._stream_process(
@@ -861,6 +862,8 @@ class Pipeline:
         llm: LLMConfig | None,
         pii_cfg: PIIConfig,
         report_fn: ReportFn,
+        ocr_cfg: OCRConfig | None,
+        code_cfg: CodeRestoreConfig,
         quality: QualityReport | None = None,
     ) -> PipelineResult:
         """AGE-8 代码模式分支：OCR 收齐 → 代码链 → render_code_files。
@@ -871,6 +874,10 @@ class Pipeline:
         from docrestore.llm.code_refine import CodeLLMRefiner, CodeRefineResult
         from docrestore.output.code_renderer import render_code_files
         from docrestore.processing.code_assembly import assemble_columns
+        from docrestore.processing.code_column_ocr import (
+            ColumnOCRConfig,
+            rerun_column_ocr,
+        )
         from docrestore.processing.code_file_grouping import (
             PageColumn,
             group_into_files,
@@ -917,6 +924,23 @@ class Pipeline:
                     max((ln.bbox[3] for ln in text_lines), default=0),
                 )
             layout = analyze_layout(text_lines, image_size)
+            if code_cfg.secondary_column_ocr:
+                secondary_ocr_engine = await self._resolve_ocr_engine(
+                    ocr_cfg, report_fn,
+                )
+                layout = await rerun_column_ocr(
+                    page,
+                    layout,
+                    secondary_ocr_engine,
+                    output_dir,
+                    ColumnOCRConfig(
+                        enabled=True,
+                        scale=code_cfg.secondary_column_ocr_scale,
+                        padding_px=code_cfg.secondary_column_ocr_padding_px,
+                        contrast=code_cfg.secondary_column_ocr_contrast,
+                        sharpness=code_cfg.secondary_column_ocr_sharpness,
+                    ),
+                )
             metas = extract_ide_metas(layout)
             columns = assemble_columns(layout)
             for col, meta in zip(columns, metas, strict=True):

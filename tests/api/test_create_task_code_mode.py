@@ -38,6 +38,19 @@ class TestCreateTaskRequestSchema:
         assert req.code is not None
         assert req.code.output_files_dir == "src"
 
+    def test_code_with_secondary_column_ocr(self) -> None:
+        req = CreateTaskRequest(
+            image_dir="/var/data/x",
+            code=CodeRestoreConfigRequest(
+                enable=True,
+                secondary_column_ocr=True,
+                secondary_column_ocr_scale=3,
+            ),
+        )
+        assert req.code is not None
+        assert req.code.secondary_column_ocr is True
+        assert req.code.secondary_column_ocr_scale == 3
+
     def test_code_compatible_with_ocr_override(self) -> None:
         """同时给 code 和 ocr → 都接收，不冲突"""
         req = CreateTaskRequest(
