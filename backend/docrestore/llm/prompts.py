@@ -860,3 +860,39 @@ def build_code_rewrite_prompt(
         {"role": "system", "content": CODE_REWRITE_SYSTEM_PROMPT},
         {"role": "user", "content": user},
     ]
+
+
+CODE_REPAIR_SYSTEM_PROMPT = """\
+你是 IDE 代码 OCR 的 scoped repair 专家。输入包含一个可编辑窗口和更大的
+只读上下文。你的任务是只修复 edit_range 内的 OCR/语法问题；只读上下文
+只能用于判断符号、类型、调用关系，绝不能在 patch 中修改。
+
+规则：
+- 只输出 JSON，不要 markdown 围栏。
+- patch.start_line / patch.end_line 必须完全落在 edit_range 内。
+- replacement_lines 只替换 patch 范围内的原始行，不得覆盖 readonly context。
+- 证据不足时不要强猜业务逻辑；把问题写入 unresolved。
+- 先给 plan 和 dependency_assessment，再给 scoped patch。
+
+输出格式：
+{
+  "plan": "<简短修复计划>",
+  "dependency_assessment": "<是否需要跨文件/更大上下文；证据不足要说明>",
+  "patch": {
+    "start_line": 10,
+    "end_line": 12,
+    "replacement_lines": ["..."]
+  },
+  "unresolved": [
+    {"line": 11, "note": "无法确认该符号"}
+  ]
+}
+"""
+
+
+def build_code_repair_prompt(context_json: str) -> list[dict[str, str]]:
+    """构造诊断驱动 scoped repair 的 [system, user] messages。"""
+    return [
+        {"role": "system", "content": CODE_REPAIR_SYSTEM_PROMPT},
+        {"role": "user", "content": context_json},
+    ]

@@ -586,6 +586,30 @@ _CODE_FLAG_RISKS: dict[str, _CodeFlagRisk] = {
         severity="warn",
         message="代码文件 {path} 的诊断命令运行失败",
     ),
+    "code.repair.truncated": _CodeFlagRisk(
+        code="code.repair.truncated",
+        stage="code_repair",
+        severity="warn",
+        message="代码文件 {path} 的 scoped repair 输出被截断，已回退该窗口",
+    ),
+    "code.repair.unresolved": _CodeFlagRisk(
+        code="code.repair.unresolved",
+        stage="code_repair",
+        severity="info",
+        message="代码文件 {path} 的 scoped repair 存在证据不足的未解决项",
+    ),
+    "code.repair.reject_diagnostic_worse": _CodeFlagRisk(
+        code="code.repair.reject_diagnostic_worse",
+        stage="code_repair",
+        severity="warn",
+        message="代码文件 {path} 的 scoped repair 诊断结果恶化，已回退 patch",
+    ),
+    "code.repair.skipped_large_file_no_window": _CodeFlagRisk(
+        code="code.repair.skipped_large_file_no_window",
+        stage="code_repair",
+        severity="info",
+        message="代码文件 {path} 过大且缺少诊断窗口，已跳过整文件 LLM 精修",
+    ),
 }
 
 
@@ -601,6 +625,12 @@ def _classify_code_flag(flag: str) -> _CodeFlagRisk | None:
         return _CODE_FLAG_RISKS["code.noise.filtered_ui_lines"]
     if flag.startswith("code.noise.filtered_ocr_glyphs="):
         return _CODE_FLAG_RISKS["code.noise.filtered_ocr_glyphs"]
+    if flag.startswith("code.repair.truncated"):
+        return _CODE_FLAG_RISKS["code.repair.truncated"]
+    if flag.startswith("code.repair.unresolved"):
+        return _CODE_FLAG_RISKS["code.repair.unresolved"]
+    if flag.startswith("code.repair.reject_diagnostic_worse"):
+        return _CODE_FLAG_RISKS["code.repair.reject_diagnostic_worse"]
     if flag.startswith("code.grouping.merged_pages="):
         return None
     return _CODE_FLAG_RISKS.get(flag)

@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
+    from docrestore.processing.code_diagnostics import CodeDiagnostic
     from docrestore.processing.code_file_grouping import SourceFile
 
 import aiofiles
@@ -140,6 +141,8 @@ _C_PREPROCESSOR_RE = re.compile(
     r"(include|define|undef|if|ifdef|ifndef|else|elif|endif|"
     r"pragma|error|warning|line)\b",
 )
+
+_CODE_REPAIR_LARGE_FILE_LINE_THRESHOLD = 400
 
 
 def _is_comment_line(stripped: str) -> bool:
@@ -263,6 +266,17 @@ def _split_by_page_markers(markdown: str, n_chunks: int) -> list[str]:
     if any(not c.strip() for c in chunks):
         return [markdown]
     return chunks
+
+
+def _has_syntax_dirty_diagnostic(
+    diagnostics: list[CodeDiagnostic],
+) -> bool:
+    """是否存在需要 scoped repair 的语法诊断。"""
+    return any(
+        diagnostic.status == "syntax_dirty"
+        and bool(diagnostic.failing_lines)
+        for diagnostic in diagnostics
+    )
 
 
 def _stitch_final_chunks(chunks: list[str]) -> str:
@@ -853,7 +867,7 @@ class Pipeline:
         只消费 page_queue 直到哨兵；不做 markdown 合并/精修。LLM 仅做单文件
         字符级修正（CodeLLMRefiner），失败/超时回退原文。
         """
-        from docrestore.llm.code_refine import CodeLLMRefiner
+        from docrestore.llm.code_refine import CodeLLMRefiner, CodeRefineResult
         from docrestore.output.code_renderer import render_code_files
         from docrestore.processing.code_assembly import assemble_columns
         from docrestore.processing.code_file_grouping import (
@@ -964,6 +978,17 @@ class Pipeline:
         base_refiner_obj = (
             base_refiner if isinstance(base_refiner, BaseLLMRefiner) else None
         )
+        pre_refine_diagnostics_by_path: dict[str, list[CodeDiagnostic]] = {}
+        if base_refiner_obj is not None and sources:
+            from docrestore.processing.code_diagnostics import diagnose_source_files
+
+            pre_refine_diagnostics = await asyncio.to_thread(
+                diagnose_source_files, sources,
+            )
+            for diagnostic in pre_refine_diagnostics:
+                pre_refine_diagnostics_by_path.setdefault(
+                    diagnostic.path, [],
+                ).append(diagnostic)
 
         # 3.5 PII：仅对每个 SourceFile 的 leading comment block 脱敏
         # （Copyright / 作者 / 邮箱 / 公司名）。正文 import 路径 / namespace
@@ -975,11 +1000,34 @@ class Pipeline:
 
         # 4. 可选 LLM 字符级精修（每个 SourceFile 独立调用，失败回退原文）
         if base_refiner_obj is not None:
+            from docrestore.llm.code_repair import DiagnosticCodeRepairer
+
             refine_mode = getattr(llm_cfg, "code_refine_mode", "refine")
             code_refiner = CodeLLMRefiner(base_refiner_obj, mode=refine_mode)
+            code_repairer = DiagnosticCodeRepairer(base_refiner_obj)
             for i, src in enumerate(sources):
                 try:
-                    result = await code_refiner.refine(src)
+                    diagnostics = pre_refine_diagnostics_by_path.get(
+                        src.path, [],
+                    )
+                    if _has_syntax_dirty_diagnostic(diagnostics):
+                        result = await code_repairer.repair(
+                            src,
+                            diagnostics,
+                            related_sources=sources,
+                        )
+                    elif (
+                        src.line_count
+                        > _CODE_REPAIR_LARGE_FILE_LINE_THRESHOLD
+                    ):
+                        result = CodeRefineResult(
+                            refined_text=src.merged_text,
+                            flags=[
+                                "code.repair.skipped_large_file_no_window"
+                            ],
+                        )
+                    else:
+                        result = await code_refiner.refine(src)
                     src.merged_text = result.refined_text
                     if result.flags:
                         src.flags = list({*src.flags, *result.flags})

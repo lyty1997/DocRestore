@@ -17,10 +17,15 @@ import re
 import shutil
 import subprocess
 import time
+import tempfile
 import tomllib
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from docrestore.processing.code_file_grouping import SourceFile
 
 
 @dataclass(frozen=True)
@@ -254,7 +259,9 @@ class CodeDiagnosticRunner:
 
         start = time.monotonic()
         try:
-            result = self._command_runner(cmd, target.file_path.parent, self._timeout_s)
+            result = self._command_runner(
+                cmd, target.file_path.parent, self._timeout_s,
+            )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return _failed(target, language, _format_exception(exc), start, tool)
 
@@ -277,6 +284,51 @@ class CodeDiagnosticRunner:
             tool=tool,
             duration_ms=_elapsed_ms(start),
         )
+
+
+def diagnose_source_files(
+    sources: list[SourceFile],
+    *,
+    runner: CodeDiagnosticRunner | None = None,
+) -> list[CodeDiagnostic]:
+    """把内存中的 SourceFile 写入临时目录后运行诊断。"""
+    active_runner = runner or CodeDiagnosticRunner()
+    with tempfile.TemporaryDirectory(prefix="docrestore-code-diag-") as tmp:
+        root = Path(tmp)
+        targets: list[CodeDiagnosticTarget] = []
+        for index, source in enumerate(sources):
+            rel_path = _safe_diagnostic_rel_path(source.path, index)
+            file_path = root / rel_path
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(source.merged_text, encoding="utf-8")
+            targets.append(CodeDiagnosticTarget(
+                path=rel_path,
+                file_path=file_path,
+                language=source.language,
+            ))
+        return active_runner.run_targets(targets)
+
+
+def diagnose_text(
+    *,
+    path: str,
+    language: str | None,
+    text: str,
+    runner: CodeDiagnosticRunner | None = None,
+) -> CodeDiagnostic:
+    """诊断一段内存文本，供 scoped repair 应用 patch 后验证。"""
+    active_runner = runner or CodeDiagnosticRunner()
+    with tempfile.TemporaryDirectory(prefix="docrestore-code-diag-") as tmp:
+        root = Path(tmp)
+        rel_path = _safe_diagnostic_rel_path(path, 0)
+        file_path = root / rel_path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(text, encoding="utf-8")
+        return active_runner.run_target(CodeDiagnosticTarget(
+            path=rel_path,
+            file_path=file_path,
+            language=language,
+        ))
 
 
 def _run_command(
@@ -303,6 +355,20 @@ def _resolve_language(target: CodeDiagnosticTarget) -> str:
         if language:
             return language
     return _LANG_BY_EXT.get(target.file_path.suffix.lower(), "unknown")
+
+
+def _safe_diagnostic_rel_path(raw_path: str, index: int) -> str:
+    """把 SourceFile.path 转为临时诊断目录内的安全相对路径。"""
+    fallback = f"unknown_{index}.txt"
+    if not raw_path or not raw_path.strip():
+        return fallback
+    path = Path(raw_path)
+    if path.is_absolute():
+        return path.name or fallback
+    parts = [part for part in path.parts if part not in {"", "."}]
+    if not parts or any(part == ".." for part in parts):
+        return path.name or fallback
+    return "/".join(parts)
 
 
 def _tool_spec(language: str, file_path: Path) -> tuple[str, list[str]] | None:

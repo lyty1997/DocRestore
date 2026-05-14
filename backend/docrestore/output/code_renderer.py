@@ -286,6 +286,8 @@ _WARN_RISK_CODES: frozenset[str] = frozenset({
     "code.assembly.no_line_height",
     "code.diagnostic.syntax_dirty",
     "code.diagnostic.failed",
+    "code.repair.truncated",
+    "code.repair.reject_diagnostic_worse",
 })
 
 
@@ -297,6 +299,12 @@ def _flag_to_risk_code(flag: str) -> str:
         return "code.assembly.line_gap_count"
     if flag.startswith("code.assembly.unpaired_codes="):
         return "code.assembly.unpaired_codes"
+    if flag.startswith("code.repair.truncated"):
+        return "code.repair.truncated"
+    if flag.startswith("code.repair.unresolved"):
+        return "code.repair.unresolved"
+    if flag.startswith("code.repair.reject_diagnostic_worse"):
+        return "code.repair.reject_diagnostic_worse"
     if flag.startswith("code.grouping.merged_pages="):
         return ""
     return flag
