@@ -31,7 +31,13 @@ from docrestore.processing.ide_meta_extract import (
 )
 
 
-def _meta(filename: str, path: str | None = None, language: str = "cpp") -> IDEMeta:
+def _meta(
+    filename: str,
+    path: str | None = None,
+    language: str = "cpp",
+    *,
+    confidence: float = 0.9,
+) -> IDEMeta:
     return IDEMeta(
         column_index=0,
         filename=filename,
@@ -39,14 +45,14 @@ def _meta(filename: str, path: str | None = None, language: str = "cpp") -> IDEM
         language=language,
         tab_readable=True,
         breadcrumb_readable=True,
-        path_confidence=0.9,
+        path_confidence=confidence,
         path_candidates=[
             PathCandidate(
                 path=path or filename,
                 filename=filename,
                 language=language,
                 source="breadcrumb",
-                confidence=0.9,
+                confidence=confidence,
             )
         ],
     )
@@ -281,9 +287,47 @@ class TestSamenameDifferentDir:
                  _column((3, "L3", 0)))
         files = group_into_files([p1, p2, p3])
         assert len(files) == 1
-        # canonical filename：长度+频次最大；3 个都是 8 字符，频次各 1，取首
+        # canonical filename：三个候选置信度相同，允许任一 OCR 变体胜出。
         assert files[0].filename in {"BUILD.gn", "BUiLD.gn", "BUlLD.gn"}
         assert files[0].line_no_range == (1, 3)
+
+    def test_high_confidence_filename_wins_over_low_confidence_ocr_variant(
+        self,
+    ) -> None:
+        """低置信 OCR filename 不能覆盖高置信路径候选。"""
+        low = _pc(
+            "DSC1", 0,
+            _meta("BUiLD.gn", "x/BUiLD.gn", "gn", confidence=0.42),
+            _column((1, "low", 0)),
+        )
+        high = _pc(
+            "DSC2", 0,
+            _meta("BUILD.gn", "x/BUILD.gn", "gn", confidence=0.95),
+            _column((2, "high", 0)),
+        )
+        files = group_into_files([low, high])
+        assert len(files) == 1
+        assert files[0].filename == "BUILD.gn"
+        assert files[0].path == "x/BUILD.gn"
+        assert "code.grouping.low_confidence_path_merged" in files[0].flags
+
+    def test_high_confidence_dir_wins_over_low_confidence_compatible_dir(
+        self,
+    ) -> None:
+        """兼容目录合并时，高置信完整目录应成为 canonical dir。"""
+        low = _pc(
+            "DSC1", 0,
+            _meta("foo.cc", "gpu/openmax/foo.cc", confidence=0.42),
+            _column((1, "low", 0)),
+        )
+        high = _pc(
+            "DSC2", 0,
+            _meta("foo.cc", "media/gpu/openmax/foo.cc", confidence=0.95),
+            _column((2, "high", 0)),
+        )
+        files = group_into_files([low, high])
+        assert len(files) == 1
+        assert files[0].path == "media/gpu/openmax/foo.cc"
 
 
 class TestNearDuplicateMerge:

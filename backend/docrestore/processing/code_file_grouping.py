@@ -415,15 +415,23 @@ def _build_source_file(
     extra_flags: list[str] | None = None,
 ) -> SourceFile:
     """从同文件多 PageColumn 构造 SourceFile"""
-    # canonical filename：长度 + 频次最大
+    # canonical filename：优先选路径置信度高 + 出现频次高的版本。不能只按
+    # 长度选，否则低置信 OCR typo（如多识一个后缀字符）会覆盖高置信路径。
     filenames = [pc.meta.filename for pc in group if pc.meta.filename]
     canonical_filename = (
-        max(filenames, key=lambda f: (len(f), filenames.count(f)))
+        max(
+            filenames,
+            key=lambda f: (
+                _filename_confidence_sum(group, f),
+                filenames.count(f),
+                len(f),
+            ),
+        )
         if filenames
         else "_unknown"
     )
 
-    # canonical dir：段数最多 + 出现频次最大
+    # canonical dir：优先选置信度高 + 频次高 + 段数更多的版本。
     dirs = [
         pc.meta.path.rsplit("/", 1)[0]
         for pc in group
@@ -433,7 +441,12 @@ def _build_source_file(
     if dirs:
         dir_counter = Counter(dirs)
         canonical_dir = max(
-            dirs, key=lambda d: (d.count("/"), dir_counter[d]),
+            dirs,
+            key=lambda d: (
+                _dir_confidence_sum(group, d),
+                dir_counter[d],
+                d.count("/"),
+            ),
         )
     canonical_path = (
         f"{canonical_dir}/{canonical_filename}"
@@ -456,13 +469,14 @@ def _build_source_file(
     flags.extend(gap_flags)
     if len(group) > 1:
         flags.append(f"code.grouping.merged_pages={len(group)}")
+        if any(_path_confidence(pc) < 0.6 for pc in group):
+            flags.append("code.grouping.low_confidence_path_merged")
 
     # pages 按 line_no_range 起点排序
     sorted_pages = sorted(
         group,
         key=lambda pc: _column_line_no_start(pc.column),
     )
-
     line_count = (
         merged_text.count("\n") + 1 if merged_text else 0
     )
@@ -477,6 +491,32 @@ def _build_source_file(
         line_no_range=line_no_range,
         flags=flags,
     )
+
+
+def _path_confidence(pc: PageColumn) -> float:
+    """PageColumn 当前路径的置信度，旧 fixture 缺字段时按中等可信处理。"""
+    confidence = getattr(pc.meta, "path_confidence", 0.0)
+    return float(confidence) if confidence > 0 else 0.65
+
+
+def _filename_confidence_sum(group: list[PageColumn], filename: str) -> float:
+    """同 filename 在组内的路径置信度总和。"""
+    return sum(
+        _path_confidence(pc)
+        for pc in group
+        if pc.meta.filename == filename
+    )
+
+
+def _dir_confidence_sum(group: list[PageColumn], directory: str) -> float:
+    """同 directory 在组内的路径置信度总和。"""
+    total = 0.0
+    for pc in group:
+        if not pc.meta.path or "/" not in pc.meta.path:
+            continue
+        if pc.meta.path.rsplit("/", 1)[0] == directory:
+            total += _path_confidence(pc)
+    return total
 
 
 def _column_line_no_start(column: CodeColumn) -> int:
