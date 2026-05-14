@@ -25,6 +25,7 @@ class TestCodeRestoreConfig:
         assert cfg.file_grouping_strategy == "tab_breadcrumb"
         assert cfg.secondary_column_ocr is False
         assert cfg.secondary_column_ocr_scale == 2
+        assert cfg.context_root == ""
 
     def test_can_enable(self) -> None:
         cfg = CodeRestoreConfig(enable=True)
@@ -38,6 +39,10 @@ class TestCodeRestoreConfig:
         )
         assert cfg.secondary_column_ocr is True
         assert cfg.secondary_column_ocr_scale == 3
+
+    def test_can_set_context_root(self) -> None:
+        cfg = CodeRestoreConfig(enable=True, context_root="/repo")
+        assert cfg.context_root == "/repo"
 
 
 class TestPaddlePipelineSwitch:

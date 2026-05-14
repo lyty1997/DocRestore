@@ -80,6 +80,7 @@ class CodeRestoreConfigRequest(BaseModel):
     secondary_column_ocr_padding_px: int | None = None
     secondary_column_ocr_contrast: float | None = None
     secondary_column_ocr_sharpness: float | None = None
+    context_root: str | None = None
 
 
 class CreateTaskRequest(BaseModel):

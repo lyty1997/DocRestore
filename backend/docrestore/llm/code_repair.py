@@ -31,6 +31,7 @@ from docrestore.processing.code_diagnostics import (
 
 if TYPE_CHECKING:
     from docrestore.processing.code_file_grouping import SourceFile
+    from docrestore.processing.code_context import CodeContextProvider
 
 logger = logging.getLogger(__name__)
 
@@ -161,12 +162,14 @@ class DiagnosticCodeRepairer:
         diagnostics: list[CodeDiagnostic],
         *,
         related_sources: list[SourceFile] | None = None,
+        context_provider: CodeContextProvider | None = None,
     ) -> CodeRefineResult:
         """按诊断窗口修复 SourceFile；失败或恶化时回退原文。"""
         contexts = build_repair_contexts(
             source,
             diagnostics,
             related_sources=related_sources or [],
+            context_provider=context_provider,
             window_radius=self._window_radius,
         )
         if not contexts:
@@ -262,6 +265,7 @@ class CodeConsistencyAuditor:
         *,
         previous_result: CodeRefineResult,
         related_sources: list[SourceFile] | None = None,
+        context_provider: CodeContextProvider | None = None,
     ) -> CodeRefineResult:
         """审计全文件一致性，只应用授权范围内的 scoped patches。"""
         context = build_consistency_audit_context(
@@ -269,6 +273,7 @@ class CodeConsistencyAuditor:
             diagnostics,
             previous_result=previous_result,
             related_sources=related_sources or [],
+            context_provider=context_provider,
             excerpt_radius=self._excerpt_radius,
         )
         if not context.editable_ranges:
@@ -357,6 +362,7 @@ def build_repair_contexts(
     diagnostics: list[CodeDiagnostic],
     *,
     related_sources: list[SourceFile],
+    context_provider: CodeContextProvider | None = None,
     window_radius: int = 8,
 ) -> list[CodeRepairContext]:
     """根据诊断失败行生成 scoped repair contexts。"""
@@ -388,7 +394,9 @@ def build_repair_contexts(
             diagnostics=[
                 diagnostic.to_index_dict() for diagnostic in diagnostics
             ],
-            related_snippets=_related_snippets(source, related_sources),
+            related_snippets=_related_snippets(
+                source, related_sources, context_provider,
+            ),
             path_candidates=path_candidates,
             source_pages=source_pages,
             constraints=[
@@ -407,6 +415,7 @@ def build_consistency_audit_context(
     *,
     previous_result: CodeRefineResult,
     related_sources: list[SourceFile],
+    context_provider: CodeContextProvider | None = None,
     excerpt_radius: int = 4,
 ) -> CodeConsistencyAuditContext:
     """组织全文件一致性审计上下文。"""
@@ -429,7 +438,9 @@ def build_consistency_audit_context(
         unresolved_items=[
             asdict(item) for item in previous_result.unresolved
         ],
-        related_snippets=_related_snippets(source, related_sources),
+        related_snippets=_related_snippets(
+            source, related_sources, context_provider,
+        ),
         constraints=[
             "patches must stay inside editable_ranges",
             "read_only_excerpts are evidence only and cannot be modified",
@@ -695,8 +706,22 @@ def _path_candidates(source: SourceFile) -> list[dict[str, object]]:
 def _related_snippets(
     source: SourceFile,
     related_sources: list[SourceFile],
+    context_provider: CodeContextProvider | None = None,
 ) -> list[str]:
     snippets: list[str] = []
+    if context_provider is not None:
+        for candidate in context_provider.search_snippets(
+            source.merged_text,
+            language=source.language,
+            limit=3,
+        ):
+            snippets.append(
+                f"reference: {candidate.path}:{candidate.start_line}-"
+                f"{candidate.end_line}\n{candidate.text}"
+            )
+            if len(snippets) >= 3:
+                return snippets
+
     source_dir = source.path.rsplit("/", 1)[0] if "/" in source.path else ""
     for related in related_sources:
         if related.path == source.path:

@@ -32,8 +32,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
+    from docrestore.processing.code_context import CodeContextProvider
     from docrestore.processing.code_diagnostics import CodeDiagnostic
     from docrestore.processing.code_file_grouping import SourceFile
+    from docrestore.processing.ide_meta_extract import IDEMeta
 
 import aiofiles
 
@@ -278,6 +280,34 @@ def _has_syntax_dirty_diagnostic(
         and bool(diagnostic.failing_lines)
         for diagnostic in diagnostics
     )
+
+
+def _augment_metas_with_code_context(
+    metas: list[IDEMeta],
+    context_provider: CodeContextProvider,
+) -> None:
+    """把参考源码路径候选追加到 IDEMeta.path_candidates，不覆盖 OCR。"""
+    from docrestore.processing.ide_meta_extract import PathCandidate
+
+    for meta in metas:
+        query = meta.path or meta.filename
+        if not query:
+            continue
+        seen = {candidate.path for candidate in meta.path_candidates}
+        for candidate in context_provider.search_paths(
+            query, language=meta.language, limit=3,
+        ):
+            if candidate.path in seen:
+                continue
+            seen.add(candidate.path)
+            meta.path_candidates.append(PathCandidate(
+                path=candidate.path,
+                filename=candidate.filename,
+                language=candidate.language,
+                source=candidate.source,
+                confidence=candidate.score,
+                raw_text=query,
+            ))
 
 
 def _stitch_final_chunks(chunks: list[str]) -> str:
@@ -878,12 +908,14 @@ class Pipeline:
             ColumnOCRConfig,
             rerun_column_ocr,
         )
+        from docrestore.processing.code_context import create_code_context_provider
         from docrestore.processing.code_file_grouping import (
             PageColumn,
             group_into_files,
         )
         from docrestore.processing.ide_layout import analyze_layout
         from docrestore.processing.ide_meta_extract import extract_ide_metas
+        context_provider = create_code_context_provider(code_cfg.context_root)
 
         # 1. 排空 OCR 队列；pages_ref 已被 producer 填充
         while True:
@@ -942,6 +974,8 @@ class Pipeline:
                     ),
                 )
             metas = extract_ide_metas(layout)
+            if context_provider is not None:
+                _augment_metas_with_code_context(metas, context_provider)
             columns = assemble_columns(layout)
             for col, meta in zip(columns, metas, strict=True):
                 all_pcs.append(PageColumn(
@@ -1044,6 +1078,7 @@ class Pipeline:
                             src,
                             diagnostics,
                             related_sources=sources,
+                            context_provider=context_provider,
                         )
                         audit_source = replace(
                             src,
@@ -1058,6 +1093,7 @@ class Pipeline:
                             diagnostics,
                             previous_result=result,
                             related_sources=sources,
+                            context_provider=context_provider,
                         )
                         if audit_result.refined_text != audit_source.merged_text:
                             result.refined_text = audit_result.refined_text

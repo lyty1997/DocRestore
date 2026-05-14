@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -27,6 +28,7 @@ from docrestore.llm.code_repair import (
 )
 from docrestore.pipeline.config import LLMConfig
 from docrestore.processing.code_assembly import CodeColumn, CodeLine
+from docrestore.processing.code_context import LocalCodeContextProvider
 from docrestore.processing.code_diagnostics import CodeDiagnostic
 from docrestore.processing.code_file_grouping import PageColumn, SourceFile
 from docrestore.processing.ide_meta_extract import IDEMeta, PathCandidate
@@ -110,6 +112,23 @@ class TestRepairContext:
         assert context.source_pages == ["DSC1.col0"]
         assert context.path_candidates[0]["path"] == "src/foo.py"
         assert "readonly context must not be modified" in context.constraints
+
+    def test_context_includes_reference_snippet(
+        self, tmp_path: Path,
+    ) -> None:
+        ref = tmp_path / "src" / "foo.py"
+        ref.parent.mkdir()
+        ref.write_text("def helper_symbol():\n    return 1\n", encoding="utf-8")
+        source = _source("def run():\n    return helper_symbol(")
+        contexts = build_repair_contexts(
+            source,
+            [_diag(2)],
+            related_sources=[],
+            context_provider=LocalCodeContextProvider(tmp_path),
+            window_radius=1,
+        )
+        assert "reference: src/foo.py" in contexts[0].related_snippets[0]
+        assert "helper_symbol" in contexts[0].related_snippets[0]
 
 
 class TestScopedPatch:

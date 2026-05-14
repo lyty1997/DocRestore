@@ -312,6 +312,8 @@ class CodeRestoreConfig(BaseModel):
     secondary_column_ocr_padding_px: int = 6
     secondary_column_ocr_contrast: float = 1.35
     secondary_column_ocr_sharpness: float = 1.4
+    #: 可选参考源码根目录。默认空字符串表示关闭；只读离线检索，不联网。
+    context_root: str = ""
 
 
 class PipelineConfig(BaseModel):
