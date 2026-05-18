@@ -101,6 +101,7 @@ export interface CodeRestoreConfig {
 export interface OCRConfig {
   model: string;
   gpu_id?: string | undefined;
+  paddle_pipeline?: "basic" | "vl" | undefined;
 }
 
 /** OCR 引擎值常量（label/desc 通过 i18n 获取） */
@@ -454,12 +455,17 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
         : undefined;
 
     /* OCR 引擎配置：模型或 GPU 有显式值才传；gpuId="" 表示自动（不覆盖） */
+    const codeNeedsPaddleBasic =
+      codeMode && ocrModel.startsWith("paddle-ocr/");
     const hasOcrOverride =
-      ocrModel !== DEFAULT_OCR_MODEL || gpuId !== GPU_AUTO_VALUE;
+      ocrModel !== DEFAULT_OCR_MODEL ||
+      gpuId !== GPU_AUTO_VALUE ||
+      codeNeedsPaddleBasic;
     const ocr: OCRConfig | undefined = hasOcrOverride
       ? {
           model: ocrModel,
           gpu_id: gpuId === GPU_AUTO_VALUE ? undefined : gpuId,
+          paddle_pipeline: codeNeedsPaddleBasic ? "basic" : undefined,
         }
       : undefined;
 

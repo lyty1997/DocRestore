@@ -55,11 +55,12 @@ class TestCreateTaskRequestSchema:
         """同时给 code 和 ocr → 都接收，不冲突"""
         req = CreateTaskRequest(
             image_dir="/var/data/x",
-            ocr=OCRConfigRequest(gpu_id="0"),
+            ocr=OCRConfigRequest(gpu_id="0", paddle_pipeline="basic"),
             code=CodeRestoreConfigRequest(enable=True),
         )
         assert req.ocr is not None
         assert req.ocr.gpu_id == "0"
+        assert req.ocr.paddle_pipeline == "basic"
         assert req.code is not None
         assert req.code.enable is True
 

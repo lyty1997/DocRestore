@@ -66,6 +66,7 @@ interface CreateTaskBody {
   ocr?: {
     model?: string | undefined;
     gpu_id?: string | undefined;
+    paddle_pipeline?: "basic" | "vl" | undefined;
   } | undefined;
   code?: {
     enable: boolean;

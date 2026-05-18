@@ -43,6 +43,7 @@ class OCRConfigRequest(BaseModel):
 
     model: str | None = None
     gpu_id: str | None = None  # GPU 选择（CUDA_VISIBLE_DEVICES）
+    paddle_pipeline: Literal["basic", "vl"] | None = None
     paddle_python: str | None = None
     paddle_ocr_timeout: int | None = None
     paddle_server_url: str | None = None
