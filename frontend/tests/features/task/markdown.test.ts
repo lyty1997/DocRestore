@@ -87,6 +87,13 @@ describe("injectPageAnchors", () => {
     expect(out).toContain('data-page="foo.jpg"');
   });
 
+  it("page 标记带相对路径时锚点归一化为裸文件名", () => {
+    const input = "<!-- page: section/foo.jpg -->";
+    const out = injectPageAnchors(input);
+    expect(out).toContain('data-page="foo.jpg"');
+    expect(out).not.toContain('data-page="section/foo.jpg"');
+  });
+
   it("无 page 标记时原样返回", () => {
     const input = "# 标题\n正文无标记";
     expect(injectPageAnchors(input)).toBe(input);

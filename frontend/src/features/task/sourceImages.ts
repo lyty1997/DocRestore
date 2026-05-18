@@ -2,6 +2,8 @@
  * 任务源图与子文档的匹配逻辑。
  */
 
+import { imageNameToPageKey } from "./sourceImagePreview";
+
 export function extractPageNamesFromMarkdown(markdown: string): readonly string[] {
   const seen = new Set<string>();
   const pages: string[] = [];
@@ -15,7 +17,7 @@ export function extractPageNamesFromMarkdown(markdown: string): readonly string[
 }
 
 function basename(path: string): string {
-  return path.split("/").pop() ?? path;
+  return imageNameToPageKey(path);
 }
 
 function getCandidateImagePrefixes(docDir: string | undefined): readonly string[] {
@@ -34,13 +36,19 @@ export function filterImagesForDoc(
   docDir: string | undefined,
   markdown = "",
 ): readonly string[] {
-  const pageNames = new Set(extractPageNamesFromMarkdown(markdown));
+  const rawPageNames = extractPageNamesFromMarkdown(markdown);
+  const pageNames = new Set(rawPageNames);
+  const pageKeys = new Set(
+    rawPageNames.map((pageName) => imageNameToPageKey(pageName)),
+  );
   const prefixes = getCandidateImagePrefixes(docDir);
 
-  if (pageNames.size > 0) {
+  if (rawPageNames.length > 0) {
     for (const prefix of prefixes) {
       const matches = allImages.filter(
-        (img) => img.startsWith(prefix) && pageNames.has(basename(img)),
+        (img) =>
+          img.startsWith(prefix) &&
+          (pageNames.has(img) || pageKeys.has(basename(img))),
       );
       if (matches.length > 0) return matches;
     }

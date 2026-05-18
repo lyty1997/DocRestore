@@ -3,6 +3,7 @@
  */
 
 import { getAssetUrl } from "../../api/client";
+import { imageNameToPageKey } from "./sourceImagePreview";
 
 /**
  * OCR 输出中允许的 HTML 标签白名单。
@@ -26,7 +27,7 @@ export function injectPageAnchors(text: string): string {
   return text.replaceAll(
     /<!--\s*page:\s*(.+?)\s*-->/g,
     (_match, name: string) => {
-      const safe = name.trim().replaceAll('"', "&quot;");
+      const safe = imageNameToPageKey(name.trim()).replaceAll('"', "&quot;");
       return `<span class="page-anchor" data-page="${safe}"></span>`;
     },
   );

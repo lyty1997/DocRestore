@@ -37,6 +37,22 @@ describe("DocCodePreview source image filtering", () => {
     ]);
   });
 
+  it("page marker 带相对路径时仍按同一 page key 匹配源图", () => {
+    const images = [
+      "section/p1.jpg",
+      "section/p2.jpg",
+      "other/p2.jpg",
+    ];
+    const markdown = [
+      "<!-- page: section/p2.jpg -->",
+      "section 下第二篇正文",
+    ].join("\n");
+
+    expect(filterImagesForDoc(images, "section/报告B", markdown)).toEqual([
+      "section/p2.jpg",
+    ]);
+  });
+
   it("没有 page marker 时保留旧的 doc_dir 前缀过滤", () => {
     const images = ["a/p1.jpg", "a/p2.jpg", "b/p3.jpg"];
 

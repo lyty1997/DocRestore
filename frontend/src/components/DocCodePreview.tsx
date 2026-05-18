@@ -23,7 +23,7 @@ import {
 import type { TaskResultResponse } from "../api/schemas";
 import { preprocessMarkdown } from "../features/task/markdown";
 import { filterImagesForDoc } from "../features/task/sourceImages";
-import { useScrollSync } from "../hooks/useScrollSync";
+import { usePreviewScrollSync } from "../hooks/usePreviewScrollSync";
 import { useTranslation } from "../i18n";
 import { CodeViewer } from "./CodeViewer";
 import { MarkdownWysiwygEditor } from "./MarkdownWysiwygEditor";
@@ -127,10 +127,11 @@ export function DocCodePreview({
     };
   }, [taskId]);
 
-  useScrollSync(leftScrollEl, rightScrollEl, {
-    align: "continuous",
-    enabled: !editMode && !selectedDocFailed && viewMode === "doc",
-  });
+  usePreviewScrollSync(
+    leftScrollEl,
+    rightScrollEl,
+    !editMode && !selectedDocFailed && viewMode === "doc",
+  );
 
   const enterEdit = useCallback((): void => {
     if (selectedDoc !== undefined) {
