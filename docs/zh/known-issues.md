@@ -46,11 +46,30 @@ limitations under the License.
 现象：
 - `code.enable=true` 时，如果 API 或全局配置强制改写 PaddleOCR 专用参数，会破坏“前端可任意选择 OCR 引擎”的设计。
 - 如果所选 OCR 引擎未填充 `PageOCR.text_lines`，代码模式可能静默跳过全部页面，最终生成空的代码产物。
+- 前端若只提交 `code.enable=true` 而没有为 PaddleOCR 显式提交 `paddle_pipeline="basic"`，
+  后端会沿用默认 `vl` pipeline；PaddleOCR-VL 输出 markdown / layout 块，不输出
+  `text_lines`，最终报“当前任务未获得任何行级 OCR 输出”。
 
 处理策略：
 - 代码模式只依赖 `PageOCR.text_lines` 这个 OCR 抽象产物，不在 API 或配置层强制切换 provider 或 provider 专用 pipeline。
 - OCR 引擎可以自由实现行级输出；未实现时，代码模式应明确报错，提示当前引擎缺少行级 bbox 能力。
 - retry/resume 必须保留 `CodeRestoreConfig`；历史任务若因旧 bug 丢失 code 快照，可从 `files-index.json` 或 `files/` 代码模式产物做最小兼容推断。
+- 前端默认 PaddleOCR + 代码模式时，应把用户意图翻译成显式请求级 OCR 覆盖：
+  `ocr.model="paddle-ocr/ppocr-v4"` + `ocr.paddle_pipeline="basic"`；API schema 必须接收该字段，
+  否则 Pydantic 会丢掉前端意图。
+
+## 代码模式质量不能只看归并文件数量
+
+现象：
+- 一批 IDE 代码照片最终可能只归并出少量源文件，看起来像“过度归并”。
+- 如果真实项目里存在接近 3000 行的大文件，多页、多图合并到同一源文件是合理结果。
+- 反过来，即使文件数量看似合理，也可能存在路径 OCR 污染、UI 噪声混入、跨栏错归或 LLM 截断。
+
+处理策略：
+- `merged_pages` 只能作为规模信息或风险信号，不能单独作为失败条件。
+- 分组质量应结合路径候选置信度、行号区间连续性、column 来源、gap 折叠、语法/编译诊断和 UI 噪声命中判断。
+- 大文件允许合并很多页，但每个 column segment 应保留来源页、行号范围、路径候选和 flags，供质量报告和前端 review 审计。
+- 参考源码匹配只能作为可选增强，不应把代码模式绑定到 Chromium、C/C++ 或任何固定项目结构。
 
 ## 多子文档预览源图过滤导致滚动同步失效
 
