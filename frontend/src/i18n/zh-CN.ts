@@ -185,6 +185,8 @@ export const zhCN = {
   "codeViewer.sourcePagesTitle": "原图来源",
   "codeViewer.sourcePagesCount": "{count} 张原图来源（点击展开）",
   "codeViewer.noSourceImages": "无对应原图",
+  "codeViewer.editAreaLabel": "编辑代码文件内容",
+  "codeViewer.saveError": "保存代码文件失败",
   "codeViewer.compile.passed": "编译通过",
   "codeViewer.compile.failed": "编译失败",
   "codeViewer.compile.skipped": "跳过编译",

@@ -100,6 +100,12 @@ class UpdateMarkdownRequest(BaseModel):
     markdown: str
 
 
+class UpdateCodeFileRequest(BaseModel):
+    """更新代码模式源文件内容"""
+
+    content: str
+
+
 class ProgressResponse(BaseModel):
     """进度信息"""
 

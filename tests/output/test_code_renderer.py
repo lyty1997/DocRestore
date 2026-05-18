@@ -190,6 +190,7 @@ class TestBasicRender:
         )
         entry = json.loads(result.index_path.read_text())[0]
         assert entry["diagnostic"]["status"] == "syntax_dirty"
+        assert entry["diagnostic"]["items"][0]["category"] == "syntax"
         assert entry["compile_status"] == "failed"
         assert entry["compile_failing_lines"] == [1]
         assert "code.diagnostic.syntax_dirty" in entry["quality"]["risk_codes"]

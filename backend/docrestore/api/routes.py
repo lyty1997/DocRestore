@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import io
+import json
 import logging
 import zipfile
 from contextlib import suppress
@@ -54,6 +55,7 @@ from docrestore.api.schemas import (
     TaskResponse,
     TaskResultResponse,
     TaskResultsResponse,
+    UpdateCodeFileRequest,
     UpdateMarkdownRequest,
 )
 from docrestore.ocr.gpu_detect import list_gpus, pick_best_gpu
@@ -636,6 +638,59 @@ async def get_task_code_file(
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 
+@router.put(
+    "/tasks/{task_id}/files/{file_path:path}",
+    response_model=ActionResponse,
+)
+async def update_task_code_file(
+    task_id: str,
+    file_path: str,
+    req: UpdateCodeFileRequest,
+) -> ActionResponse:
+    """保存 AGE-8 代码模式渲染的单个源文件。
+
+    只允许写入已存在的 ``output_dir/files/`` 子文件，禁止通过新建路径扩大
+    可写范围；保存后同步更新 ``files-index.json`` 的行数摘要。
+    """
+    manager = _get_manager()
+    task = manager.get_task(task_id)
+    if task is None:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
+
+    rel = _validate_code_file_path(file_path)
+    if rel is None:
+        raise ApiBusinessError(
+            APIErrorCode.FILE_NOT_FOUND, 404, "文件不存在",
+        )
+
+    output_dir = Path(task.output_dir)
+    files_root = (output_dir / "files").resolve(strict=False)
+    if not files_root.is_dir():
+        raise ApiBusinessError(
+            APIErrorCode.CODE_DIR_NOT_FOUND, 404, "代码目录不存在",
+        )
+
+    target = (files_root / Path(*rel.parts)).resolve(strict=False)
+    if not target.is_relative_to(files_root) or not target.is_file():
+        raise ApiBusinessError(
+            APIErrorCode.FILE_NOT_FOUND, 404, "文件不存在",
+        )
+
+    try:
+        target.write_text(req.content, encoding="utf-8")
+        _update_code_index_after_write(output_dir, rel, req.content)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ApiBusinessError(
+            APIErrorCode.WRITE_FAILED, 500,
+            f"保存失败: {exc}",
+            params={"reason": str(exc)},
+        ) from exc
+
+    return ActionResponse(task_id=task_id, message="代码文件已保存")
+
+
 def _validate_code_file_path(file_path: str) -> PurePosixPath | None:
     """校验 ``files/`` 下的相对路径，禁止 .. / 绝对路径 / 隐藏目录。"""
     if not file_path:
@@ -646,6 +701,54 @@ def _validate_code_file_path(file_path: str) -> PurePosixPath | None:
     if any(seg.startswith(".") for seg in p.parts):
         return None
     return p
+
+
+def _count_code_lines(content: str) -> int:
+    """按前端编辑器的 ``\\n`` 语义统计显示行数。"""
+    return 0 if content == "" else content.count("\n") + 1
+
+
+def _update_code_index_after_write(
+    output_dir: Path,
+    rel: PurePosixPath,
+    content: str,
+) -> None:
+    """保存代码文件后同步刷新 files-index 中的基础行数信息。"""
+    index_path = output_dir / "files-index.json"
+    if not index_path.is_file():
+        return
+
+    data: object = json.loads(index_path.read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        return
+
+    rel_path = rel.as_posix()
+    line_count = _count_code_lines(content)
+    changed = False
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        if item.get("path") != rel_path:
+            continue
+        item["line_count"] = line_count
+        raw_range = item.get("line_no_range")
+        if (
+            isinstance(raw_range, list)
+            and len(raw_range) >= 1
+            and isinstance(raw_range[0], int)
+        ):
+            start = raw_range[0]
+            item["line_no_range"] = (
+                [start, start + line_count - 1] if line_count > 0 else []
+            )
+        changed = True
+        break
+
+    if changed:
+        index_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
 
 @router.get("/tasks/{task_id}/download")

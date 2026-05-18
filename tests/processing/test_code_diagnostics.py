@@ -38,6 +38,7 @@ class TestParserDiagnostics:
         assert result.status == "syntax_dirty"
         assert result.failing_lines == [1]
         assert result.syntax_errors == 1
+        assert result.items[0].category == "syntax"
 
     def test_json_syntax_dirty_line(self, tmp_path: Path) -> None:
         source = tmp_path / "bad.json"
@@ -104,6 +105,8 @@ class TestToolDiagnostics:
         assert result.category == "syntax"
         assert result.failing_lines == [3]
         assert result.syntax_errors == 1
+        assert result.items[0].line == 3
+        assert result.items[0].category == "syntax"
 
     def test_tool_semantic_failure_classified(self, tmp_path: Path) -> None:
         source = tmp_path / "bad.cc"
@@ -125,3 +128,60 @@ class TestToolDiagnostics:
         assert result.status == "semantic_dirty"
         assert result.category == "semantic"
         assert result.semantic_errors == 1
+
+    def test_cpp_missing_include_classified_as_dependency(
+        self, tmp_path: Path,
+    ) -> None:
+        source = tmp_path / "bad.cc"
+        source.write_text('#include "missing.h"\n', encoding="utf-8")
+
+        def run(
+            cmd: list[str], cwd: Path, timeout_s: int,
+        ) -> CommandRunResult:
+            return CommandRunResult(
+                returncode=1,
+                stderr=(
+                    "bad.cc:1:10: fatal error: missing.h: "
+                    "No such file or directory"
+                ),
+            )
+
+        runner = CodeDiagnosticRunner(
+            tool_resolver=lambda _tool: "/usr/bin/tool",
+            command_runner=run,
+        )
+        result = runner.run_target(_target(source, "cpp"))
+        assert result.status == "dependency_dirty"
+        assert result.category == "dependency"
+        assert result.failing_lines == [1]
+        assert result.dependency_errors == 1
+        assert result.syntax_errors == 0
+        assert result.items[0].code == "missing_include"
+
+    def test_cpp_include_root_is_passed_to_command(
+        self, tmp_path: Path,
+    ) -> None:
+        source = tmp_path / "src" / "bad.cc"
+        source.parent.mkdir()
+        source.write_text('#include "src/good.h"\n', encoding="utf-8")
+
+        def run(
+            cmd: list[str], cwd: Path, timeout_s: int,
+        ) -> CommandRunResult:
+            assert "-I" in cmd
+            assert str(tmp_path) in cmd
+            assert cwd == source.parent
+            return CommandRunResult(returncode=0)
+
+        runner = CodeDiagnosticRunner(
+            tool_resolver=lambda _tool: "/usr/bin/tool",
+            command_runner=run,
+        )
+        target = CodeDiagnosticTarget(
+            path="src/bad.cc",
+            file_path=source,
+            language="cpp",
+            include_root=tmp_path,
+        )
+        result = runner.run_target(target)
+        assert result.status == "syntax_clean"

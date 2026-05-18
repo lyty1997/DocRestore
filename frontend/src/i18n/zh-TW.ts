@@ -189,6 +189,8 @@ export const zhTW: Record<TranslationKey, string> = {
   "codeViewer.sourcePagesTitle": "原圖來源",
   "codeViewer.sourcePagesCount": "{count} 張原圖來源（點擊展開）",
   "codeViewer.noSourceImages": "無對應原圖",
+  "codeViewer.editAreaLabel": "編輯程式碼檔案內容",
+  "codeViewer.saveError": "儲存程式碼檔案失敗",
   "codeViewer.compile.passed": "編譯通過",
   "codeViewer.compile.failed": "編譯失敗",
   "codeViewer.compile.skipped": "跳過編譯",

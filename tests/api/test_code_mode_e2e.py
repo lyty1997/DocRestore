@@ -238,4 +238,56 @@ class TestCodeModeE2E:
             code_api_client, task_id, timeout_s=10.0,
         )
         assert not (out_dir / "files-index.json").exists()
-        assert not (out_dir / "files").exists()
+
+    @pytest.mark.asyncio
+    async def test_update_code_file_saves_under_files_dir(
+        self,
+        code_api_client: AsyncClient,
+        code_image_dir: Path,
+        tmp_path: Path,
+    ) -> None:
+        """PUT /tasks/{id}/files/{path} 只能保存已生成的代码文件。"""
+        out_dir = tmp_path / "out_edit"
+
+        resp = await code_api_client.post(
+            "/api/v1/tasks",
+            json={
+                "image_dir": str(code_image_dir),
+                "output_dir": str(out_dir),
+                "code": {"enable": True},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        task_id = resp.json()["task_id"]
+        assert await _wait_until_terminal(code_api_client, task_id) == "completed"
+
+        index_resp = await code_api_client.get(f"/api/v1/tasks/{task_id}/files-index")
+        assert index_resp.status_code == 200, index_resp.text
+        file_path = index_resp.json()[0]["path"]
+        assert isinstance(file_path, str)
+
+        new_content = "int changed() {\n  return 7;\n}\n"
+        save_resp = await code_api_client.put(
+            f"/api/v1/tasks/{task_id}/files/{file_path}",
+            json={"content": new_content},
+        )
+        assert save_resp.status_code == 200, save_resp.text
+
+        file_resp = await code_api_client.get(
+            f"/api/v1/tasks/{task_id}/files/{file_path}",
+        )
+        assert file_resp.status_code == 200, file_resp.text
+        assert file_resp.text == new_content
+
+        updated_index = json.loads(
+            (out_dir / "files-index.json").read_text(encoding="utf-8"),
+        )
+        assert updated_index[0]["line_count"] == 4
+        assert updated_index[0]["line_no_range"] == [1, 4]
+
+        blocked_resp = await code_api_client.put(
+            f"/api/v1/tasks/{task_id}/files/%2E%2E/document.md",
+            json={"content": "bad"},
+        )
+        assert blocked_resp.status_code == 404
+        assert (out_dir / "document.md").read_text(encoding="utf-8") != "bad"

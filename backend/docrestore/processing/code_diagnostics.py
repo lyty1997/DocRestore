@@ -16,8 +16,8 @@ import json
 import re
 import shutil
 import subprocess
-import time
 import tempfile
+import time
 import tomllib
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -35,6 +35,7 @@ class CodeDiagnosticTarget:
     path: str
     file_path: Path
     language: str | None = None
+    include_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,19 @@ class CommandRunResult:
     returncode: int
     stdout: str = ""
     stderr: str = ""
+
+
+@dataclass(frozen=True)
+class CodeDiagnosticItem:
+    """面向人工审查的单条诊断标注。"""
+
+    line: int
+    column: int = 0
+    severity: str = "error"
+    category: str = "syntax"
+    code: str = ""
+    message: str = ""
+    source: str = ""
 
 
 @dataclass(frozen=True)
@@ -58,6 +72,8 @@ class CodeDiagnostic:
     failing_lines: list[int] = field(default_factory=list)
     syntax_errors: int = 0
     semantic_errors: int = 0
+    dependency_errors: int = 0
+    items: list[CodeDiagnosticItem] = field(default_factory=list)
     tool: str = ""
     duration_ms: int = 0
 
@@ -119,6 +135,23 @@ _SEMANTIC_ERROR_PATTERNS = (
     "cannot find",
     "unresolved import",
 )
+_DEPENDENCY_ERROR_PATTERNS = (
+    "no such file or directory",
+    "file not found",
+    "cannot open include file",
+    "没有那个文件或目录",
+)
+
+
+@dataclass(frozen=True)
+class _ClassifiedToolOutput:
+    """外部工具输出的轻量分类结果。"""
+
+    syntax_errors: int = 0
+    semantic_errors: int = 0
+    dependency_errors: int = 0
+    failing_lines: list[int] = field(default_factory=list)
+    items: list[CodeDiagnosticItem] = field(default_factory=list)
 
 
 class CodeDiagnosticRunner:
@@ -237,7 +270,7 @@ class CodeDiagnosticRunner:
     def _run_tool(
         self, target: CodeDiagnosticTarget, language: str,
     ) -> CodeDiagnostic:
-        spec = _tool_spec(language, target.file_path)
+        spec = _tool_spec(language, target.file_path, target.include_root)
         if spec is None:
             return CodeDiagnostic(
                 path=target.path,
@@ -269,18 +302,27 @@ class CodeDiagnosticRunner:
         if result.returncode == 0:
             return _syntax_clean(target, language, start, tool)
 
-        syntax_n, semantic_n, lines = _classify_tool_output(output)
-        status = "syntax_dirty" if syntax_n else "semantic_dirty"
-        category = "syntax" if syntax_n else "semantic"
+        classified = _classify_tool_output(output, tool)
+        if classified.syntax_errors:
+            status = "syntax_dirty"
+            category = "syntax"
+        elif classified.dependency_errors:
+            status = "dependency_dirty"
+            category = "dependency"
+        else:
+            status = "semantic_dirty"
+            category = "semantic"
         return CodeDiagnostic(
             path=target.path,
             language=language,
             status=status,
             category=category,
             summary=output[:1000],
-            failing_lines=lines,
-            syntax_errors=syntax_n,
-            semantic_errors=semantic_n,
+            failing_lines=classified.failing_lines,
+            syntax_errors=classified.syntax_errors,
+            semantic_errors=classified.semantic_errors,
+            dependency_errors=classified.dependency_errors,
+            items=classified.items,
             tool=tool,
             duration_ms=_elapsed_ms(start),
         )
@@ -305,6 +347,7 @@ def diagnose_source_files(
                 path=rel_path,
                 file_path=file_path,
                 language=source.language,
+                include_root=root,
             ))
         return active_runner.run_targets(targets)
 
@@ -328,6 +371,7 @@ def diagnose_text(
             path=rel_path,
             file_path=file_path,
             language=language,
+            include_root=root,
         ))
 
 
@@ -371,24 +415,33 @@ def _safe_diagnostic_rel_path(raw_path: str, index: int) -> str:
     return "/".join(parts)
 
 
-def _tool_spec(language: str, file_path: Path) -> tuple[str, list[str]] | None:
+def _tool_spec(
+    language: str,
+    file_path: Path,
+    include_root: Path | None = None,
+) -> tuple[str, list[str]] | None:
     file_arg = str(file_path)
     if language == "javascript":
         return "node", ["node", "--check", file_arg]
     if language == "typescript":
         return "tsc", ["tsc", "--noEmit", "--pretty", "false", file_arg]
     if language == "c":
-        return "gcc", ["gcc", "-fsyntax-only", "-w", file_arg]
+        cmd = ["gcc", "-fsyntax-only", "-w"]
+        if include_root is not None:
+            cmd.extend(["-I", str(include_root)])
+        cmd.append(file_arg)
+        return "gcc", cmd
     if language == "cpp":
         kind = (
             "c++-header"
             if file_path.suffix.lower() in {".h", ".hh", ".hpp"}
             else "c++"
         )
-        return "g++", [
-            "g++", "-fsyntax-only", "-std=c++17", "-w", "-fpermissive",
-            "-x", kind, file_arg,
-        ]
+        cmd = ["g++", "-fsyntax-only", "-std=c++17", "-w", "-fpermissive"]
+        if include_root is not None:
+            cmd.extend(["-I", str(include_root)])
+        cmd.extend(["-x", kind, file_arg])
+        return "g++", cmd
     if language == "go":
         return "go", ["go", "tool", "compile", file_arg]
     if language == "rust":
@@ -420,6 +473,15 @@ def _syntax_dirty(
     start: float,
 ) -> CodeDiagnostic:
     lines = sorted({line for line in failing_lines if line > 0})
+    items = [
+        CodeDiagnosticItem(
+            line=line,
+            category="syntax",
+            code="parse_error",
+            message=summary[:200],
+        )
+        for line in lines
+    ]
     return CodeDiagnostic(
         path=target.path,
         language=language,
@@ -428,6 +490,7 @@ def _syntax_dirty(
         summary=summary[:1000],
         failing_lines=lines,
         syntax_errors=max(1, len(lines)),
+        items=items,
         duration_ms=_elapsed_ms(start),
     )
 
@@ -450,36 +513,106 @@ def _failed(
     )
 
 
-def _classify_tool_output(output: str) -> tuple[int, int, list[int]]:
+def _classify_tool_output(output: str, tool: str) -> _ClassifiedToolOutput:
     syntax = 0
     semantic = 0
+    dependency = 0
     lines: set[int] = set()
+    items: list[CodeDiagnosticItem] = []
     for raw_line in output.splitlines():
-        line = raw_line.lower()
-        line_no = _extract_line_no(raw_line)
-        if any(pattern in line for pattern in _SYNTAX_ERROR_PATTERNS):
+        category, item = _classify_tool_line(raw_line, tool)
+        if category == "dependency":
+            dependency += 1
+        elif category == "syntax":
             syntax += 1
-            if line_no > 0:
-                lines.add(line_no)
-        elif any(pattern in line for pattern in _SEMANTIC_ERROR_PATTERNS):
+        elif category == "semantic":
             semantic += 1
-        elif "error" in line:
-            syntax += 1
-            if line_no > 0:
-                lines.add(line_no)
-    if syntax == 0 and semantic == 0 and output:
+        if item is not None:
+            lines.add(item.line)
+            items.append(item)
+    if syntax == 0 and semantic == 0 and dependency == 0 and output:
         semantic = 1
-    return syntax, semantic, sorted(lines)
+    return _ClassifiedToolOutput(
+        syntax_errors=syntax,
+        semantic_errors=semantic,
+        dependency_errors=dependency,
+        failing_lines=sorted(lines),
+        items=items,
+    )
+
+
+def _classify_tool_line(
+    raw_line: str,
+    tool: str,
+) -> tuple[str, CodeDiagnosticItem | None]:
+    line = raw_line.lower()
+    line_no, column = _extract_line_col(raw_line)
+    message = _extract_tool_message(raw_line)
+    if any(pattern in line for pattern in _DEPENDENCY_ERROR_PATTERNS):
+        return "dependency", _tool_item(
+            line_no, column, "warn", "dependency",
+            "missing_include", message, tool,
+        )
+    if any(pattern in line for pattern in _SYNTAX_ERROR_PATTERNS):
+        return "syntax", _tool_item(
+            line_no, column, "error", "syntax",
+            "syntax_error", message, tool,
+        )
+    if any(pattern in line for pattern in _SEMANTIC_ERROR_PATTERNS):
+        return "semantic", _tool_item(
+            line_no, column, "warn", "semantic",
+            "semantic_error", message, tool,
+        )
+    if "error" in line:
+        return "syntax", _tool_item(
+            line_no, column, "error", "syntax",
+            "tool_error", message, tool,
+        )
+    return "", None
+
+
+def _tool_item(
+    line: int,
+    column: int,
+    severity: str,
+    category: str,
+    code: str,
+    message: str,
+    tool: str,
+) -> CodeDiagnosticItem | None:
+    if line <= 0:
+        return None
+    return CodeDiagnosticItem(
+        line=line,
+        column=column,
+        severity=severity,
+        category=category,
+        code=code,
+        message=message,
+        source=tool,
+    )
 
 
 def _extract_line_no(text: str) -> int:
+    line_no, _column = _extract_line_col(text)
+    return line_no
+
+
+def _extract_line_col(text: str) -> tuple[int, int]:
     match = _CPP_LINE_RE.search(text)
     if match is not None:
-        return int(match.group("line"))
+        return int(match.group("line")), int(match.group("col"))
     match = _LINE_COL_RE.search(text)
     if match is not None:
-        return int(match.group(1))
-    return 0
+        return int(match.group(1)), int(match.group(2))
+    return 0, 0
+
+
+def _extract_tool_message(text: str) -> str:
+    match = _CPP_LINE_RE.search(text)
+    if match is not None:
+        return match.group("msg").strip()
+    return text.strip()
 
 
 def _line_from_parse_error(exc: BaseException) -> int:

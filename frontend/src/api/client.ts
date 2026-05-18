@@ -371,6 +371,24 @@ export async function getCodeFileContent(
   return response.text();
 }
 
+/** 保存代码模式单文件内容 */
+export async function updateCodeFileContent(
+  taskId: string,
+  filePath: string,
+  content: string,
+): Promise<ActionResponse> {
+  const url = `${API_BASE}/tasks/${taskId}/files/${filePath
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/")}`;
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: apiHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ content }),
+  });
+  return handleResponse(response, ActionResponseSchema);
+}
+
 /** 获取源图片列表 */
 export async function listSourceImages(
   taskId: string,

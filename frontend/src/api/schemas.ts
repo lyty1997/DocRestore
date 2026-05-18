@@ -224,11 +224,46 @@ export const OcrWarmupResponseSchema = z.object({
 export type OcrWarmupResponse = z.infer<typeof OcrWarmupResponseSchema>;
 
 /** 代码模式 files-index 单条记录 */
+export const SourcePageRangeSchema = z.object({
+  page: z.string(),
+  start_line: z.number(),
+  end_line: z.number(),
+});
+export type SourcePageRange = z.infer<typeof SourcePageRangeSchema>;
+
+export const CodeDiagnosticItemSchema = z.object({
+  line: z.number(),
+  column: z.number().default(0),
+  severity: z.string().default("error"),
+  category: z.string().default("syntax"),
+  code: z.string().default(""),
+  message: z.string().default(""),
+  source: z.string().default(""),
+});
+export type CodeDiagnosticItem = z.infer<typeof CodeDiagnosticItemSchema>;
+
+export const CodeDiagnosticSchema = z.object({
+  path: z.string().optional(),
+  language: z.string().optional(),
+  status: z.string(),
+  category: z.string(),
+  summary: z.string().default(""),
+  failing_lines: z.array(z.number()).default([]),
+  syntax_errors: z.number().default(0),
+  semantic_errors: z.number().default(0),
+  dependency_errors: z.number().default(0),
+  items: z.array(CodeDiagnosticItemSchema).default([]),
+  tool: z.string().default(""),
+  duration_ms: z.number().default(0),
+});
+export type CodeDiagnostic = z.infer<typeof CodeDiagnosticSchema>;
+
 export const FilesIndexEntrySchema = z.object({
   path: z.string(),
   filename: z.string(),
   language: z.string().nullable().optional(),
   source_pages: z.array(z.string()).default([]),
+  source_page_ranges: z.array(SourcePageRangeSchema).default([]),
   line_count: z.number().default(0),
   line_no_range: z.array(z.number()).default([]),
   flags: z.array(z.string()).default([]),
@@ -240,6 +275,7 @@ export const FilesIndexEntrySchema = z.object({
   compile_error: z.string().nullable().optional(),
   compile_skip_reason: z.string().nullable().optional(),
   compile_failing_lines: z.array(z.number()).nullable().optional(),
+  diagnostic: CodeDiagnosticSchema.optional(),
 });
 export type FilesIndexEntry = z.infer<typeof FilesIndexEntrySchema>;
 

@@ -195,6 +195,8 @@ export const en: Record<TranslationKey, string> = {
   "codeViewer.sourcePagesTitle": "Source pages",
   "codeViewer.sourcePagesCount": "{count} source pages (click to expand)",
   "codeViewer.noSourceImages": "No matching source image",
+  "codeViewer.editAreaLabel": "Edit code file content",
+  "codeViewer.saveError": "Failed to save code file",
   "codeViewer.compile.passed": "Compile OK",
   "codeViewer.compile.failed": "Compile failed",
   "codeViewer.compile.skipped": "Compile skipped",

@@ -113,6 +113,7 @@ async def render_code_files(
                 path=rel_path,
                 file_path=target,
                 language=src.language,
+                include_root=files_dir,
             )
             for src, rel_path, target in safe_sources
         ]
@@ -349,6 +350,8 @@ def _diagnostic_risk_code(diagnostic: CodeDiagnostic) -> str:
         return "code.diagnostic.syntax_dirty"
     if diagnostic.status == "semantic_dirty":
         return "code.diagnostic.semantic_dirty"
+    if diagnostic.status == "dependency_dirty":
+        return "code.diagnostic.dependency_dirty"
     if diagnostic.status == "tool_unavailable":
         return "code.diagnostic.tool_unavailable"
     if diagnostic.status == "failed":
