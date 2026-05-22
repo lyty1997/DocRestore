@@ -40,6 +40,29 @@ class TestParserDiagnostics:
         assert result.syntax_errors == 1
         assert result.items[0].category == "syntax"
 
+    def test_python_recovers_and_reports_later_syntax_lines(
+        self, tmp_path: Path,
+    ) -> None:
+        source = tmp_path / "bad.py"
+        source.write_text(
+            "\n".join([
+                "def first(:",
+                "    return 1",
+                "",
+                "def second(:",
+                "    return 2",
+            ]),
+            encoding="utf-8",
+        )
+
+        result = CodeDiagnosticRunner().run_target(_target(source))
+
+        assert result.status == "syntax_dirty"
+        assert result.failing_lines == [1, 4]
+        assert result.syntax_errors == 2
+        assert [item.line for item in result.items] == [1, 4]
+        assert all(item.category == "syntax" for item in result.items)
+
     def test_json_syntax_dirty_line(self, tmp_path: Path) -> None:
         source = tmp_path / "bad.json"
         source.write_text('{"a": 1,\n', encoding="utf-8")
@@ -108,6 +131,57 @@ class TestToolDiagnostics:
         assert result.items[0].line == 3
         assert result.items[0].category == "syntax"
 
+    def test_tool_recovers_and_reports_later_syntax_lines(
+        self, tmp_path: Path,
+    ) -> None:
+        source = tmp_path / "bad.cc"
+        source.write_text(
+            "\n".join([
+                "int first() {",
+                "  BAD_ONE",
+                "}",
+                "int second() {",
+                "  BAD_TWO",
+                "}",
+            ]),
+            encoding="utf-8",
+        )
+
+        def run(
+            cmd: list[str], cwd: Path, timeout_s: int,
+        ) -> CommandRunResult:
+            checked = Path(cmd[-1])
+            text = checked.read_text(encoding="utf-8")
+            assert cwd == checked.parent
+            assert timeout_s == 10
+            if "BAD_ONE" in text:
+                return CommandRunResult(
+                    returncode=1,
+                    stderr=(
+                        "bad.cc:2:3: error: expected ';' before 'BAD_ONE'"
+                    ),
+                )
+            if "BAD_TWO" in text:
+                return CommandRunResult(
+                    returncode=1,
+                    stderr=(
+                        "bad.cc:5:3: error: expected ';' before 'BAD_TWO'"
+                    ),
+                )
+            return CommandRunResult(returncode=0)
+
+        runner = CodeDiagnosticRunner(
+            tool_resolver=lambda _tool: "/usr/bin/tool",
+            command_runner=run,
+        )
+        result = runner.run_target(_target(source, "cpp"))
+
+        assert result.status == "syntax_dirty"
+        assert result.category == "syntax"
+        assert result.failing_lines == [2, 5]
+        assert result.syntax_errors == 2
+        assert [item.line for item in result.items] == [2, 5]
+
     def test_tool_semantic_failure_classified(self, tmp_path: Path) -> None:
         source = tmp_path / "bad.cc"
         source.write_text("UnknownType x;\n", encoding="utf-8")
@@ -157,6 +231,94 @@ class TestToolDiagnostics:
         assert result.dependency_errors == 1
         assert result.syntax_errors == 0
         assert result.items[0].code == "missing_include"
+
+    def test_cpp_missing_include_recovers_later_syntax_error(
+        self, tmp_path: Path,
+    ) -> None:
+        source = tmp_path / "bad.cc"
+        source.write_text(
+            '#include "missing.h"\nint main() {\n  BAD_TOKEN\n}\n',
+            encoding="utf-8",
+        )
+
+        def run(
+            cmd: list[str], cwd: Path, timeout_s: int,
+        ) -> CommandRunResult:
+            checked = Path(cmd[-1])
+            text = checked.read_text(encoding="utf-8")
+            assert cwd == checked.parent
+            assert timeout_s == 10
+            has_missing_stub = any(
+                Path(cmd[index + 1], "missing.h").exists()
+                for index, part in enumerate(cmd[:-1])
+                if part == "-I"
+            )
+            if '#include "missing.h"' in text and not has_missing_stub:
+                return CommandRunResult(
+                    returncode=1,
+                    stderr=(
+                        "bad.cc:1:10: fatal error: missing.h: "
+                        "No such file or directory"
+                    ),
+                )
+            if "BAD_TOKEN" in text:
+                return CommandRunResult(
+                    returncode=1,
+                    stderr="bad.cc:3:3: error: expected ';' before 'BAD_TOKEN'",
+                )
+            return CommandRunResult(returncode=0)
+
+        runner = CodeDiagnosticRunner(
+            tool_resolver=lambda _tool: "/usr/bin/tool",
+            command_runner=run,
+        )
+        result = runner.run_target(_target(source, "cpp"))
+
+        assert result.status == "syntax_dirty"
+        assert result.failing_lines == [1, 3]
+        assert result.dependency_errors == 1
+        assert result.syntax_errors == 1
+        assert [item.category for item in result.items] == ["dependency", "syntax"]
+
+    def test_cpp_ocr_chinese_noise_marked_even_when_dependencies_block(
+        self, tmp_path: Path,
+    ) -> None:
+        source = tmp_path / "bad.cc"
+        source.write_text(
+            '#include "missing.h"\n'
+            "// 注释里的中文不应标为语法错误 王\n"
+            "if(hEglImage 二 EGL_NO_IMAGE_KHR){ 王\n",
+            encoding="utf-8",
+        )
+
+        def run(
+            cmd: list[str], cwd: Path, timeout_s: int,
+        ) -> CommandRunResult:
+            checked = Path(cmd[-1])
+            assert cwd == checked.parent
+            assert timeout_s == 10
+            return CommandRunResult(
+                returncode=1,
+                stderr=(
+                    f"{checked.name}:1:10: fatal error: missing.h: "
+                    "No such file or directory"
+                ),
+            )
+
+        runner = CodeDiagnosticRunner(
+            tool_resolver=lambda _tool: "/usr/bin/tool",
+            command_runner=run,
+        )
+        result = runner.run_target(_target(source, "cpp"))
+
+        assert result.status == "syntax_dirty"
+        assert result.dependency_errors == 1
+        assert result.syntax_errors == 1
+        assert result.failing_lines == [1, 3]
+        assert [(item.line, item.code) for item in result.items] == [
+            (1, "missing_include"),
+            (3, "ocr_noise_non_ascii"),
+        ]
 
     def test_cpp_include_root_is_passed_to_command(
         self, tmp_path: Path,
