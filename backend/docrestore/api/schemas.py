@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class LLMConfigRequest(BaseModel):
@@ -105,6 +105,42 @@ class UpdateCodeFileRequest(BaseModel):
     """更新代码模式源文件内容"""
 
     content: str
+
+
+class DiagnoseCodeFileRequest(BaseModel):
+    """诊断代码模式源文件草稿内容"""
+
+    file_path: str
+    content: str
+
+
+class CodeDiagnosticItemResponse(BaseModel):
+    """代码诊断单条行级标注"""
+
+    line: int
+    column: int = 0
+    severity: str = "error"
+    category: str = "syntax"
+    code: str = ""
+    message: str = ""
+    source: str = ""
+
+
+class CodeDiagnosticResponse(BaseModel):
+    """代码诊断响应"""
+
+    path: str
+    language: str
+    status: str
+    category: str
+    summary: str = ""
+    failing_lines: list[int] = Field(default_factory=list)
+    syntax_errors: int = 0
+    semantic_errors: int = 0
+    dependency_errors: int = 0
+    items: list[CodeDiagnosticItemResponse] = Field(default_factory=list)
+    tool: str = ""
+    duration_ms: int = 0
 
 
 class ProgressResponse(BaseModel):

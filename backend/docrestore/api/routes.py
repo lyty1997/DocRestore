@@ -37,8 +37,10 @@ from docrestore.api.auth import require_auth_ws
 from docrestore.api.schemas import (
     ActionResponse,
     BrowseDirsResponse,
+    CodeDiagnosticResponse,
     CreateTaskRequest,
     CustomSensitiveWord,
+    DiagnoseCodeFileRequest,
     DirEntry,
     GPUInfoResponse,
     GPUListResponse,
@@ -638,6 +640,53 @@ async def get_task_code_file(
     return Response(content=content, media_type="text/plain; charset=utf-8")
 
 
+@router.post(
+    "/tasks/{task_id}/code-diagnostics",
+    response_model=CodeDiagnosticResponse,
+)
+async def diagnose_task_code_file(
+    task_id: str,
+    req: DiagnoseCodeFileRequest,
+) -> CodeDiagnosticResponse:
+    """对代码模式源文件草稿做只读实时诊断。"""
+    from docrestore.processing.code_diagnostics import diagnose_text
+
+    manager = _get_manager()
+    task = manager.get_task(task_id)
+    if task is None:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
+
+    rel = _validate_code_file_path(req.file_path)
+    if rel is None:
+        raise ApiBusinessError(
+            APIErrorCode.FILE_NOT_FOUND, 404, "文件不存在",
+        )
+
+    output_dir = Path(task.output_dir)
+    files_root = (output_dir / "files").resolve(strict=False)
+    target = (files_root / Path(*rel.parts)).resolve(strict=False)
+    if (
+        not files_root.is_dir()
+        or not target.is_relative_to(files_root)
+        or not target.is_file()
+    ):
+        raise ApiBusinessError(
+            APIErrorCode.FILE_NOT_FOUND, 404, "文件不存在",
+        )
+
+    language = _code_file_language_from_index(output_dir, rel)
+    diagnostic = await asyncio.to_thread(
+        diagnose_text,
+        path=rel.as_posix(),
+        language=language,
+        text=req.content,
+        include_root=files_root,
+    )
+    return CodeDiagnosticResponse.model_validate(diagnostic.to_index_dict())
+
+
 @router.put(
     "/tasks/{task_id}/files/{file_path:path}",
     response_model=ActionResponse,
@@ -749,6 +798,32 @@ def _update_code_index_after_write(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+
+
+def _code_file_language_from_index(
+    output_dir: Path,
+    rel: PurePosixPath,
+) -> str | None:
+    """从 files-index 读取代码语言，索引异常时交给诊断器按扩展名推断。"""
+    index_path = output_dir / "files-index.json"
+    if not index_path.is_file():
+        return None
+    try:
+        data: object = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, list):
+        return None
+
+    rel_path = rel.as_posix()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        if item.get("path") != rel_path:
+            continue
+        language = item.get("language")
+        return language if isinstance(language, str) and language else None
+    return None
 
 
 @router.get("/tasks/{task_id}/download")
