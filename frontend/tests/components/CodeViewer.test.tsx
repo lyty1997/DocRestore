@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  diagnoseCodeFileContent,
   getCodeFileContent,
   getFilesIndex,
   updateCodeFileContent,
@@ -12,6 +13,7 @@ import { CodeViewer } from "../../src/components/CodeViewer";
 import { LanguageProvider } from "../../src/i18n";
 
 vi.mock("../../src/api/client", () => ({
+  diagnoseCodeFileContent: vi.fn(),
   getCodeFileContent: vi.fn(),
   getFilesIndex: vi.fn(),
   getSourceImageUrl: vi.fn((taskId: string, filename: string): string =>
@@ -20,6 +22,7 @@ vi.mock("../../src/api/client", () => ({
   updateCodeFileContent: vi.fn(),
 }));
 
+const diagnoseCodeFileContentMock = vi.mocked(diagnoseCodeFileContent);
 const getFilesIndexMock = vi.mocked(getFilesIndex);
 const getCodeFileContentMock = vi.mocked(getCodeFileContent);
 const updateCodeFileContentMock = vi.mocked(updateCodeFileContent);
@@ -37,6 +40,20 @@ function renderViewer(index: FilesIndex, content?: string): void {
       ].join("\n"),
   );
   updateCodeFileContentMock.mockResolvedValue({ task_id: "task-1" });
+  diagnoseCodeFileContentMock.mockResolvedValue({
+    path: "src/foo.cc",
+    language: "cpp",
+    status: "syntax_clean",
+    category: "syntax",
+    summary: "",
+    failing_lines: [],
+    syntax_errors: 0,
+    semantic_errors: 0,
+    dependency_errors: 0,
+    items: [],
+    tool: "g++",
+    duration_ms: 1,
+  });
 
   render(
     <LanguageProvider>
@@ -59,6 +76,7 @@ function getRequiredElement(selector: string): Element {
 describe("CodeViewer", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    globalThis.localStorage.clear();
   });
 
   afterEach(() => {
@@ -212,6 +230,235 @@ describe("CodeViewer", () => {
     );
     expect(line.className).toContain("has-dependency-diagnostic");
     expect(line.getAttribute("title")).toContain("missing.h");
+  });
+
+  it("使用 diagnostic.items 渲染多处语法红色波浪线", async () => {
+    renderViewer(
+      [
+        {
+          path: "src/foo.cc",
+          filename: "foo.cc",
+          language: "cpp",
+          source_pages: ["DSC1.col0"],
+          source_page_ranges: [],
+          line_count: 5,
+          line_no_range: [20, 24],
+          flags: [],
+          compile_status: "failed",
+          diagnostic: {
+            path: "src/foo.cc",
+            language: "cpp",
+            status: "syntax_dirty",
+            category: "syntax",
+            summary: "multiple syntax errors",
+            failing_lines: [21, 24],
+            syntax_errors: 2,
+            semantic_errors: 0,
+            dependency_errors: 0,
+            items: [
+              {
+                line: 21,
+                column: 3,
+                severity: "error",
+                category: "syntax",
+                code: "syntax_error",
+                message: "expected ';'",
+                source: "g++",
+              },
+              {
+                line: 24,
+                column: 3,
+                severity: "error",
+                category: "syntax",
+                code: "syntax_error",
+                message: "expected expression",
+                source: "g++",
+              },
+            ],
+            tool: "g++",
+            duration_ms: 1,
+          },
+        },
+      ],
+      [
+        "int first() {",
+        "  BAD_ONE",
+        "}",
+        "int second() {",
+        "  BAD_TWO",
+      ].join("\n"),
+    );
+
+    await screen.findByText("src/foo.cc");
+
+    const firstLine = await waitFor(() =>
+      getRequiredElement('.code-line[data-line="21"]'),
+    );
+    const secondLine = getRequiredElement('.code-line[data-line="24"]');
+
+    expect(firstLine.className).toContain("has-syntax-diagnostic");
+    expect(secondLine.className).toContain("has-syntax-diagnostic");
+    expect(firstLine.getAttribute("title")).toContain("expected ';'");
+    expect(secondLine.getAttribute("title")).toContain("expected expression");
+  });
+
+  it("编辑态实时诊断并支持接受单条诊断", async () => {
+    const user = userEvent.setup();
+    renderViewer(
+      [
+        {
+          path: "src/foo.cc",
+          filename: "foo.cc",
+          language: "cpp",
+          source_pages: [],
+          source_page_ranges: [],
+          line_count: 2,
+          line_no_range: [1, 2],
+          flags: [],
+        },
+      ],
+      '#include "missing.h"\nint main() { return 0; }',
+    );
+    diagnoseCodeFileContentMock.mockResolvedValue({
+      path: "src/foo.cc",
+      language: "cpp",
+      status: "dependency_dirty",
+      category: "dependency",
+      summary: "missing include",
+      failing_lines: [1],
+      syntax_errors: 0,
+      semantic_errors: 0,
+      dependency_errors: 1,
+      items: [{
+        line: 1,
+        column: 10,
+        severity: "warn",
+        category: "dependency",
+        code: "missing_include",
+        message: "missing.h: No such file or directory",
+        source: "g++",
+      }],
+      tool: "g++",
+      duration_ms: 1,
+    });
+
+    await screen.findByText("src/foo.cc");
+    await user.click(screen.getByRole("button", { name: "编辑" }));
+
+    await waitFor(() => {
+      expect(diagnoseCodeFileContentMock).toHaveBeenCalledWith(
+        "task-1",
+        "src/foo.cc",
+        '#include "missing.h"\nint main() { return 0; }',
+      );
+    });
+
+    expect(
+      await screen.findByText("dependency: missing.h: No such file or directory"),
+    ).toBeTruthy();
+    expect(
+      getRequiredElement(".code-editor-edit-gutter .code-line-number")
+        .className,
+    ).toContain(
+      "has-dependency-diagnostic",
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "接受此诊断" }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.queryByText("dependency: missing.h: No such file or directory"),
+      ).toBeNull();
+    });
+    expect(
+      getRequiredElement(".code-editor-edit-gutter .code-line-number")
+        .className,
+    ).not.toContain(
+      "has-dependency-diagnostic",
+    );
+  });
+
+  it("接受 include 依赖问题后仍显示后续语法诊断", async () => {
+    const user = userEvent.setup();
+    renderViewer(
+      [
+        {
+          path: "src/foo.cc",
+          filename: "foo.cc",
+          language: "cpp",
+          source_pages: [],
+          source_page_ranges: [],
+          line_count: 3,
+          line_no_range: [1, 3],
+          flags: [],
+        },
+      ],
+      '#include "missing.h"\nint ok = 1;\nif(hEglImage 二 EGL_NO_IMAGE_KHR){ 王',
+    );
+    diagnoseCodeFileContentMock.mockResolvedValue({
+      path: "src/foo.cc",
+      language: "cpp",
+      status: "syntax_dirty",
+      category: "syntax",
+      summary: "include and ocr noise",
+      failing_lines: [1, 3],
+      syntax_errors: 1,
+      semantic_errors: 0,
+      dependency_errors: 1,
+      items: [
+        {
+          line: 1,
+          column: 10,
+          severity: "warn",
+          category: "dependency",
+          code: "missing_include",
+          message: "missing.h: No such file or directory",
+          source: "g++",
+        },
+        {
+          line: 3,
+          column: 14,
+          severity: "error",
+          category: "syntax",
+          code: "ocr_noise_non_ascii",
+          message: "OCR noise character '二' appears in code",
+          source: "ocr-noise-scan",
+        },
+      ],
+      tool: "g++",
+      duration_ms: 1,
+    });
+
+    await screen.findByText("src/foo.cc");
+    await user.click(screen.getByRole("button", { name: "编辑" }));
+
+    expect(
+      await screen.findByText("dependency: missing.h: No such file or directory"),
+    ).toBeTruthy();
+    expect(
+      await screen.findByText("syntax: OCR noise character '二' appears in code"),
+    ).toBeTruthy();
+
+    const acceptButtons = screen.getAllByRole(
+      "button",
+      { name: "接受此诊断" },
+    );
+    const firstAcceptButton = acceptButtons[0];
+    if (firstAcceptButton === undefined) {
+      throw new Error("未找到接受诊断按钮");
+    }
+    await user.click(firstAcceptButton);
+
+    await waitFor(() => {
+      expect(
+        screen.queryByText("dependency: missing.h: No such file or directory"),
+      ).toBeNull();
+    });
+    expect(
+      screen.getByText("syntax: OCR noise character '二' appears in code"),
+    ).toBeTruthy();
   });
 
   it("支持在线编辑并保存当前代码文件", async () => {

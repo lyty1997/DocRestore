@@ -258,6 +258,11 @@ export const CodeDiagnosticSchema = z.object({
 });
 export type CodeDiagnostic = z.infer<typeof CodeDiagnosticSchema>;
 
+export const DiagnoseCodeFileResponseSchema = CodeDiagnosticSchema;
+export type DiagnoseCodeFileResponse = z.infer<
+  typeof DiagnoseCodeFileResponseSchema
+>;
+
 export const FilesIndexEntrySchema = z.object({
   path: z.string(),
   filename: z.string(),

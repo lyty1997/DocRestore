@@ -14,6 +14,7 @@ import {
   TaskResultResponseSchema,
   TaskResultsResponseSchema,
   FilesIndexSchema,
+  DiagnoseCodeFileResponseSchema,
   UploadCompleteResponseSchema,
   UploadFilesResponseSchema,
   UploadSessionFileDeleteResponseSchema,
@@ -33,6 +34,7 @@ import {
   type TaskResultResponse,
   type TaskResultsResponse,
   type FilesIndex,
+  type DiagnoseCodeFileResponse,
   type UploadCompleteResponse,
   type UploadFilesResponse,
   type UploadSessionFileDeleteResponse,
@@ -388,6 +390,20 @@ export async function updateCodeFileContent(
     body: JSON.stringify({ content }),
   });
   return handleResponse(response, ActionResponseSchema);
+}
+
+/** 对代码模式单文件草稿做实时诊断 */
+export async function diagnoseCodeFileContent(
+  taskId: string,
+  filePath: string,
+  content: string,
+): Promise<DiagnoseCodeFileResponse> {
+  const response = await fetch(`${API_BASE}/tasks/${taskId}/code-diagnostics`, {
+    method: "POST",
+    headers: apiHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ file_path: filePath, content }),
+  });
+  return handleResponse(response, DiagnoseCodeFileResponseSchema);
 }
 
 /** 获取源图片列表 */

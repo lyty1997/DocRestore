@@ -20,11 +20,13 @@ import {
 } from "react";
 
 import {
+  diagnoseCodeFileContent,
   getCodeFileContent,
   getFilesIndex,
   updateCodeFileContent,
 } from "../api/client";
 import type {
+  CodeDiagnostic,
   CodeDiagnosticItem,
   FilesIndex,
   FilesIndexEntry,
@@ -52,6 +54,13 @@ interface CodePageAnchor {
   readonly pageKey: string;
   readonly sourcePage: string;
   readonly lineIndex: number;
+}
+
+interface VisibleDiagnosticItem {
+  readonly item: CodeDiagnosticItem;
+  readonly lineIndex: number;
+  readonly lineNumber: number;
+  readonly key: string;
 }
 
 /** 把 "DSC06835.col0" 拆为 page_stem="DSC06835" */
@@ -185,10 +194,11 @@ function isCompileFailingLine(
 function diagnosticItemsForLine(
   entry: FilesIndexEntry,
   lineIndex: number,
+  diagnostic: CodeDiagnostic | undefined = entry.diagnostic,
 ): CodeDiagnosticItem[] {
   const localLineNo = lineIndex + 1;
   const displayLineNo = displayLineNumber(entry, lineIndex);
-  const items = entry.diagnostic?.items.filter(
+  const items = diagnostic?.items.filter(
     (item) => item.line === localLineNo || item.line === displayLineNo,
   ) ?? [];
   if (items.length > 0) return items;
@@ -229,6 +239,91 @@ function lineCountForContent(content: string): number {
   return content === "" ? 0 : content.split("\n").length;
 }
 
+function diagnosticStorageKey(taskId: string, path: string): string {
+  return `docrestore:accepted-diagnostics:${taskId}:${path}`;
+}
+
+function diagnosticKey(
+  taskId: string,
+  path: string,
+  item: CodeDiagnosticItem,
+  lineText: string,
+): string {
+  return [
+    taskId,
+    path,
+    item.line.toString(),
+    item.column.toString(),
+    item.category,
+    item.code,
+    item.message,
+    item.source,
+    lineText.trim(),
+  ].join("\u001F");
+}
+
+function readAcceptedDiagnosticKeys(taskId: string, path: string): Set<string> {
+  try {
+    const raw = globalThis.localStorage.getItem(
+      diagnosticStorageKey(taskId, path),
+    );
+    if (raw === null) return new Set<string>();
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set<string>();
+    return new Set(parsed.filter((item): item is string => typeof item === "string"));
+  } catch {
+    return new Set<string>();
+  }
+}
+
+function writeAcceptedDiagnosticKeys(
+  taskId: string,
+  path: string,
+  keys: ReadonlySet<string>,
+): void {
+  globalThis.localStorage.setItem(
+    diagnosticStorageKey(taskId, path),
+    JSON.stringify([...keys]),
+  );
+}
+
+function visibleDiagnosticsForContent(
+  entry: FilesIndexEntry,
+  lines: readonly string[],
+  taskId: string,
+  path: string,
+  acceptedKeys: ReadonlySet<string>,
+  diagnostic: CodeDiagnostic | undefined = entry.diagnostic,
+): VisibleDiagnosticItem[] {
+  const visible: VisibleDiagnosticItem[] = [];
+  for (const [lineIndex, lineText] of lines.entries()) {
+    const lineItems = diagnosticItemsForLine(entry, lineIndex, diagnostic);
+    for (const item of lineItems) {
+      const key = diagnosticKey(taskId, path, item, lineText);
+      if (acceptedKeys.has(key)) continue;
+      visible.push({
+        item,
+        lineIndex,
+        lineNumber: displayLineNumber(entry, lineIndex),
+        key,
+      });
+    }
+  }
+  return visible;
+}
+
+function filterAcceptedDiagnostics(
+  items: readonly CodeDiagnosticItem[],
+  lineText: string,
+  taskId: string,
+  path: string,
+  acceptedKeys: ReadonlySet<string>,
+): CodeDiagnosticItem[] {
+  return items.filter(
+    (item) => !acceptedKeys.has(diagnosticKey(taskId, path, item, lineText)),
+  );
+}
+
 export function CodeViewer({
   taskId,
   allSourceImages,
@@ -245,6 +340,16 @@ export function CodeViewer({
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | undefined>();
+  const [liveDiagnostic, setLiveDiagnostic] = useState<
+    CodeDiagnostic | undefined
+  >();
+  const [liveDiagnosticLoading, setLiveDiagnosticLoading] = useState(false);
+  const [liveDiagnosticError, setLiveDiagnosticError] = useState<
+    string | undefined
+  >();
+  const [acceptedDiagnosticKeys, setAcceptedDiagnosticKeys] = useState<
+    Set<string>
+  >(new Set<string>());
   const [contentLoading, setContentLoading] = useState(false);
   const [contentError, setContentError] = useState<string | undefined>();
   const [codeScrollEl, setCodeScrollEl] = useState<HTMLDivElement>();
@@ -277,6 +382,9 @@ export function CodeViewer({
       setContent("");
       setDraftContent("");
       setEditing(false);
+      setLiveDiagnostic(undefined);
+      setLiveDiagnosticError(undefined);
+      setAcceptedDiagnosticKeys(new Set<string>());
       return;
     }
     let cancelled = false;
@@ -289,6 +397,8 @@ export function CodeViewer({
           setContent(text);
           setDraftContent(text);
           setEditing(false);
+          setLiveDiagnostic(undefined);
+          setLiveDiagnosticError(undefined);
         }
       })
       .catch((error: unknown) => {
@@ -304,7 +414,48 @@ export function CodeViewer({
     };
   }, [taskId, selectedPath]);
 
+  useEffect(() => {
+    if (selectedPath === undefined) {
+      setAcceptedDiagnosticKeys(new Set<string>());
+      return;
+    }
+    setAcceptedDiagnosticKeys(readAcceptedDiagnosticKeys(taskId, selectedPath));
+  }, [selectedPath, taskId]);
+
   const selectedEntry = index?.find((e) => e.path === selectedPath);
+
+  useEffect(() => {
+    if (!editing || selectedPath === undefined || selectedEntry === undefined) {
+      setLiveDiagnostic(undefined);
+      setLiveDiagnosticError(undefined);
+      setLiveDiagnosticLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLiveDiagnosticLoading(true);
+    setLiveDiagnosticError(undefined);
+    const timeoutId = globalThis.setTimeout(() => {
+      void diagnoseCodeFileContent(taskId, selectedPath, draftContent)
+        .then((diagnostic) => {
+          if (!cancelled) setLiveDiagnostic(diagnostic);
+        })
+        .catch((error: unknown) => {
+          if (cancelled) return;
+          const msg = error instanceof Error ? error.message : String(error);
+          setLiveDiagnosticError(msg);
+        })
+        .finally(() => {
+          if (!cancelled) setLiveDiagnosticLoading(false);
+        });
+    }, 350);
+
+    return () => {
+      cancelled = true;
+      globalThis.clearTimeout(timeoutId);
+    };
+  }, [draftContent, editing, selectedEntry, selectedPath, taskId]);
+
   const selectedImages = useMemo(
     () =>
       selectedEntry === undefined
@@ -339,6 +490,36 @@ export function CodeViewer({
   const contentLines = splitEditorLines(content);
   const draftLines = splitEditorLines(draftContent);
   const dirty = editing && draftContent !== content;
+  const activeDiagnostic = editing ? liveDiagnostic : selectedEntry?.diagnostic;
+  const activeLines = editing ? draftLines : contentLines;
+  const visibleDiagnostics =
+    selectedEntry === undefined || selectedPath === undefined
+      ? []
+      : visibleDiagnosticsForContent(
+          selectedEntry,
+          activeLines,
+          taskId,
+          selectedPath,
+          acceptedDiagnosticKeys,
+          activeDiagnostic,
+        );
+
+  const acceptDiagnostic = (key: string): void => {
+    if (selectedPath === undefined) return;
+    setAcceptedDiagnosticKeys((prev) => {
+      const next = new Set(prev);
+      next.add(key);
+      writeAcceptedDiagnosticKeys(taskId, selectedPath, next);
+      return next;
+    });
+  };
+
+  const clearAcceptedDiagnostics = (): void => {
+    if (selectedPath === undefined) return;
+    const next = new Set<string>();
+    writeAcceptedDiagnosticKeys(taskId, selectedPath, next);
+    setAcceptedDiagnosticKeys(next);
+  };
 
   const handleSaveCode = async (): Promise<void> => {
     if (selectedPath === undefined || selectedEntry === undefined) return;
@@ -363,6 +544,17 @@ export function CodeViewer({
                           lineCountForContent(draftContent) -
                           1,
                       ],
+                ...(liveDiagnostic === undefined
+                  ? {}
+                  : {
+                      diagnostic: liveDiagnostic,
+                      compile_status:
+                        liveDiagnostic.status === "syntax_clean"
+                          ? "passed"
+                          : "failed",
+                      compile_failing_lines: liveDiagnostic.failing_lines,
+                      compile_error: liveDiagnostic.summary,
+                    }),
               }
             : entry,
         ),
@@ -534,16 +726,25 @@ export function CodeViewer({
         {!contentLoading && contentError === undefined && (
           <>
             {editing && selectedEntry !== undefined ? (
-              <div className="code-editor-edit-wrap">
-                <div
-                  ref={editGutterRef}
-                  className="code-editor-edit-gutter"
-                  aria-hidden="true"
-                >
-                  {draftLines.map((_, lineIndex) => {
-                      const lineItems = diagnosticItemsForLine(
+              <>
+                <div className="code-editor-edit-wrap">
+                  <div
+                    ref={editGutterRef}
+                    className="code-editor-edit-gutter"
+                    aria-hidden="true"
+                  >
+                    {draftLines.map((_, lineIndex) => {
+                      const rawLineItems = diagnosticItemsForLine(
                         selectedEntry,
                         lineIndex,
+                        liveDiagnostic,
+                      );
+                      const lineItems = filterAcceptedDiagnostics(
+                        rawLineItems,
+                        draftLines[lineIndex] ?? "",
+                        taskId,
+                        selectedEntry.path,
+                        acceptedDiagnosticKeys,
                       );
                       return (
                         <div
@@ -558,18 +759,83 @@ export function CodeViewer({
                         </div>
                       );
                     })}
+                  </div>
+                  <textarea
+                    className="code-editor-textarea"
+                    value={draftContent}
+                    spellCheck={false}
+                    aria-label={t("codeViewer.editAreaLabel")}
+                    onChange={(event) => {
+                      setDraftContent(event.currentTarget.value);
+                    }}
+                    onScroll={syncEditGutterScroll}
+                  />
                 </div>
-                <textarea
-                  className="code-editor-textarea"
-                  value={draftContent}
-                  spellCheck={false}
-                  aria-label={t("codeViewer.editAreaLabel")}
-                  onChange={(event) => {
-                    setDraftContent(event.currentTarget.value);
-                  }}
-                  onScroll={syncEditGutterScroll}
-                />
-              </div>
+                {(liveDiagnosticLoading ||
+                  liveDiagnosticError !== undefined ||
+                  visibleDiagnostics.length > 0 ||
+                  acceptedDiagnosticKeys.size > 0) && (
+                  <div className="code-editor-diagnostics">
+                    <div className="code-editor-diagnostics-header">
+                      <strong>
+                        {t("codeViewer.diagnosticsTitle", {
+                          count: visibleDiagnostics.length,
+                        })}
+                      </strong>
+                      {liveDiagnosticLoading && (
+                        <span>{t("codeViewer.liveDiagnosticPending")}</span>
+                      )}
+                      {acceptedDiagnosticKeys.size > 0 && (
+                        <button
+                          type="button"
+                          className="code-editor-diagnostic-action"
+                          onClick={clearAcceptedDiagnostics}
+                        >
+                          {t("codeViewer.clearAcceptedDiagnostics")}
+                        </button>
+                      )}
+                    </div>
+                    {liveDiagnosticError !== undefined && (
+                      <div className="code-editor-diagnostic-error">
+                        {t("codeViewer.liveDiagnosticError")}:{" "}
+                        {liveDiagnosticError}
+                      </div>
+                    )}
+                    {acceptedDiagnosticKeys.size > 0 && (
+                      <div className="code-editor-diagnostic-muted">
+                        {t("codeViewer.acceptedDiagnostics", {
+                          count: acceptedDiagnosticKeys.size,
+                        })}
+                      </div>
+                    )}
+                    {visibleDiagnostics.map(({ item, lineNumber, key }) => (
+                      <div
+                        key={key}
+                        className={
+                          "code-editor-diagnostic-item" +
+                          diagnosticClass([item])
+                        }
+                      >
+                        <span className="code-editor-diagnostic-line">
+                          {lineNumber.toString()}
+                        </span>
+                        <span className="code-editor-diagnostic-message">
+                          {diagnosticTitle([item])}
+                        </span>
+                        <button
+                          type="button"
+                          className="code-editor-diagnostic-action"
+                          onClick={() => {
+                            acceptDiagnostic(key);
+                          }}
+                        >
+                          {t("codeViewer.acceptDiagnostic")}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
             ) : (
               <div
                 ref={(el) => { setCodeScrollEl(el ?? undefined); }}
@@ -577,9 +843,16 @@ export function CodeViewer({
               >
                 {selectedEntry !== undefined &&
                   contentLines.map((line, lineIndex) => {
-                    const lineItems = diagnosticItemsForLine(
+                    const rawLineItems = diagnosticItemsForLine(
                       selectedEntry,
                       lineIndex,
+                    );
+                    const lineItems = filterAcceptedDiagnostics(
+                      rawLineItems,
+                      line,
+                      taskId,
+                      selectedEntry.path,
+                      acceptedDiagnosticKeys,
                     );
                     const lineDiagnosticClass = diagnosticClass(lineItems);
                     const lineTitle = diagnosticTitle(lineItems);
