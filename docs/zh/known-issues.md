@@ -27,6 +27,19 @@ limitations under the License.
 - 短段无法二分时，先带 `retry_hint` 对同一输入重试一次，明确要求完整保留输入内容。
 - 重试仍截断或调用失败时回退原文，并保留 `truncated=True` 与质量报告，避免截断输出进入最终文档。
 
+## CodeLLMRefiner 整文件输出截断
+
+现象：
+- 代码模式日志出现 `CodeLLMRefiner 输出被 token 上限截断（finish_reason=length, raw_len=0...）`。
+- 即使显式调大 `max_tokens`，provider 也可能因为上下文/输出预算直接返回空内容并标记 `length`。
+- 整个 `SourceFile` 回退原文会导致大块代码完全没有获得字符级 LLM 修复。
+
+处理策略：
+- `refine` 模式不要整文件硬顶 token；按行和字符数切成小块，每块独立调用 LLM。
+- 每个 chunk 仍强制行数守恒；单个 chunk 截断、JSON 解析失败或行数变化时，只回退该 chunk，后续 chunk 继续处理。
+- 汇总时拼回全部 chunk，并保留 `code.refine.chunked=N`、`code.refine.chunk_truncated=i` 等 flags 供质量报告和前端审查。
+- `rewrite` 模式允许重排行，不做自动切块；需要依赖诊断窗口或人工小范围修复。
+
 ## LLM 误把重叠拍照页整页删除
 
 现象：
@@ -70,6 +83,22 @@ limitations under the License.
 - 分组质量应结合路径候选置信度、行号区间连续性、column 来源、gap 折叠、语法/编译诊断和 UI 噪声命中判断。
 - 大文件允许合并很多页，但每个 column segment 应保留来源页、行号范围、路径候选和 flags，供质量报告和前端 review 审计。
 - 参考源码匹配只能作为可选增强，不应把代码模式绑定到 Chromium、C/C++ 或任何固定项目结构。
+
+## 代码语法诊断不能只停在首个错误
+
+现象：
+- `ast.parse`、`node --check`、`gcc/g++ -fsyntax-only` 等解析/编译工具遇到严重语法错误时，可能只返回第一处错误。
+- `#include` 缺失头文件属于依赖错误，但会阻挡 C/C++ 编译器继续暴露后续 OCR 造成的真实语法错误。
+- 某些 OCR 噪声（例如代码表达式里的 `二`、孤立 `王`、全角括号/逗号）不一定能被编译器走到；如果前面有依赖或语义错误，纯编译器诊断会漏标。
+- 代码模式前端依赖 `diagnostic.items` 渲染红色波浪线；如果后端只产出第一条 item，后续独立 OCR 语法错误不会被标注。
+
+处理策略：
+- 诊断器第一次发现语法错误后，只在临时副本中屏蔽已定位的语法错误行，重新运行同一解析器/工具，继续收集后续独立语法错误。
+- 对缺失 include 这类 dependency，不能只按行屏蔽；应从编译器错误中提取缺失头文件路径，在临时 include root 里生成 stub header，并把该 root 追加到编译器 `-I` 后继续复诊断。
+- 对 C/C++、Python、JS/TS、Go、Rust 等代码文本额外做轻量词法扫描，忽略注释和字符串，标出代码区中的 CJK / 全角字符 OCR 噪声，避免被编译器短路吞掉。
+- Python 复诊断屏蔽疑似复合语句头时，同时清空其缩进 suite，避免残留缩进错误再次阻塞后续顶层错误。
+- 复诊断不得修改用户文件；最多迭代有限次数，无法恢复时保留已收集的诊断。
+- 前端继续以 `diagnostic.items` 为唯一行级标注源，多条 syntax item 应分别渲染红色波浪线和 tooltip；编辑态实时诊断结果可被用户按条接受/隐藏。
 
 ## 多子文档预览源图过滤导致滚动同步失效
 

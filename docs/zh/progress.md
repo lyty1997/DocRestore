@@ -405,3 +405,102 @@
 遗留问题：
 - 第二轮 stub header 复诊断尚未实现；当前只把真实缺失依赖降级为审查标注。后续可在 dependency pass 后生成空 stub 继续暴露被 include 阻挡的真实语法 OCR 错误。
 - GN/BUILD 文件仍缺专门诊断与文件名大小写归一，可作为下一步独立优化。
+
+## 2026-05-19 12:28 CST - 代码模式多语法错误复诊断
+
+完成内容：
+- `CodeDiagnosticRunner` 增加恢复式复诊断：首轮语法错误后，在临时副本中屏蔽已定位错误行并重复运行解析器/工具，继续收集后续独立语法错误。
+- Python/JSON/TOML 解析型诊断改为多轮收集；Python 对疑似复合语句头会同步清空缩进 suite，避免残留缩进错误遮挡后续顶层错误。
+- C/C++、JS/TS、Go、Rust 等外部工具诊断在语法错误场景下复跑临时副本，合并去重后的多条 `diagnostic.items`。
+- 前端 `CodeViewer` 增加多条 syntax diagnostic 回归测试，确认多处红色波浪线和 tooltip 都能渲染。
+- `docs/zh/known-issues.md` 新增“代码语法诊断不能只停在首个错误”条目，沉淀本次处理策略。
+
+验证：
+- `/home/lyty/work/ai/env/anaconda3/bin/python -m pytest tests/processing/test_code_diagnostics.py -q`：通过，12 passed。
+- `/home/lyty/work/ai/env/anaconda3/bin/ruff check backend/docrestore/processing/code_diagnostics.py tests/processing/test_code_diagnostics.py`：通过。
+- `./node_modules/.bin/vitest run tests/components/CodeViewer.test.tsx`：通过，6 passed。
+- `npm run lint`：通过。
+- `npm run typecheck`：通过。
+- `/home/lyty/work/ai/env/anaconda3/bin/python -m pytest tests/output/test_code_renderer.py tests/llm/test_code_repair.py -q`：通过，24 passed, 1 skipped。
+
+遗留问题：
+- 复诊断是行级恢复策略，能暴露后续独立语法错误，但对跨多行未闭合括号/字符串等强耦合错误仍可能只能保留已收集结果。
+
+## 2026-05-19 18:27 CST - 代码编辑实时诊断与可接受标注
+
+完成内容：
+- 修正复诊断策略：C/C++ 缺失 include 这类 dependency 行也会在临时副本中屏蔽后继续检查，避免只停在第一个头文件错误。
+- 新增 `POST /tasks/{task_id}/code-diagnostics`，对代码模式源文件草稿做只读实时诊断，不保存文件。
+- `CodeViewer` 编辑态增加 350ms debounce 实时语法检查；诊断结果同步到行号 gutter 和诊断列表。
+- 用户可按条“接受此诊断”，例如代码片段中可接受的缺失头文件；接受记录按任务、文件、行内容和诊断信息写入浏览器 localStorage，并可一键恢复。
+- 保存代码文件后会把当前实时诊断回写到前端索引状态，避免保存后仍显示旧诊断。
+
+验证：
+- `/home/lyty/work/ai/env/anaconda3/bin/python -m pytest tests/processing/test_code_diagnostics.py -q`：通过，13 passed。
+- `/home/lyty/work/ai/env/anaconda3/bin/ruff check backend/docrestore/processing/code_diagnostics.py backend/docrestore/api/routes.py backend/docrestore/api/schemas.py tests/processing/test_code_diagnostics.py`：通过。
+- `./node_modules/.bin/vitest run tests/components/CodeViewer.test.tsx`：通过，7 passed。
+- `npm run typecheck`：通过。
+- `npm run lint`：通过。
+- `/home/lyty/work/ai/env/anaconda3/bin/python -m pytest tests/output/test_code_renderer.py tests/llm/test_code_repair.py -q`：通过，24 passed, 1 skipped。
+- Vite + Playwright 打开 `http://127.0.0.1:5173/` 并截图 `docrestore-code-diagnostics-home.png`，控制台无 error。
+
+遗留问题：
+- 编辑态红色/黄色标注当前落在 gutter 和诊断列表；原生 textarea 内部无法直接画逐行红色波浪线，若要做到完全 IDE 式内联波浪线，需要后续替换为 CodeMirror/Monaco 等编辑器组件。
+
+## 2026-05-20 18:27 CST - OCR 中文噪声语法标注补强
+
+完成内容：
+- 复现 `/tmp/docrestore_02bca34c/files/media/gpu/openmax/gles2_dmabuf_to_egl_image_translator.cc` 漏标：当前诊断只返回 3 个缺失 include，未到第 90 行 `if(hEglImage 二 EGL_NO_IMAGE_KHR){ 王`。
+- 在工具诊断后追加不依赖编译器的 OCR 噪声词法扫描：忽略注释、块注释和字符串，只扫描代码区 CJK / 全角字符。
+- 噪声扫描结果以 `syntax` / `ocr_noise_non_ascii` 合并进 `diagnostic.items`；即使编译器被 include 或语义错误短路，也能标出代码区中文/全角 OCR 噪声。
+- 前端补充回归：接受 include 依赖诊断后，后续 OCR 噪声语法诊断仍保留显示。
+- 真实文件验证：`gles2_dmabuf_to_egl_image_translator.cc` 现在返回 line 90、column 15、`ocr_noise_non_ascii`，消息包含 `OCR noise character '二' appears in code`。
+
+验证：
+- `/home/lyty/work/ai/env/anaconda3/bin/python -m pytest tests/processing/test_code_diagnostics.py -q`：通过，14 passed。
+- `/home/lyty/work/ai/env/anaconda3/bin/ruff check backend/docrestore/processing/code_diagnostics.py tests/processing/test_code_diagnostics.py`：通过。
+- `./node_modules/.bin/vitest run tests/components/CodeViewer.test.tsx`：通过，8 passed。
+- `npm run typecheck`：通过。
+- `npm run lint`：通过。
+- `/home/lyty/work/ai/env/anaconda3/bin/python -m pytest tests/output/test_code_renderer.py tests/llm/test_code_repair.py -q`：通过，24 passed, 1 skipped。
+
+遗留问题：
+- 词法扫描目前只报每行第一个 OCR 非 ASCII 噪声字符；同一行多个噪声可通过修复第一处后再次诊断暴露。
+
+## 2026-05-20 18:35 CST - 编译器复诊断 include stub 落地
+
+完成内容：
+- 确认上一版并未真正生成缺失头文件 stub，只是错误地把 dependency 行号当作当前 `.cc` 行去屏蔽；对 include 链路里的缺失头文件无效。
+- `_collect_additional_tool_diagnostics` 改为从 `missing_include` 诊断消息提取头文件路径，在临时 `__include_stubs__` 下生成 stub header，并把该目录加入编译器 `-I`。
+- C/C++ 复诊断增加临时 prelude header，提供常见 EGL/GLuint 等占位类型，减少缺依赖造成的无效阻塞。
+- 复诊断现在会迭代新增缺失 include stub，同时继续收集编译器后续语法错误，再把 dependency 和 syntax items 合并去重。
+- 真实文件验证：`gles2_dmabuf_to_egl_image_translator.cc` 诊断从只返回 3 个 dependency，变为包含 include dependency、编译器后续 syntax errors，以及 line 90 的 `expected unqualified-id before 'if'` 和 `ocr_noise_non_ascii`。
+
+验证：
+- `/home/lyty/work/ai/env/anaconda3/bin/python -m pytest tests/processing/test_code_diagnostics.py -q`：通过，14 passed。
+- `/home/lyty/work/ai/env/anaconda3/bin/ruff check backend/docrestore/processing/code_diagnostics.py tests/processing/test_code_diagnostics.py`：通过。
+- `./node_modules/.bin/vitest run tests/components/CodeViewer.test.tsx`：通过，8 passed。
+- `npm run typecheck`：通过。
+- `npm run lint`：通过。
+- `/home/lyty/work/ai/env/anaconda3/bin/python -m pytest tests/output/test_code_renderer.py tests/llm/test_code_repair.py -q`：通过，24 passed, 1 skipped。
+
+遗留问题：
+- 生成的 stub header 只为复诊断暴露更多语法错误，不代表依赖语义真实存在；前端仍应允许用户把缺依赖标注为可接受。
+
+## 2026-05-20 19:44 CST - CodeLLMRefiner 分块避免 token 截断
+
+完成内容：
+- 修复代码模式 `CodeLLMRefiner` 整文件 refine 容易触发 `finish_reason=length, raw_len=0` 的问题。
+- `refine` 模式新增按行/字符数自动切块：超过 80 行或 3500 字符的 SourceFile 分块调用 LLM，避免输出 JSON 超出 provider token 上限。
+- 每个 chunk 仍保持行数守恒；单个 chunk 截断、JSON 失败或行数变化时，只回退该 chunk，不再导致整个 SourceFile 回退原文。
+- 分块结果会合并 corrections / unresolved，并按原文件行号偏移；flags 增加 `code.refine.chunked=N`、`code.refine.chunk_truncated=i` 等审计信息。
+- `rewrite` 模式暂不自动分块，因为 rewrite 允许重排行，盲切会破坏语义边界。
+- 已更新 `docs/zh/known-issues.md`，记录 CodeLLMRefiner 整文件截断处理策略。
+
+验证：
+- `/home/lyty/work/ai/env/anaconda3/bin/python -m pytest tests/llm/test_code_refine.py -q`：通过，21 passed。
+- `/home/lyty/work/ai/env/anaconda3/bin/python -m pytest tests/llm/test_code_refine.py tests/llm/test_code_repair.py tests/output/test_code_renderer.py tests/pipeline/test_quality_report.py -q`：通过，66 passed, 1 skipped。
+- `/home/lyty/work/ai/env/anaconda3/bin/ruff check backend/docrestore/llm/code_refine.py backend/docrestore/processing/code_diagnostics.py backend/docrestore/api/routes.py backend/docrestore/api/schemas.py tests/llm/test_code_refine.py tests/processing/test_code_diagnostics.py`：通过。
+
+遗留问题：
+- 当前分块按行数/字符数切，不做函数级语法边界识别；后续可用诊断窗口或轻量 parser 进一步按函数/类边界切分。
