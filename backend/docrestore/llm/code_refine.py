@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from docrestore.llm.base import BaseLLMRefiner
@@ -38,6 +39,9 @@ if TYPE_CHECKING:
     from docrestore.processing.code_file_grouping import SourceFile
 
 logger = logging.getLogger(__name__)
+
+_REFINE_CHUNK_MAX_CHARS = 3500
+_REFINE_CHUNK_MAX_LINES = 80
 
 
 def _line_delta(before: str, after: str) -> int:
@@ -108,6 +112,46 @@ class CodeLLMRefiner:
                 refined_text=merged,
                 flags=["code.refine.empty_input"],
             )
+        if self._mode == "refine" and _should_chunk_refine(merged):
+            return await self._refine_chunked(source)
+
+        return await self._refine_once(source, merged)
+
+    async def _refine_chunked(self, source: SourceFile) -> CodeRefineResult:
+        chunks = _split_refine_chunks(source.merged_text)
+        refined_chunks: list[str] = []
+        corrections: list[CodeCorrection] = []
+        unresolved: list[CodeUnresolved] = []
+        flags: list[str] = [f"code.refine.chunked={len(chunks)}"]
+        raw_parts: list[str] = []
+        line_offset = 0
+
+        for idx, chunk in enumerate(chunks, start=1):
+            chunk_source = replace(
+                source,
+                merged_text=chunk,
+                line_count=chunk.count("\n") + 1 if chunk else 0,
+            )
+            result = await self._refine_once(chunk_source, chunk)
+            refined_chunks.append(result.refined_text)
+            raw_parts.append(result.raw_response)
+            flags.extend(_chunk_flags(result.flags, idx))
+            corrections.extend(_offset_corrections(result.corrections, line_offset))
+            unresolved.extend(_offset_unresolved(result.unresolved, line_offset))
+            line_offset += chunk.count("\n") + 1
+
+        return CodeRefineResult(
+            refined_text="\n".join(refined_chunks),
+            corrections=corrections,
+            unresolved=unresolved,
+            flags=_dedupe_flags(flags),
+            raw_response="\n".join(part for part in raw_parts if part),
+        )
+
+    async def _refine_once(
+        self, source: SourceFile, merged: str,
+    ) -> CodeRefineResult:
+        """对一段代码做单次 LLM 修正。"""
 
         if self._mode == "rewrite":
             messages = build_code_rewrite_prompt(
@@ -304,6 +348,95 @@ def _parse_unresolved(raw: object) -> list[CodeUnresolved]:
             ))
         except (TypeError, ValueError):
             continue
+    return out
+
+
+def _should_chunk_refine(text: str) -> bool:
+    return (
+        len(text) > _REFINE_CHUNK_MAX_CHARS
+        or text.count("\n") + 1 > _REFINE_CHUNK_MAX_LINES
+    )
+
+
+def _split_refine_chunks(text: str) -> list[str]:
+    """按行切分 refine 输入，保持最终拼接行数不变。"""
+    lines = text.split("\n")
+    chunks: list[str] = []
+    current: list[str] = []
+    current_chars = 0
+
+    for line in lines:
+        next_chars = current_chars + len(line) + (1 if current else 0)
+        if (
+            current
+            and (
+                len(current) >= _REFINE_CHUNK_MAX_LINES
+                or next_chars > _REFINE_CHUNK_MAX_CHARS
+            )
+        ):
+            chunks.append("\n".join(current))
+            current = []
+            current_chars = 0
+        current.append(line)
+        current_chars += len(line) + (1 if len(current) > 1 else 0)
+
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
+def _offset_corrections(
+    corrections: list[CodeCorrection],
+    line_offset: int,
+) -> list[CodeCorrection]:
+    return [
+        CodeCorrection(
+            line=item.line + line_offset,
+            before=item.before,
+            after=item.after,
+            reason=item.reason,
+        )
+        for item in corrections
+    ]
+
+
+def _offset_unresolved(
+    unresolved: list[CodeUnresolved],
+    line_offset: int,
+) -> list[CodeUnresolved]:
+    return [
+        CodeUnresolved(
+            line=item.line + line_offset,
+            context=item.context,
+            note=item.note,
+        )
+        for item in unresolved
+    ]
+
+
+def _chunk_flags(flags: list[str], index: int) -> list[str]:
+    out: list[str] = []
+    for flag in flags:
+        out.append(flag)
+        if flag == "code.refine.truncated":
+            out.append(f"code.refine.chunk_truncated={index}")
+        elif flag.startswith("code.refine.llm_error="):
+            out.append(f"code.refine.chunk_llm_error={index}")
+        elif flag == "code.refine.json_decode_error":
+            out.append(f"code.refine.chunk_json_decode_error={index}")
+        elif flag.startswith("code.refine.line_count_mismatch="):
+            out.append(f"code.refine.chunk_line_count_mismatch={index}")
+    return out
+
+
+def _dedupe_flags(flags: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for flag in flags:
+        if flag in seen:
+            continue
+        seen.add(flag)
+        out.append(flag)
     return out
 
 

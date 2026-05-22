@@ -235,6 +235,66 @@ class TestRefineSafetyGuards:
         assert 4000 <= _C._estimate_max_tokens("a" * 10000) <= 5000
 
     @pytest.mark.asyncio
+    async def test_large_refine_input_is_chunked(self) -> None:
+        """refine 模式大 SourceFile 自动拆块，避免整文件输出截断。"""
+        original = "\n".join(f"int value_{i} = O;" for i in range(120))
+
+        async def fake_call(kwargs: dict[str, object]) -> SimpleNamespace:
+            messages = kwargs["messages"]
+            assert isinstance(messages, list)
+            prompt = messages[-1]["content"]
+            assert isinstance(prompt, str)
+            chunk = prompt.split("---\n", 1)[1]
+            refined = chunk.replace("= O;", "= 0;")
+            return _mock_response(json.dumps({
+                "corrected_code": refined,
+                "corrections": [],
+                "unresolved": [],
+            }))
+
+        base = BaseLLMRefiner(LLMConfig())
+        base._call_llm = AsyncMock(side_effect=fake_call)  # type: ignore[method-assign]
+        result = await CodeLLMRefiner(base).refine(_make_source(original))
+
+        assert base._call_llm.call_count >= 2
+        assert result.refined_text.count("\n") == original.count("\n")
+        assert "int value_119 = 0;" in result.refined_text
+        assert any(flag.startswith("code.refine.chunked=") for flag in result.flags)
+
+    @pytest.mark.asyncio
+    async def test_chunk_truncation_falls_back_only_that_chunk(self) -> None:
+        """单个 chunk 被截断时，只回退该 chunk，后续 chunk 继续精修。"""
+        original = "\n".join(f"int value_{i} = O;" for i in range(120))
+        calls = 0
+
+        async def fake_call(kwargs: dict[str, object]) -> SimpleNamespace:
+            nonlocal calls
+            calls += 1
+            messages = kwargs["messages"]
+            assert isinstance(messages, list)
+            prompt = messages[-1]["content"]
+            assert isinstance(prompt, str)
+            chunk = prompt.split("---\n", 1)[1]
+            if calls == 1:
+                return _mock_response("", finish_reason="length")
+            refined = chunk.replace("= O;", "= 0;")
+            return _mock_response(json.dumps({
+                "corrected_code": refined,
+                "corrections": [],
+                "unresolved": [],
+            }))
+
+        base = BaseLLMRefiner(LLMConfig())
+        base._call_llm = AsyncMock(side_effect=fake_call)  # type: ignore[method-assign]
+        result = await CodeLLMRefiner(base).refine(_make_source(original))
+
+        assert "code.refine.truncated" in result.flags
+        assert "code.refine.chunk_truncated=1" in result.flags
+        assert "int value_0 = O;" in result.refined_text
+        assert "int value_119 = 0;" in result.refined_text
+        assert result.refined_text.count("\n") == original.count("\n")
+
+    @pytest.mark.asyncio
     async def test_corrupt_corrections_dropped(self) -> None:
         """corrections 字段含非法项 → 跳过非法项"""
         original = "x = 0;"
