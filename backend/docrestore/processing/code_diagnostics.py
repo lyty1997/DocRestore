@@ -959,12 +959,13 @@ def _scan_ocr_noise_items(
     items: list[CodeDiagnosticItem] = []
     in_block_comment = False
     for line_no, raw_line in enumerate(lines, start=1):
-        code, in_block_comment = _code_portion_for_noise_scan(
+        code_chars, in_block_comment = _code_portion_for_noise_scan(
             raw_line, in_block_comment,
         )
-        suspicious = _first_suspicious_code_char(code)
+        suspicious = _first_suspicious_code_char(code_chars)
         if suspicious is None:
             continue
+        # column 为源行真实 1-based 列（已还原被剥离的注释/字符串偏移，B7 C23）。
         column, char = suspicious
         items.append(CodeDiagnosticItem(
             line=line_no,
@@ -984,8 +985,12 @@ def _scan_ocr_noise_items(
 def _code_portion_for_noise_scan(
     line: str,
     in_block_comment: bool,
-) -> tuple[str, bool]:
-    out: list[str] = []
+) -> tuple[list[tuple[int, str]], bool]:
+    """返回行内非注释/非字符串的代码字符及其 1-based 源列。
+
+    携带源列而非压缩后的子串下标，避免上报的 column 因剥离前缀偏移（B7 C23）。
+    """
+    out: list[tuple[int, str]] = []
     idx = 0
     quote: str | None = None
     while idx < len(line):
@@ -1016,15 +1021,17 @@ def _code_portion_for_noise_scan(
             quote = ch
             idx += 1
             continue
-        out.append(ch)
+        out.append((idx + 1, ch))
         idx += 1
-    return "".join(out), in_block_comment
+    return out, in_block_comment
 
 
-def _first_suspicious_code_char(text: str) -> tuple[int, str] | None:
-    for index, char in enumerate(text, start=1):
+def _first_suspicious_code_char(
+    chars: list[tuple[int, str]],
+) -> tuple[int, str] | None:
+    for column, char in chars:
         if _is_suspicious_code_char(char):
-            return index, char
+            return column, char
     return None
 
 

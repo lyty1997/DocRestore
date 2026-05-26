@@ -380,6 +380,32 @@ class TestToolDiagnostics:
             (3, "ocr_noise_non_ascii"),
         ]
 
+    def test_ocr_noise_column_uses_source_column(
+        self, tmp_path: Path,
+    ) -> None:
+        """噪声字符前有被剥离的字符串时，列号应是源列而非压缩子串下标（B7 C23）。"""
+        source = tmp_path / "bad.cc"
+        # 工 在源行第 13 列；旧实现会把它算成剥离 "ab" 后的子串下标 9。
+        source.write_text('  x = "ab"; 工\n', encoding="utf-8")
+
+        def run(
+            cmd: list[str], cwd: Path, timeout_s: int,
+        ) -> CommandRunResult:
+            return CommandRunResult(returncode=1, stderr="")
+
+        runner = CodeDiagnosticRunner(
+            tool_resolver=lambda _tool: "/usr/bin/g++",
+            command_runner=run,
+        )
+        result = runner.run_target(_target(source, "cpp"))
+        noise = [
+            item for item in result.items
+            if item.code == "ocr_noise_non_ascii"
+        ]
+        assert noise
+        assert noise[0].line == 1
+        assert noise[0].column == 13
+
     def test_cpp_include_root_is_passed_to_command(
         self, tmp_path: Path,
     ) -> None:
