@@ -208,6 +208,65 @@ class TestDiagnosticCodeRepairer:
         assert result.unresolved[0].note == "unclear"
         assert "code.repair.unresolved" in result.flags
 
+    @pytest.mark.asyncio
+    async def test_repair_remaps_later_window_after_line_count_change(
+        self,
+    ) -> None:
+        """前一窗口 patch 改变行数后，后续窗口 patch 应按偏移落到正确行（B7 C2）。"""
+        source = _source("x = 1\ny = 2\nz = 3\na = 4\nb = 5\nc = 6\nd = 7")
+        win1 = json.dumps({
+            "plan": "merge",
+            "dependency_assessment": "local",
+            "patch": {
+                "start_line": 1,
+                "end_line": 2,
+                "replacement_lines": ["x = 1  # merged"],
+            },
+            "unresolved": [],
+        })
+        win2 = json.dumps({
+            "plan": "fix c",
+            "dependency_assessment": "local",
+            "patch": {
+                "start_line": 6,
+                "end_line": 6,
+                "replacement_lines": ["c = 60"],
+            },
+            "unresolved": [],
+        })
+        base = BaseLLMRefiner(LLMConfig())
+        base._call_llm = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[_response(win1), _response(win2)],
+        )
+        result = await DiagnosticCodeRepairer(base, window_radius=1).repair(
+            source, [_diag(2), _diag(6)],
+        )
+        # 第一个窗口删掉一行后整体上移 1 行；第二个窗口的 patch（原文第 6 行
+        # "c = 6"）应被平移到 current 第 5 行命中，而不是错改 "d = 7"。
+        assert result.refined_text.split("\n") == [
+            "x = 1  # merged", "z = 3", "a = 4", "b = 5", "c = 60", "d = 7",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_repair_rejects_truncating_patch(self) -> None:
+        """替换行数骤减、丢失过半窗口内容的 patch 按截断拒绝、回退原文（B7 C4）。"""
+        source = _source("\n".join(f"line{i}" for i in range(1, 12)))
+        payload = json.dumps({
+            "plan": "rewrite",
+            "dependency_assessment": "local",
+            "patch": {
+                "start_line": 1,
+                "end_line": 10,
+                "replacement_lines": ["a", "b"],
+            },
+            "unresolved": [],
+        })
+        result = await DiagnosticCodeRepairer(
+            _base(payload), window_radius=8,
+        ).repair(source, [_diag(5)])
+        assert result.refined_text == source.merged_text
+        assert "code.repair.reject_truncation" in result.flags
+
 
 class TestConsistencyAudit:
     def test_audit_context_uses_editable_and_readonly_excerpts(self) -> None:
@@ -350,3 +409,39 @@ class TestConsistencyAudit:
         )
         assert result.refined_text == source.merged_text
         assert "code.audit.reject_diagnostic_worse" in result.flags
+
+    @pytest.mark.asyncio
+    async def test_audit_remaps_multiple_patches_after_line_shift(self) -> None:
+        """多个 audit patch 顺序应用时按 start_line 升序 + 偏移定位（B7 C2/C3）。"""
+        source = _source("H0ST = 1\nb = 2\nc = 3\nd = 4\nHOST = 5")
+        # 故意把 patch 乱序给出：第二个改原文第 5 行，第一个把前两行合并成一行。
+        payload = json.dumps({
+            "plan": "normalize",
+            "patches": [
+                {
+                    "start_line": 5,
+                    "end_line": 5,
+                    "replacement_lines": ["HOST = 50"],
+                    "evidence": "line5",
+                },
+                {
+                    "start_line": 1,
+                    "end_line": 2,
+                    "replacement_lines": ["HOST = 1"],
+                    "evidence": "merge top",
+                },
+            ],
+            "candidate_ranges": [],
+            "unresolved": [],
+        })
+        result = await CodeConsistencyAuditor(_base(payload)).audit(
+            source,
+            [],
+            previous_result=CodeRefineResult(refined_text=source.merged_text),
+            related_sources=[],
+        )
+        # 合并前两行后整体上移 1；第 5 行 patch 应平移到 current 第 4 行命中。
+        assert result.refined_text.split("\n") == [
+            "HOST = 1", "c = 3", "d = 4", "HOST = 50",
+        ]
+        assert "code.audit.patches=2" in result.flags

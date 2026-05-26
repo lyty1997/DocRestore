@@ -182,6 +182,10 @@ class DiagnosticCodeRepairer:
         current = original
         attempts: list[CodeRepairAttempt] = []
         original_score = _diagnostic_score(diagnostics)
+        # 已应用 patch 造成的累计行偏移。窗口之间互不重叠（_merge_line_windows
+        # 保证有间隔），故前一个 patch 只平移后续窗口的行号、不改其文本内容；
+        # patch/edit_range 都是原文行号，按偏移平移到 current 坐标系再应用（B7 C2）。
+        line_offset = 0
         for context in contexts:
             attempt = await self._repair_one_window(current, source, context)
             attempts.append(attempt)
@@ -189,7 +193,16 @@ class DiagnosticCodeRepairer:
                 flag.startswith("code.repair.reject") for flag in attempt.flags
             ):
                 continue
-            patched = apply_scoped_patch(current, context.edit_range, attempt.patch)
+            if _is_truncating_patch(attempt.patch):
+                attempts[-1] = _with_flag(
+                    attempt, "code.repair.reject_truncation",
+                )
+                continue
+            patched = apply_scoped_patch(
+                current,
+                _shift_range(context.edit_range, line_offset),
+                _shift_patch(attempt.patch, line_offset),
+            )
             if patched is None:
                 attempts[-1] = _with_flag(attempt, "code.repair.reject_scope")
                 continue
@@ -204,6 +217,7 @@ class DiagnosticCodeRepairer:
                     attempt, "code.repair.reject_diagnostic_worse",
                 )
                 continue
+            line_offset += _patch_line_delta(attempt.patch)
             current = patched
 
         if current == original:
@@ -295,7 +309,13 @@ class CodeConsistencyAuditor:
         original = source.merged_text
         current = original
         applied = 0
-        for audit_patch in attempt.patches:
+        baseline_score = _diagnostic_score(diagnostics)
+        # 多个 audit patch 顺序应用同样会移动后续 patch 的行号；按 start_line 升序
+        # 处理并按累计偏移平移到 current 坐标系（B7 C2/C3）。
+        line_offset = 0
+        for audit_patch in sorted(
+            attempt.patches, key=lambda ap: ap.patch.start_line,
+        ):
             edit_range = _range_authorizing_patch(
                 audit_patch.patch, context.editable_ranges,
             )
@@ -304,7 +324,16 @@ class CodeConsistencyAuditor:
                     attempt, "code.audit.reject_readonly_patch",
                 )
                 continue
-            patched = apply_scoped_patch(current, edit_range, audit_patch.patch)
+            if _is_truncating_patch(audit_patch.patch):
+                attempt = _with_audit_flag(
+                    attempt, "code.audit.reject_truncation",
+                )
+                continue
+            patched = apply_scoped_patch(
+                current,
+                _shift_range(edit_range, line_offset),
+                _shift_patch(audit_patch.patch, line_offset),
+            )
             if patched is None:
                 attempt = _with_audit_flag(attempt, "code.audit.reject_scope")
                 continue
@@ -314,11 +343,12 @@ class CodeConsistencyAuditor:
                 text=patched,
                 runner=self._diagnostic_runner,
             )
-            if _diagnostic_score([post]) > _diagnostic_score(diagnostics):
+            if _diagnostic_score([post]) > baseline_score:
                 attempt = _with_audit_flag(
                     attempt, "code.audit.reject_diagnostic_worse",
                 )
                 continue
+            line_offset += _patch_line_delta(audit_patch.patch)
             current = patched
             applied += 1
 
@@ -468,6 +498,41 @@ def apply_scoped_patch(
     start = patch.start_line - 1
     end = patch.end_line
     return "\n".join([*lines[:start], *patch.replacement_lines, *lines[end:]])
+
+
+def _shift_range(edit_range: CodeEditRange, offset: int) -> CodeEditRange:
+    """把原文坐标的授权窗口平移到已应用 patch 后的 current 坐标系。"""
+    return CodeEditRange(
+        edit_range.start_line + offset, edit_range.end_line + offset,
+    )
+
+
+def _shift_patch(patch: ScopedPatch, offset: int) -> ScopedPatch:
+    """把原文坐标的 patch 行号平移到 current 坐标系（替换内容不变）。"""
+    return ScopedPatch(
+        start_line=patch.start_line + offset,
+        end_line=patch.end_line + offset,
+        replacement_lines=patch.replacement_lines,
+    )
+
+
+def _patch_line_delta(patch: ScopedPatch) -> int:
+    """patch 应用后造成的行数变化（正=增行，负=减行）。"""
+    return len(patch.replacement_lines) - (patch.end_line - patch.start_line + 1)
+
+
+# scoped 修复允许行数变化（合并/拆分/补符号），但替换行数比被替换区间骤减且
+# 丢失过半内容时，多半是 LLM 把窗口"概括/截断"丢掉真实代码，按截断拒绝（B7 C4）。
+_TRUNCATION_MIN_REMOVED = 4
+
+
+def _is_truncating_patch(patch: ScopedPatch) -> bool:
+    """判断 patch 是否疑似截断/概括（丢失过半且删除行数可观）。"""
+    span = patch.end_line - patch.start_line + 1
+    removed = span - len(patch.replacement_lines)
+    if removed < _TRUNCATION_MIN_REMOVED:
+        return False
+    return len(patch.replacement_lines) * 2 < span
 
 
 def parse_repair_response(

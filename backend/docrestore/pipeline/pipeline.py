@@ -1063,6 +1063,9 @@ class Pipeline:
                 CodeConsistencyAuditor,
                 DiagnosticCodeRepairer,
             )
+            from docrestore.processing.code_diagnostics import (
+                diagnose_source_files,
+            )
 
             refine_mode = getattr(llm_cfg, "code_refine_mode", "refine")
             code_refiner = CodeLLMRefiner(base_refiner_obj, mode=refine_mode)
@@ -1088,9 +1091,18 @@ class Pipeline:
                                 if result.refined_text else 0
                             ),
                         )
+                        # repair 可能改变行数：audit 必须基于 refine 后文本重新
+                        # 诊断（授权窗口行号对齐 + 正确的接受/拒绝基线），不能沿用
+                        # 原文行号的 pre-refine 诊断把窗口打到错误行（B7 C3）。
+                        if result.refined_text != src.merged_text:
+                            audit_diagnostics = await asyncio.to_thread(
+                                diagnose_source_files, [audit_source],
+                            )
+                        else:
+                            audit_diagnostics = diagnostics
                         audit_result = await code_auditor.audit(
                             audit_source,
-                            diagnostics,
+                            audit_diagnostics,
                             previous_result=result,
                             related_sources=sources,
                             context_provider=context_provider,
