@@ -27,7 +27,7 @@ bash scripts/setup_deepseek_ocr.sh    # DeepSeek-OCR-2（备用）
 cd frontend && npm install && cd ..
 ```
 
-四个 conda 环境各司其职（详见 [docs/deployment.md](docs/deployment.md)）：
+四个 conda 环境各司其职（详见 [docs/zh/deployment.md](docs/zh/deployment.md)）：
 
 | 环境 | 用途 | GPU |
 |------|------|-----|
@@ -136,7 +136,7 @@ OPENAI_API_BASE=https://your-proxy/v1
 - `LLMConfig` — provider（cloud/local）、模型、API 地址、分段大小、截断检测、全局并发上限（`max_concurrent_requests`）
 - `OutputConfig` / `PIIConfig` — 输出格式、PII 脱敏
 
-字段说明详见 [docs/backend/data-models.md](docs/zh/backend/data-models.md)。
+字段说明详见 [docs/zh/backend/data-models.md](docs/zh/backend/data-models.md)。
 
 ## 使用
 
@@ -146,6 +146,7 @@ OPENAI_API_BASE=https://your-proxy/v1
 - 上传图片或选择服务器路径创建任务
 - WebSocket 实时进度（OCR / 清洗 / 精修 / 输出）
 - Markdown 预览（多文档子文档切换）+ 人工精修 + zip 下载
+- 代码模式任务可查看 `files-index.json`、源文件、来源图片和实时诊断标注
 - 任务历史：分页、状态筛选、取消 / 重试 / 删除
 
 ### 命令行（端到端）
@@ -160,7 +161,7 @@ python scripts/run_e2e.py \
 
 ### REST API
 
-完整接口契约见 [docs/backend/api.md](docs/zh/backend/api.md)，示例：
+完整接口契约见 [docs/zh/backend/api.md](docs/zh/backend/api.md)，示例：
 
 ```bash
 # 最小创建任务（用 .env / yaml 里的 LLM 默认值）

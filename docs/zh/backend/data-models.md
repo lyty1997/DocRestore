@@ -351,7 +351,59 @@ class PIIConfig(BaseModel):
     block_cloud_on_detect_failure: bool = True
 ```
 
-### 4.8 PipelineConfig（总配置）
+### 4.8 CodeRestoreConfig
+
+代码模式请求级配置，默认关闭。启用后 Pipeline 走 IDE 截图 → 源文件还原链路。
+
+```python
+class CodeRestoreConfig(BaseModel):
+    enable: bool = False
+    output_files_dir: str = "files"
+    file_grouping_strategy: Literal["tab_breadcrumb", "content_only"] = "tab_breadcrumb"
+    secondary_column_ocr: bool = False
+    secondary_column_ocr_scale: int = 2
+    secondary_column_ocr_padding_px: int = 6
+    secondary_column_ocr_contrast: float = 1.35
+    secondary_column_ocr_sharpness: float = 1.4
+    context_root: str = ""              # 只读参考源码根目录，默认关闭
+```
+
+当前仅 `tab_breadcrumb` 分组策略可用；`content_only` 是保留枚举，不应在开发中按已实现能力使用。
+
+### 4.9 CodeDiagnostic
+
+代码模式轻量诊断结果写入 `files-index.json` 的 `diagnostic` 字段，并通过实时诊断 API 返回给前端。
+
+```python
+@dataclass(frozen=True)
+class CodeDiagnosticItem:
+    line: int
+    column: int = 0
+    severity: str = "error"
+    category: str = "syntax"       # syntax / semantic / dependency
+    code: str = ""                 # parse_error / missing_include / ocr_noise_non_ascii 等
+    message: str = ""
+    source: str = ""               # parser 或工具名
+
+@dataclass(frozen=True)
+class CodeDiagnostic:
+    path: str
+    language: str
+    status: str                     # syntax_clean / syntax_dirty / dependency_dirty / ...
+    category: str
+    summary: str = ""
+    failing_lines: list[int] = field(default_factory=list)
+    syntax_errors: int = 0
+    semantic_errors: int = 0
+    dependency_errors: int = 0
+    items: list[CodeDiagnosticItem] = field(default_factory=list)
+    tool: str = ""
+    duration_ms: int = 0
+```
+
+旧字段 `compile_status`、`compile_failing_lines`、`compile_error` 由 `output/code_renderer.py` 从 `CodeDiagnostic` 派生，仅用于历史兼容。
+
+### 4.10 PipelineConfig（总配置）
 
 ```python
 class PipelineConfig(BaseModel):
@@ -360,8 +412,11 @@ class PipelineConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     pii: PIIConfig = Field(default_factory=PIIConfig)
+    code: CodeRestoreConfig = Field(default_factory=CodeRestoreConfig)
     db_path: str = "data/docrestore.db"    # SQLite 持久化路径
     debug: bool = True                     # 落盘中间产物到 output_dir/debug/
+    profiling_enable: bool = False         # Pipeline 全流程埋点
+    profiling_output_path: str = ""        # 空串表示 {output_dir}/profile.json
 ```
 
 > 任务并发上限从 `QueueConfig.max_concurrent_pipelines` 迁移为
@@ -376,6 +431,8 @@ class PipelineConfig(BaseModel):
 | `processing/cleaner.py` | `PageOCR` |
 | `processing/dedup.py` | `PageOCR`, `MergeResult`, `MergedDocument`, `DedupConfig` |
 | `processing/segmenter.py` | `Segment` |
+| `processing/code_file_grouping.py` | `PageColumn`, `SourceFile` |
+| `processing/code_diagnostics.py` | `CodeDiagnostic`, `CodeDiagnosticItem` |
 | `llm/cloud.py` | `LLMConfig`, `RefineContext`, `RefinedResult`, `Gap` |
 | `llm/local.py` | `LLMConfig`, `RefineContext`, `RefinedResult`, `Gap` |
 | `privacy/` | `PIIConfig`, `RedactionRecord` |

@@ -504,3 +504,21 @@
 
 遗留问题：
 - 当前分块按行数/字符数切，不做函数级语法边界识别；后续可用诊断窗口或轻量 parser 进一步按函数/类边界切分。
+
+## 2026-05-22 12:36 CST - 文档事实源整理与代码模式现状同步
+
+完成内容：
+- 扫描 `docs/`、后端、前端、测试和脚本结构，确认会影响开发判断的过期点主要集中在文档入口、模块索引、代码模式 API/前端/processing 说明。
+- 更新根 README、`docs/README.md` 和 `docs/zh/README.md`，明确 `docs/zh/` 当前模块文档优先，`progress.md` 是迭代流水，AGE / references 默认是历史设计记录。
+- 更新系统架构和后端索引，把代码模式当前链路补齐为 `PageOCR.text_lines` → IDE 布局 → 代码栏组装 → SourceFile 分组 → LLM 精修/修复 → 轻量诊断 → `files/` / `files-index.json`。
+- 更新 `processing.md`、`data-models.md`、`api.md` 和 `frontend/features.md`，补齐 `CodeRestoreConfig`、`CodeDiagnostic`、代码模式文件 API、实时诊断 API、CodeViewer 编辑态诊断与接受诊断机制。
+- 修正根 README 和历史专题文档中的旧链接，为 AGE-8 / AGE-58 文档加历史状态提示，并更新 `CodeViewer.tsx` 顶部注释，避免旧描述影响代码开发。
+
+验证：
+- `rg --files docs backend frontend tests scripts .codex`：完成工程结构扫描。
+- `git diff --check`：通过。
+- `npm run typecheck`：通过。
+
+遗留问题：
+- 英文文档仍有较多历史 AGE / references 表述，本次只在双语总入口标明事实源优先级；后续如需要对外发布英文文档，应单独同步当前代码模式 API 和前端说明。
+- AGE 历史文档未逐篇改写，保留为设计记录；开发时仍应以模块文档和代码为准。

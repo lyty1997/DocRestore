@@ -1,5 +1,7 @@
 # AGE-8 设计：IDE 代码照片 → 源文件还原
 
+> 历史设计记录：本文保留 AGE-8 阶段的方案、实验数据和当时的“待实施”描述。当前代码模式事实源请以 `processing.md`、`api.md`、`../frontend/features.md` 和代码实现为准。
+
 **状态**：v2 方案 Phase 1.2 已落地（AGE-53 ✅），其余 Phase 1 实施中
 **Linear**：[AGE-8](https://linear.app/axiom-mind/issue/AGE-8/ide-代码照片-源文件还原)
 **输入**：`test_images/Chromium_VDA_code/`（NAS 全 272 张 IDE 截图，VSCode 暗色主题）
@@ -333,7 +335,7 @@ API 层：`POST /tasks` 加 `code: CodeRestoreConfig | None`，前端 TaskForm �
 ## 10. 引用
 
 - 本文档：`docs/zh/backend/age-8-ide-code.md`
-- 进度：`docs/progress.md`（2026-04-25 节）
+- 进度：`../progress.md`（2026-04-25 节）
 - 模块：`backend/docrestore/processing/ide_layout.py`
 - 单测：`tests/processing/test_ide_layout.py`
 - 实测脚本：`scripts/age8_probe_basic_ocr.py` / `age8_analyze_line_layout.py` / `age8_validate_full_dataset.py`

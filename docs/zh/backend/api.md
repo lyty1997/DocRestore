@@ -25,6 +25,7 @@ API 层对外暴露 REST API 与 WebSocket：
 - 获取最终结果（markdown + 输出路径）
 - 下载单任务结果 zip（`document.md` + `images/`）
 - 受限静态资源访问（白名单 + 路径穿越防护）
+- 代码模式文件索引、源文件读取/保存和编辑态实时诊断
 
 API 层只依赖 Pipeline 层（调度/任务管理/结果模型），不直接依赖 OCR/处理/LLM/输出等内部实现细节。
 
@@ -68,6 +69,7 @@ class LLMConfigRequest(BaseModel):
 class OCRConfigRequest(BaseModel):
     model: str | None = None               # 如 "paddle-ocr/ppocr-v4" / "deepseek/ocr-2"
     gpu_id: str | None = None              # CUDA_VISIBLE_DEVICES
+    paddle_pipeline: Literal["basic", "vl"] | None = None
     paddle_python: str | None = None
     paddle_ocr_timeout: int | None = None
     paddle_server_url: str | None = None
@@ -81,6 +83,16 @@ class PIIConfigRequest(BaseModel):
     enable: bool | None = None
     # 兼容 list[str]（纯字符串）和 list[CustomSensitiveWord]（对象）两种写法
     custom_sensitive_words: list[CustomSensitiveWord] | list[str] | None = None
+
+class CodeRestoreConfigRequest(BaseModel):
+    enable: bool | None = None
+    output_files_dir: str | None = None
+    secondary_column_ocr: bool | None = None
+    secondary_column_ocr_scale: int | None = None
+    secondary_column_ocr_padding_px: int | None = None
+    secondary_column_ocr_contrast: float | None = None
+    secondary_column_ocr_sharpness: float | None = None
+    context_root: str | None = None
 ```
 
 路由 `_to_custom_words()` 统一将两种形态转为 `list[CustomWord]`，写入 `pii_override`。
@@ -94,6 +106,7 @@ class CreateTaskRequest(BaseModel):
     llm: LLMConfigRequest | None = None
     ocr: OCRConfigRequest | None = None
     pii: PIIConfigRequest | None = None
+    code: CodeRestoreConfigRequest | None = None
 
 class ProgressResponse(BaseModel):
     stage: str; current: int; total: int; percent: float; message: str
@@ -109,6 +122,13 @@ class ActionResponse(BaseModel):
 
 class UpdateMarkdownRequest(BaseModel):
     markdown: str
+
+class UpdateCodeFileRequest(BaseModel):
+    content: str
+
+class DiagnoseCodeFileRequest(BaseModel):
+    file_path: str
+    content: str
 ```
 
 **任务结果（多文档兼容）**：
@@ -164,6 +184,33 @@ class StageServerSourceResponse(BaseModel):
 class SourceImagesResponse(BaseModel):
     task_id: str
     images: list[str]
+```
+
+**代码模式文件与诊断**：
+
+```python
+class CodeDiagnosticItemResponse(BaseModel):
+    line: int
+    column: int = 0
+    severity: str = "error"
+    category: str = "syntax"          # syntax / semantic / dependency
+    code: str = ""                    # 如 parse_error / missing_include
+    message: str = ""
+    source: str = ""                  # parser/tool 名
+
+class CodeDiagnosticResponse(BaseModel):
+    path: str
+    language: str
+    status: str                        # syntax_clean / syntax_dirty / dependency_dirty / ...
+    category: str
+    summary: str = ""
+    failing_lines: list[int] = []
+    syntax_errors: int = 0
+    semantic_errors: int = 0
+    dependency_errors: int = 0
+    items: list[CodeDiagnosticItemResponse] = []
+    tool: str = ""
+    duration_ms: int = 0
 ```
 
 **分片上传会话**（前端 `FileUploader` 流程使用）：
@@ -239,6 +286,10 @@ class GPUListResponse(BaseModel):
 | `GET` | `/tasks/{id}/results` | 多文档结果列表（`TaskResultsResponse`） |
 | `PUT` | `/tasks/{id}/results/{result_index}` | 更新指定子文档 Markdown（按索引定位，人工精修） |
 | `GET` | `/tasks/{id}/assets/{asset_path:path}` | 受限资源访问（白名单 + 路径穿越防护） |
+| `GET` | `/tasks/{id}/files-index` | 读取代码模式 `files-index.json`；非代码模式或未完成返回 404 |
+| `GET` | `/tasks/{id}/files/{file_path:path}` | 读取代码模式 `files/` 下已有源文件文本 |
+| `PUT` | `/tasks/{id}/files/{file_path:path}` | 保存代码模式已有源文件，并同步 `files-index.json` 行数摘要 |
+| `POST` | `/tasks/{id}/code-diagnostics` | 对代码模式源文件草稿做只读实时诊断，不保存文件 |
 | `GET` | `/tasks/{id}/download` | 下载任务结果 zip（含多文档子目录） |
 | `GET` | `/tasks/{id}/source-images` | 列出任务输入图片文件名 |
 | `GET` | `/tasks/{id}/source-images/{filename:path}` | 获取任务输入源图片文件 |
@@ -279,6 +330,10 @@ class GPUListResponse(BaseModel):
       {"word": "张伟", "code": "化名A"},
       "公司内部代号"
     ]
+  },
+  "code": {
+    "enable": false,
+    "context_root": ""
   }
 }
 ```
@@ -357,7 +412,7 @@ class GPUListResponse(BaseModel):
 - WebSocket 连接，发送端先推送初始进度，随后增量推送进度事件，任务终止时关闭连接
 - 握手时通过 `require_auth_ws` 校验；未认证或任务不存在返回 1008/1011 关闭码
 - payload 与 `TaskProgress` dataclass 字段一致（`stage/current/total/percent/message`）
-- 详见 [ws_progress.md](ws_progress.md)
+- 当前契约以本文件和 `tests/api/test_ws_progress.py` 为准
 
 #### GET /api/v1/tasks/{task_id}/assets/{asset_path:path} — 受限资源访问
 
@@ -365,7 +420,18 @@ class GPUListResponse(BaseModel):
 - 安全策略（`_validate_asset_path` + `_resolve_asset_path`）：
   - 拒绝绝对路径、`..`、`.` 等非法片段
   - `Path.resolve()` + `is_relative_to()` 防止软链接/路径穿越
-- 用于前端预览/增量加载资源。详见 [result_delivery.md](result_delivery.md)
+- 用于前端预览/增量加载资源。
+
+#### 代码模式文件 API
+
+这些接口只访问 `task.output_dir/files/` 和根目录 `files-index.json`。`file_path` 会拒绝绝对路径、`.`、`..` 和空片段；保存接口只允许覆盖已存在文件，不允许通过 API 新建任意路径。
+
+- `GET /tasks/{task_id}/files-index`：返回 `files-index.json` 数组。没有代码模式产物、任务未完成或索引不存在时返回 404。
+- `GET /tasks/{task_id}/files/{file_path:path}`：返回 `text/plain; charset=utf-8` 源文件内容。
+- `PUT /tasks/{task_id}/files/{file_path:path}`：请求体 `{ "content": "..." }`，写回已有源文件，并更新索引中的 `line_count` / `line_no_range`。
+- `POST /tasks/{task_id}/code-diagnostics`：请求体 `{ "file_path": "src/a.cc", "content": "..." }`，在临时文件中调用 `diagnose_text()`，返回 `CodeDiagnosticResponse`。该接口不保存草稿内容，前端编辑态 debounce 调用它渲染实时诊断列表。
+
+`files-index.json` 中的 `diagnostic` 是当前行级标注事实源；旧字段 `compile_status`、`compile_failing_lines`、`compile_error` 仅用于兼容旧前端/历史产物。
 
 #### GET /api/v1/tasks/{task_id}/download — 下载结果 zip
 

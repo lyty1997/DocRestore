@@ -18,7 +18,7 @@ limitations under the License.
 
 ## 1. 职责
 
-对 OCR 输出进行后处理：页内文本清洗 + 相邻页去重合并 + 长文档分段。三个子模块各自独立，由 Pipeline 按顺序调用。
+对 OCR 输出进行后处理。普通文档模式包含页内文本清洗、相邻页去重合并和长文档分段；代码模式额外包含 IDE 布局识别、代码栏组装、跨页源文件分组、参考源码检索和轻量诊断。各模块保持纯处理逻辑，由 Pipeline 按任务配置编排。
 
 ## 2. 文件清单
 
@@ -27,6 +27,13 @@ limitations under the License.
 | `processing/cleaner.py` | OCR 输出清洗（页内去重、乱码移除、空行规范化） |
 | `processing/dedup.py` | 相邻页重叠检测与合并，附跨页频率过滤 `strip_repeated_lines()` |
 | `processing/segmenter.py` | 文档分段器（按语义边界切分，附加行级上下文） |
+| `processing/ide_layout.py` | IDE 截图布局识别，产出代码区、侧栏和元信息候选 |
+| `processing/code_assembly.py` | 基于行号锚点把 OCR text_lines 组装为代码栏 |
+| `processing/code_file_grouping.py` | 将跨张 PageColumn 按路径/文件名聚合为 SourceFile |
+| `processing/code_context.py` | 从只读参考源码根目录检索相关片段，辅助 scoped repair |
+| `processing/code_diagnostics.py` | 多语言轻量诊断，输出 syntax / semantic / dependency 标注 |
+| `processing/ide_meta_extract.py` | 从 IDE 顶栏、tab、breadcrumb 提取路径、文件名和语言候选 |
+| `processing/ocr_postfix.py` | OCR 字符级后处理与常见混淆修正 |
 
 > `preprocessor.py` / `ngram_filter.py` 位于 `ocr/` 下（worker 内部使用），见 [ocr.md](ocr.md)。
 
@@ -140,12 +147,26 @@ class DocumentSegmenter:
 - 输出：`list[Segment]`，每段含 `text`/`start_line`/`end_line`
 - 上下文（`overlap_before`/`overlap_after`）在 `RefineContext` 中由 Pipeline 单独构造，`Segment` 本身只含文本与行号
 
+### 3.5 代码模式处理链路
+
+启用 `PipelineConfig.code.enable` 后，Pipeline 不再把 OCR 文本直接送入普通 Markdown 分段，而是消费 `PageOCR.text_lines` 进入 IDE 专用链路：
+
+1. `ide_layout.py` 识别 IDE 截图中的代码区域、侧栏/面包屑等元信息区域。
+2. `code_assembly.py` 依赖行级 bbox 和行号锚点组装每张图的代码栏，保留来源页、列索引、bbox、行号范围和质量 flags。
+3. `ide_meta_extract.py` 提取 `filename/path/language/path_candidates/path_confidence`。
+4. `code_file_grouping.py` 将 `PageColumn` 聚合为 `SourceFile`，按路径/文件名跨页合并，行号重叠只保留首份；无法确认的 gap 以 flags 暴露给质量报告。
+5. `llm/code_refine.py` 与 `llm/code_repair.py` 对 `SourceFile.merged_text` 做字符级精修和诊断驱动 scoped repair。
+6. `code_diagnostics.py` 在写出前或编辑态实时运行轻量诊断。标准库解析优先，外部工具缺失时降级为 `tool_unavailable`，不让任务失败。
+
+`CodeDiagnosticRunner` 当前支持 Python/JSON/TOML/XML/YAML 标准库解析，以及 JavaScript/TypeScript/C/C++/Go/Rust 的外部工具检查。诊断器会在临时副本中屏蔽已定位语法错误、为缺失 include 生成 stub header 并复跑，以暴露后续独立错误；同时扫描代码区 CJK / 全角字符 OCR 噪声。
+
 ## 4. 依赖的接口
 
 | 来源 | 使用 |
 |---|---|
 | `models.py` | `PageOCR`, `MergeResult`, `MergedDocument`, `Region`, `Segment` |
-| `pipeline/config.py` | `DedupConfig` |
+| `pipeline/config.py` | `DedupConfig`, `CodeRestoreConfig` |
+| `processing/code_file_grouping.py` | `PageColumn`, `SourceFile` |
 
 不依赖 OCR 层、LLM 层或输出层。
 
