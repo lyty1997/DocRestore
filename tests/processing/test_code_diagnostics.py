@@ -6,12 +6,19 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import time
 from pathlib import Path
+
+import pytest
 
 from docrestore.processing.code_diagnostics import (
     CodeDiagnosticRunner,
     CodeDiagnosticTarget,
     CommandRunResult,
+    _run_command,
 )
 
 
@@ -347,3 +354,35 @@ class TestToolDiagnostics:
         )
         result = runner.run_target(target)
         assert result.status == "syntax_clean"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="进程组兜底依赖 POSIX killpg")
+class TestRunCommandProcessGroup:
+    """_run_command 超时进程组兜底（B7 C13）。"""
+
+    def test_timeout_isolates_session_and_kills_process_group(
+        self, tmp_path: Path,
+    ) -> None:
+        """超时应抛 TimeoutExpired，子进程独占进程组且被 killpg 收割（不留孤儿）。"""
+        info = tmp_path / "info.txt"
+        script = (
+            "import os\n"
+            f"open({str(info)!r}, 'w').write(f'{{os.getpid()}} {{os.getpgid(0)}}')\n"
+            "import time\n"
+            "time.sleep(30)\n"
+        )
+        with pytest.raises(subprocess.TimeoutExpired):
+            _run_command([sys.executable, "-c", script], tmp_path, timeout_s=1)
+
+        pid, pgid = (int(part) for part in info.read_text().split())
+        # start_new_session 让子进程成为会话/组长，pgid == pid。
+        assert pid == pgid
+        # killpg 后子进程应被收割，轮询确认不残留。
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("子进程超时后未被进程组清理，存在孤儿")

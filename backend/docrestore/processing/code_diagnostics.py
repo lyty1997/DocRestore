@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -454,19 +456,44 @@ def diagnose_text(
 def _run_command(
     cmd: list[str], cwd: Path, timeout_s: int,
 ) -> CommandRunResult:
-    proc = subprocess.run(  # noqa: S603
+    """运行外部诊断命令（g++/tsc/node 等）。
+
+    用 ``start_new_session=True`` 让子进程独占进程组，超时时 ``killpg`` 整组，
+    避免 g++ 派生的 cc1plus 等孙进程在超时后成为孤儿（项目子进程进程组兜底规范，
+    B7 C13）。超时仍抛 ``subprocess.TimeoutExpired``，由 ``_run_tool`` 降级处理。
+    """
+    with subprocess.Popen(  # noqa: S603
         cmd,
         cwd=cwd,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout_s,
-        check=False,
-    )
-    return CommandRunResult(
-        returncode=proc.returncode,
-        stdout=proc.stdout or "",
-        stderr=proc.stderr or "",
-    )
+        start_new_session=True,
+    ) as proc:
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc)
+            # 二次 communicate 排空管道并回收子进程，避免 pipe 残留/僵尸。
+            proc.communicate()
+            raise
+        return CommandRunResult(
+            returncode=proc.returncode,
+            stdout=stdout or "",
+            stderr=stderr or "",
+        )
+
+
+def _kill_process_group(proc: subprocess.Popen[str]) -> None:
+    """超时后强杀子进程所在进程组（POSIX），回退到只杀直接子进程。"""
+    if os.name == "posix":
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            # 进程已退出或无权限：退回单进程 kill。
+            pass
+    proc.kill()
 
 
 def _resolve_language(target: CodeDiagnosticTarget) -> str:
