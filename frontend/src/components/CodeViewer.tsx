@@ -1,13 +1,14 @@
 /**
- * AGE-50：代码模式视图。
+ * 代码模式审查视图。
  *
  * 三栏布局（复用 .preview-split CSS）：
- *   左：file 列表（点击切换；compile_failed 标红）
- *   中：当前 file 文本（<pre>）
+ *   左：源文件列表（按 diagnostic / compile 兼容字段标注风险）
+ *   中：当前源文件文本、编辑态 textarea、实时诊断列表
  *   右：source_pages 对应的原图缩略图列表
  *
  * 数据来源：GET /tasks/{id}/files-index → FilesIndex；
- * 文件正文按需 fetch /tasks/{id}/files/{path}。
+ * 文件正文按需 fetch /tasks/{id}/files/{path}；编辑态草稿通过
+ * POST /tasks/{id}/code-diagnostics 做只读实时诊断。
  */
 
 import {
