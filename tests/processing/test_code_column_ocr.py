@@ -107,9 +107,10 @@ class FakeColumnOCREngine:
 
 def test_compute_column_crop_boxes_clamps_and_splits_columns() -> None:
     boxes = compute_column_crop_boxes(_layout(), (400, 200), padding_px=8)
+    # 返回 (column_index, bbox)，column_index 为锚点/栏的原始索引。
     assert boxes == [
-        (22, 12, 237, 148),
-        (222, 12, 368, 148),
+        (0, (22, 12, 237, 148)),
+        (1, (222, 12, 368, 148)),
     ]
 
 
@@ -162,3 +163,45 @@ async def test_rerun_column_ocr_remaps_dual_column_lines(
     assert refined.columns[0][0].bbox[0] >= 0
     assert refined.above_code[0].text == "tab"
     assert "code.column_ocr.applied=col0" in refined.flags
+
+
+@pytest.mark.asyncio
+async def test_rerun_column_ocr_survives_crop_column_count_mismatch(
+    tmp_path: Path,
+) -> None:
+    """裁剪框数量少于 columns 时不得崩溃，缺裁剪框的栏回退原 columns。
+
+    旧实现用 zip(crops, columns, strict=True)，crops 因退化框/越界被丢弃后
+    与 columns 长度不一致会抛 ValueError，整任务崩溃（B7 C1）。
+    """
+    image_path = tmp_path / "page.jpg"
+    Image.new("RGB", (400, 200), color=(30, 30, 30)).save(image_path)
+    base = _layout()
+    extra_column = [TextLine((380, 30, 395, 45), "x", 0.9)]
+    # columns 比 anchors 多一栏：compute_column_crop_boxes 只按锚点产框，
+    # crops 数量 < columns，命中长度不一致路径。
+    layout = IDELayout(
+        anchors=base.anchors,
+        columns=[*base.columns, extra_column],
+        above_code=base.above_code,
+        below_code=base.below_code,
+        sidebar=base.sidebar,
+    )
+    page = PageOCR(
+        image_path=image_path,
+        image_size=(400, 200),
+        raw_text="",
+        text_lines=[line for column in layout.columns for line in column],
+    )
+    refined = await rerun_column_ocr(
+        page,
+        layout,
+        FakeColumnOCREngine(),
+        tmp_path / "out",
+        ColumnOCRConfig(enabled=True, scale=2),
+    )
+    assert len(refined.columns) == 3
+    assert refined.columns[0][0].text == "LEFT_FIXED();"
+    assert refined.columns[1][0].text == "RIGHT_FIXED();"
+    # 多出的第三栏没有对应裁剪框，回退首轮 columns 不丢失。
+    assert refined.columns[2] == extra_column

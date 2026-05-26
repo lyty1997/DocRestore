@@ -69,12 +69,16 @@ async def rerun_column_ocr(
     if not crops:
         return layout
 
-    remapped_columns: list[list[TextLine]] = []
+    # 默认沿用首轮 columns，再按 crop 的原始 column_index 覆盖。退化框被跳过的栏、
+    # crop 无行级输出的栏，以及越界 crop，都保持原 columns，避免长度错位崩溃。
+    remapped_columns: list[list[TextLine]] = list(layout.columns)
     flags = list(layout.flags)
-    for crop, original_column in zip(crops, layout.columns, strict=True):
+    for crop in crops:
+        if not 0 <= crop.column_index < len(remapped_columns):
+            # 锚点多于 columns 时可能出现越界 crop，跳过。
+            continue
         crop_ocr = await ocr_engine.ocr(crop.path, crop_dir)
         if not crop_ocr.text_lines:
-            remapped_columns.append(original_column)
             flags.append(f"code.column_ocr.empty=col{crop.column_index}")
             continue
         remapped = [
@@ -82,7 +86,7 @@ async def rerun_column_ocr(
             for line in crop_ocr.text_lines
         ]
         remapped.sort(key=lambda line: (line.bbox[1], line.bbox[0]))
-        remapped_columns.append(remapped)
+        remapped_columns[crop.column_index] = remapped
         flags.append(f"code.column_ocr.applied=col{crop.column_index}")
 
     return IDELayout(
@@ -111,13 +115,13 @@ def create_column_crops(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     with Image.open(image_path) as image:
-        for index, bbox in enumerate(boxes):
+        for column_index, bbox in boxes:
             crop = image.crop(bbox)
             crop = enhance_column_crop(crop, config)
-            path = output_dir / f"column_{index}.png"
+            path = output_dir / f"column_{column_index}.png"
             crop.save(path)
             crops.append(ColumnCrop(
-                column_index=index,
+                column_index=column_index,
                 bbox=bbox,
                 path=path,
                 scale=max(1, config.scale),
@@ -129,12 +133,17 @@ def compute_column_crop_boxes(
     layout: IDELayout,
     image_size: tuple[int, int],
     padding_px: int,
-) -> list[tuple[int, int, int, int]]:
-    """基于行号锚点和 column OCR 行计算裁剪边界。"""
+) -> list[tuple[int, tuple[int, int, int, int]]]:
+    """基于行号锚点和 column OCR 行计算裁剪边界。
+
+    返回 ``(column_index, bbox)`` 列表，``column_index`` 为锚点/栏的原始索引。
+    退化（零宽/零高）裁剪框会被跳过，因此返回项数可能少于锚点数——调用方必须
+    依赖 ``column_index`` 而非位置来对齐 ``layout.columns``，否则会发生错位。
+    """
     if not layout.anchors:
         return []
-    width, height = image_size
-    boxes: list[tuple[int, int, int, int]] = []
+    width = image_size[0]
+    boxes: list[tuple[int, tuple[int, int, int, int]]] = []
     for index, anchor in enumerate(layout.anchors):
         col_lines = layout.columns[index] if index < len(layout.columns) else []
         x1 = anchor.x1_min
@@ -159,7 +168,7 @@ def compute_column_crop_boxes(
             image_size,
         )
         if box[2] > box[0] and box[3] > box[1]:
-            boxes.append(box)
+            boxes.append((index, box))
     return boxes
 
 
