@@ -48,7 +48,10 @@ _SLASH_COMMENT_LANGUAGES = {
     "javascript", "typescript", "java", "go", "rust", "swift",
     "kotlin", "dart", "scala", "php", "css", "scss", "less",
 }
-_SLASH_COMMENT_PREFIX_RE = re.compile(r"^(\s*)[1lI]/(?=\s|\S)")
+# 仅当 / 之后是空白、另一个斜杠或行尾时才纠错为注释，避免误伤行首除法/标识符
+# （`1/2`、`l/count`、`I/O` 不应被改成注释）。OCR 错认的 `//` 注释绝大多数是
+# `[1lI]/ 空格+正文`，收紧后仍覆盖该主场景（B7 C5）。
+_SLASH_COMMENT_PREFIX_RE = re.compile(r"^(\s*)[1lI]/(?=\s|/|$)")
 
 
 # D 类：C/C++ 预处理指令中常见 OCR 大小写错误。
@@ -76,7 +79,9 @@ _UI_NOISE_LINE_RE = re.compile(
     r"Search\s+Marketplace|"
     r"The\s+Marketplace\s+has\s+extensions.*|"
     r"Aa\s+ab\s+\*?\s*\d+\s+of\s+\d+.*|"
-    r"\d+\s+of\s+\d+\s+\S*|"
+    # 仅整行恰为 "N of M"（VS Code 查找计数）才视为噪声；"N of M <文字>"
+    # 可能是合法正文/注释，不再误清（B7 C6）。
+    r"\d+\s+of\s+\d+|"
     r"src\[SSH:[^\]]+\].*|"
     r".*\s+-\s+Visual\s+Studio\s+Code"
     r")\s*$",

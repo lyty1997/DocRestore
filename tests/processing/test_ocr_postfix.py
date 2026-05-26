@@ -220,6 +220,20 @@ class TestCodeUINoiseFilter:
         assert result.text == text
         assert result.flags == []
 
+    def test_filters_bare_match_counter_line(self) -> None:
+        """整行恰为 "N of M"（查找计数）仍按噪声置空。"""
+        text = "int main() {\n3 of 5\n  return 0;\n}"
+        result = clean_code_ocr_text(text, "cpp")
+        assert result.text.split("\n")[1] == ""
+        assert "code.noise.filtered_ui_lines=1" in result.flags
+
+    def test_does_not_filter_line_with_text_after_of_pattern(self) -> None:
+        """"N of M <文字>" 可能是合法正文/注释，不再误清（B7 C6）。"""
+        text = "items = []\n3 of 5 items processed\nreturn items"
+        result = clean_code_ocr_text(text, "python")
+        assert "3 of 5 items processed" in result.text
+        assert result.flags == []
+
 
 class TestLanguageAwareRules:
     """需要语言上下文的确定性纠错。"""
@@ -231,6 +245,18 @@ class TestLanguageAwareRules:
     def test_slash_comment_rule_not_applied_to_python(self) -> None:
         result = correct_ocr_artifacts("  1/ TODO: not a comment", "python")
         assert result == "  1/ TODO: not a comment"
+
+    def test_slash_rule_preserves_line_start_division(self) -> None:
+        """行首除法 `1/2` 不得被误改成注释（B7 C5）。"""
+        assert correct_ocr_artifacts("1/2 + offset", "cpp") == "1/2 + offset"
+
+    def test_slash_rule_preserves_identifier_division(self) -> None:
+        """行首 `l/count` 是标识符除法，紧跟非空白不纠错（B7 C5）。"""
+        assert correct_ocr_artifacts("l/count * scale", "cpp") == "l/count * scale"
+
+    def test_slash_rule_preserves_io_token(self) -> None:
+        """`I/O` 这类 token 不应被改成注释（B7 C5）。"""
+        assert correct_ocr_artifacts("I/O = open(path)", "cpp") == "I/O = open(path)"
 
     def test_preprocessor_directive_case_normalized_for_cpp(self) -> None:
         result = correct_ocr_artifacts("#dEfine FOO 1", "cpp")
