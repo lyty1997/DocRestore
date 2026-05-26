@@ -62,6 +62,28 @@ def test_search_snippets_returns_reference_excerpt(tmp_path: Path) -> None:
     assert snippets[0].start_line == 1
 
 
+def test_search_snippets_skips_unreadable_file_without_crashing(
+    tmp_path: Path,
+) -> None:
+    """list_files 缓存后源文件被目录替换时，search_snippets 不得崩溃（B7 C7）。
+
+    _is_small_file 的 stat 守卫挡不住 read_text 的 IsADirectoryError/PermissionError，
+    旧实现会让该 OSError 冒泡，拖垮整条 repair 上下文构建链。
+    """
+    source = tmp_path / "src" / "codec.py"
+    source.parent.mkdir()
+    source.write_text(
+        "def decode_frame():\n    return 1\n", encoding="utf-8",
+    )
+    provider = LocalCodeContextProvider(tmp_path)
+    provider.list_files()  # 先缓存文件列表
+    # 把文件替换成目录：stat 仍成功，但 read_text 抛 IsADirectoryError(OSError)。
+    source.unlink()
+    source.mkdir()
+    # 不抛异常即视为修复（命中失败、返回空是可接受结果）。
+    assert provider.search_snippets("decode_frame()", language="python") == []
+
+
 def test_detect_language_from_shebang(tmp_path: Path) -> None:
     script = tmp_path / "tool"
     script.write_text("#!/usr/bin/env python3\nprint('x')\n", encoding="utf-8")

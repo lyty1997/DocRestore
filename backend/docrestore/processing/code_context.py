@@ -187,7 +187,12 @@ class LocalCodeContextProvider:
             abs_path = self._safe_abs_path(item.path)
             if abs_path is None or not _is_small_file(abs_path, self._max_file_bytes):
                 continue
-            text = abs_path.read_text(encoding="utf-8", errors="ignore")
+            try:
+                text = abs_path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                # 文件在 list_files 缓存后被删除/改权限/目录化时会抛 OSError，
+                # 跳过该文件即可，不能让它冒泡拖垮整条 repair 上下文构建链（B7 C7）。
+                continue
             lines = text.splitlines()
             for idx, line in enumerate(lines):
                 score = _line_token_score(line, tokens)
