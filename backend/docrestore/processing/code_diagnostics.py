@@ -113,6 +113,8 @@ _LANG_BY_EXT: dict[str, str] = {
 }
 
 _LINE_COL_RE = re.compile(r"(?::|\()(\d+)(?::|,)(\d+)")
+# 只有行号没有列号的兜底（如 node --check 的 "file.js:2" 定位行）。
+_LINE_ONLY_RE = re.compile(r"(?::|\()(\d+)")
 _CPP_LINE_RE = re.compile(
     r":(?P<line>\d+):(?P<col>\d+):\s*(?:(?:fatal\s+)?error|warning):\s*(?P<msg>.*)",
     re.IGNORECASE,
@@ -143,6 +145,9 @@ _DEPENDENCY_ERROR_PATTERNS = (
     "cannot open include file",
     "没有那个文件或目录",
 )
+# 纯语法检查工具：非零退出本质就是语法/解析失败。tsc/go/rustc 带语义分析，
+# 兜底归类为 semantic（B7 C9）。
+_SYNTAX_ONLY_TOOLS = {"node", "gcc", "g++"}
 _OCR_NOISE_LANGUAGES = {
     "c",
     "cpp",
@@ -1052,7 +1057,19 @@ def _classify_tool_output(output: str, tool: str) -> _ClassifiedToolOutput:
             lines.add(item.line)
             items.append(item)
     if syntax == 0 and semantic == 0 and dependency == 0 and output:
-        semantic = 1
+        # 纯语法工具的非零退出本质是语法错误，应触发 scoped repair；带语义分析的
+        # 工具才兜底成 semantic（B7 C9）。
+        if tool in _SYNTAX_ONLY_TOOLS:
+            syntax = 1
+        else:
+            semantic = 1
+    if not lines and (syntax or semantic or dependency):
+        # 错误行号常落在不含关键词的定位行（如 node "file.js:2"），逐行分类会漏掉；
+        # 兜底从整段输出抽第一个行号，让修复/审查有可定位的窗口（B7 C8）。
+        seeded = _seed_failing_line(output, tool, syntax, dependency)
+        if seeded is not None:
+            lines.add(seeded.line)
+            items.append(seeded)
     return _ClassifiedToolOutput(
         syntax_errors=syntax,
         semantic_errors=semantic,
@@ -1060,6 +1077,30 @@ def _classify_tool_output(output: str, tool: str) -> _ClassifiedToolOutput:
         failing_lines=sorted(lines),
         items=items,
     )
+
+
+def _seed_failing_line(
+    output: str, tool: str, syntax: int, dependency: int,
+) -> CodeDiagnosticItem | None:
+    """分类有错但无失败行时，从输出里抽第一个行号作为定位窗口。"""
+    if syntax:
+        category, code = "syntax", "syntax_error"
+    elif dependency:
+        category, code = "dependency", "missing_include"
+    else:
+        category, code = "semantic", "semantic_error"
+    for raw_line in output.splitlines():
+        line_no = _extract_line_no(raw_line)
+        if line_no > 0:
+            return CodeDiagnosticItem(
+                line=line_no,
+                severity="error" if category != "dependency" else "warn",
+                category=category,
+                code=code,
+                message=_extract_tool_message(raw_line),
+                source=tool,
+            )
+    return None
 
 
 def _classify_tool_line(
@@ -1126,6 +1167,10 @@ def _extract_line_col(text: str) -> tuple[int, int]:
     match = _LINE_COL_RE.search(text)
     if match is not None:
         return int(match.group(1)), int(match.group(2))
+    # 只有行号没有列号的定位行（如 node --check 的 "file.js:2"）（B7 C8）。
+    only = _LINE_ONLY_RE.search(text)
+    if only is not None:
+        return int(only.group(1)), 0
     return 0, 0
 
 

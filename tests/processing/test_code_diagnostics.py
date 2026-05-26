@@ -114,6 +114,58 @@ class TestToolDiagnostics:
         assert result.status == "syntax_clean"
         assert result.tool == "node"
 
+    def test_node_syntax_failure_seeds_failing_line(
+        self, tmp_path: Path,
+    ) -> None:
+        """node 定位行无关键词，仍应抽出失败行触发修复（B7 C8）。"""
+        source = tmp_path / "app.js"
+        source.write_text("const x = ;\n", encoding="utf-8")
+
+        def run(
+            cmd: list[str], cwd: Path, timeout_s: int,
+        ) -> CommandRunResult:
+            return CommandRunResult(
+                returncode=1,
+                stderr=(
+                    "app.js:1\n"
+                    "const x = ;\n"
+                    "          ^\n\n"
+                    "SyntaxError: Unexpected token ';'\n"
+                ),
+            )
+
+        runner = CodeDiagnosticRunner(
+            tool_resolver=lambda _tool: "/usr/bin/node",
+            command_runner=run,
+        )
+        result = runner.run_target(_target(source))
+        assert result.status == "syntax_dirty"
+        assert result.failing_lines == [1]
+        assert result.syntax_errors >= 1
+
+    def test_syntax_only_tool_unrecognized_failure_is_syntax(
+        self, tmp_path: Path,
+    ) -> None:
+        """纯语法工具非零退出且不匹配模式时应归 syntax 而非 semantic（B7 C9）。"""
+        source = tmp_path / "bad.cc"
+        source.write_text("int main(){}\n", encoding="utf-8")
+
+        def run(
+            cmd: list[str], cwd: Path, timeout_s: int,
+        ) -> CommandRunResult:
+            return CommandRunResult(
+                returncode=1,
+                stderr="bad.cc:7 output that matches none of the patterns",
+            )
+
+        runner = CodeDiagnosticRunner(
+            tool_resolver=lambda _tool: "/usr/bin/g++",
+            command_runner=run,
+        )
+        result = runner.run_target(_target(source, "cpp"))
+        assert result.status == "syntax_dirty"
+        assert result.failing_lines == [7]
+
     def test_tool_syntax_failure_extracts_lines(self, tmp_path: Path) -> None:
         source = tmp_path / "bad.cc"
         source.write_text("int main(\n", encoding="utf-8")
