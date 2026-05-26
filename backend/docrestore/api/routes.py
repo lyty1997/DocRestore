@@ -683,6 +683,9 @@ async def diagnose_task_code_file(
         language=language,
         text=req.content,
         include_root=files_root,
+        # 草稿在隔离临时目录诊断，传入真实兄弟目录让同目录 #include 可解析，
+        # 避免对依赖同目录头文件的 C/C++ 草稿误报缺失依赖（B7 C19）。
+        extra_include_roots=[target.parent],
     )
     return CodeDiagnosticResponse.model_validate(diagnostic.to_index_dict())
 

@@ -38,6 +38,9 @@ class CodeDiagnosticTarget:
     file_path: Path
     language: str | None = None
     include_root: Path | None = None
+    # 额外的 -I 搜索根（如真实兄弟头文件目录），用于隔离草稿诊断时解析同目录
+    # #include（B7 C19）。
+    extra_include_roots: list[Path] | None = None
 
 
 @dataclass(frozen=True)
@@ -339,7 +342,12 @@ class CodeDiagnosticRunner:
     def _run_tool(
         self, target: CodeDiagnosticTarget, language: str,
     ) -> CodeDiagnostic:
-        spec = _tool_spec(language, target.file_path, target.include_root)
+        spec = _tool_spec(
+            language,
+            target.file_path,
+            target.include_root,
+            target.extra_include_roots,
+        )
         if spec is None:
             return CodeDiagnostic(
                 path=target.path,
@@ -440,9 +448,14 @@ def diagnose_text(
     language: str | None,
     text: str,
     include_root: Path | None = None,
+    extra_include_roots: list[Path] | None = None,
     runner: CodeDiagnosticRunner | None = None,
 ) -> CodeDiagnostic:
-    """诊断一段内存文本，供 scoped repair 应用 patch 后验证。"""
+    """诊断一段内存文本，供 scoped repair 应用 patch 后验证。
+
+    草稿写入隔离临时目录，因此同目录 ``#include "sibling.h"`` 无法在 cwd 解析；
+    调用方可用 ``extra_include_roots`` 传入真实兄弟目录让 -I 解析（B7 C19）。
+    """
     active_runner = runner or CodeDiagnosticRunner()
     with tempfile.TemporaryDirectory(prefix="docrestore-code-diag-") as tmp:
         root = Path(tmp)
@@ -455,6 +468,7 @@ def diagnose_text(
             file_path=file_path,
             language=language,
             include_root=include_root or root,
+            extra_include_roots=extra_include_roots,
         ))
 
 

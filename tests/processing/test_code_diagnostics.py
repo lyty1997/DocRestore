@@ -19,6 +19,7 @@ from docrestore.processing.code_diagnostics import (
     CodeDiagnosticTarget,
     CommandRunResult,
     _run_command,
+    diagnose_text,
 )
 
 
@@ -406,6 +407,38 @@ class TestToolDiagnostics:
         )
         result = runner.run_target(target)
         assert result.status == "syntax_clean"
+
+    def test_diagnose_text_passes_extra_include_roots(
+        self, tmp_path: Path,
+    ) -> None:
+        """真实兄弟目录应作为 -I 传入，使同目录 #include 可解析（B7 C19）。"""
+        sibling_dir = tmp_path / "src"
+        sibling_dir.mkdir()
+        captured: dict[str, list[str]] = {}
+
+        def run(
+            cmd: list[str], cwd: Path, timeout_s: int,
+        ) -> CommandRunResult:
+            captured["cmd"] = cmd
+            return CommandRunResult(returncode=0)
+
+        runner = CodeDiagnosticRunner(
+            tool_resolver=lambda _tool: "/usr/bin/g++",
+            command_runner=run,
+        )
+        diagnose_text(
+            path="src/foo.cpp",
+            language="cpp",
+            text='#include "bar.h"\nint main(){}\n',
+            include_root=tmp_path,
+            extra_include_roots=[sibling_dir],
+            runner=runner,
+        )
+        cmd = captured["cmd"]
+        assert "-I" in cmd
+        # 兄弟目录与 include_root 都进入 -I 搜索路径。
+        assert str(sibling_dir) in cmd
+        assert str(tmp_path) in cmd
 
 
 @pytest.mark.skipif(os.name != "posix", reason="进程组兜底依赖 POSIX killpg")
