@@ -31,12 +31,10 @@ build/
 .ruff_cache/
 .pytest_cache/
 
-# claude环境
-.claude/
-CLAUDE.md
-
-# 项目进度
-docs/progress.md
+# claude 本地密钥（中转站 token，禁止入库）
+.claude/*.env
+# claude 自带默认 skill 包（任意安装可复现，无需入库）
+.claude/skills/
 
 # playwright
 node_modules/
