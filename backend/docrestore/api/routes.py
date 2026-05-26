@@ -687,6 +687,11 @@ async def diagnose_task_code_file(
     return CodeDiagnosticResponse.model_validate(diagnostic.to_index_dict())
 
 
+# 串行化代码文件保存：write_text + files-index 的 read-modify-write 必须互斥，
+# 否则并发 PUT 会相互覆盖、丢失另一文件的 line_count 更新（B7 PUT 竞态）。
+_CODE_FILE_WRITE_LOCK = asyncio.Lock()
+
+
 @router.put(
     "/tasks/{task_id}/files/{file_path:path}",
     response_model=ActionResponse,
@@ -728,8 +733,12 @@ async def update_task_code_file(
         )
 
     try:
-        target.write_text(req.content, encoding="utf-8")
-        _update_code_index_after_write(output_dir, rel, req.content)
+        # 阻塞文件 IO + 索引 RMW 放到线程里跑，并用锁串行化避免并发覆盖（B7 PUT）。
+        async with _CODE_FILE_WRITE_LOCK:
+            await asyncio.to_thread(
+                _write_code_file_and_index,
+                target, output_dir, rel, req.content,
+            )
     except (OSError, json.JSONDecodeError) as exc:
         raise ApiBusinessError(
             APIErrorCode.WRITE_FAILED, 500,
@@ -755,6 +764,17 @@ def _validate_code_file_path(file_path: str) -> PurePosixPath | None:
 def _count_code_lines(content: str) -> int:
     """按前端编辑器的 ``\\n`` 语义统计显示行数。"""
     return 0 if content == "" else content.count("\n") + 1
+
+
+def _write_code_file_and_index(
+    target: Path,
+    output_dir: Path,
+    rel: PurePosixPath,
+    content: str,
+) -> None:
+    """同步写入代码文件并刷新 files-index（在线程内执行，由调用方持锁串行化）。"""
+    target.write_text(content, encoding="utf-8")
+    _update_code_index_after_write(output_dir, rel, content)
 
 
 def _update_code_index_after_write(

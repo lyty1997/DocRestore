@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -165,7 +166,10 @@ class DiagnosticCodeRepairer:
         context_provider: CodeContextProvider | None = None,
     ) -> CodeRefineResult:
         """按诊断窗口修复 SourceFile；失败或恶化时回退原文。"""
-        contexts = build_repair_contexts(
+        # build_repair_contexts 内含参考源码树的 rglob/read_text 等阻塞 IO，
+        # 放到线程里跑，避免阻塞事件循环（B7 C12）。
+        contexts = await asyncio.to_thread(
+            build_repair_contexts,
             source,
             diagnostics,
             related_sources=related_sources or [],
@@ -206,7 +210,8 @@ class DiagnosticCodeRepairer:
             if patched is None:
                 attempts[-1] = _with_flag(attempt, "code.repair.reject_scope")
                 continue
-            post = diagnose_text(
+            post = await asyncio.to_thread(
+                diagnose_text,
                 path=source.path,
                 language=source.language,
                 text=patched,
@@ -282,7 +287,9 @@ class CodeConsistencyAuditor:
         context_provider: CodeContextProvider | None = None,
     ) -> CodeRefineResult:
         """审计全文件一致性，只应用授权范围内的 scoped patches。"""
-        context = build_consistency_audit_context(
+        # build_consistency_audit_context 同样含参考源码树阻塞 IO，放到线程里。
+        context = await asyncio.to_thread(
+            build_consistency_audit_context,
             source,
             diagnostics,
             previous_result=previous_result,
@@ -337,7 +344,8 @@ class CodeConsistencyAuditor:
             if patched is None:
                 attempt = _with_audit_flag(attempt, "code.audit.reject_scope")
                 continue
-            post = diagnose_text(
+            post = await asyncio.to_thread(
+                diagnose_text,
                 path=source.path,
                 language=source.language,
                 text=patched,

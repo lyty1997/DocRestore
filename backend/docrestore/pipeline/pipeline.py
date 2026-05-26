@@ -975,7 +975,11 @@ class Pipeline:
                 )
             metas = extract_ide_metas(layout)
             if context_provider is not None:
-                _augment_metas_with_code_context(metas, context_provider)
+                # search_paths 首次会 rglob 整个参考源码树 + 逐文件 stat/读取，
+                # 是阻塞 IO，放到线程里跑避免阻塞事件循环（B7 S3）。
+                await asyncio.to_thread(
+                    _augment_metas_with_code_context, metas, context_provider,
+                )
             columns = assemble_columns(layout)
             for col, meta in zip(columns, metas, strict=True):
                 all_pcs.append(PageColumn(
