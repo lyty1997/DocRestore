@@ -375,3 +375,18 @@ async def test_illegal_char_path_does_not_abort_batch(
     assert "AAA" in joined
     assert "CCC" in joined  # NUL 文件不影响其余文件写出
     assert "BBB" in joined  # NUL 被清洗后该文件仍能写
+
+
+@pytest.mark.asyncio
+async def test_index_filename_matches_deduped_basename(tmp_path: Path) -> None:
+    """同名降级去重后 index filename 应与 path basename 一致（自审 followup）。"""
+    sources = [
+        _make_source("/a/foo.cc", "AAA\n"),
+        _make_source("/b/foo.cc", "BBB\n"),
+    ]
+    result = await render_code_files(sources, tmp_path)
+    index = json.loads(result.index_path.read_text())
+    for entry in index:
+        assert entry["filename"] == entry["path"].rsplit("/", 1)[-1]
+    # 第二个被去重成 __1，filename 也随之，而非仍是原始 foo.cc
+    assert any(e["path"].endswith("foo__1.cc") for e in index)

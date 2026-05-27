@@ -101,7 +101,6 @@ async def render_code_files(
         # 同 rel_path（降级后同 basename、或上游消歧未尽）会互相覆盖丢文件，
         # 这里兜底加唯一后缀（B4 H2）。
         rel_path = _dedup_rel_path(rel_path, used_rel)
-        used_rel.add(rel_path)
         target = files_dir / rel_path
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -113,6 +112,9 @@ async def render_code_files(
             # 单文件写失败（残留非法路径/权限/超长等）不应中断整批渲染。
             skipped.append((src.path, f"write_failed:{exc}"))
             continue
+        # 写成功后才占用该名，失败的路径不预留，避免后续同名文件被多余加后缀
+        # （自审 followup）。
+        used_rel.add(rel_path)
         written.append(target)
         safe_sources.append((src, rel_path, target))
 
@@ -136,7 +138,8 @@ async def render_code_files(
         diagnostic = diagnostics_by_path.get(rel_path)
         entry: dict[str, object] = {
             "path": rel_path,
-            "filename": src.filename,
+            # 用去重/清洗后的 basename，与磁盘 path 一致（自审 followup）
+            "filename": rel_path.rsplit("/", 1)[-1],
             "language": src.language,
             "source_pages": [
                 f"{p.page_stem}.col{p.column_index}" for p in src.pages
