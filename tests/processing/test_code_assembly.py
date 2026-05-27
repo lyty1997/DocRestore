@@ -283,3 +283,26 @@ class TestSpike:
             assert indent_count >= 1, (
                 f"{stem} col_{col.column_index} 全无缩进（异常）"
             )
+
+
+def test_split_recovers_code_line_left_of_anchor_right_edge() -> None:
+    """x1 落在行号列右缘左侧的非数字行应收录为代码，不被静默丢弃（B4 G2）。"""
+    from docrestore.processing.code_assembly import _split_line_numbers_and_code
+    from docrestore.processing.ide_layout import LineNumberAnchor
+
+    anchor = LineNumberAnchor(
+        x1_center=110, x1_min=100, x2_max=130,
+        y_top=20, y_bottom=200, line_count=5, num_range=(1, 5),
+        monotonic_ratio=1.0,
+    )
+    x_tol = 10  # 右缘阈值 = x2_max - x_tol//2 = 125
+    lines = [
+        _line((100, 20, 128, 36), "1"),           # 行号
+        _line((200, 20, 320, 36), "int x = 1;"),  # 常规代码
+        _line((118, 40, 300, 56), "foo();"),       # x1=118<125：旧实现静默丢弃
+    ]
+    line_no_lines, code_lines = _split_line_numbers_and_code(lines, anchor, x_tol)
+    assert [ln.text for ln in line_no_lines] == ["1"]
+    code_texts = [ln.text for ln in code_lines]
+    assert "foo();" in code_texts  # 已恢复，不再丢失
+    assert "int x = 1;" in code_texts

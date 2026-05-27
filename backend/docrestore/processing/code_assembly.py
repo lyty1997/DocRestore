@@ -230,10 +230,10 @@ def _split_line_numbers_and_code(
         if is_numeric and x1 >= anchor.x1_min - x_tolerance and x2 <= line_no_max_x:
             line_no_lines.append(ln)
         else:
-            # 代码 line：在 anchor 之后；x1 < anchor.x1_min 的行（极少见）
-            # 应在 ide_layout 阶段已被归入 sidebar，这里防御性丢弃
-            if x1 >= anchor.x2_max - x_tolerance // 2:
-                code_lines.append(ln)
+            # 非行号 = 代码行。即便 x1 落在行号列右缘左侧（OCR 把行号与代码合到
+            # 同一框、或行号-代码间距很小），也收录为代码行——该 line 已被
+            # ide_layout 归入本栏，静默丢弃会让整行真实代码消失（B4 G2）。
+            code_lines.append(ln)
     return line_no_lines, code_lines
 
 
