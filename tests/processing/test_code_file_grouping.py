@@ -105,8 +105,8 @@ class TestBasicGrouping:
             bbox=(10, 20, 300, 500),
         )
         column.flags.append("code.assembly.unpaired_codes=1")
-        segment = segment_from_page_column(_pc("DSC1", 1, meta, column))
-        assert segment.page_stem == "DSC1"
+        segment = segment_from_page_column(_pc("page1", 1, meta, column))
+        assert segment.page_stem == "page1"
         assert segment.column_index == 1
         assert segment.bbox == (10, 20, 300, 500)
         assert segment.line_no_range == (10, 11)
@@ -120,7 +120,7 @@ class TestBasicGrouping:
 
     def test_single_file_single_page(self) -> None:
         pcs = [_pc(
-            "DSC1", 0, _meta("foo.cc", "media/gpu/foo.cc"),
+            "page1", 0, _meta("foo.cc", "media/gpu/foo.cc"),
             _column((1, "#include <a>", 0), (2, "int main() {", 0)),
         )]
         files = group_into_files(pcs)
@@ -136,10 +136,10 @@ class TestBasicGrouping:
     def test_two_pages_same_file_concat(self) -> None:
         """两张图同 file，行号 1-3 + 4-6 → 拼成 6 行"""
         m = _meta("foo.cc", "src/foo.cc")
-        p1 = _pc("DSC1", 0, m, _column(
+        p1 = _pc("page1", 0, m, _column(
             (1, "L1", 0), (2, "L2", 0), (3, "L3", 0),
         ))
-        p2 = _pc("DSC2", 0, m, _column(
+        p2 = _pc("page2", 0, m, _column(
             (4, "L4", 0), (5, "L5", 0), (6, "L6", 0),
         ))
         files = group_into_files([p1, p2])
@@ -152,12 +152,12 @@ class TestBasicGrouping:
     def test_overlap_dedup(self) -> None:
         """两张图重叠（行 3-5 和 4-7）→ 重复 line_no 取首次"""
         m = _meta("foo.cc")
-        p1 = _pc("DSC1", 0, m, _column(
+        p1 = _pc("page1", 0, m, _column(
             (3, "FROM_PAGE_1_L3", 0),
             (4, "FROM_PAGE_1_L4", 0),
             (5, "FROM_PAGE_1_L5", 0),
         ))
-        p2 = _pc("DSC2", 0, m, _column(
+        p2 = _pc("page2", 0, m, _column(
             (4, "FROM_PAGE_2_L4", 0),
             (5, "FROM_PAGE_2_L5", 0),
             (6, "FROM_PAGE_2_L6", 0),
@@ -175,7 +175,7 @@ class TestBasicGrouping:
     def test_line_gap_flag(self) -> None:
         """单文件行号 1 + 5 跳过 2-4 → 标 missing flag + 占位空行"""
         m = _meta("foo.cc")
-        pc = _pc("DSC1", 0, m, _column(
+        pc = _pc("page1", 0, m, _column(
             (1, "L1", 0), (5, "L5", 0),
         ))
         f = group_into_files([pc])[0]
@@ -190,11 +190,11 @@ class TestBasicGrouping:
     def test_large_gap_uses_comment_marker(self) -> None:
         """单次 gap > 50 → 不再批量塞空行，改单行注释占位
 
-        回归 DSC06953/07002 错归案例：行号从 1051 直接跳到 1639 时，
+        回归 page06953/07002 错归案例：行号从 1051 直接跳到 1639 时，
         587 个连续空行把文件膨胀到肉眼不可读。新策略改为单行注释。
         """
         m = _meta("foo.cc", language="cpp")
-        pc = _pc("DSC1", 0, m, _column(
+        pc = _pc("page1", 0, m, _column(
             (1, "L1", 0), (1000, "L1000", 0),
         ))
         f = group_into_files([pc])[0]
@@ -209,7 +209,7 @@ class TestBasicGrouping:
     def test_large_gap_python_uses_hash_prefix(self) -> None:
         """python/shell 等 # 注释语言 → 占位用 # 前缀"""
         m = _meta("foo.py", language="python")
-        pc = _pc("DSC1", 0, m, _column(
+        pc = _pc("page1", 0, m, _column(
             (1, "import os", 0), (200, "main()", 0),
         ))
         f = group_into_files([pc])[0]
@@ -220,7 +220,7 @@ class TestBasicGrouping:
     def test_mixed_gaps_small_keeps_blank_large_collapses(self) -> None:
         """同文件混合：小 gap 仍空行（兼容人工补全工作流），大 gap 注释"""
         m = _meta("foo.cc", language="cpp")
-        pc = _pc("DSC1", 0, m, _column(
+        pc = _pc("page1", 0, m, _column(
             (1, "L1", 0),
             (4, "L4", 0),       # 小 gap (3) → 空行
             (200, "L200", 0),   # 大 gap (>50) → 注释
@@ -235,7 +235,7 @@ class TestBasicGrouping:
         assert "code.grouping.large_gap_collapsed" in f.flags
         # 单 gap 等于阈值（50）时仍走空行（边界条件）
         m2 = _meta("bar.cc", language="cpp")
-        pc2 = _pc("DSC2", 0, m2, _column(
+        pc2 = _pc("page2", 0, m2, _column(
             (1, "X", 0), (51, "Y", 0),  # gap=49，临界以下
         ))
         f2 = group_into_files([pc2])[0]
@@ -247,43 +247,43 @@ class TestSamenameDifferentDir:
     def test_same_name_different_dir_split(self) -> None:
         """两张图都是 BUILD.gn 但目录不同 → 分两组"""
         p1 = _pc(
-            "DSC1", 0, _meta("BUILD.gn", "media/gpu/openmax/BUILD.gn", "gn"),
+            "page1", 0, _meta("BUILD.gn", "app/core/widget/BUILD.gn", "gn"),
             _column((1, "import(\"//a\")", 0)),
         )
         p2 = _pc(
-            "DSC2", 0, _meta("BUILD.gn", "components/foo/BUILD.gn", "gn"),
+            "page2", 0, _meta("BUILD.gn", "components/foo/BUILD.gn", "gn"),
             _column((1, "import(\"//b\")", 0)),
         )
         files = group_into_files([p1, p2])
         assert len(files) == 2
         paths = sorted(f.path for f in files)
         assert paths == [
+            "app/core/widget/BUILD.gn",
             "components/foo/BUILD.gn",
-            "media/gpu/openmax/BUILD.gn",
         ]
 
     def test_compatible_dir_merged(self) -> None:
-        """前缀缺失版本 + 完整版本（gpu/openmax 是 media/gpu/openmax 后缀）→ 合并"""
+        """前缀缺失版本 + 完整版本（core/widget 是 app/core/widget 后缀）→ 合并"""
         p1 = _pc(
-            "DSC1", 0, _meta("BUILD.gn", "gpu/openmax/BUILD.gn", "gn"),
+            "page1", 0, _meta("BUILD.gn", "core/widget/BUILD.gn", "gn"),
             _column((1, "L1", 0)),
         )
         p2 = _pc(
-            "DSC2", 0, _meta("BUILD.gn", "media/gpu/openmax/BUILD.gn", "gn"),
+            "page2", 0, _meta("BUILD.gn", "app/core/widget/BUILD.gn", "gn"),
             _column((2, "L2", 0)),
         )
         files = group_into_files([p1, p2])
         assert len(files) == 1
-        # canonical 选段数最多版（media/gpu/openmax）
-        assert files[0].path == "media/gpu/openmax/BUILD.gn"
+        # canonical 选段数最多版（app/core/widget）
+        assert files[0].path == "app/core/widget/BUILD.gn"
 
     def test_ocr_charcase_unified(self) -> None:
         """BUILD/BUiLD/BUlLD 大小写差 OCR 噪声 → 统一为同一 file"""
-        p1 = _pc("DSC1", 0, _meta("BUILD.gn", "x/BUILD.gn", "gn"),
+        p1 = _pc("page1", 0, _meta("BUILD.gn", "x/BUILD.gn", "gn"),
                  _column((1, "L1", 0)))
-        p2 = _pc("DSC2", 0, _meta("BUiLD.gn", "x/BUiLD.gn", "gn"),
+        p2 = _pc("page2", 0, _meta("BUiLD.gn", "x/BUiLD.gn", "gn"),
                  _column((2, "L2", 0)))
-        p3 = _pc("DSC3", 0, _meta("BUlLD.gn", "x/BUlLD.gn", "gn"),
+        p3 = _pc("page3", 0, _meta("BUlLD.gn", "x/BUlLD.gn", "gn"),
                  _column((3, "L3", 0)))
         files = group_into_files([p1, p2, p3])
         assert len(files) == 1
@@ -296,12 +296,12 @@ class TestSamenameDifferentDir:
     ) -> None:
         """低置信 OCR filename 不能覆盖高置信路径候选。"""
         low = _pc(
-            "DSC1", 0,
+            "page1", 0,
             _meta("BUiLD.gn", "x/BUiLD.gn", "gn", confidence=0.42),
             _column((1, "low", 0)),
         )
         high = _pc(
-            "DSC2", 0,
+            "page2", 0,
             _meta("BUILD.gn", "x/BUILD.gn", "gn", confidence=0.95),
             _column((2, "high", 0)),
         )
@@ -316,65 +316,65 @@ class TestSamenameDifferentDir:
     ) -> None:
         """兼容目录合并时，高置信完整目录应成为 canonical dir。"""
         low = _pc(
-            "DSC1", 0,
-            _meta("foo.cc", "gpu/openmax/foo.cc", confidence=0.42),
+            "page1", 0,
+            _meta("foo.cc", "core/widget/foo.cc", confidence=0.42),
             _column((1, "low", 0)),
         )
         high = _pc(
-            "DSC2", 0,
-            _meta("foo.cc", "media/gpu/openmax/foo.cc", confidence=0.95),
+            "page2", 0,
+            _meta("foo.cc", "app/core/widget/foo.cc", confidence=0.95),
             _column((2, "high", 0)),
         )
         files = group_into_files([low, high])
         assert len(files) == 1
-        assert files[0].path == "media/gpu/openmax/foo.cc"
+        assert files[0].path == "app/core/widget/foo.cc"
 
 
 class TestNearDuplicateMerge:
     """同 dir 下 filename 极相似（OCR 字符噪声 / 截断）的二次合并"""
 
     def test_typo_one_extra_char_merged(self) -> None:
-        """回归 DSC06873：``acceleratorr.cc`` (1 page) 应并入
+        """回归 page06873：``acceleratorr.cc`` (1 page) 应并入
         ``accelerator.cc`` (大量 pages) —— 编辑距离 1。"""
         big_pages = [
             _pc(f"DSC{i}", 0,
-                _meta("openmax_video_decode_accelerator.cc",
-                      "media/gpu/openmax/openmax_video_decode_accelerator.cc"),
+                _meta("widget_decode_helper.cc",
+                      "app/core/widget/widget_decode_helper.cc"),
                 _column((i, f"L{i}", 0)))
             for i in range(1, 21)  # 20 pages
         ]
         small_page = _pc(
-            "DSC100", 0,
-            _meta("openmax_video_decode_acceleratorr.cc",
-                  "media/gpu/openmax/openmax_video_decode_acceleratorr.cc"),
+            "page100", 0,
+            _meta("widget_decode_helperr.cc",
+                  "app/core/widget/widget_decode_helperr.cc"),
             _column((100, "TYPO_PAGE", 0)),
         )
         files = group_into_files([*big_pages, small_page])
         assert len(files) == 1, [f.filename for f in files]
-        assert files[0].filename == "openmax_video_decode_accelerator.cc"
+        assert files[0].filename == "widget_decode_helper.cc"
         # typo page 的内容必须出现在合并后的文本里
         assert "TYPO_PAGE" in files[0].merged_text
         assert "code.grouping.merged_near_duplicate" in files[0].flags
 
     def test_truncated_filename_merged_via_suffix(self) -> None:
-        """``_decode_accelerator.cc`` (1 page) 是 ``openmax_video_decode_
-        accelerator.cc`` 的真后缀 → 并入大组。"""
+        """``_helper.cc`` (1 page) 是 ``widget_decode_
+        helper.cc`` 的真后缀 → 并入大组。"""
         big_pages = [
             _pc(f"DSC{i}", 0,
-                _meta("openmax_video_decode_accelerator.cc",
-                      "media/gpu/openmax/openmax_video_decode_accelerator.cc"),
+                _meta("widget_decode_helper.cc",
+                      "app/core/widget/widget_decode_helper.cc"),
                 _column((i, f"L{i}", 0)))
             for i in range(1, 21)
         ]
         small = _pc(
-            "DSC99", 0,
-            _meta("_decode_accelerator.cc",
-                  "media/gpu/openmax/_decode_accelerator.cc"),
+            "page99", 0,
+            _meta("_helper.cc",
+                  "app/core/widget/_helper.cc"),
             _column((99, "TRUNC_PAGE", 0)),
         )
         files = group_into_files([*big_pages, small])
         assert len(files) == 1
-        assert files[0].filename == "openmax_video_decode_accelerator.cc"
+        assert files[0].filename == "widget_decode_helper.cc"
         assert "TRUNC_PAGE" in files[0].merged_text
 
     def test_distinct_files_not_merged_when_balanced(self) -> None:
@@ -405,7 +405,7 @@ class TestNearDuplicateMerge:
             for i in range(1, 21)
         ]
         h_page = _pc(
-            "DSC100", 0,
+            "page100", 0,
             _meta("foo.h", "lib/foo.h"),
             _column((100, "HEADER", 0)),
         )
@@ -418,7 +418,7 @@ class TestNearDuplicateMerge:
 class TestNoFilename:
     def test_filename_missing_separate_group(self) -> None:
         m_no = IDEMeta(column_index=0, filename=None, path=None)
-        pc = _pc("DSC1", 0, m_no, _column((1, "x", 0)))
+        pc = _pc("page1", 0, m_no, _column((1, "x", 0)))
         files = group_into_files([pc])
         assert len(files) == 1
         assert "code.grouping.no_filename" in files[0].flags
@@ -497,16 +497,16 @@ class TestSpikeAggregation:
         assert total_pages == len(all_pcs), "总 page 数必须保持"
 
     def test_status_h_merged(self, all_pcs: list[PageColumn]) -> None:
-        """openmax_status.h 跨 3 张图 6 个栏 → 应聚一个 file"""
+        """widget_status.h 跨 3 张图 6 个栏 → 应聚一个 file"""
         files = group_into_files(all_pcs)
         status_files = [
-            f for f in files if "openmax_status.h" in f.filename.lower()
+            f for f in files if "widget_status.h" in f.filename.lower()
         ]
         # 可能有 1 个或多个（depending on dir 兼容性）
-        assert status_files, "未找到 openmax_status.h"
+        assert status_files, "未找到 widget_status.h"
         # 至少有一个 SourceFile 跨多页
         assert any(len(f.pages) >= 2 for f in status_files), (
-            "openmax_status.h 应跨多页聚合"
+            "widget_status.h 应跨多页聚合"
         )
 
     def test_build_gn_unified(self, all_pcs: list[PageColumn]) -> None:

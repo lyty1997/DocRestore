@@ -224,14 +224,14 @@ async def test_retry_marked_context_does_not_trigger_again() -> None:
 async def test_page_drop_retry_recovers() -> None:
     """LLM 把整页替换成重复删除注释 → 带提示重试，成功则采用重试版。"""
     text = (
-        "<!-- page: DSC07966.JPG -->\n"
+        "<!-- page: page07966.JPG -->\n"
         "## 概述\n"
-        "<div><img src=\"DSC07966_OCR/images/0.jpg\" /></div>\n"
+        "<div><img src=\"page07966_OCR/images/0.jpg\" /></div>\n"
         "1. Per-layer API\n"
     )
     first = RefinedResult(
         markdown=(
-            "<!-- page: DSC07966.JPG -->\n"
+            "<!-- page: page07966.JPG -->\n"
             "<!-- 本页内容与上一页完全重复，已去除 -->\n"
         ),
     )
@@ -253,9 +253,9 @@ async def test_page_drop_retry_recovers() -> None:
 @pytest.mark.asyncio
 async def test_page_drop_retry_still_bad_falls_back_to_raw() -> None:
     """重试仍输出整页误删注释 → 回退原文并标记 truncated，避免写缓存。"""
-    text = "<!-- page: DSC07966.JPG -->\n有效正文\n"
+    text = "<!-- page: page07966.JPG -->\n有效正文\n"
     bad = (
-        "<!-- page: DSC07966.JPG -->\n"
+        "<!-- page: page07966.JPG -->\n"
         "<!-- 本页内容与上一页完全重复，已去除 -->\n"
     )
     first = RefinedResult(markdown=bad)
@@ -566,7 +566,7 @@ def test_split_in_half_avoids_page_marker_zone() -> None:
     middle_heading = "## 真正的章节标题\n"  # heading 起始 ≈ 500
     # 30 行 ≈ 300 chars，让 heading 离 marker > avoid_chars (240)
     mid_filler = "中段填充行内容。\n" * 30
-    marker = "<!-- page: DSC04699.JPG -->\n"
+    marker = "<!-- page: page04699.JPG -->\n"
     post = "后段内容填充行。\n" * 50  # 500 chars
     text = pre + middle_heading + mid_filler + marker + post
 
@@ -585,7 +585,7 @@ def test_split_in_half_keeps_overlap_zone_together() -> None:
     # 构造一个简单场景：marker 前后各有"重叠行"（拍照时被两边都拍到）
     pre_filler = ("内容填充行\n" * 30)  # ~270 chars
     overlap_before = "重要的重叠行 A\n重要的重叠行 B\n"
-    marker = "<!-- page: DSC04711.JPG -->\n"
+    marker = "<!-- page: page04711.JPG -->\n"
     overlap_after = "重要的重叠行 A\n重要的重叠行 B\n"  # 同样的两行（拍照重叠）
     post_filler = ("后续内容填充行\n" * 30)
     text = pre_filler + overlap_before + marker + overlap_after + post_filler
@@ -596,7 +596,7 @@ def test_split_in_half_keeps_overlap_zone_together() -> None:
     # 会被 rstrip("\n")，所以匹配时不带末尾换行）
     full_overlap_block = (
         "重要的重叠行 A\n重要的重叠行 B\n"
-        "<!-- page: DSC04711.JPG -->\n"
+        "<!-- page: page04711.JPG -->\n"
         "重要的重叠行 A\n重要的重叠行 B"
     )
     in_first = full_overlap_block in halves[0]

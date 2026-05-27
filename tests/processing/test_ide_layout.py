@@ -180,7 +180,7 @@ class TestThresholds:
     def test_excessive_num_range_filtered(self) -> None:
         """num_range 跨度 > max_num_range 视为噪声 anchor 过滤
 
-        构造：8 个单调数字但跨度 = 5500（如 chromium_video 堆栈 PID 噪声）
+        构造：8 个单调数字但跨度 = 5500（如 示例_video 堆栈 PID 噪声）
         """
         nums = ["1", "100", "500", "1000", "2000", "3000", "4500", "5500"]
         lines = [

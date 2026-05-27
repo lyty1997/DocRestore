@@ -38,9 +38,9 @@ describe("markdownRoundtrip", () => {
     });
 
     it("converts page anchor comment to data-page-anchor div", () => {
-      const html = markdownToHtml("Hello\n\n<!-- page: DSC0001.JPG -->\n\nWorld");
+      const html = markdownToHtml("Hello\n\n<!-- page: page0001.JPG -->\n\nWorld");
       expect(html).toContain("data-page-anchor");
-      expect(html).toContain('data-page="DSC0001.JPG"');
+      expect(html).toContain('data-page="page0001.JPG"');
     });
   });
 
@@ -54,10 +54,10 @@ describe("markdownRoundtrip", () => {
       // Tiptap renderHTML 会给 div 加内容（icon + label），让 turndown 不
       // 把它当 blank 丢掉。markdownToHtml 也产出非空 div，与此一致。
       const html
-        = '<div data-page-anchor data-page="DSC0001.JPG">'
-        + '<span>📄</span><span>DSC0001.JPG</span></div>';
+        = '<div data-page-anchor data-page="page0001.JPG">'
+        + '<span>📄</span><span>page0001.JPG</span></div>';
       const md = htmlToMarkdown(html);
-      expect(md).toContain("<!-- page: DSC0001.JPG -->");
+      expect(md).toContain("<!-- page: page0001.JPG -->");
     });
 
     it("converts GFM table back", () => {
@@ -72,11 +72,11 @@ describe("markdownRoundtrip", () => {
 
   describe("round-trip", () => {
     it("preserves headings + page anchor through round-trip", () => {
-      const md0 = "# 文档标题\n\n<!-- page: DSC0001.JPG -->\n\n第一段。\n";
+      const md0 = "# 文档标题\n\n<!-- page: page0001.JPG -->\n\n第一段。\n";
       const html1 = markdownToHtml(md0);
       const md1 = htmlToMarkdown(html1);
       expect(md1).toContain("# 文档标题");
-      expect(md1).toContain("<!-- page: DSC0001.JPG -->");
+      expect(md1).toContain("<!-- page: page0001.JPG -->");
       expect(md1).toContain("第一段");
     });
 

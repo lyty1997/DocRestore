@@ -22,7 +22,7 @@ const ALLOWED_TAG_RE =
  *   找到，也不会破坏视觉（CSS 里设零高度 / display:block）
  */
 export function injectPageAnchors(text: string): string {
-  // 注意：HTML 注释内不能含 `--`，但文件名可以含单个 `-`（如 DSC04696-2.jpg）。
+  // 注意：HTML 注释内不能含 `--`，但文件名可以含单个 `-`（如 page04696-2.jpg）。
   // 用 `.+?` 非贪婪匹配到 `-->` 之前即可。
   return text.replaceAll(
     /<!--\s*page:\s*(.+?)\s*-->/g,

@@ -64,7 +64,7 @@ interface VisibleDiagnosticItem {
   readonly key: string;
 }
 
-/** 把 "DSC06835.col0" 拆为 page_stem="DSC06835" */
+/** 把 "page06835.col0" 拆为 page_stem="page06835" */
 function stemFromSourcePage(sourcePage: string): string {
   const dotIdx = sourcePage.indexOf(".");
   return dotIdx > 0 ? sourcePage.slice(0, dotIdx) : sourcePage;

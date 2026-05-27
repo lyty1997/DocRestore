@@ -59,7 +59,7 @@ function renderViewer(index: FilesIndex, content?: string): void {
     <LanguageProvider>
       <CodeViewer
         taskId="task-1"
-        allSourceImages={["raw/DSC1.JPG", "raw/DSC2.JPG"]}
+        allSourceImages={["raw/page1.JPG", "raw/page2.JPG"]}
       />
     </LanguageProvider>,
   );
@@ -89,10 +89,10 @@ describe("CodeViewer", () => {
         path: "src/foo.cc",
         filename: "foo.cc",
         language: "cpp",
-        source_pages: ["DSC1.col0", "DSC2.col0"],
+        source_pages: ["page1.col0", "page2.col0"],
         source_page_ranges: [
-          { page: "DSC1.col0", start_line: 1, end_line: 3 },
-          { page: "DSC2.col0", start_line: 4, end_line: 5 },
+          { page: "page1.col0", start_line: 1, end_line: 3 },
+          { page: "page2.col0", start_line: 4, end_line: 5 },
         ],
         line_count: 5,
         line_no_range: [1, 5],
@@ -106,14 +106,14 @@ describe("CodeViewer", () => {
     });
 
     const codeAnchor = getRequiredElement(
-      '.code-content-text [data-page="DSC2.JPG"]',
+      '.code-content-text [data-page="page2.JPG"]',
     );
     const imageAnchor = getRequiredElement(
-      '.code-source-images-list [data-page="DSC2.JPG"]',
+      '.code-source-images-list [data-page="page2.JPG"]',
     );
 
     expect(codeAnchor.className).toBe("code-page-anchor");
-    expect(imageAnchor.getAttribute("alt")).toBe("raw/DSC2.JPG");
+    expect(imageAnchor.getAttribute("alt")).toBe("raw/page2.JPG");
   });
 
   it("旧 files-index 没有来源页行号范围时仍按来源页顺序生成锚点", async () => {
@@ -122,7 +122,7 @@ describe("CodeViewer", () => {
         path: "src/foo.cc",
         filename: "foo.cc",
         language: "cpp",
-        source_pages: ["DSC1.col0", "DSC2.col0"],
+        source_pages: ["page1.col0", "page2.col0"],
         source_page_ranges: [],
         line_count: 5,
         line_no_range: [1, 5],
@@ -147,7 +147,7 @@ describe("CodeViewer", () => {
           path: "src/foo.cc",
           filename: "foo.cc",
           language: "cpp",
-          source_pages: ["DSC1.col0"],
+          source_pages: ["page1.col0"],
           source_page_ranges: [],
           line_count: 5,
           line_no_range: [10, 14],
@@ -188,7 +188,7 @@ describe("CodeViewer", () => {
           path: "src/foo.cc",
           filename: "foo.cc",
           language: "cpp",
-          source_pages: ["DSC1.col0"],
+          source_pages: ["page1.col0"],
           source_page_ranges: [],
           line_count: 2,
           line_no_range: [1, 2],
@@ -239,7 +239,7 @@ describe("CodeViewer", () => {
           path: "src/foo.cc",
           filename: "foo.cc",
           language: "cpp",
-          source_pages: ["DSC1.col0"],
+          source_pages: ["page1.col0"],
           source_page_ranges: [],
           line_count: 5,
           line_no_range: [20, 24],

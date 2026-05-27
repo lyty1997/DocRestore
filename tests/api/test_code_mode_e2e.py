@@ -55,13 +55,13 @@ def _write_code_fixture(tmp_path: Path) -> tuple[Path, Path]:
 
     rows: list[dict[str, object]] = [{
         "bbox": [100, 50, 900, 80],
-        "text": "media > gpu > openmax > foo.cc",
+        "text": "app > core > widget > foo.cc",
         "score": 0.99,
     }]
     code_lines = [
         "#include <stdint.h>",
         "namespace media {",
-        "int OpenmaxValue() {",
+        "int WidgetValue() {",
         "  return 42;",
         "}",
         "}  // namespace media",
@@ -203,10 +203,10 @@ class TestCodeModeE2E:
         for entry in index:
             assert required.issubset(entry)
 
-        # 关键断言 4：chromium 路径出现（spike 数据特征）
+        # 关键断言 4：示例 路径出现（spike 数据特征）
         all_paths = " ".join(e["path"] for e in index)
-        assert "media/gpu/openmax" in all_paths, (
-            f"未恢复 chromium 路径，paths: {all_paths}"
+        assert "app/core/widget" in all_paths, (
+            f"未恢复 示例 路径，paths: {all_paths}"
         )
 
     @pytest.mark.asyncio

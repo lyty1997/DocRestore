@@ -4,7 +4,7 @@
 
 **状态**：v2 方案 Phase 1.2 已落地（AGE-53 ✅），其余 Phase 1 实施中
 **Linear**：[AGE-8](https://linear.app/axiom-mind/issue/AGE-8/ide-代码照片-源文件还原)
-**输入**：`test_images/Chromium_VDA_code/`（NAS 全 272 张 IDE 截图，VSCode 暗色主题）
+**输入**：`test_images/ide_code_sample/`（NAS 全 272 张 IDE 截图，VSCode 暗色主题）
 **期望输出**：每个源文件一份 `.cc`/`.h`/`.gn`/`.py`/... 源文件 + `files-index.json`
 
 ---
@@ -231,7 +231,7 @@ API 层：`POST /tasks` 加 `code: CodeRestoreConfig | None`，前端 TaskForm �
 
 ### 实测验证（已完成）
 - ✅ 8 张 spike：全部 2 anchor，mono 100%
-- ✅ NAS 全 272 张：成功率 100%，平均最大单调性 1.0，唯一 weak_monotonic warning（DSC06875，含三位数行号 OCR 偶发噪声但仍可用）
+- ✅ NAS 全 272 张：成功率 100%，平均最大单调性 1.0，唯一 weak_monotonic warning（page06875，含三位数行号 OCR 偶发噪声但仍可用）
 
 ---
 
@@ -249,12 +249,12 @@ API 层：`POST /tasks` 加 `code: CodeRestoreConfig | None`，前端 TaskForm �
 ### Phase 2：跨张归类 + 输出（5-7 天）
 - AGE-45 / AGE-46 / AGE-47
 
-**Phase 2 验收**：8 张 spike → ≥ 3 个独立源文件，路径符合 Chromium 源树。
+**Phase 2 验收**：8 张 spike → ≥ 3 个独立源文件，路径符合 参考源码树。
 
 ### Phase 3：编译级精修（1-2 周）
 - AGE-48 / AGE-49 / AGE-50
 
-**Phase 3 验收**：≥ 3 个文件通过编译 + 5 个文件人工 diff 公开 Chromium 源 ≥ 80%。
+**Phase 3 验收**：≥ 3 个文件通过编译 + 5 个文件人工 diff 公开 参考源码 ≥ 80%。
 
 ---
 
@@ -264,14 +264,14 @@ API 层：`POST /tasks` 加 `code: CodeRestoreConfig | None`，前端 TaskForm �
 
 | 图 | 总行数 | anchor 0 (x1, mono) | anchor 1 (x1, mono) | column 0/1 行数 | sidebar 类型 |
 |---|---|---|---|---|---|
-| DSC06835 | 135 | 185 (1.0) | 1720 (1.0) | 47/48 | 折叠 |
-| DSC06836 | 159 | 185 (1.0) | 1712 (1.0) | 46/46 | 折叠 |
-| DSC06837 | 147 | 197 (1.0) | 1723 (1.0) | 46/44 | 折叠 |
-| DSC06838 | 203 | 1026 (1.0) | 1936 (1.0) | 46/54 | 展开 (EXPLORER) |
-| DSC06839 | 217 | 1019 (1.0) | 1921 (1.0) | 51/59 | 展开 |
-| DSC06840 | 190 | 1028 (1.0) | 1930 (1.0) | 51/41 | 展开 |
-| DSC06841 | 134 | 177 (1.0) | 1701 (1.0) | 46/49 | 折叠 |
-| DSC06842 | 139 | 170 (1.0) | 1686 (1.0) | 46/56 | 折叠 |
+| page06835 | 135 | 185 (1.0) | 1720 (1.0) | 47/48 | 折叠 |
+| page06836 | 159 | 185 (1.0) | 1712 (1.0) | 46/46 | 折叠 |
+| page06837 | 147 | 197 (1.0) | 1723 (1.0) | 46/44 | 折叠 |
+| page06838 | 203 | 1026 (1.0) | 1936 (1.0) | 46/54 | 展开 (EXPLORER) |
+| page06839 | 217 | 1019 (1.0) | 1921 (1.0) | 51/59 | 展开 |
+| page06840 | 190 | 1028 (1.0) | 1930 (1.0) | 51/41 | 展开 |
+| page06841 | 134 | 177 (1.0) | 1701 (1.0) | 46/49 | 折叠 |
+| page06842 | 139 | 170 (1.0) | 1686 (1.0) | 46/56 | 折叠 |
 
 ### 7.2 全 272 张统计（`output/age8-validate-full/summary.json`）
 
@@ -290,7 +290,7 @@ API 层：`POST /tasks` 加 `code: CodeRestoreConfig | None`，前端 TaskForm �
 ```
 
 - **检出率 100%**（272/272 都识别出 2 个 anchor）
-- **唯一 weak_monotonic**：DSC06875，右栏行号 211-320 含三位数，OCR 偶发噪声 mono=0.676，但左栏 mono=1.0 + 仍检出 2 anchor，整体可用
+- **唯一 weak_monotonic**：page06875，右栏行号 211-320 含三位数，OCR 偶发噪声 mono=0.676，但左栏 mono=1.0 + 仍检出 2 anchor，整体可用
 - **左栏代码行数**：avg 49.7（min 34 / max 66）
 - **右栏代码行数**：avg 53.2（min 35 / max 72）
 - **above_code（tab/menu）**：avg 10.0
@@ -300,7 +300,7 @@ API 层：`POST /tasks` 加 `code: CodeRestoreConfig | None`，前端 TaskForm �
 ### 7.3 业内对照
 | 工具 | IDE 多栏处理 | 结果 |
 |---|---|---|
-| PaddleOCR-VL（默认）| layout 解析 | DSC06838 整图合并为单 content block |
+| PaddleOCR-VL（默认）| layout 解析 | page06838 整图合并为单 content block |
 | PaddleOCR-VL `merge_layout_blocks=False` | 关后处理合并 | 与默认无差异（参数对底层 layout 无效）|
 | PP-DocBlockLayout 阈值 0.05~0.5 | "多栏文档子区域"模型 | 全部输出单一 Region 覆盖整图 |
 | PP-StructureV3 + reading order | layout-first + pointer network | 跨栏合并阅读顺序（与需求相反）|
@@ -324,7 +324,7 @@ API 层：`POST /tasks` 加 `code: CodeRestoreConfig | None`，前端 TaskForm �
 | 风险 | 影响 | 应对 |
 |---|---|---|
 | VSCode hide line numbers（用户关行号） | 中 | quality flag `code.no_anchor`，整图归 sidebar 待人工补正；spike 273 张全开行号未触发 |
-| 三位数以上行号 OCR 噪声 | 低 | 已实测：DSC06875 weak_monotonic 仅 warning 不阻断；可加 `code.line_gap_at_<n>` 注释占位（AGE-54）|
+| 三位数以上行号 OCR 噪声 | 低 | 已实测：page06875 weak_monotonic 仅 warning 不阻断；可加 `code.line_gap_at_<n>` 注释占位（AGE-54）|
 | 同名文件跨多个目录（多个 BUILD.gn） | 低 | breadcrumb 路径区分，组 ID = 完整路径（AGE-46）|
 | LLM 字符级修正引入语义错（变量名 `O1` → `01`） | 中 | AGE-48 LLM 输出 changelog；编译失败回退到未精修版（AGE-49）|
 | sidebar 文件树底部越界进 below_code | 低 | ide_layout 已修复：x < anchor[0].x1_min 优先归 sidebar |

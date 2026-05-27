@@ -74,7 +74,7 @@ class TestKeepsLongerVersion:
         )
         md = (
             f"## 编译方式\n{truncated}\n\n"
-            "<!-- page: DSC04727.JPG -->\n\n"
+            "<!-- page: page04727.JPG -->\n\n"
             f"## 编译方式\n{complete}\n"
         )
         out, removed = dedup_h2_sections(md)

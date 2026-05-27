@@ -6,13 +6,13 @@
 """AGE-8 端到端验收报告：文件树 + 语法检查 + 失败样本。
 
 跑完 code mode 任务后调用本脚本，对 ``output/<task>/`` 出一份：
-1. 文件树（chromium 风格路径分组）
+1. 文件树（示例 风格路径分组）
 2. compile_check（auto-stubs）syntax_clean / syntax_dirty / sysroot_missing 分布
 3. 真 OCR 语法噪声样本（前 N 行）
 
 用法::
 
-    python scripts/age8_e2e_report.py --task-dir output/chromium_vda_real
+    python scripts/age8_e2e_report.py --task-dir output/ide_code_real
 """
 
 from __future__ import annotations
@@ -149,7 +149,7 @@ def main() -> int:
         )
         print(f"  syntax_clean / total = {clean}/{total} = {ratio}")
         print(f"  syntax_dirty (真 OCR 噪声) = {dirty}")
-        print(f"  sysroot_missing (缺 chromium 头) = {sysroot}")
+        print(f"  sysroot_missing (缺 示例 头) = {sysroot}")
         print(f"  skipped (无工具/无映射) = {skipped}")
     print()
     return 0

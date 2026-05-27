@@ -113,15 +113,15 @@ class TestAge8E2eAcceptance:
         )
 
     @pytest.mark.asyncio
-    async def test_chromium_path_present(
+    async def test_示例_path_present(
         self, all_pcs: list[PageColumn], tmp_path: Path,
     ) -> None:
-        """断言 2：files-index.json 含 chromium 源树路径"""
+        """断言 2：files-index.json 含 示例 源树路径"""
         sources = group_into_files(all_pcs)
         result = await render_code_files(sources, tmp_path)
         index = json.loads(result.index_path.read_text())
         all_paths = " ".join(e["path"] for e in index)
-        assert "media/gpu/openmax" in all_paths, all_paths
+        assert "app/core/widget" in all_paths, all_paths
 
     @pytest.mark.asyncio
     async def test_no_ide_ui_in_code(
@@ -196,7 +196,7 @@ class TestAge8E2eAcceptance:
     ) -> None:
         """断言：spike 已知的 4+ 文件应都被恢复
 
-        spike 8 张含：openmax_video_decode_accelerator.cc/.h, openmax_status.h,
+        spike 8 张含：widget_decode_helper.cc/.h, widget_status.h,
         gles2_dmabuf_to_egl_image_translator.cc/.h, BUILD.gn
         """
         sources = group_into_files(all_pcs)
@@ -208,8 +208,8 @@ class TestAge8E2eAcceptance:
         joined = " ".join(all_paths).lower()
         # 关键文件存在（filename 大小写宽松）
         for keyword in [
-            "openmax_video_decode_accelerator",
-            "openmax_status.h",
+            "widget_decode_helper",
+            "widget_status.h",
             "gles2_dmabuf_to_egl_image_translator",
             "build.gn",
         ]:

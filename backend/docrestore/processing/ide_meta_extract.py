@@ -13,7 +13,7 @@
 
 关键观察（基于 spike 实测 above_code 内容）：
   - VSCode tab 行文字含文件扩展名（``.cc`` / ``.h`` / ``.gn`` 等），通常无 ``>``
-  - breadcrumb 行用 `` > `` 分隔多段（如 ``media > gpu > openmax > foo.cc``），
+  - breadcrumb 行用 `` > `` 分隔多段（如 ``media > gpu > widget > foo.cc``），
     末段是当前文件，前段是路径
   - breadcrumb 后段可能跟 symbol path（``... > foo.cc > {} media > Allocate``），
     要找**最后一个含文件扩展名的段**为锚点
@@ -76,7 +76,7 @@ _BREADCRUMB_SPLIT_RE = re.compile(r"\s*>+\s*")
 
 #: tab/breadcrumb 段头部图标 OCR 误识噪声前缀（需要清洗）
 #: spike 实测有两种贴法：
-#:   1. ``C openmax_status.h``（带空格）
+#:   1. ``C widget_status.h``（带空格）
 #:   2. ``Cgles2_..._translator.h``（无空格紧贴）
 #: 第 2 种容易误吞文件名首字符，需要 cross-validate"去前缀后是否更像有效文件名"
 _ICON_PREFIX_WITH_SPACE_RE = re.compile(
@@ -108,8 +108,8 @@ class IDEMeta:
     """单个编辑器栏的元数据"""
 
     column_index: int
-    filename: str | None = None     # 如 "openmax_status.h"
-    path: str | None = None         # 如 "media/gpu/openmax/openmax_status.h"
+    filename: str | None = None     # 如 "widget_status.h"
+    path: str | None = None         # 如 "app/core/widget/widget_status.h"
     language: str | None = None
     tab_readable: bool = False      # 是否找到 tab 文件名
     breadcrumb_readable: bool = False
@@ -124,7 +124,7 @@ def extract_ide_metas(layout: IDELayout) -> list[IDEMeta]:
     """对 layout 的每个 anchor 提取一份 IDEMeta。
 
     最后做"同图栏间路径补全"：用其他栏的目录前缀补全本栏 path=None 或
-    OCR 漏分隔符（如 ``gpuopenmax`` ↔ ``gpu/openmax``）的场景。
+    OCR 漏分隔符（如 ``corewidget`` ↔ ``core/widget``）的场景。
 
     没有 anchor 返回空列表。
     """
@@ -158,8 +158,8 @@ def _reconcile_within_image(metas: list[IDEMeta]) -> None:
 
     场景：
       1. 某栏 path=None 但 filename 有 → 借用其他栏的目录前缀拼路径
-      2. 某栏 path 因 OCR 漏 ``>`` 把多段粘连（``media/gpuopenmax/...``），
-         但其他栏 path 是 ``media/gpu/openmax/...`` → 用粘连版"去 /"后等价
+      2. 某栏 path 因 OCR 漏 ``>`` 把多段粘连（``app/corewidget/...``），
+         但其他栏 path 是 ``app/core/widget/...`` → 用粘连版"去 /"后等价
          判定为相同目录，替换为细分版
 
     标 quality flag：
@@ -178,7 +178,7 @@ def _reconcile_within_image(metas: list[IDEMeta]) -> None:
     if not dirs:
         return
     # 选众数；并列时偏好"段数更多"版本（更细分 = 更可信，OCR 漏分隔符
-    # 只会让段变少，不会凭空多段。``media/gpu/openmax`` 比 ``media/gpuopenmax`` 可信）
+    # 只会让段变少，不会凭空多段。``app/core/widget`` 比 ``app/corewidget`` 可信）
     counter = Counter(dirs)
     max_count = max(counter.values())
     top_dirs = [d for d, c in counter.items() if c == max_count]
@@ -203,7 +203,7 @@ def _reconcile_within_image(metas: list[IDEMeta]) -> None:
             ))
             m.path_confidence = max(m.path_confidence, 0.72)
             continue
-        # 场景 2：粘连还原（"gpuopenmax" → "gpu/openmax"）
+        # 场景 2：粘连还原（"corewidget" → "core/widget"）
         if "/" not in m.path:
             continue
         m_dir = m.path.rsplit("/", 1)[0]
@@ -234,13 +234,13 @@ def _extract_for_column(idx: int, lines: list[TextLine]) -> IDEMeta:  # noqa: C9
     OCR 又常把多 tab 误识为 active，所以 tab 只在 breadcrumb 完全
     缺失时才作为兜底。
 
-    **breadcrumb 片段拼接**（DSC06953/07050 回归修复）：
-    OCR 经常把一行 breadcrumb 拆成多个 bbox（``openmax_`` + ``_video_
+    **breadcrumb 片段拼接**（page06953/07050 回归修复）：
+    OCR 经常把一行 breadcrumb 拆成多个 bbox（``widget_`` + ``_video_
     decode_accelerator.cc`` 等），按 x 顺序拼接 + 边界字符去重后再走
     单行 ``_parse_breadcrumb``，避免单段 fragment 被误识为 tab。
 
     **截断补全**：拼接后若 filename 仍以 ``_`` 开头或与某 tab 候选
-    suffix-match → 用 tab 完整版（DSC07050 ``_decode_accelerator.cc``
+    suffix-match → 用 tab 完整版（page07050 ``_decode_accelerator.cc``
     场景）。但若 filename 已是合法独立名，禁止 tab override（防 .h/.cc
     误覆盖）。
     """
@@ -399,7 +399,7 @@ def _split_lines_by_kind(
     """把 lines 拆成 (breadcrumb, tab) 两组。
 
     给定 ``band`` 时优先按 y 带划分：落在 band 上的视为 breadcrumb 片段
-    （包括没有 ``>`` 的截断片段，如 DSC06953 ``_video_decode_accelerator
+    （包括没有 ``>`` 的截断片段，如 page06953 ``_video_decode_accelerator
     .cc``）。否则退回旧规则（含 ``>`` 视为 breadcrumb）。
     """
     breadcrumb: list[TextLine] = []
@@ -422,7 +422,7 @@ def _split_lines_by_kind(
 def _stitch_breadcrumb_fragments(lines: list[TextLine]) -> str:
     """按 x 顺序拼接 breadcrumb 片段，对 bbox 重叠的相邻片段去重首尾共享字符。
 
-    OCR 把一行连续文字拆成多个 bbox 时，常在分割点处复制字符（``openmax_``
+    OCR 把一行连续文字拆成多个 bbox 时，常在分割点处复制字符（``widget_``
     + ``_video_decode_accelerator.cc`` → 共享 ``_``）。重叠区域的首尾共享
     字符 → 去重一份。
 
@@ -479,7 +479,7 @@ def _complete_via_tab_suffix(
     """用同栏 tab 候选的完整名 suffix-match 补全 partial filename。
 
     例：partial=``_decode_accelerator.cc``，tab 候选含
-    ``openmax_video_decode_accelerator.cc`` → 后者以前者结尾 → 用后者。
+    ``widget_decode_helper.cc`` → 后者以前者结尾 → 用后者。
     多个 tab 候选 endswith partial 时取最长（更具体）。
     """
     candidates: list[str] = []
@@ -503,11 +503,11 @@ def _parse_breadcrumb(text: str) -> tuple[str | None, str | None]:  # noqa: C901
     """从一行 breadcrumb 拆出 ``(path, filename)``。
 
     例：
-      - ``media >gpu >openmax > C openmax_status.h`` →
-        ``("media/gpu/openmax/openmax_status.h", "openmax_status.h")``
-      - ``media>gpu>openmax>C+ foo.cc>{}media>Symbol`` →
+      - ``media >gpu >widget > C widget_status.h`` →
+        ``("app/core/widget/widget_status.h", "widget_status.h")``
+      - ``media>gpu>widget>C+ foo.cc>{}media>Symbol`` →
         最后一个含扩展名的段 ``C+ foo.cc`` 是文件锚点，``{}media>Symbol``
-        是 symbol path，丢弃 → ``("media/gpu/openmax/foo.cc", "foo.cc")``
+        是 symbol path，丢弃 → ``("app/core/widget/foo.cc", "foo.cc")``
       - 末段被截（``... > foo_video_decode_ac``）→ filename=None，
         让上层用 tab 兜底
     """
@@ -529,7 +529,7 @@ def _parse_breadcrumb(text: str) -> tuple[str | None, str | None]:  # noqa: C901
     if file_idx < 0 or filename is None or file_match is None:
         return None, None
 
-    # 反向收集路径段，遇到 symbol/另一个 file/非法字符就停（spike DSC06837
+    # 反向收集路径段，遇到 symbol/另一个 file/非法字符就停（spike page06837
     # 等场景：OCR 把两条 breadcrumb 合一行，含 ``{}media > AllocateOmxC``
     # symbol path，必须截断不让它污染 path）
     path_segments: list[str] = []
@@ -544,11 +544,11 @@ def _parse_breadcrumb(text: str) -> tuple[str | None, str | None]:  # noqa: C901
             break
         path_segments.insert(0, cleaned)
 
-    # 文件段同时含路径前缀（DSC07050：``openmax C+openmax_video_decode_acc
-    # elerator.cc`` —— OCR 把分隔符 `>` 漏识，dir ``openmax`` 与 filename
+    # 文件段同时含路径前缀（page07050：``widget C+widget_video_decode_acc
+    # elerator.cc`` —— OCR 把分隔符 `>` 漏识，dir ``widget`` 与 filename
     # 同段）。把文件名前的空白分词逐个验证为路径段，追加到 path_segments
     # 末尾。注意要剔除 VSCode tab 图标 OCR 噪声（``C+`` / ``C`` 等单字符
-    # icon），否则 ``C openmax.h`` 会误产生 ``C/openmax.h``。
+    # icon），否则 ``C widget.h`` 会误产生 ``C/widget.h``。
     prefix_text = parts[file_idx][: file_match.start(1)]
     for word in prefix_text.split():
         cleaned = _clean_segment(word)
@@ -625,7 +625,7 @@ def _pick_best_tab_filename(  # noqa: C901 — tab 候选筛选 + hint 增强多
     优先级：
       1. 排除 window title（含 SSH / -src[/IP 地址等噪声特征）
       2. 优先 active tab（VSCode 当前激活 tab 紧跟 ``×`` 关闭按钮）
-      3. 用 breadcrumb-row hint suffix-match 消歧（DSC06953 等场景：
+      3. 用 breadcrumb-row hint suffix-match 消歧（page06953 等场景：
          tab bar 多 tab 都无 ``×``，但 breadcrumb 有截断片段透露 active）
       4. 否则取 y 最小的（最顶 tab bar 行）+ 第一个匹配扩展名的
     """

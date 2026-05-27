@@ -53,8 +53,8 @@ limitations under the License.
 - 新增 `docs/zh/known-issues.md`，沉淀短段截断无法二分的现象与处理策略。
 - 新增/更新 `tests/pipeline/test_selective_rerun.py` 覆盖短段重试恢复和重试仍截断回退。
 - 复查 `test_images/crop_compare/AI子系统-裁剪/Linux_AI子系统_开发指南`：
-  - 视觉对照 `DSC07966.JPG` / `DSC07967.JPG` 确认二者是拍照重叠页，不是整页重复。
-  - 定位到 `seg_0b8cd2de12a092b74adbf7ec734f2725.json` 段级 LLM 缓存已把 `DSC07966.JPG` 替换成 `<!-- 本页内容与上一页完全重复，已去除 -->`，说明误删发生在段级精修阶段。
+  - 视觉对照 `page07966.JPG` / `page07967.JPG` 确认二者是拍照重叠页，不是整页重复。
+  - 定位到 `seg_0b8cd2de12a092b74adbf7ec734f2725.json` 段级 LLM 缓存已把 `page07966.JPG` 替换成 `<!-- 本页内容与上一页完全重复，已去除 -->`，说明误删发生在段级精修阶段。
   - 更新 refine/final_refine prompt：HTML `<img src="...">` 与 Markdown 图片占位符同等保留；禁止用“本页重复已去除”注释替代页面。
   - 新增段级防护 `_maybe_retry_refine_on_page_drop()`：检测整页误删注释后带提示重试，仍失败则回退原段并标记 `truncated=True`，防止坏输出写入缓存。
 
@@ -282,16 +282,16 @@ fallback + 占位符），但只在 JSX 层贯彻。后端 60+ 处 raise HTTPExc
 
 遗留问题：无（本地 LLM 端到端已可在 UI 直选；云端模式行为与历史完全一致）
 
-## 2026-04-27 代码模式归类 4 类回归修复（DSC06953/07050/06873 + UI 滚动）
+## 2026-04-27 代码模式归类 4 类回归修复（page06953/07050/06873 + UI 滚动）
 
-主题：跑 211 张 chromium IDE 截图后发现 4 个归类/UI bug，逐一修复
+主题：跑 211 张 示例 IDE 截图后发现 4 个归类/UI bug，逐一修复
 + 补单测/playwright 截图验证。
 
-### #1 DSC06953 / DSC07002 col0 误归到 gles2_dmabuf_to_egl_image_translator.cc
+### #1 page06953 / page07002 col0 误归到 gles2_dmabuf_to_egl_image_translator.cc
 
-- 现象：本应归到 ``openmax_video_decode_accelerator.cc`` 的 col0，被错
+- 现象：本应归到 ``widget_decode_helper.cc`` 的 col0，被错
   归到同 col0 但完全不同的 gles2 文件
-- 根因：col0 breadcrumb OCR 拆成多 bbox（``openmax_`` + ``_video_decode_
+- 根因：col0 breadcrumb OCR 拆成多 bbox（``widget_`` + ``_video_decode_
   accelerator.cc``），单段不含 ``>`` → ``_split_lines_by_kind`` 把它当
   tab；``_pick_best_tab_filename`` 在 tab bar 同时显示 .cc tab、谁也
   没 ``×`` 时退回 "y 最小者优先"，命中 gles2
@@ -300,28 +300,28 @@ fallback + 占位符），但只在 JSX 层贯彻。后端 60+ 处 raise HTTPExc
     带，同 y 带的所有片段都视为 breadcrumb（即使无 ``>``）
   - ``_stitch_breadcrumb_fragments``：按 x 排序拼接，相邻 bbox 重叠时用
     ``_dedup_overlap_boundary`` 去重首尾共享字符 1-8 个
-  - 拼接后走单行 ``_parse_breadcrumb`` —— ``openmax_`` 与 ``_video_
+  - 拼接后走单行 ``_parse_breadcrumb`` —— ``widget_`` 与 ``_video_
     decode_accelerator.cc`` 在 ``_`` 处共享，去重后还原完整 filename
   - 兜底：``_pick_best_tab_filename`` 加 ``hint_lines`` 参数，无 ``×``
     标记时用 breadcrumb-row 片段 suffix-match 消歧 tab 候选
 
-### #3 DSC07050 col0 出现幽灵 _decode_accelerator.cc
+### #3 page07050 col0 出现幽灵 _decode_accelerator.cc
 
 - 现象：1 page、24 行的 ``_decode_accelerator.cc`` 是不存在的文件
-- 根因：DSC07050 col0 breadcrumb 含 ``_decode_accelerator.cc>{}media>``
-  + ``openmax_video_`` 两片段，OCR 漏识 dir 与 filename 间的 ``>``，
-  解析出截断版 filename + 丢失 ``openmax`` 段路径
+- 根因：page07050 col0 breadcrumb 含 ``_decode_accelerator.cc>{}media>``
+  + ``widget_video_`` 两片段，OCR 漏识 dir 与 filename 间的 ``>``，
+  解析出截断版 filename + 丢失 ``widget`` 段路径
 - 修复（``ide_meta_extract.py``）：
   - ``_looks_truncated_filename`` + ``_complete_via_tab_suffix``：
     filename 以 ``_`` 开头且某 tab 候选 endswith 它 → 用 tab 完整版
   - ``_parse_breadcrumb`` 文件段前缀提取：当 dir 与 filename 在同一段
-    （``openmax C+openmax_video_decode_accelerator.cc``），按空白分词
+    （``widget C+widget_decode_helper.cc``），按空白分词
     + ``_looks_like_icon_word`` 滤掉 ``C/C+/H/J`` 等图标残留 → 把
-    剩余的 ``openmax`` 追加进 path
+    剩余的 ``widget`` 追加进 path
 
-### #2 DSC06873 col0 拼写错 acceleratorr.cc 误成独立文件
+### #2 page06873 col0 拼写错 acceleratorr.cc 误成独立文件
 
-- 现象：1 page 的 ``openmax_video_decode_acceleratorr.cc``（OCR 多识
+- 现象：1 page 的 ``widget_decode_helperr.cc``（OCR 多识
   一个 ``r``）与 256 page 的正确版被识别成两份不同文件
 - 修复（``code_file_grouping.py``）：``group_into_files`` 末尾增 ``
   _merge_near_duplicate_filenames`` 二次合并：
@@ -355,12 +355,12 @@ fallback + 占位符），但只在 JSX 层贯彻。后端 60+ 处 raise HTTPExc
   passed / 14 skipped
 - TS：``tsc --noEmit`` + ``eslint`` 无报错
 
-遗留问题：现有 chromium_v3 task 的 ``files-index.json`` 是修复前生成
+遗留问题：现有 示例_v3 task 的 ``files-index.json`` 是修复前生成
 的，需重新跑该任务（或 resume）才能让 fix 生效到这份数据上。
 
 ### #7 修复 OCR worker stdout 空行/日志行导致 task 整体失败
 
-- 现象：跑 chromium_v4 任务时，worker 在 init 期间 stdout 偶发出现空行或
+- 现象：跑 示例_v4 任务时，worker 在 init 期间 stdout 偶发出现空行或
   vLLM/transformers 日志，命中 ``base.py::_read_response`` 的默认实现：
   ``json.loads(b"\\n")`` → ``JSONDecodeError: Expecting value: line 2
   column 1 (char 1)`` → 整个 task 推到 failed
@@ -438,7 +438,7 @@ fallback + 占位符），但只在 JSX 层贯彻。后端 60+ 处 raise HTTPExc
 
 ## 2026-04-26 代码模式回归 5 大问题修复 — 前后端组件解耦 + LLM provider 兜底
 
-主题：用户跑完 211 张 Chromium IDE 截图后发现 5 个回归问题，
+主题：用户跑完 211 张 示例 IDE 截图后发现 5 个回归问题，
 按优先级一并修复。
 
 ### #5 LiteLLM provider 缺失（base.py + test_model_normalize.py）
@@ -459,7 +459,7 @@ fallback + 占位符），但只在 JSX 层贯彻。后端 60+ 处 raise HTTPExc
 - 单测 4 条：纯文档模式不混入 / 代码模式三件套 / 字节内容一致 / 多子目录命名空间
 
 ### #3 IDE meta：breadcrumb 是唯一真相（ide_meta_extract.py）
-- 实测 DSC06953/07002：col0 IDE 显示 `.h` 但被归到 `.cc`，根因是
+- 实测 page06953/07002：col0 IDE 显示 `.h` 但被归到 `.cc`，根因是
   `_reconcile_with_tab` 在"breadcrumb 末段截断 + tab 名是 prefix"时
   让 tab 覆盖 breadcrumb，OCR 多 tab 噪声直接污染文件归类
 - 用户决策：含 `>` 的 breadcrumb 必然是当前打开的源文件（IDE 不会撒谎），
@@ -492,13 +492,13 @@ fallback + 占位符），但只在 JSX 层贯彻。后端 60+ 处 raise HTTPExc
 ### 收益
 - `tests/llm/test_model_normalize.py` +4
 - `tests/api/test_zip_code_mode.py` +4
-- `tests/processing/test_ide_meta_extract.py` +2（DSC06953 回归守护）
+- `tests/processing/test_ide_meta_extract.py` +2（page06953 回归守护）
 - 全量回归 135 passed / 4 skipped
 
 ### 二阶段：遗留三项（用户后续决策"按你的修法修复"）
 **#A gap 填充加阈值**：`code_file_grouping._merge_columns_by_line_no` 单次
 gap > 50 行不再批量塞空行，改插单行注释占位（`// ... N lines missing ...`
-或 `# ... ...` 按 language 选）。回归 DSC06953 案例的 587 连续空行雪崩。
+或 `# ... ...` 按 language 选）。回归 page06953 案例的 587 连续空行雪崩。
 新 flag `code.grouping.large_gap_collapsed` 标识被压缩。
 +`tests/processing/test_code_file_grouping.py` 3 用例（cpp / python / 混合 gap）。
 
@@ -551,8 +551,8 @@ pipeline 测试 181 passed 无破坏。
 - `llm/prompts.py CODE_REFINE_SYSTEM_PROMPT` 告诉 LLM 上游已规则纠错，
   重点修剩余的 D（粘连）/ E（IDE chrome 残留）/ 缺 = 号 等
 
-**实测 spike diff**：`k0mxStateInvalid → kOmxStateInvalid`、
-`kOmxStateExecuting g=4，→ kOmxStateExecuting g=4,`、
+**实测 spike diff**：`kWidqetStateInvalid → kWidgetStateInvalid`、
+`kWidgetStateExecuting g=4，→ kWidgetStateExecuting g=4,`、
 `if（current_cpu → if(current_cpu` 等全部修正，无误伤。
 
 ### 真 C/C++ 语法验证（不再 mock）
@@ -560,7 +560,7 @@ pipeline 测试 181 passed 无破坏。
 - `scripts/age8_stub_includes.py`：扫源文件 `#include` 自动落 stub header
   - 标准库头跳过；EGL/ / base/logging.h / media/base/status.h 等关键
     类型族注入 typedef stub 让 g++ 不一片红
-- 错误分类（区分 OCR 噪声 vs 缺 chromium sysroot）：
+- 错误分类（区分 OCR 噪声 vs 缺 示例 sysroot）：
   - `syntax_clean` / `syntax_dirty`（真 OCR 粘连）/ `sysroot_missing`（缺类型）
     / `skipped`
   - syntax patterns 只匹配强 OCR 信号（invalid preprocessing directive /
@@ -568,9 +568,9 @@ pipeline 测试 181 passed 无破坏。
 - `scripts/age8_e2e_report.py` 一键端到端验收报告
 - 6 条**真起 g++ 子进程**的端到端集成测试 + 12 条分类单测 + 13 条 stub 单测
 
-### Chromium VDA 真任务回归
-- 输入 252 张 chromium VDA 模块照片 → 真 OCR + LLM refine + 后处理
-- 期望：files-index.json 落盘 + 文件树按 chromium 路径组织 + g++ syntax
+### 示例 VDA 真任务回归
+- 输入 252 张 示例 VDA 模块照片 → 真 OCR + LLM refine + 后处理
+- 期望：files-index.json 落盘 + 文件树按 示例 路径组织 + g++ syntax
   报告 syntax_dirty 数尽量低（OCR postfix + LLM refine 应已处理大部分）
 - _typos.toml 加白名单：OCR 反例的故意错拼（dEfine / regsiter）需要豁免
 
@@ -578,15 +578,15 @@ pipeline 测试 181 passed 无破坏。
 - pre-commit 全绿；mypy --strict + ruff --strict + typos
 - 915+ 单测 + 18 真 g++ 集成测试
 
-遗留问题：无（chromium 真任务回归正在跑）
+遗留问题：无（示例 真任务回归正在跑）
 
 ## 2026-04-26 AGE-8 收官 — E2E + 代码模式视图
 
 主题：AGE-52 E2E + AGE-50 前端代码模式 + Pipeline 集成代码分支 + DB 历史任务自动 hydrate。
 
 ### AGE-52 E2E 端到端验收（commit 70607a0）
-- `tests/pipeline/test_age8_e2e.py`：8 张 spike 全链路 7 条断言（≥3 文件 / chromium 路径 / IDE UI 剥离 / 行号剥离 / 缩进保留 / index 字段完整 / 关键文件恢复）
-- LLM 精修验证（deepseek-v4-flash）：openmax_status.h 13 处字符级修正 100% 正确，行数严格保持
+- `tests/pipeline/test_age8_e2e.py`：8 张 spike 全链路 7 条断言（≥3 文件 / 示例 路径 / IDE UI 剥离 / 行号剥离 / 缩进保留 / index 字段完整 / 关键文件恢复）
+- LLM 精修验证（deepseek-v4-flash）：widget_status.h 13 处字符级修正 100% 正确，行数严格保持
 
 ### AGE-50 代码模式视图（commit df70356）
 - **Pipeline 集成 `_code_pipeline` 分支**：`code.enable=True` 时跳过 LLM 流式精修，OCR 收齐后跑 ide_layout → ide_meta_extract → code_assembly → group_into_files → 可选 CodeLLMRefiner → render_code_files
@@ -647,7 +647,7 @@ sidebar 折叠/展开、字体缩放等真实场景下，**任何固定比例阈
 - anchor_count_distribution: `{2: 272}`
 - avg_max_monotonic: **1.0**
 - code.no_anchor: **0 张**
-- 唯一 warning：DSC06875 右栏含三位数行号 OCR 偶发噪声（mono=0.676），
+- 唯一 warning：page06875 右栏含三位数行号 OCR 偶发噪声（mono=0.676），
   但仍检出 2 anchor + max_mono=1.0，整体可用
 
 **回归测试**：873 passed / 49 skipped / 0 failed（含 ide_layout 32 + 现有 841）

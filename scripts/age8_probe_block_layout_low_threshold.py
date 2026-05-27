@@ -24,7 +24,7 @@ IMAGES_DIR = PROJECT_ROOT / "test_images" / "age8-spike"
 
 # 多组 thresholdeshold 实验
 THRESHOLDS = [0.5, 0.3, 0.1, 0.05]
-IMAGES = ["DSC06836", "DSC06838"]
+IMAGES = ["page06836", "page06838"]
 
 
 def _extract_boxes(res):

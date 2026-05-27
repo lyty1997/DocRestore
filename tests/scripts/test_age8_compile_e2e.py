@@ -6,7 +6,7 @@
 
 不 mock。直接调 ``run_compile_check``，期望它真的 ``subprocess.run g++``
 拿到 stderr 后做错误分类。覆盖：
-1. 干净 chromium 风格 .cc → syntax_clean
+1. 干净 示例 风格 .cc → syntax_clean
 2. OCR 粘连 #ifndEf → syntax_dirty
 3. 缺类型（不给 stub）→ sysroot_missing
 4. 给关键 stub 后能 syntax_clean
@@ -59,9 +59,9 @@ pytestmark = pytest.mark.skipif(
 
 
 class TestCleanSyntaxPasses:
-    """完美的 chromium 风格代码 + 自动 stub → syntax_clean"""
+    """完美的 示例 风格代码 + 自动 stub → syntax_clean"""
 
-    def test_minimal_chromium_style_cc(self, tmp_path: Path) -> None:
+    def test_minimal_示例_style_cc(self, tmp_path: Path) -> None:
         files = tmp_path / "files"
         (files / "media" / "gpu").mkdir(parents=True)
         cc = files / "media" / "gpu" / "ok.cc"
@@ -137,12 +137,12 @@ class TestOcrSyntaxNoiseDetected:
 
 
 class TestSysrootMissingClassified:
-    """干净代码 + 缺 chromium 头 → sysroot_missing（不污染 OCR 噪声指标）"""
+    """干净代码 + 缺 示例 头 → sysroot_missing（不污染 OCR 噪声指标）"""
 
-    def test_missing_chromium_type(self, tmp_path: Path) -> None:
+    def test_missing_示例_type(self, tmp_path: Path) -> None:
         files = tmp_path / "files"
         files.mkdir()
-        cc = files / "needs_chromium.cc"
+        cc = files / "needs_示例.cc"
         # 没 stub 时 BitstreamBuffer / Bind 没定义
         cc.write_text(
             'class BitstreamBuffer;\n'  # 前向声明

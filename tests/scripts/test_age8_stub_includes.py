@@ -7,7 +7,7 @@
 确认：
 - collect_includes 扫描所有 .h/.cc/.cpp 的 #include "xxx" 和 <xxx>
 - build_stub_dir 跳过标准库头、给关键类型注入 typedef、其他写空 stub
-- 行为对 chromium 风格 #include "media/foo.h" 友好
+- 行为对 示例 风格 #include "media/foo.h" 友好
 """
 
 from __future__ import annotations
@@ -31,18 +31,18 @@ from age8_stub_includes import (  # type: ignore[import-not-found]
 def files_root(tmp_path: Path) -> Path:
     """构造一个迷你 files/ 树含多种 #include 形态。"""
     root = tmp_path / "files"
-    (root / "media" / "gpu" / "openmax").mkdir(parents=True)
+    (root / "media" / "gpu" / "widget").mkdir(parents=True)
     (root / "base").mkdir(parents=True)
 
-    (root / "media" / "gpu" / "openmax" / "foo.cc").write_text(
+    (root / "media" / "gpu" / "widget" / "foo.cc").write_text(
         '#include "base/logging.h"\n'
-        '#include "media/gpu/openmax/foo.h"\n'
+        '#include "app/core/widget/foo.h"\n'
         "#include <map>\n"
         "#include <EGL/egl.h>\n"
         "int main() { return 0; }\n",
         encoding="utf-8",
     )
-    (root / "media" / "gpu" / "openmax" / "foo.h").write_text(
+    (root / "media" / "gpu" / "widget" / "foo.h").write_text(
         '#include "base/bind.h"\n'
         "#include <vector>\n",
         encoding="utf-8",
@@ -60,7 +60,7 @@ class TestCollectIncludes:
         result = collect_includes(files_root)
         assert "base/logging.h" in result
         assert "base/bind.h" in result
-        assert "media/gpu/openmax/foo.h" in result
+        assert "app/core/widget/foo.h" in result
         assert "map" in result
         assert "vector" in result
         assert "EGL/egl.h" in result
@@ -143,7 +143,7 @@ class TestStdlibCoverage:
 
 
 class TestTypedefStubsContent:
-    """关键 typedef stub 包含必要类型，避免 chromium 缺这些就编不过"""
+    """关键 typedef stub 包含必要类型，避免 示例 缺这些就编不过"""
 
     def test_egl_egl_h_has_core_types(self) -> None:
         content = _TYPEDEF_STUBS["EGL/egl.h"]

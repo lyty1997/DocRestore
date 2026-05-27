@@ -40,8 +40,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUT_ROOT = PROJECT_ROOT / "output" / "age8-probe-basic"
 IMAGES_DIR = PROJECT_ROOT / "test_images" / "age8-spike"
 IMAGE_STEMS = [
-    "DSC06835", "DSC06836", "DSC06837", "DSC06838",
-    "DSC06839", "DSC06840", "DSC06841", "DSC06842",
+    "page06835", "page06836", "page06837", "page06838",
+    "page06839", "page06840", "page06841", "page06842",
 ]
 
 

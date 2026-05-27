@@ -14,40 +14,40 @@ Total data: **1259 images, 6 datasets**
 
 | Dataset | Path | Count | Type |
 |---|---|---|---|
-| Chromium_VDA_code | NAS chromium/chromium_decode/code/ | 272 | VSCode two-column IDE |
-| TMedia | NAS Linux系统/视频子系统/TMedia/code/ | 585 | Mixed VSCode single-column + two-column IDE |
-| chromium_display_code | NAS chromium/chromium_display/code/ | 157 | VSCode two-column IDE |
-| chromium_diff | NAS chromium/chromium_display/diff/ | 123 | git diff view (two/three-column) |
-| chromium_video | NAS chromium/chromium播放视频性能零拷贝优化/ | 111 | Mixed Feishu docs + debugger stack |
+| ide_code_sample | internal dataset | 272 | VSCode two-column IDE |
+| TMedia | internal dataset | 585 | Mixed VSCode single-column + two-column IDE |
+| ide_display_sample | internal dataset | 157 | VSCode two-column IDE |
+| ide_diff | internal dataset | 123 | git diff view (two/three-column) |
+| sample_video | internal dataset | 111 | Mixed Feishu docs + debugger stack |
 | doc_control | test_images/[1-11].jpg | 11 | Plain document photos (control) |
 
 ## 2. Overview (single-table summary)
 
 | Dataset | Total | Detected | Success rate | mono≥0.9 | no_anchor | single | 2 | 3+ |
 |---|---|---|---|---|---|---|---|---|
-| Chromium_VDA_code | 272 | 272 | **100.00%** | 272 | 0 | 0 | 272 | 0 |
+| ide_code_sample | 272 | 272 | **100.00%** | 272 | 0 | 0 | 272 | 0 |
 | TMedia | 585 | 585 | **100.00%** | 585 | 0 | 304 | 281 | 0 |
-| chromium_display_code | 157 | 157 | **100.00%** | 157 | 0 | 0 | 157 | 0 |
-| chromium_diff | 123 | 121 | **98.37%** | 121 | 2 | 14 | 99 | **8** |
-| chromium_video | 111 | 49 | 44.14%* | 39 | 62 | 49 | 0 | 0 |
+| ide_display_sample | 157 | 157 | **100.00%** | 157 | 0 | 0 | 157 | 0 |
+| ide_diff | 123 | 121 | **98.37%** | 121 | 2 | 14 | 99 | **8** |
+| sample_video | 111 | 49 | 44.14%* | 39 | 62 | 49 | 0 | 0 |
 | doc_control | 11 | 0 | **0.00%**† | 0 | 11 | 0 | 0 | 0 |
 
-\* chromium_video is a mixed dataset of "Feishu docs + debugger stacks"; 44% are real IDE code images.
+\* sample_video is a mixed dataset of "Feishu docs + debugger stacks"; 44% are real IDE code images.
 † doc_control is a **control experiment**: pure document photos should yield 0 detections (verifying that they are not misidentified as code). **0% is the expected result.**
 
 ## 3. Core conclusions
 
 ### 3.1 IDE code scenario success rate: 99.82%
-Counting only the first 4 IDE/diff datasets (1137 images total), 1135 were detected, with **2 missed detections** (real no_anchor cases in chromium_diff, possibly binary diffs / image diffs without a line-number column structure).
+Counting only the first 4 IDE/diff datasets (1137 images total), 1135 were detected, with **2 missed detections** (real no_anchor cases in ide_diff, possibly binary diffs / image diffs without a line-number column structure).
 
 ### 3.2 Column-count adaptation validated across all scenarios
 
 | Columns | Occurrences | Datasets |
 |---|---|---|
-| 0 (none) | 75 | doc_control 11 + chromium_video 62 + chromium_diff 2 |
-| 1 (single column) | 367 | TMedia 304 + chromium_video 49 + chromium_diff 14 |
-| 2 (two columns) | 809 | Chromium_VDA_code 272 + TMedia 281 + chromium_display_code 157 + chromium_diff 99 |
-| 3 (three columns) | **8** | chromium_diff 8 (git diff old/new line numbers + right-side file) |
+| 0 (none) | 75 | doc_control 11 + sample_video 62 + ide_diff 2 |
+| 1 (single column) | 367 | TMedia 304 + sample_video 49 + ide_diff 14 |
+| 2 (two columns) | 809 | ide_code_sample 272 + TMedia 281 + ide_display_sample 157 + ide_diff 99 |
+| 3 (three columns) | **8** | ide_diff 8 (git diff old/new line numbers + right-side file) |
 
 **First time seeing single and 3+ columns** — earlier spikes were all two-column; we now cover the diversity of real datasets.
 
@@ -56,18 +56,18 @@ Counting only the first 4 IDE/diff datasets (1137 images total), 1135 were detec
 | Validation | Result |
 |---|---|
 | Plain document photos (11) misidentified as code | **0 / 11** ✓ |
-| Feishu docs (62) in the chromium_video dataset misidentified as code | **0 / 62** ✓ |
-| Debugger stacks (49) in chromium_video correctly identified as single-column code | **49 / 49** ✓ |
+| Feishu docs (62) in the sample_video dataset misidentified as code | **0 / 62** ✓ |
+| Debugger stacks (49) in sample_video correctly identified as single-column code | **49 / 49** ✓ |
 
 **A total of 73 non-code images produced no false positives.**
 
 ### 3.4 Real OCR / algorithm weaknesses (partially fixed)
 
 #### Fixed: TextLine sorting bug
-- **Symptom**: 8 chromium_diff images triggered `'<' not supported between TextLine and TextLine`
+- **Symptom**: 8 ide_diff images triggered `'<' not supported between TextLine and TextLine`
 - **Cause**: in `code_assembly.py:_pair_by_y`, `sorted((int, TextLine))` tuples fall back to comparing TextLine when ints are equal (the dataclass has no default `__lt__`)
 - **Fix**: add `key=lambda x: x[0]` to sorted()
-- **Validation**: chromium_diff re-run success rate 92→121 (+29 images)
+- **Validation**: ide_diff re-run success rate 92→121 (+29 images)
 
 #### Known weakness: unpaired_codes (pending AGE-54 upgrade)
 Cases where a code line is not matched with a line-number line. The current simplified handling only sets a flag without inserting.
@@ -75,8 +75,8 @@ Cases where a code line is not matched with a line-number line. The current simp
 | Dataset | Triggering image-occurrences | Severity |
 |---|---|---|
 | TMedia | ~600 image-occurrences (1–56 unpaired per image) | Medium |
-| chromium_diff | ~200 image-occurrences (1–54 per image) | Medium |
-| chromium_display_code | ~70 image-occurrences (1–8 per image) | Low |
+| ide_diff | ~200 image-occurrences (1–54 per image) | Medium |
+| ide_display_sample | ~70 image-occurrences (1–8 per image) | Low |
 
 **Root cause**: line-number lines occasionally OCR as empty strings/fail, leaving code lines without a matching line number; or OCR merges multiple code lines into a single line, breaking y-pairing.
 
@@ -95,9 +95,9 @@ Some images have `code.line_gap_count` as high as 1700+.
 
 ## 4. Per-dataset details
 
-### 4.1 Chromium_VDA_code (272, 100%)
+### 4.1 ide_code_sample (272, 100%)
 - All two-column; mono=1.0
-- Sole weak_monotonic case: DSC06875 (right column contains three-digit line numbers)
+- Sole weak_monotonic case: page06875 (right column contains three-digit line numbers)
 - Averages: left column 49.7 lines / right column 53.2 lines / above 10 / below 20.6 / sidebar 1.7
 
 ### 4.2 TMedia (585, 100%)
@@ -107,17 +107,17 @@ Some images have `code.line_gap_count` as high as 1700+.
 - char_width 17.87–20.78 px, line_height 31–42 px
 - 3 weak_monotonic cases (OCR noise)
 
-### 4.3 chromium_display_code (157, 100%)
+### 4.3 ide_display_sample (157, 100%)
 - All two-column; mono=1.0
 - char_width 17–20 px, line_height 33–41 px
 
-### 4.4 chromium_diff (123, 98.37%)
+### 4.4 ide_diff (123, 98.37%)
 - **First time seeing 3 anchors** (8 images), 99 with double anchors, 14 single
 - 2 real no_anchor cases (diffs without a line-number column structure)
 - char_width 11.79–13.75 px (smaller than IDE code fonts)
 - TextLine sorting bug fixed
 
-### 4.5 chromium_video (111, 44.14% / 100% within expectations)
+### 4.5 sample_video (111, 44.14% / 100% within expectations)
 - The dataset is a mix of "Feishu docs + debugger stacks"; **44.14% are real IDE code images (49 single-column debugger views)**
 - **62 document photos correctly identified as no_anchor (no false positives)**
 - mono ≥ 0.9: 39/49
@@ -185,11 +185,11 @@ v3 switches to `y_center < anchor.y_top` / `y_center > anchor.y_bottom`, routing
 
 | Dataset | v1 | v2-3000 | v3 (final) |
 |---|---|---|---|
-| Chromium_VDA_code | 272/272 (100%) | 272/272 (100%) | 272/272 (100%) ✓ |
+| ide_code_sample | 272/272 (100%) | 272/272 (100%) | 272/272 (100%) ✓ |
 | TMedia | 585/585 (100%) | 585/585 (100%) | 585/585 (100%) ✓ |
-| chromium_display_code | 157/157 (100%) | 157/157 (100%) | 157/157 (100%) ✓ |
-| chromium_diff | 121/123 (98.37%) | 121/123 (98.37%) | 121/123 (98.37%) ✓ |
-| chromium_video (non-target) | 49/111 (44%) | 47/111 (42%) | 47/111 (42%) ✓ |
+| ide_display_sample | 157/157 (100%) | 157/157 (100%) | 157/157 (100%) ✓ |
+| ide_diff | 121/123 (98.37%) | 121/123 (98.37%) | 121/123 (98.37%) ✓ |
+| sample_video (non-target) | 49/111 (44%) | 47/111 (42%) | 47/111 (42%) ✓ |
 | doc_control | 0/11 (zero false positives) | 0/11 (zero false positives) | 0/11 (zero false positives) ✓ |
 
 Anchor detection rates are identical across all three versions. v3's real improvement is in the **quality of the output code_text**:
@@ -199,8 +199,8 @@ Anchor detection rates are identical across all three versions. v3's real improv
 | Dataset | v2 mean / max | v3 mean / max | Reduction |
 |---|---|---|---|
 | TMedia | 40.3 / 67 | 32.1 / 36 | -20% / -46% |
-| chromium_display_code | 24.9 / 32 | 24.5 / 25 | -1.6% / -22% |
-| Chromium_VDA_code | 24.6 / 39 | 24.3 / 38 | -1% / -3% |
+| ide_display_sample | 24.9 / 32 | 24.5 / 25 | -1.6% / -22% |
+| ide_code_sample | 24.6 / 39 | 24.3 / 38 | -1% / -3% |
 
 v3's max column lengths are close to the typical IDE view of 25 lines (one-screen standard), proving that garbage was eliminated. The extra column length in v2 was entirely OCR fragments + UI noise + real code mixed together.
 

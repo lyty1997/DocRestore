@@ -11,7 +11,7 @@
 用法：
     /home/lyty/work/ai/env/anaconda3/envs/ppocr_client/bin/python3 \\
         scripts/age8_validate_full_dataset.py \\
-        --input /mnt/TrueNAS_Share/chromium/chromium_decode/code/ \\
+        --input /path/to/ide_code_dataset/ \\
         --output output/age8-validate-full \\
         [--limit 50]
 """

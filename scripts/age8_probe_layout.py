@@ -45,7 +45,7 @@ MODELS = [
     "PP-DocLayout_plus-L",
     "PP-DocLayout-L",
 ]
-IMAGE_STEMS = ["DSC06836", "DSC06838"]
+IMAGE_STEMS = ["page06836", "page06838"]
 
 
 def _extract_boxes(res) -> list[dict]:

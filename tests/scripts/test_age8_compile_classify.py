@@ -4,7 +4,7 @@
 
 """AGE-49 compile_check 错误分类测试。
 
-g++ stderr 文本 → 区分 syntax (真 OCR 噪声) vs semantic (缺 chromium sysroot)
+g++ stderr 文本 → 区分 syntax (真 OCR 噪声) vs semantic (缺 示例 sysroot)
 vs cascade (前面错误的连锁反应，归 semantic)。
 
 样本来自 spike e2e-refined 的真实 g++ 报错。
@@ -48,7 +48,7 @@ class TestSyntaxErrors:
 
 
 class TestSemanticErrors:
-    """缺 chromium sysroot 的语义错（不是 OCR 责任）"""
+    """缺 示例 sysroot 的语义错（不是 OCR 责任）"""
 
     def test_undeclared_identifier(self) -> None:
         err = "foo.h:12:12: error: 'BitstreamBuffer' has not been declared\n"

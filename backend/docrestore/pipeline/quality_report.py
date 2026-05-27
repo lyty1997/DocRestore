@@ -24,7 +24,7 @@
 用法：
     report = QualityReport()
     await report.add(QualityIssue(stage="cleaner", code="cleaner.high_garbage_ratio",
-                                  page="DSC04725.JPG", severity="warn", ...))
+                                  page="page04725.JPG", severity="warn", ...))
     await report.dump_to_file(output_dir / ".quality_report.json")
 """
 
@@ -66,7 +66,7 @@ class QualityIssue:
     """人类可读描述（中文）。"""
 
     page: str = ""
-    """关联图片文件名（如 `DSC04725.JPG`），无关联时空。"""
+    """关联图片文件名（如 `page04725.JPG`），无关联时空。"""
 
     segment_index: int = 0
     """关联段号，无关联时 0。段号从 1 起计。"""

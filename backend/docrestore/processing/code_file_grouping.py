@@ -14,7 +14,7 @@
 **核心算法**：
   1. 跨张 path/filename canonical 标准化：
      - fuzzy filename 用 ``lower()`` 容忍 OCR 大小写错识（BUILD/BUiLD/BUlLD）
-     - dir 用 "去 / 后" 后缀兼容判定，把 ``gpu/openmax`` 与 ``media/gpu/openmax``
+     - dir 用 "去 / 后" 后缀兼容判定，把 ``core/widget`` 与 ``app/core/widget``
        识别为同 dir（短的是长的后缀，单图无 peer 时缺前缀场景由此兜底）
      - 同组内 canonical filename = 字符长度+频次最大；canonical dir = 段数最多
   2. 按 (canonical_dir, canonical_filename) 二级分组
@@ -146,7 +146,7 @@ def group_into_files(page_columns: list[PageColumn]) -> list[SourceFile]:
 
 
 #: 小组并入大组时，小组 page 数占两组之和的最大比例。超过此比例视为
-#: "两份真实不同的文件"，不合并。0.1 = 10% —— 经验值，DSC06873 typo
+#: "两份真实不同的文件"，不合并。0.1 = 10% —— 经验值，page06873 typo
 #: 案例里 typo 组占 1/(1+255)=0.39%，远低于阈值。
 _NEAR_DUP_MAX_RATIO = 0.10
 
@@ -236,14 +236,14 @@ def _is_near_duplicate(big: SourceFile, small: SourceFile) -> bool:
     small_name = small.filename.lower()
     if big_name == small_name:
         return True
-    # suffix 关系：``_decode_accelerator.cc`` 是 ``openmax_video_decode_
+    # suffix 关系：``_decode_accelerator.cc`` 是 ``widget_video_decode_
     # accelerator.cc`` 的真后缀（小组的 stem 长度 < 大组的 stem 长度）
     if (
         len(small_name) < len(big_name)
         and big_name.endswith(small_name)
     ):
         return True
-    # 编辑距离 ≤ 2：DSC06873 ``acceleratorr.cc`` vs ``accelerator.cc``
+    # 编辑距离 ≤ 2：page06873 ``acceleratorr.cc`` vs ``accelerator.cc``
     if abs(len(big_name) - len(small_name)) <= _NEAR_DUP_MAX_EDIT_DISTANCE:
         return _edit_distance_within(
             big_name, small_name, _NEAR_DUP_MAX_EDIT_DISTANCE,
@@ -374,7 +374,7 @@ def _split_by_compatible_dir(
     """同 filename 内，按 dir 兼容性细分子组
 
     兼容性：``dir1.replace('/', '') == dir2.replace('/', '')``（OCR 漏分隔
-    符）或 一方是另一方的后缀（如 ``gpu/openmax`` ⊆ ``media/gpu/openmax``）。
+    符）或 一方是另一方的后缀（如 ``core/widget`` ⊆ ``app/core/widget``）。
     """
     if len(group) <= 1:
         return [group]
@@ -394,7 +394,7 @@ def _split_by_compatible_dir(
 
 
 def _compact_dir(path: str | None) -> str:
-    """从 ``media/gpu/openmax/foo.cc`` 提 ``mediagpuopenmax``（去 / 大小写不变）"""
+    """从 ``app/core/widget/foo.cc`` 提 ``appcorewidget``（去 / 大小写不变）"""
     if not path or "/" not in path:
         return ""
     return path.rsplit("/", 1)[0].replace("/", "")
@@ -534,7 +534,7 @@ def _column_line_no_end(column: CodeColumn) -> int:
 
 
 #: 单次行号 gap 超过此阈值 → 不再批量塞空行，改插单行注释占位。
-#: DSC06953/07002 错归案例里，错归 + 行号大跳跃产生过 587 个连续空行
+#: page06953/07002 错归案例里，错归 + 行号大跳跃产生过 587 个连续空行
 #: 把文件膨胀到肉眼不可读。50 行是经验值：50 行内的 gap 多是 OCR 漏识
 #: 或代码折叠，仍当作空白；超过就明显是结构性错误（错归 / 漏页），
 #: 用注释明确标注，避免污染。

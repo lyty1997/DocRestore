@@ -2,7 +2,7 @@
 
 **Status**: v2 design Phase 1.2 landed (AGE-53 done), the rest of Phase 1 in progress
 **Linear**: [AGE-8](https://linear.app/axiom-mind/issue/AGE-8/ide-代码照片-源文件还原)
-**Input**: `test_images/Chromium_VDA_code/` (full 272-image NAS set, VSCode dark theme)
+**Input**: `test_images/ide_code_sample/` (full 272-image NAS set, VSCode dark theme)
 **Expected output**: one `.cc`/`.h`/`.gn`/`.py`/... source file per file + `files-index.json`
 
 ---
@@ -227,7 +227,7 @@ API layer: `POST /tasks` adds `code: CodeRestoreConfig | None`; the frontend Tas
 
 ### Empirical validation (completed)
 - ✅ 8 spike images: all detect 2 anchors, mono 100%
-- ✅ Full 272-image NAS set: success rate 100%, average max monotonicity 1.0, only one weak_monotonic warning (DSC06875, contains three-digit line numbers with sporadic OCR noise but still usable)
+- ✅ Full 272-image NAS set: success rate 100%, average max monotonicity 1.0, only one weak_monotonic warning (page06875, contains three-digit line numbers with sporadic OCR noise but still usable)
 
 ---
 
@@ -245,12 +245,12 @@ API layer: `POST /tasks` adds `code: CodeRestoreConfig | None`; the frontend Tas
 ### Phase 2: cross-image grouping + output (5-7 days)
 - AGE-45 / AGE-46 / AGE-47
 
-**Phase 2 acceptance**: 8 spike images → ≥ 3 independent source files, paths matching the Chromium source tree.
+**Phase 2 acceptance**: 8 spike images → ≥ 3 independent source files, paths matching the source tree.
 
 ### Phase 3: compile-grade refinement (1-2 weeks)
 - AGE-48 / AGE-49 / AGE-50
 
-**Phase 3 acceptance**: ≥ 3 files compile + manual diff of 5 files against the public Chromium source ≥ 80%.
+**Phase 3 acceptance**: ≥ 3 files compile + manual diff of 5 files against the public sample source ≥ 80%.
 
 ---
 
@@ -260,14 +260,14 @@ API layer: `POST /tasks` adds `code: CodeRestoreConfig | None`; the frontend Tas
 
 | Image | total lines | anchor 0 (x1, mono) | anchor 1 (x1, mono) | column 0/1 line count | sidebar type |
 |---|---|---|---|---|---|
-| DSC06835 | 135 | 185 (1.0) | 1720 (1.0) | 47/48 | collapsed |
-| DSC06836 | 159 | 185 (1.0) | 1712 (1.0) | 46/46 | collapsed |
-| DSC06837 | 147 | 197 (1.0) | 1723 (1.0) | 46/44 | collapsed |
-| DSC06838 | 203 | 1026 (1.0) | 1936 (1.0) | 46/54 | expanded (EXPLORER) |
-| DSC06839 | 217 | 1019 (1.0) | 1921 (1.0) | 51/59 | expanded |
-| DSC06840 | 190 | 1028 (1.0) | 1930 (1.0) | 51/41 | expanded |
-| DSC06841 | 134 | 177 (1.0) | 1701 (1.0) | 46/49 | collapsed |
-| DSC06842 | 139 | 170 (1.0) | 1686 (1.0) | 46/56 | collapsed |
+| page06835 | 135 | 185 (1.0) | 1720 (1.0) | 47/48 | collapsed |
+| page06836 | 159 | 185 (1.0) | 1712 (1.0) | 46/46 | collapsed |
+| page06837 | 147 | 197 (1.0) | 1723 (1.0) | 46/44 | collapsed |
+| page06838 | 203 | 1026 (1.0) | 1936 (1.0) | 46/54 | expanded (EXPLORER) |
+| page06839 | 217 | 1019 (1.0) | 1921 (1.0) | 51/59 | expanded |
+| page06840 | 190 | 1028 (1.0) | 1930 (1.0) | 51/41 | expanded |
+| page06841 | 134 | 177 (1.0) | 1701 (1.0) | 46/49 | collapsed |
+| page06842 | 139 | 170 (1.0) | 1686 (1.0) | 46/56 | collapsed |
 
 ### 7.2 Statistics over the full 272 images (`output/age8-validate-full/summary.json`)
 
@@ -286,7 +286,7 @@ API layer: `POST /tasks` adds `code: CodeRestoreConfig | None`; the frontend Tas
 ```
 
 - **Detection rate 100%** (272/272 all detect 2 anchors)
-- **Only weak_monotonic case**: DSC06875, right column line numbers 211-320 contain three digits, sporadic OCR noise gave mono=0.676, but the left column had mono=1.0 and 2 anchors were still detected, so it remains usable overall
+- **Only weak_monotonic case**: page06875, right column line numbers 211-320 contain three digits, sporadic OCR noise gave mono=0.676, but the left column had mono=1.0 and 2 anchors were still detected, so it remains usable overall
 - **Left-column code line count**: avg 49.7 (min 34 / max 66)
 - **Right-column code line count**: avg 53.2 (min 35 / max 72)
 - **above_code (tab/menu)**: avg 10.0
@@ -296,7 +296,7 @@ API layer: `POST /tasks` adds `code: CodeRestoreConfig | None`; the frontend Tas
 ### 7.3 Industry comparison
 | Tool | IDE multi-column handling | Result |
 |---|---|---|
-| PaddleOCR-VL (default) | layout parsing | DSC06838 entire image merged into a single content block |
+| PaddleOCR-VL (default) | layout parsing | page06838 entire image merged into a single content block |
 | PaddleOCR-VL `merge_layout_blocks=False` | disable post-merging | no difference vs default (the parameter does not affect the underlying layout) |
 | PP-DocBlockLayout threshold 0.05~0.5 | "multi-column document sub-region" model | always emits a single Region covering the whole image |
 | PP-StructureV3 + reading order | layout-first + pointer network | merges reading order across columns (opposite of our requirement) |
@@ -320,7 +320,7 @@ API layer: `POST /tasks` adds `code: CodeRestoreConfig | None`; the frontend Tas
 | Risk | Impact | Mitigation |
 |---|---|---|
 | VSCode hide line numbers (user disables line numbers) | medium | quality flag `code.no_anchor`, whole image classified as sidebar pending manual fixup; the 273-image spike all kept line numbers on and never triggered this |
-| OCR noise on line numbers with three or more digits | low | empirically verified: DSC06875 weak_monotonic is only a warning, not a blocker; can add `code.line_gap_at_<n>` placeholder comments (AGE-54) |
+| OCR noise on line numbers with three or more digits | low | empirically verified: page06875 weak_monotonic is only a warning, not a blocker; can add `code.line_gap_at_<n>` placeholder comments (AGE-54) |
 | Same filename across multiple directories (multiple BUILD.gn) | low | breadcrumb path disambiguates; group ID = full path (AGE-46) |
 | LLM character-level correction introduces semantic errors (variable name `O1` -> `01`) | medium | AGE-48 LLM emits a changelog; on compile failure fall back to the un-refined version (AGE-49) |
 | Bottom of sidebar file tree overflowing into below_code | low | already fixed in ide_layout: x < anchor[0].x1_min is classified as sidebar with priority |

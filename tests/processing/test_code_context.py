@@ -36,12 +36,12 @@ def test_list_files_detects_multiple_languages(tmp_path: Path) -> None:
 
 def test_search_paths_fuzzy_matches_filename(tmp_path: Path) -> None:
     (tmp_path / "media" / "gpu").mkdir(parents=True)
-    (tmp_path / "media" / "gpu" / "openmax_video.cc").write_text(
+    (tmp_path / "media" / "gpu" / "widget_video.cc").write_text(
         "int x;\n", encoding="utf-8",
     )
     provider = LocalCodeContextProvider(tmp_path)
-    matches = provider.search_paths("openmax_video.cc", language="cpp")
-    assert matches[0].path == "media/gpu/openmax_video.cc"
+    matches = provider.search_paths("widget_video.cc", language="cpp")
+    assert matches[0].path == "media/gpu/widget_video.cc"
     assert matches[0].source == "reference"
     assert matches[0].score > 0.8
 

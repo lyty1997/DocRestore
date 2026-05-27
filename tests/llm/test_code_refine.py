@@ -32,7 +32,7 @@ def _make_source(text: str, *, path: str = "src/foo.cc",
                  language: str = "cpp") -> SourceFile:
     line_count = text.count("\n") + 1 if text else 0
     page = PageColumn(
-        page_stem="DSC1", column_index=0,
+        page_stem="page1", column_index=0,
         meta=IDEMeta(column_index=0, filename="foo.cc",
                      path=path, language=language),
         column=CodeColumn(

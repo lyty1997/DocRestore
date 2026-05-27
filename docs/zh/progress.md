@@ -96,7 +96,7 @@
 
 完成内容：
 - 新增 `docs/zh/backend/age-58-code-mode-quality-plan.md`，把代码模式质量修复拆成质量可观测性、column segment 建模、路径候选置信度、UI 噪声过滤、确定性 OCR 清理、诊断驱动 LLM、小片段修复、二次裁剪 OCR 和可选代码库上下文。
-- 明确修复主线不依赖参考源码，必须泛化到多项目、多语言；参考源码匹配只作为可插拔增强，不绑定 Chromium、C/C++ 或任何固定项目结构。
+- 明确修复主线不依赖参考源码，必须泛化到多项目、多语言；参考源码匹配只作为可插拔增强，不绑定 示例、C/C++ 或任何固定项目结构。
 - 修正质量判断口径：多页归并到少量源文件对大文件是合理现象，`merged_pages` 只作为风险信号，不能单独作为失败条件。
 - 更新后端文档索引，新增 AGE-58 方案入口。
 - 更新已知问题，记录“代码模式质量不能只看归并文件数量”的复用经验。
@@ -111,14 +111,14 @@
 ## 2026-05-14 17:45:38 CST - AGE-58 代码模式质量偏差排查
 
 完成内容：
-- 对比 `/mnt/TrueNAS_Share/chromium/chromium_decode/code` 原始 IDE 照片、`/tmp/docrestore_b5950355` OCR 中间产物与 `files/` 最终代码产物，确认最终偏差不是单一 OCR 识别率问题。
+- 对比内部 IDE 代码截图数据集原始照片、`/tmp/docrestore_b5950355` OCR 中间产物与 `files/` 最终代码产物，确认最终偏差不是单一 OCR 识别率问题。
 - 定位主要质量损失来源：整屏 OCR 混入 VSCode 顶栏、breadcrumb、搜索框、Loading 遮罩、底部 Terminal/Marketplace 等 UI 噪声；双栏 IDE 截图被按不稳定路径 OCR 过度归并；`files-index.json` 中多个文件带 `code.refine.truncated`，LLM 修复基本未能作用于大文件。
 - 抽样确认 PP-OCR basic 对可见代码行能提供可用行级 bbox 与部分文本，但暗色主题小字号、红色语法高亮、拍摄透视和低对比会造成 `//`、下划线、大小写、引号、括号和标点的系统性错误。
 - 已在 Linear AGE-58 补充排查结论与分阶段优化方案，后续应优先做版面裁剪、路径/分组置信度和编译驱动修复，而不是只切换 OCR 引擎。
 
 验证：
-- 抽样查看 `DSC06835.JPG`、`DSC06853.JPG`、`DSC07032.JPG` 原图，分别覆盖双栏初始页、右侧头文件 Loading 遮罩、搜索框遮挡与后段行号页。
-- 抽样读取对应 `text_lines.jsonl`、`files-index.json` 和最终 `openmax_video_decode_accelerator.cc`、`openmax_video_decode_accelerator.h`、`BUILD.gn`、`gles2_dmabuf_to_egl_image_translator.cc` 产物进行交叉比对。
+- 抽样查看 `page06835.JPG`、`page06853.JPG`、`page07032.JPG` 原图，分别覆盖双栏初始页、右侧头文件 Loading 遮罩、搜索框遮挡与后段行号页。
+- 抽样读取对应 `text_lines.jsonl`、`files-index.json` 和最终 `widget_decode_helper.cc`、`widget_decode_helper.h`、`BUILD.gn`、`gles2_dmabuf_to_egl_image_translator.cc` 产物进行交叉比对。
 
 遗留问题：
 - AGE-58 仍需实现代码模式质量门禁、双栏裁剪重 OCR、路径候选校正、行号连续性分组和编译/LLM 小片段修复；本次仅完成归因和方案同步。
@@ -392,7 +392,7 @@
 - C/C++ 诊断 target 支持 `include_root`，renderer 与内存诊断会把输出根目录传给 `gcc/g++ -I`，避免生成文件间的本地 include 被误判为缺失。
 - 缺失头文件类错误分类为 `dependency_dirty` / `dependency`，不再作为 `syntax_dirty` 驱动 LLM 语法修复。
 - files-index 前端 schema 增加 `diagnostic` 和 `diagnostic.items`；CodeViewer 使用结构化诊断渲染红色/黄色/语义波浪线和行 tooltip。
-- 用 `/tmp/docrestore_02bca34c` 的 `openmax_video_decode_accelerator.cc` 验证：诊断越过本地生成头文件，停在外部 `base/compiler_specific.h`，状态为 `dependency_dirty`。
+- 用 `/tmp/docrestore_02bca34c` 的 `widget_decode_helper.cc` 验证：诊断越过本地生成头文件，停在外部 `base/compiler_specific.h`，状态为 `dependency_dirty`。
 
 验证：
 - `/home/lyty/work/ai/env/anaconda3/bin/python -m pytest tests/processing/test_code_diagnostics.py tests/output/test_code_renderer.py -q`：通过，20 passed, 1 skipped。
@@ -450,7 +450,7 @@
 ## 2026-05-20 18:27 CST - OCR 中文噪声语法标注补强
 
 完成内容：
-- 复现 `/tmp/docrestore_02bca34c/files/media/gpu/openmax/gles2_dmabuf_to_egl_image_translator.cc` 漏标：当前诊断只返回 3 个缺失 include，未到第 90 行 `if(hEglImage 二 EGL_NO_IMAGE_KHR){ 王`。
+- 复现 `/tmp/docrestore_02bca34c/files/app/core/widget/gles2_dmabuf_to_egl_image_translator.cc` 漏标：当前诊断只返回 3 个缺失 include，未到第 90 行 `if(hEglImage 二 EGL_NO_IMAGE_KHR){ 王`。
 - 在工具诊断后追加不依赖编译器的 OCR 噪声词法扫描：忽略注释、块注释和字符串，只扫描代码区 CJK / 全角字符。
 - 噪声扫描结果以 `syntax` / `ocr_noise_non_ascii` 合并进 `diagnostic.items`；即使编译器被 include 或语义错误短路，也能标出代码区中文/全角 OCR 噪声。
 - 前端补充回归：接受 include 依赖诊断后，后续 OCR 噪声语法诊断仍保留显示。

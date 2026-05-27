@@ -5,7 +5,7 @@
 """AGE-8 PaddleOCR-VL 关合并实测
 
 测试 merge_layout_blocks=False 是否能拿到栏级独立 block，
-解决 DSC06838 默认下被合并为单一 content block 的问题。
+解决 page06838 默认下被合并为单一 content block 的问题。
 
 前置：scripts/start.sh ppocr-server 在跑（端口 8119）。
 """
@@ -28,7 +28,7 @@ OUT_ROOT = PROJECT_ROOT / "output" / "age8-probe-vl-no-merge"
 IMAGES_DIR = PROJECT_ROOT / "test_images" / "age8-spike"
 SERVER_URL = "http://127.0.0.1:8119/v1"
 MODEL = "PaddleOCR-VL-1.5-0.9B"
-IMAGES = ["DSC06836", "DSC06838"]
+IMAGES = ["page06836", "page06838"]
 
 
 def _extract_blocks(res):

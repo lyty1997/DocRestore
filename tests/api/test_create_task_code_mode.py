@@ -118,7 +118,7 @@ class TestCreateTaskCodeFlowsToManager:
         img_dir.mkdir()
         # 占位图避免 image_dir 校验失败；create_task 后立刻读 _tasks，
         # 不等 pipeline 真正跑完
-        (img_dir / "DSC0001.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+        (img_dir / "page0001.jpg").write_bytes(b"\xff\xd8\xff\xe0")
 
         resp = await api_client.post(
             "/api/v1/tasks",
@@ -146,7 +146,7 @@ class TestCreateTaskCodeFlowsToManager:
         """请求未带 code → task.code is None（保留默认行为）"""
         img_dir = tmp_path / "imgs"
         img_dir.mkdir()
-        (img_dir / "DSC0001.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+        (img_dir / "page0001.jpg").write_bytes(b"\xff\xd8\xff\xe0")
 
         resp = await api_client.post(
             "/api/v1/tasks",

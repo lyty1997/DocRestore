@@ -5,10 +5,10 @@
 
 """AGE-49 stub include 自动生成器。
 
-g++ -fsyntax-only 跑 chromium 风格 #include 时，缺 chromium sysroot →
+g++ -fsyntax-only 跑 示例 风格 #include 时，缺 示例 sysroot →
 fatal error: 'media/foo.h' file not found。本脚本扫描 files/ 下源文件
 的所有 #include，自动在 stub_dir 下创建对应的空 header（mkdir -p +
-touch），并对常见类型族（EGL/、GLES/、OpenMAX）注入 typedef stub，
+touch），并对常见类型族（EGL/、GLES/ 等）注入 typedef stub，
 让 g++ 预处理 + 语义阶段不至于因缺类型直接 fatal。
 
 用法（独立）：
@@ -55,7 +55,7 @@ _STDLIB_HEADERS = frozenset({
 })
 
 # 关键命名空间 → 注入的 typedef stub（让 g++ 看到该 #include 时获得基本类型）
-# chromium / EGL / OpenMax 风格的强类型，没有这些会一片红。
+# 示例 / EGL / Widget 风格的强类型，没有这些会一片红。
 _TYPEDEF_STUBS: dict[str, str] = {
     # OpenGL ES
     "GLES2/gl2.h": (
@@ -99,7 +99,7 @@ _TYPEDEF_STUBS: dict[str, str] = {
         "#define DRM_FORMAT_MOD_LINEAR 0\n"
         "typedef unsigned long uint64_t;\n"
     ),
-    # chromium base —— spike 高频
+    # 示例 base —— spike 高频
     "base/logging.h": (
         "#pragma once\n"
         "#define DCHECK(x) ((void)0)\n"
@@ -123,7 +123,7 @@ _TYPEDEF_STUBS: dict[str, str] = {
         "auto BindRepeating(F&& f, Args&&... args) -> int { return 0; }\n"
         "}  // namespace base\n"
     ),
-    # chromium media —— OpenMax / VDA 高频
+    # 示例 media —— Widget / VDA 高频
     "media/base/status.h": (
         "#pragma once\n"
         "namespace media {\n"

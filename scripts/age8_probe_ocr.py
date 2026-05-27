@@ -18,7 +18,7 @@
 
 用法：
     python scripts/age8_probe_ocr.py  \\
-        [--images DSC06836,DSC06838] \\
+        [--images page06836,page06838] \\
         [--output output/age8-probe]
 """
 
@@ -128,7 +128,7 @@ async def _probe(images: list[str], output_root: Path) -> None:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="AGE-8 OCR 证据采集")
     parser.add_argument(
-        "--images", default="DSC06836,DSC06838",
+        "--images", default="page06836,page06838",
         help="逗号分隔的 stem 列表",
     )
     parser.add_argument(

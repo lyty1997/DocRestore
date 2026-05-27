@@ -4,9 +4,9 @@
 
 """OCR 后处理纠错测试（A 标点统一 + B 标识符 0→O）。
 
-样本来自 chromium spike 实际 OCR 错误：
-  - ``k0mxStateInvalid`` → ``kOmxStateInvalid``
-  - ``kOmxStateExecuting g=4，`` → ``kOmxStateExecuting g=4,``
+样本来自真实 IDE 代码截图 OCR 错误：
+  - ``n0deStateInvalid`` → ``nOdeStateInvalid``
+  - ``nOdeStateExecuting g=4，`` → ``nOdeStateExecuting g=4,``
   - ``（）`` → ``()``
 
 设计原则：
@@ -30,8 +30,8 @@ class TestAPunctuation:
     """A 类：中英文标点统一。"""
 
     def test_chinese_comma_to_ascii(self) -> None:
-        result = correct_ocr_artifacts("kOmxStateExecuting g=4，", "cpp")
-        assert result == "kOmxStateExecuting g=4,"
+        result = correct_ocr_artifacts("nOdeStateExecuting g=4，", "cpp")
+        assert result == "nOdeStateExecuting g=4,"
 
     def test_chinese_parens_to_ascii(self) -> None:
         result = correct_ocr_artifacts("static int Group（）{return 1；}", "cpp")
@@ -63,19 +63,19 @@ class TestBIdentifierZeroToO:
     """B 类：标识符里 0→O（保守：前后都是字母时改）。"""
 
     def test_camelcase_zero_to_o(self) -> None:
-        """k0mx → kOmx（小写+0+小写，spike 真实错误）"""
-        result = correct_ocr_artifacts("k0mxStateInvalid=1", "cpp")
-        assert result == "kOmxStateInvalid=1"
+        """n0de → nOde（小写+0+小写，spike 真实错误）"""
+        result = correct_ocr_artifacts("n0deStateInvalid=1", "cpp")
+        assert result == "nOdeStateInvalid=1"
 
     def test_camelcase_zero_before_uppercase(self) -> None:
-        """k0Mx → kOMx（小写+0+大写）"""
-        result = correct_ocr_artifacts("k0Mx=1", "cpp")
-        assert result == "kOMx=1"
+        """n0De → nODe（小写+0+大写）"""
+        result = correct_ocr_artifacts("n0De=1", "cpp")
+        assert result == "nODe=1"
 
     def test_underscore_zero_letter(self) -> None:
-        """_0mx → _Omx（下划线+0+字母）"""
-        result = correct_ocr_artifacts("var _0mxFlag = 1;", "cpp")
-        assert result == "var _OmxFlag = 1;"
+        """_0de → _Ode（下划线+0+字母）"""
+        result = correct_ocr_artifacts("var _0deFlag = 1;", "cpp")
+        assert result == "var _OdeFlag = 1;"
 
     def test_hex_literal_not_changed(self) -> None:
         """0xDEAD 不能误改（hex 字面量保护）"""
@@ -99,34 +99,34 @@ class TestBIdentifierZeroToO:
         assert result == "int x = 0;"
 
     def test_string_literal_internal_zero_preserved(self) -> None:
-        """字符串内的 k0mx 保留（用户也许真的命名了）"""
+        """字符串内的 n0de 保留（用户也许真的命名了）"""
         result = correct_ocr_artifacts(
-            'const char* s = "k0mxLabel";', "cpp",
+            'const char* s = "n0deLabel";', "cpp",
         )
         # 字符串内不动；外部 = 0 也不该变
-        assert 'k0mxLabel' in result
+        assert 'n0deLabel' in result
 
     def test_multiple_replacements_one_line(self) -> None:
         """同一行多个 0→O 都被替换"""
         result = correct_ocr_artifacts(
-            "k0mx, k0k, k0Pause", "cpp",
+            "n0de, n0n, n0Pause", "cpp",
         )
-        assert result == "kOmx, kOk, kOPause"
+        assert result == "nOde, nOn, nOPause"
 
-    def test_chromium_enum_block(self) -> None:
-        """spike 实际样本：枚举块（混合 k0mx 和真 0 数字字面量）"""
+    def test_enum_block(self) -> None:
+        """真实样本：枚举块（混合 n0de 和真 0 数字字面量）"""
         text = (
-            "enum class OmxStatusCodes : StatusCodeType {\n"
-            "  k0k=0,\n"
-            "  k0mxStateInvalid=1,\n"
-            "  k0mxStateLoaded=2,\n"
+            "enum class NodeStatusCodes : StatusCodeType {\n"
+            "  n0n=0,\n"
+            "  n0deStateInvalid=1,\n"
+            "  n0deStateLoaded=2,\n"
             "};"
         )
         expected = (
-            "enum class OmxStatusCodes : StatusCodeType {\n"
-            "  kOk=0,\n"
-            "  kOmxStateInvalid=1,\n"
-            "  kOmxStateLoaded=2,\n"
+            "enum class NodeStatusCodes : StatusCodeType {\n"
+            "  nOn=0,\n"
+            "  nOdeStateInvalid=1,\n"
+            "  nOdeStateLoaded=2,\n"
             "};"
         )
         assert correct_ocr_artifacts(text, "cpp") == expected
@@ -145,8 +145,8 @@ class TestSafetyAndRobustness:
 
     def test_python_language(self) -> None:
         """Python 也适用相同规则（标识符约定一致）"""
-        result = correct_ocr_artifacts("x = k0mx + 1", "python")
-        assert result == "x = kOmx + 1"
+        result = correct_ocr_artifacts("x = n0de + 1", "python")
+        assert result == "x = nOde + 1"
 
     def test_gn_language(self) -> None:
         """GN 配置文件：路径里的 0/O 不动（路径本身可能含 0）"""
@@ -156,8 +156,8 @@ class TestSafetyAndRobustness:
 
     def test_unknown_language_falls_back(self) -> None:
         """language=None 时应用通用规则（A 总是开，B 也开）"""
-        result = correct_ocr_artifacts("k0mxFlag，1", None)
-        assert result == "kOmxFlag,1"
+        result = correct_ocr_artifacts("n0deFlag，1", None)
+        assert result == "nOdeFlag,1"
 
     def test_line_count_strictly_preserved(self) -> None:
         """规则不能引入或删除换行（refine 行数检查依赖）"""

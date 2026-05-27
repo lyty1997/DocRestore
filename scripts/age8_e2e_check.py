@@ -10,7 +10,7 @@
 环境：ppocr_client conda（含 paddleocr + paddle）
 用法：
     /home/lyty/work/ai/env/anaconda3/envs/ppocr_client/bin/python3 \\
-        scripts/age8_e2e_check.py [--stems DSC06835,DSC06836,...]
+        scripts/age8_e2e_check.py [--stems page06835,page06836,...]
 """
 
 from __future__ import annotations
@@ -152,7 +152,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--stems",
-        default="DSC06835,DSC06836,DSC06838,DSC06840,DSC06841,DSC06842",
+        default="page06835,page06836,page06838,page06840,page06841,page06842",
     )
     args = parser.parse_args()
     stems = [s.strip() for s in args.stems.split(",") if s.strip()]

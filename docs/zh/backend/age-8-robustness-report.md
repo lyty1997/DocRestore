@@ -14,40 +14,40 @@
 
 | 数据集 | 路径 | 张数 | 类型 |
 |---|---|---|---|
-| Chromium_VDA_code | NAS chromium/chromium_decode/code/ | 272 | VSCode 双栏 IDE |
-| TMedia | NAS Linux系统/视频子系统/TMedia/code/ | 585 | VSCode 单栏+双栏 IDE 混合 |
-| chromium_display_code | NAS chromium/chromium_display/code/ | 157 | VSCode 双栏 IDE |
-| chromium_diff | NAS chromium/chromium_display/diff/ | 123 | git diff 视图（双/三栏） |
-| chromium_video | NAS chromium/chromium播放视频性能零拷贝优化/ | 111 | 飞书文档+调试器堆栈混合 |
+| ide_code_sample | 内部数据集 | 272 | VSCode 双栏 IDE |
+| TMedia | 内部数据集 | 585 | VSCode 单栏+双栏 IDE 混合 |
+| ide_display_sample | 内部数据集 | 157 | VSCode 双栏 IDE |
+| ide_diff | 内部数据集 | 123 | git diff 视图（双/三栏） |
+| sample_video | 内部数据集 | 111 | 飞书文档+调试器堆栈混合 |
 | doc_control | test_images/[1-11].jpg | 11 | 普通文档照片（对照） |
 
 ## 2. 总览（一表流）
 
 | 数据集 | 总数 | 检出 | 成功率 | mono≥0.9 | no_anchor | single | 2 | 3+ |
 |---|---|---|---|---|---|---|---|---|
-| Chromium_VDA_code | 272 | 272 | **100.00%** | 272 | 0 | 0 | 272 | 0 |
+| ide_code_sample | 272 | 272 | **100.00%** | 272 | 0 | 0 | 272 | 0 |
 | TMedia | 585 | 585 | **100.00%** | 585 | 0 | 304 | 281 | 0 |
-| chromium_display_code | 157 | 157 | **100.00%** | 157 | 0 | 0 | 157 | 0 |
-| chromium_diff | 123 | 121 | **98.37%** | 121 | 2 | 14 | 99 | **8** |
-| chromium_video | 111 | 49 | 44.14%* | 39 | 62 | 49 | 0 | 0 |
+| ide_display_sample | 157 | 157 | **100.00%** | 157 | 0 | 0 | 157 | 0 |
+| ide_diff | 123 | 121 | **98.37%** | 121 | 2 | 14 | 99 | **8** |
+| sample_video | 111 | 49 | 44.14%* | 39 | 62 | 49 | 0 | 0 |
 | doc_control | 11 | 0 | **0.00%**† | 0 | 11 | 0 | 0 | 0 |
 
-\* chromium_video 是"飞书文档 + 调试器堆栈"混合数据集，44% 是真 IDE 代码图。
+\* sample_video 是"飞书文档 + 调试器堆栈"混合数据集，44% 是真 IDE 代码图。
 † doc_control 是**对照实验**：纯文档照片应当 0 检出（验证不误识为代码）。**0% 是期望结果**。
 
 ## 3. 核心结论
 
 ### 3.1 IDE 代码场景成功率 99.82%
-仅算前 4 个 IDE/diff 数据集（共 1137 张），检出 1135 张，**漏检 2 张**（chromium_diff 真 no_anchor，可能是 binary diff / 图片 diff，无行号列结构）。
+仅算前 4 个 IDE/diff 数据集（共 1137 张），检出 1135 张，**漏检 2 张**（ide_diff 真 no_anchor，可能是 binary diff / 图片 diff，无行号列结构）。
 
 ### 3.2 栏数自适应已全场景验证
 
 | 栏数 | 出现次数 | 数据集 |
 |---|---|---|
-| 0（无） | 75 | doc_control 11 + chromium_video 62 + chromium_diff 2 |
-| 1（单栏） | 367 | TMedia 304 + chromium_video 49 + chromium_diff 14 |
-| 2（双栏） | 809 | Chromium_VDA_code 272 + TMedia 281 + chromium_display_code 157 + chromium_diff 99 |
-| 3（三栏） | **8** | chromium_diff 8（git diff 旧/新版本行号 + 右侧文件） |
+| 0（无） | 75 | doc_control 11 + sample_video 62 + ide_diff 2 |
+| 1（单栏） | 367 | TMedia 304 + sample_video 49 + ide_diff 14 |
+| 2（双栏） | 809 | ide_code_sample 272 + TMedia 281 + ide_display_sample 157 + ide_diff 99 |
+| 3（三栏） | **8** | ide_diff 8（git diff 旧/新版本行号 + 右侧文件） |
 
 **首次见到 single 和 3+ 栏**——之前 spike 都是双栏，现在覆盖了真实数据集的多样性。
 
@@ -56,18 +56,18 @@
 | 验证 | 结果 |
 |---|---|
 | 普通文档照片（11 张）被误识为代码 | **0 / 11** ✓ |
-| chromium_video 数据集中飞书文档（62 张）被误识为代码 | **0 / 62** ✓ |
-| chromium_video 调试器堆栈（49 张）正确识别为单栏代码 | **49 / 49** ✓ |
+| sample_video 数据集中飞书文档（62 张）被误识为代码 | **0 / 62** ✓ |
+| sample_video 调试器堆栈（49 张）正确识别为单栏代码 | **49 / 49** ✓ |
 
 **总计 73 张非代码图无任何误判**。
 
 ### 3.4 真实 OCR / 算法弱点（已部分修复）
 
 #### 修复：TextLine 排序 bug
-- **现象**：chromium_diff 8 张图触发 `'<' not supported between TextLine and TextLine`
+- **现象**：ide_diff 8 张图触发 `'<' not supported between TextLine and TextLine`
 - **原因**：`code_assembly.py:_pair_by_y` 内 `sorted((int, TextLine))` 元组在 int 同值时 fallback 比较 TextLine（dataclass 默认无 `__lt__`）
 - **修复**：sorted() 加 `key=lambda x: x[0]`
-- **验证**：chromium_diff 重跑成功率 92→121（+29 张）
+- **验证**：ide_diff 重跑成功率 92→121（+29 张）
 
 #### 已知弱点：unpaired_codes（待 AGE-54 升级）
 代码 line 没配上行号 line 的情况。当前简化处理是只标 flag 不插入。
@@ -75,8 +75,8 @@
 | 数据集 | 触发图数 | 严重度 |
 |---|---|---|
 | TMedia | ~600 张次（每图 1-56 个 unpaired） | 中 |
-| chromium_diff | ~200 张次（每图 1-54 个） | 中 |
-| chromium_display_code | ~70 张次（每图 1-8 个） | 低 |
+| ide_diff | ~200 张次（每图 1-54 个） | 中 |
+| ide_display_sample | ~70 张次（每图 1-8 个） | 低 |
 
 **根因**：行号 line OCR 偶尔识别成空字符串/失败，导致代码 line 找不到匹配行号；或 OCR 把多行代码合并为一个 line 影响 y 配对。
 
@@ -95,9 +95,9 @@
 
 ## 4. 各数据集细节
 
-### 4.1 Chromium_VDA_code（272，100%）
+### 4.1 ide_code_sample（272，100%）
 - 全部双栏；mono=1.0
-- 唯一 weak_monotonic：DSC06875（右栏含三位数行号）
+- 唯一 weak_monotonic：page06875（右栏含三位数行号）
 - 平均：左栏 49.7 行 / 右栏 53.2 行 / above 10 / below 20.6 / sidebar 1.7
 
 ### 4.2 TMedia（585，100%）
@@ -107,17 +107,17 @@
 - char_width 17.87-20.78 px，line_height 31-42 px
 - 3 张 weak_monotonic（OCR 噪声）
 
-### 4.3 chromium_display_code（157，100%）
+### 4.3 ide_display_sample（157，100%）
 - 全部双栏；mono=1.0
 - char_width 17-20 px，line_height 33-41 px
 
-### 4.4 chromium_diff（123，98.37%）
+### 4.4 ide_diff（123，98.37%）
 - **首次见 3 anchor**（8 张），双 anchor 99 张，single 14 张
 - 2 张真 no_anchor（无行号列结构的 diff）
 - char_width 11.79-13.75 px（比 IDE 代码字体小）
 - 已修复 TextLine 排序 bug
 
-### 4.5 chromium_video（111，44.14% / 100% 期望内）
+### 4.5 sample_video（111，44.14% / 100% 期望内）
 - 数据集是"飞书文档 + 调试器堆栈"混合，**44.14% 是真 IDE 代码图（49 调试器单栏）**
 - **62 张文档照片正确识别为 no_anchor（不误识）**
 - mono ≥ 0.9：39/49
@@ -190,11 +190,11 @@ v3 改用 `y_center < anchor.y_top` / `y_center > anchor.y_bottom`，从源头
 
 | 数据集 | v1 | v2-3000 | v3（最终） |
 |---|---|---|---|
-| Chromium_VDA_code | 272/272 (100%) | 272/272 (100%) | 272/272 (100%) ✓ |
+| ide_code_sample | 272/272 (100%) | 272/272 (100%) | 272/272 (100%) ✓ |
 | TMedia | 585/585 (100%) | 585/585 (100%) | 585/585 (100%) ✓ |
-| chromium_display_code | 157/157 (100%) | 157/157 (100%) | 157/157 (100%) ✓ |
-| chromium_diff | 121/123 (98.37%) | 121/123 (98.37%) | 121/123 (98.37%) ✓ |
-| chromium_video（非目标）| 49/111 (44%) | 47/111 (42%) | 47/111 (42%) ✓ |
+| ide_display_sample | 157/157 (100%) | 157/157 (100%) | 157/157 (100%) ✓ |
+| ide_diff | 121/123 (98.37%) | 121/123 (98.37%) | 121/123 (98.37%) ✓ |
+| sample_video（非目标）| 49/111 (44%) | 47/111 (42%) | 47/111 (42%) ✓ |
 | doc_control | 0/11 (零误判) | 0/11 (零误判) | 0/11 (零误判) ✓ |
 
 anchor 检出率三方完全一致。v3 真正改进的是**输出 code_text 的质量**：
@@ -204,8 +204,8 @@ anchor 检出率三方完全一致。v3 真正改进的是**输出 code_text 的
 | 数据集 | v2 mean / max | v3 mean / max | 减少率 |
 |---|---|---|---|
 | TMedia | 40.3 / 67 | 32.1 / 36 | -20% / -46% |
-| chromium_display_code | 24.9 / 32 | 24.5 / 25 | -1.6% / -22% |
-| Chromium_VDA_code | 24.6 / 39 | 24.3 / 38 | -1% / -3% |
+| ide_display_sample | 24.9 / 32 | 24.5 / 25 | -1.6% / -22% |
+| ide_code_sample | 24.6 / 39 | 24.3 / 38 | -1% / -3% |
 
 v3 的 max 列长度接近 IDE 视图典型 25 行（一屏标准），证明垃圾被剔除。
 v2 多出的列长度全是 OCR 切碎残片+UI 噪声+真代码混合。

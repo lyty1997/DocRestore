@@ -66,43 +66,43 @@ class TestSingleColumn:
     def test_breadcrumb_basic(self) -> None:
         above = [_line(
             (100, 100, 1000, 130),
-            "media > gpu > openmax > foo.cc",
+            "app > core > widget > foo.cc",
         )]
         layout = _make_layout_with_above(above, anchor_count=1)
         metas = extract_ide_metas(layout)
         assert len(metas) == 1
         m = metas[0]
         assert m.filename == "foo.cc"
-        assert m.path == "media/gpu/openmax/foo.cc"
+        assert m.path == "app/core/widget/foo.cc"
         assert m.language == "cpp"
         assert m.breadcrumb_readable is True
         assert m.tab_readable is True
         assert m.path_confidence == 0.95
         assert m.path_candidates[0].source == "breadcrumb"
-        assert m.path_candidates[0].path == "media/gpu/openmax/foo.cc"
+        assert m.path_candidates[0].path == "app/core/widget/foo.cc"
 
     def test_breadcrumb_with_icon_prefix(self) -> None:
         """OCR 把 VSCode 文件图标识别成 'C ' 前缀，应清洗"""
         above = [_line(
             (100, 100, 1000, 130),
-            "media >gpu >openmax > C openmax_status.h",
+            "app >core >widget > C widget_status.h",
         )]
         layout = _make_layout_with_above(above, anchor_count=1)
         m = extract_ide_metas(layout)[0]
-        assert m.filename == "openmax_status.h"
-        assert m.path == "media/gpu/openmax/openmax_status.h"
+        assert m.filename == "widget_status.h"
+        assert m.path == "app/core/widget/widget_status.h"
         assert m.language == "cpp"
 
     def test_breadcrumb_with_symbol_path(self) -> None:
         """breadcrumb 末尾跟 symbol path（如 `> {}media > Symbol`），应忽略"""
         above = [_line(
             (100, 100, 1500, 130),
-            "media >gpu >openmax > C+ foo.cc > {}media > AllocateOmxC",
+            "app >core >widget > C+ foo.cc > {}media > AllocateOmxC",
         )]
         layout = _make_layout_with_above(above, anchor_count=1)
         m = extract_ide_metas(layout)[0]
         assert m.filename == "foo.cc"
-        assert m.path == "media/gpu/openmax/foo.cc"
+        assert m.path == "app/core/widget/foo.cc"
 
     def test_tab_only_no_breadcrumb(self) -> None:
         """无 breadcrumb 时，tab fallback 拿到 filename（path=None）"""
@@ -148,22 +148,22 @@ class TestSingleColumn:
         above = [
             _line(
                 (100, 100, 1500, 130),
-                "media >gpu >openmax >C+ openmax_video_decode_ac",
+                "app >core >widget >C+ widget_video_decode_ac",
             ),
             _line(
                 (100, 60, 800, 90),
-                "C+ openmax_video_decode_accelerator.cc 4×",
+                "C+ widget_decode_helper.cc 4×",
             ),
         ]
         layout = _make_layout_with_above(above, anchor_count=1)
         m = extract_ide_metas(layout)[0]
         # breadcrumb 末段含 `_ac` 没扩展名 → fallback 到 tab
-        assert m.filename == "openmax_video_decode_accelerator.cc"
+        assert m.filename == "widget_decode_helper.cc"
 
     def test_breadcrumb_wins_over_tab_with_different_extension(
         self,
     ) -> None:
-        """回归 DSC06953/07002：IDE 多 tab + breadcrumb 指向 .h，
+        """回归 page06953/07002：IDE 多 tab + breadcrumb 指向 .h，
         tab bar 同时显示 .cc 和 .h（split editor 共享 tab bar）。
         breadcrumb 是当前打开的源文件，扩展名不能被 tab 翻覆。
         """
@@ -171,7 +171,7 @@ class TestSingleColumn:
             # breadcrumb：当前栏打开的是 .h
             _line(
                 (100, 100, 1500, 130),
-                "media >gpu >openmax > C openmax_video_decode_accelerator.h",
+                "app >core >widget > C widget_decode_helper.h",
             ),
             # tab bar：同时显示多个 tab，包含别的扩展名
             _line(
@@ -180,15 +180,15 @@ class TestSingleColumn:
             ),
             _line(
                 (820, 60, 1500, 90),
-                "C+ openmax_video_decode_accelerator.cc 4×",
+                "C+ widget_decode_helper.cc 4×",
             ),
         ]
         layout = _make_layout_with_above(above, anchor_count=1)
         m = extract_ide_metas(layout)[0]
         # 必须取 breadcrumb 的 .h，不能被 tab 的 .cc 覆盖
-        assert m.filename == "openmax_video_decode_accelerator.h"
+        assert m.filename == "widget_decode_helper.h"
         assert m.path == (
-            "media/gpu/openmax/openmax_video_decode_accelerator.h"
+            "app/core/widget/widget_decode_helper.h"
         )
         assert [c.source for c in m.path_candidates] == ["breadcrumb", "tab"]
         assert m.path_candidates[1].filename == (
@@ -206,28 +206,28 @@ class TestSingleColumn:
         above = [
             _line(
                 (100, 100, 1500, 130),
-                "media >gpu >openmax > foo.h",
+                "app >core >widget > foo.h",
             ),
             _line((100, 60, 800, 90), "C+ bar.cc 4×"),
         ]
         layout = _make_layout_with_above(above, anchor_count=1)
         m = extract_ide_metas(layout)[0]
         assert m.filename == "foo.h"
-        assert m.path == "media/gpu/openmax/foo.h"
+        assert m.path == "app/core/widget/foo.h"
 
     def test_breadcrumb_fragments_stitched_with_overlap_dedup(self) -> None:
-        """回归 DSC06953：breadcrumb OCR 拆成多 bbox + 边界字符共享。
+        """回归 page06953：breadcrumb OCR 拆成多 bbox + 边界字符共享。
 
-        ``openmax_`` (x=611-769) + ``_video_decode_accelerator.cc`` (x=754-
+        ``widget_`` (x=611-769) + ``_decode_helper.cc`` (x=754-
         1216) 在 x 重叠区共享 ``_``。stitch 后应去重，得到完整 filename，
         不应因截断错归到 tab 里别的 .cc 文件。
         """
         above = [
             # 同 y-band 的 breadcrumb 片段
-            _line((164, 145, 534, 191), "media >gpu >openmax"),
+            _line((164, 145, 534, 191), "app >core >widget"),
             _line((569, 146, 607, 177), "C+"),
-            _line((611, 147, 769, 182), "openmax_"),
-            _line((754, 135, 1216, 180), "_video_decode_accelerator.cc"),
+            _line((611, 147, 769, 182), "widget_"),
+            _line((754, 135, 1216, 180), "_decode_helper.cc"),
             # tab bar：同时显示多个 .cc tab，无 active 标记
             _line(
                 (920, 57, 1634, 107),
@@ -235,70 +235,70 @@ class TestSingleColumn:
             ),
             _line(
                 (161, 66, 826, 117),
-                "C+ openmax_video_decode_accelerator.cc 4",
+                "C+ widget_decode_helper.cc 4",
             ),
         ]
         layout = _make_layout_with_above(above, anchor_count=1)
         m = extract_ide_metas(layout)[0]
-        assert m.filename == "openmax_video_decode_accelerator.cc"
+        assert m.filename == "widget_decode_helper.cc"
         assert m.path == (
-            "media/gpu/openmax/openmax_video_decode_accelerator.cc"
+            "app/core/widget/widget_decode_helper.cc"
         )
 
     def test_breadcrumb_truncated_filename_completed_via_tab(self) -> None:
-        """回归 DSC07050：stitched breadcrumb 含 ``_decode_accelerator.cc``
+        """回归 page07050：stitched breadcrumb 含 ``_helper.cc``
         （前缀被覆盖丢失），用同栏 tab 候选 suffix-match 补全完整名。
         """
         above = [
-            # breadcrumb 解出来 filename 是 ``_decode_accelerator.cc`` 截断版
+            # breadcrumb 解出来 filename 是 ``_helper.cc`` 截断版
             _line(
                 (100, 100, 1500, 130),
-                "media > gpu > openmax > _decode_accelerator.cc",
+                "app > core > widget > _helper.cc",
             ),
-            # tab bar：包含完整 openmax_video_decode_accelerator.cc，无 ×
+            # tab bar：包含完整 widget_decode_helper.cc，无 ×
             _line(
                 (920, 57, 1634, 107),
                 "C+gles2_dmabuf_to_egl_image_translator.cc 2",
             ),
             _line(
                 (161, 66, 826, 117),
-                "C+ openmax_video_decode_accelerator.cc 4",
+                "C+ widget_decode_helper.cc 4",
             ),
         ]
         layout = _make_layout_with_above(above, anchor_count=1)
         m = extract_ide_metas(layout)[0]
-        assert m.filename == "openmax_video_decode_accelerator.cc"
+        assert m.filename == "widget_decode_helper.cc"
         assert m.path == (
-            "media/gpu/openmax/openmax_video_decode_accelerator.cc"
+            "app/core/widget/widget_decode_helper.cc"
         )
 
     def test_breadcrumb_path_segment_merged_with_filename(self) -> None:
-        """回归 DSC07050：OCR 漏 ``>`` 导致 dir ``openmax`` 与 filename
-        在同一段，path 应能补回 ``openmax`` 不丢失。
+        """回归 page07050：OCR 漏 ``>`` 导致 dir ``widget`` 与 filename
+        在同一段，path 应能补回 ``widget`` 不丢失。
         """
         above = [_line(
             (100, 100, 1500, 130),
-            "media > gpu > openmax C+ openmax_video_decode_accelerator.cc",
+            "app > core > widget C+ widget_decode_helper.cc",
         )]
         layout = _make_layout_with_above(above, anchor_count=1)
         m = extract_ide_metas(layout)[0]
-        assert m.filename == "openmax_video_decode_accelerator.cc"
+        assert m.filename == "widget_decode_helper.cc"
         assert m.path == (
-            "media/gpu/openmax/openmax_video_decode_accelerator.cc"
+            "app/core/widget/widget_decode_helper.cc"
         )
 
     def test_icon_word_C_not_treated_as_dir(self) -> None:
-        """``C openmax.h`` 中 ``C`` 是 VSCode 图标，不能被视为 dir 段。"""
+        """``C widget.h`` 中 ``C`` 是 VSCode 图标，不能被视为 dir 段。"""
         above = [_line(
             (100, 100, 1200, 130),
-            "media > gpu > openmax > C openmax_video_decode_accelerator.h",
+            "app > core > widget > C widget_decode_helper.h",
         )]
         layout = _make_layout_with_above(above, anchor_count=1)
         m = extract_ide_metas(layout)[0]
-        assert m.filename == "openmax_video_decode_accelerator.h"
+        assert m.filename == "widget_decode_helper.h"
         # path 不应混入额外的 ``C`` 段
         assert m.path == (
-            "media/gpu/openmax/openmax_video_decode_accelerator.h"
+            "app/core/widget/widget_decode_helper.h"
         )
 
     def test_extension_to_language_coverage(self) -> None:
@@ -323,40 +323,40 @@ class TestWithinImageReconcile:
         """col_0 只有 filename → 借用 col_1 的目录前缀"""
         above = [
             # col_0：tab 有 filename 无 breadcrumb（path=None）
-            _line((180, 60, 800, 90), "C+ openmax_status.h 4×"),
+            _line((180, 60, 800, 90), "C+ widget_status.h 4×"),
             # col_1：完整 breadcrumb
             _line(
                 (1990, 100, 2800, 130),
-                "media >gpu >openmax > openmax_status.h",
+                "app >core >widget > widget_status.h",
             ),
         ]
         layout = _make_layout_with_above(above, anchor_count=2)
         metas = extract_ide_metas(layout)
         assert len(metas) == 2
         # col_0 path 应该被补成 col_1 的目录前缀
-        assert metas[0].filename == "openmax_status.h"
-        assert metas[0].path == "media/gpu/openmax/openmax_status.h"
+        assert metas[0].filename == "widget_status.h"
+        assert metas[0].path == "app/core/widget/widget_status.h"
         assert "code.path_inferred_from_peer" in metas[0].flags
         assert metas[0].path_confidence == 0.72
         assert metas[0].path_candidates[-1].source == "peer"
 
     def test_path_segments_recovered(self) -> None:
-        """col_0 的 path 段粘连（gpuopenmax）→ 用 col_1 的细分版本替换"""
+        """col_0 的 path 段粘连（corewidget）→ 用 col_1 的细分版本替换"""
         above = [
-            # col_0：OCR 漏 `>` 导致 gpu+openmax 粘连
+            # col_0：OCR 漏 `>` 导致 gpu+widget 粘连
             _line(
                 (180, 100, 1500, 130),
-                "media >gpuopenmax > foo.cc",
+                "app >corewidget > foo.cc",
             ),
             # col_1：正常细分
             _line(
                 (1990, 100, 2800, 130),
-                "media >gpu >openmax > bar.cc",
+                "app >core >widget > bar.cc",
             ),
         ]
         layout = _make_layout_with_above(above, anchor_count=2)
         metas = extract_ide_metas(layout)
-        assert metas[0].path == "media/gpu/openmax/foo.cc"
+        assert metas[0].path == "app/core/widget/foo.cc"
         assert "code.path_segments_recovered" in metas[0].flags
         assert metas[0].path_confidence == 0.95
         assert metas[0].path_candidates[-1].source == "peer"
@@ -380,12 +380,12 @@ class TestMultipleColumns:
             # column 0：x_center 在 200 附近（anchor[0].x1_min=200）
             _line(
                 (180, 100, 1500, 130),
-                "media >gpu >openmax > foo.cc",
+                "app >core >widget > foo.cc",
             ),
             # column 1：x_center 在 2000 附近（anchor[1].x1_min=2000）
             _line(
                 (1990, 100, 2800, 130),
-                "media >gpu >openmax > BUILD.gn",
+                "app >core >widget > BUILD.gn",
             ),
         ]
         layout = _make_layout_with_above(above, anchor_count=2)
@@ -483,11 +483,11 @@ class TestSpike:
         all_filenames = " ".join(
             (m.filename or "") for m in metas
         ).lower()
-        # spike 主要是 chromium openmax 相关
-        if stem in {"DSC06835", "DSC06836", "DSC06837", "DSC06840"}:
-            # 这些图都含 BUILD.gn 或 openmax_video_decode_accelerator
+        # spike 主要是 示例 widget 相关
+        if stem in {"page06835", "page06836", "page06837", "page06840"}:
+            # 这些图都含 BUILD.gn 或 widget_decode_helper
             has_known = (
-                "openmax" in all_filenames
+                "widget" in all_filenames
                 or "build.gn" in all_filenames
                 or "gles" in all_filenames
             )

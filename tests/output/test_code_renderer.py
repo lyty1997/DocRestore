@@ -39,7 +39,7 @@ def _make_source(
     page_stems: list[str] | None = None,
 ) -> SourceFile:
     pages = []
-    for stem in page_stems or ["DSC1"]:
+    for stem in page_stems or ["page1"]:
         meta = IDEMeta(
             column_index=0, filename=path.rsplit("/", 1)[-1],
             path=path, language=language,
@@ -85,21 +85,21 @@ class TestBasicRender:
     @pytest.mark.asyncio
     async def test_writes_files_and_index(self, tmp_path: Path) -> None:
         sources = [
-            _make_source("media/gpu/openmax/foo.cc", "// foo\nint x;\n"),
+            _make_source("app/core/widget/foo.cc", "// foo\nint x;\n"),
             _make_source(
-                "media/gpu/openmax/foo.h", "#pragma once\n",
+                "app/core/widget/foo.h", "#pragma once\n",
                 language="cpp",
             ),
             _make_source(
-                "media/gpu/openmax/BUILD.gn",
+                "app/core/widget/BUILD.gn",
                 'import("//build")\n', language="gn",
             ),
         ]
         result = await render_code_files(sources, tmp_path)
         assert isinstance(result, CodeRenderResult)
-        assert (tmp_path / "files" / "media/gpu/openmax/foo.cc").exists()
-        assert (tmp_path / "files" / "media/gpu/openmax/foo.h").exists()
-        assert (tmp_path / "files" / "media/gpu/openmax/BUILD.gn").exists()
+        assert (tmp_path / "files" / "app/core/widget/foo.cc").exists()
+        assert (tmp_path / "files" / "app/core/widget/foo.h").exists()
+        assert (tmp_path / "files" / "app/core/widget/BUILD.gn").exists()
         assert result.index_path.exists()
         assert result.document_path.exists()
         assert len(result.written_files) == 3
@@ -108,7 +108,7 @@ class TestBasicRender:
     async def test_index_fields_complete(self, tmp_path: Path) -> None:
         sources = [_make_source(
             "src/foo.cc", "int x;\n",
-            page_stems=["DSC1", "DSC2"],
+            page_stems=["page1", "page2"],
             flags=["code.grouping.merged_pages=2"],
         )]
         result = await render_code_files(sources, tmp_path)
@@ -118,16 +118,16 @@ class TestBasicRender:
         assert entry["path"] == "src/foo.cc"
         assert entry["filename"] == "foo.cc"
         assert entry["language"] == "cpp"
-        assert "DSC1.col0" in entry["source_pages"]
-        assert "DSC2.col0" in entry["source_pages"]
+        assert "page1.col0" in entry["source_pages"]
+        assert "page2.col0" in entry["source_pages"]
         assert entry["source_page_ranges"] == [
-            {"page": "DSC1.col0", "start_line": 1, "end_line": 1},
-            {"page": "DSC2.col0", "start_line": 1, "end_line": 1},
+            {"page": "page1.col0", "start_line": 1, "end_line": 1},
+            {"page": "page2.col0", "start_line": 1, "end_line": 1},
         ]
         assert entry["source_page_count"] == 2
         assert entry["source_column_count"] == 2
         assert entry["path_confidence"] == 0.91
-        assert entry["source_segments"][0]["page_stem"] == "DSC1"
+        assert entry["source_segments"][0]["page_stem"] == "page1"
         assert entry["source_segments"][0]["selected_path"] == "src/foo.cc"
         assert entry["source_segments"][0]["path_candidates"][0]["source"] == (
             "breadcrumb"
@@ -148,7 +148,7 @@ class TestBasicRender:
         assert entry["source_file_flags"] == ["code.refine.truncated"]
         assert entry["source_column_flags"] == [
             {
-                "page": "DSC1.col0",
+                "page": "page1.col0",
                 "meta_flags": ["code.tab_only_fallback"],
                 "column_flags": ["code.assembly.unpaired_codes=2"],
             }

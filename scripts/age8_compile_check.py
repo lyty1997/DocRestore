@@ -49,7 +49,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # C/C++ 编译命令：-w 关警告、-fpermissive 让"未定义类型"等语义错降级 → 让纯
 # **语法**层面的错误（粘连 / 未匹配括号 / 漏分号 / 中文标点等）能被检出，
-# 同时不让 chromium 缺 sysroot 的语义错把"代码模式还原能力"指标污染。
+# 同时不让 示例 缺 sysroot 的语义错把"代码模式还原能力"指标污染。
 # stub include 通过 -I 注入（main 调用 build_stub_includes 后传入）。
 _CXX_BASE = ["-fsyntax-only", "-std=c++17", "-w", "-fpermissive"]
 _C_BASE = ["-fsyntax-only", "-w"]
@@ -95,8 +95,8 @@ _SYNTAX_ERROR_PATTERNS = [
     # 导致解析失败（不是 OCR 责任）。
 ]
 
-# **缺 chromium sysroot 的语义错**（未定义类型 / 未知 namespace 等）。
-# 不算 OCR 噪声 —— chromium 的 base::Bind / BitstreamBuffer 等本来就需要
+# **缺 示例 sysroot 的语义错**（未定义类型 / 未知 namespace 等）。
+# 不算 OCR 噪声 —— 示例 的 base::Bind / BitstreamBuffer 等本来就需要
 # 全套头文件才能解析。这类不影响代码模式还原能力评估。
 _SEMANTIC_ERROR_PATTERNS = [
     "has not been declared",
@@ -153,7 +153,7 @@ class CompileResult:
     error: str = ""           # 截短的 stderr（< 4KB）
     failing_lines: list[int] = field(default_factory=list)  # 真 OCR 语法错行号
     syntax_errors: int = 0    # 粘连 / 标点 / 未匹配括号 等（OCR 噪声）
-    semantic_errors: int = 0  # 未定义类型 / 缺 namespace（缺 chromium 全量头）
+    semantic_errors: int = 0  # 未定义类型 / 缺 namespace（缺 示例 全量头）
     skip_reason: str = ""     # 为什么 skipped（无工具/无映射）
 
 
@@ -162,7 +162,7 @@ class CompileReport:
     total: int
     syntax_clean: int      # g++ 通过 + 无任何错误
     syntax_dirty: int      # 有真 OCR 语法错（粘连/标点/未匹配）
-    sysroot_missing: int   # 仅语义错（缺 chromium 全量头），语法本身干净
+    sysroot_missing: int   # 仅语义错（缺 示例 全量头），语法本身干净
     skipped: int
     results: list[CompileResult]
     tool_availability: dict[str, bool]
@@ -235,7 +235,7 @@ def _run_one_file(
             path=str(file_path), language=lang,
             status="syntax_clean", duration_ms=duration_ms,
         )
-    # 失败但只有语义错（缺 chromium sysroot）→ syntax 仍是干净的
+    # 失败但只有语义错（缺 示例 sysroot）→ syntax 仍是干净的
     if syntax_n == 0 and semantic_n > 0:
         return CompileResult(
             path=str(file_path), language=lang,
@@ -261,11 +261,11 @@ def run_compile_check(
     """对 files_dir 下所有支持的源文件跑语法检查
 
     relative_paths 非空时仅检查指定列表（来自 files-index.json）；否则递归
-    扫描整个目录。``extra_includes`` 是额外的 -I 目录列表（chromium stub
+    扫描整个目录。``extra_includes`` 是额外的 -I 目录列表（示例 stub
     headers 等），会被注入 g++/gcc 命令。
     """
-    # files_dir 自身也加进 -I：chromium 风格 #include "media/foo.h" 在 files/
-    # 下能 self-resolve（文件树就是按 chromium 路径组织的）
+    # files_dir 自身也加进 -I：示例 风格 #include "media/foo.h" 在 files/
+    # 下能 self-resolve（文件树就是按 示例 路径组织的）
     final_includes = [files_dir]
     if extra_includes:
         final_includes.extend(extra_includes)
@@ -360,7 +360,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--report", type=Path, default=None)
     parser.add_argument(
         "--auto-stubs", action="store_true",
-        help="自动扫 #include 并生成 stub headers（推荐 chromium 这类缺 sysroot 场景）",
+        help="自动扫 #include 并生成 stub headers（推荐 示例 这类缺 sysroot 场景）",
     )
     parser.add_argument(
         "--stub-dir", type=Path, default=None,

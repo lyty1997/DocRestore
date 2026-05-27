@@ -102,7 +102,7 @@ class TestSplitLeadingComment:
 def _build_source(merged_text: str, path: str = "x/foo.cc") -> SourceFile:
     """构造最小 SourceFile 用于 _redact_code_headers 测试。"""
     pc = PageColumn(
-        page_stem="DSC00001",
+        page_stem="page00001",
         column_index=0,
         meta=IDEMeta(
             column_index=0,

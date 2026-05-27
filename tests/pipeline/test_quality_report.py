@@ -59,7 +59,7 @@ def _make_code_source(
         flags=column_flags or [],
     )
     page = PageColumn(
-        page_stem="DSC1",
+        page_stem="page1",
         column_index=0,
         meta=meta,
         column=column,
@@ -268,7 +268,7 @@ class TestDetectCodeModeQuality:
         assert "code.grouping.merged_pages" not in codes
         first = report.issues[0]
         assert first.metadata["path"] == "src/foo.cc"
-        assert first.metadata["source_pages"] == ["DSC1.col0"]
+        assert first.metadata["source_pages"] == ["page1.col0"]
         assert "code.refine.truncated" in first.metadata["flags"]
 
     @pytest.mark.asyncio

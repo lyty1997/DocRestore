@@ -60,7 +60,7 @@ def _source(text: str, *, language: str = "python") -> SourceFile:
         char_width=10,
         avg_line_height=20,
     )
-    page = PageColumn("DSC1", 0, meta, column)
+    page = PageColumn("page1", 0, meta, column)
     return SourceFile(
         path="src/foo.py",
         filename="foo.py",
@@ -109,7 +109,7 @@ class TestRepairContext:
         context = contexts[0]
         assert context.edit_range == CodeEditRange(1, 2)
         assert context.local_lines == ["1: def run():", "2:     return ("]
-        assert context.source_pages == ["DSC1.col0"]
+        assert context.source_pages == ["page1.col0"]
         assert context.path_candidates[0]["path"] == "src/foo.py"
         assert "readonly context must not be modified" in context.constraints
 

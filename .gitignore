@@ -56,7 +56,7 @@ debug_image/
 
 # 并行测试数据集（含 symlink 形式，所以不加尾斜杠以匹配文件和目录）
 test_images/parallel_test
-test_images/Chromium_VDA_code
+test_images/ide_code_sample
 
 # 裁剪对比测试数据（局部生成，按 CLAUDE.md 测试规则不入库）
 test_images/crop_compare/

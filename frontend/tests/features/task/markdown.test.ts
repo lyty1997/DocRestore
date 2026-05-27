@@ -54,10 +54,10 @@ describe("rewriteImageUrls", () => {
 
 describe("injectPageAnchors", () => {
   it("把单个 page 注释转成隐藏锚点 span", () => {
-    const input = "段前\n<!-- page: DSC04696.jpg -->\n段后";
+    const input = "段前\n<!-- page: page04696.jpg -->\n段后";
     const out = injectPageAnchors(input);
     expect(out).toContain(
-      '<span class="page-anchor" data-page="DSC04696.jpg"></span>',
+      '<span class="page-anchor" data-page="page04696.jpg"></span>',
     );
     expect(out).not.toContain("<!--");
   });
@@ -76,9 +76,9 @@ describe("injectPageAnchors", () => {
   });
 
   it("兼容文件名含单个连字符", () => {
-    const input = "<!-- page: DSC04696-2.jpg -->";
+    const input = "<!-- page: page04696-2.jpg -->";
     const out = injectPageAnchors(input);
-    expect(out).toContain('data-page="DSC04696-2.jpg"');
+    expect(out).toContain('data-page="page04696-2.jpg"');
   });
 
   it("兼容文件名前后含空白", () => {
