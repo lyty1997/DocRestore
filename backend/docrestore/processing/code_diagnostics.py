@@ -449,12 +449,18 @@ def diagnose_text(
     text: str,
     include_root: Path | None = None,
     extra_include_roots: list[Path] | None = None,
+    sibling_files: list[tuple[str, str]] | None = None,
     runner: CodeDiagnosticRunner | None = None,
 ) -> CodeDiagnostic:
     """诊断一段内存文本，供 scoped repair 应用 patch 后验证。
 
     草稿写入隔离临时目录，因此同目录 ``#include "sibling.h"`` 无法在 cwd 解析；
     调用方可用 ``extra_include_roots`` 传入真实兄弟目录让 -I 解析（B7 C19）。
+
+    ``sibling_files``（``(path, text)`` 列表）会被写入同一临时根，使目标的同目录/
+    相对 ``#include`` 可解析——否则隔离诊断把缺失头误判为 ``dependency_dirty``，与
+    基线（``diagnose_source_files`` 共置全部源文件）不可比，骗过 scoped repair 的
+    "诊断未恶化"接受门（自审 followup）。
     """
     active_runner = runner or CodeDiagnosticRunner()
     with tempfile.TemporaryDirectory(prefix="docrestore-code-diag-") as tmp:
@@ -463,6 +469,13 @@ def diagnose_text(
         file_path = root / rel_path
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(text, encoding="utf-8")
+        for idx, (sib_path, sib_text) in enumerate(sibling_files or [], start=1):
+            sib_rel = _safe_diagnostic_rel_path(sib_path, idx)
+            if sib_rel == rel_path:
+                continue  # 不覆盖被诊断的目标文件
+            sib_file = root / sib_rel
+            sib_file.parent.mkdir(parents=True, exist_ok=True)
+            sib_file.write_text(sib_text, encoding="utf-8")
         return active_runner.run_target(CodeDiagnosticTarget(
             path=rel_path,
             file_path=file_path,

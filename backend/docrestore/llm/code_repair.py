@@ -186,6 +186,9 @@ class DiagnosticCodeRepairer:
         current = original
         attempts: list[CodeRepairAttempt] = []
         original_score = _diagnostic_score(diagnostics)
+        # 隔离诊断需共置兄弟文件让同目录 #include 可解析，否则缺失头会被判
+        # dependency_dirty(score 0)、骗过下方"诊断未恶化"接受门（自审 followup）。
+        siblings = _sibling_files(source, related_sources)
         # 已应用 patch 造成的累计行偏移。窗口之间互不重叠（_merge_line_windows
         # 保证有间隔），故前一个 patch 只平移后续窗口的行号、不改其文本内容；
         # patch/edit_range 都是原文行号，按偏移平移到 current 坐标系再应用（B7 C2）。
@@ -215,6 +218,7 @@ class DiagnosticCodeRepairer:
                 path=source.path,
                 language=source.language,
                 text=patched,
+                sibling_files=siblings,
                 runner=self._diagnostic_runner,
             )
             if _diagnostic_score([post]) > original_score:
@@ -317,6 +321,7 @@ class CodeConsistencyAuditor:
         current = original
         applied = 0
         baseline_score = _diagnostic_score(diagnostics)
+        siblings = _sibling_files(source, related_sources)
         # 多个 audit patch 顺序应用同样会移动后续 patch 的行号；按 start_line 升序
         # 处理并按累计偏移平移到 current 坐标系（B7 C2/C3）。
         line_offset = 0
@@ -349,6 +354,7 @@ class CodeConsistencyAuditor:
                 path=source.path,
                 language=source.language,
                 text=patched,
+                sibling_files=siblings,
                 runner=self._diagnostic_runner,
             )
             if _diagnostic_score([post]) > baseline_score:
@@ -910,6 +916,22 @@ def _extract_json(raw: str) -> str:
     if start >= 0 and end > start:
         return text[start:end + 1]
     return text
+
+
+def _sibling_files(
+    source: SourceFile,
+    related_sources: list[SourceFile] | None,
+) -> list[tuple[str, str]]:
+    """供隔离诊断共置的同组兄弟文件 ``(path, text)``，排除目标自身。
+
+    让 post-patch ``diagnose_text`` 能解析目标的同目录 ``#include``，与基线
+    （``diagnose_source_files`` 共置全部源）可比，避免缺失头骗过接受门。
+    """
+    return [
+        (s.path, s.merged_text)
+        for s in (related_sources or [])
+        if s.path != source.path
+    ]
 
 
 def _diagnostic_score(diagnostics: list[CodeDiagnostic]) -> int:

@@ -466,6 +466,33 @@ class TestToolDiagnostics:
         assert str(sibling_dir) in cmd
         assert str(tmp_path) in cmd
 
+    def test_diagnose_text_writes_sibling_files(self) -> None:
+        """sibling_files 写入同一临时根使同目录 #include 可解析（自审 followup）。"""
+        seen: dict[str, bool] = {}
+
+        def run(
+            cmd: list[str], cwd: Path, timeout_s: int,
+        ) -> CommandRunResult:
+            # target 为 src/foo.cc → cwd 是临时根下的 src/，兄弟 src/bar.h 应同目录可见
+            seen["sibling_present"] = (cwd / "bar.h").exists()
+            return CommandRunResult(returncode=0)
+
+        runner = CodeDiagnosticRunner(
+            tool_resolver=lambda _tool: "/usr/bin/g++",
+            command_runner=run,
+        )
+        diagnose_text(
+            path="src/foo.cc",
+            language="cpp",
+            text='#include "bar.h"\nint main(){}\n',
+            sibling_files=[
+                ("src/bar.h", "int bar();\n"),
+                ("src/foo.cc", "SELF_SHOULD_BE_SKIPPED"),  # 同 path 不覆盖目标
+            ],
+            runner=runner,
+        )
+        assert seen["sibling_present"] is True
+
 
 @pytest.mark.skipif(os.name != "posix", reason="进程组兜底依赖 POSIX killpg")
 class TestRunCommandProcessGroup:
