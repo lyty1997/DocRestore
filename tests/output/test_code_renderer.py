@@ -341,3 +341,37 @@ class TestSpikeIntegration:
         # 文件内容非空
         for f in result.written_files:
             assert f.read_text(), f"{f} 内容空"
+
+
+@pytest.mark.asyncio
+async def test_same_basename_downgrade_does_not_overwrite(
+    tmp_path: Path,
+) -> None:
+    """不同源降级到同 basename 时不得互相覆盖丢内容（B4 H2）。"""
+    sources = [
+        _make_source("/a/foo.cc", "FIRST_CONTENT\n"),
+        _make_source("/b/foo.cc", "SECOND_CONTENT\n"),
+    ]
+    result = await render_code_files(sources, tmp_path)
+    assert len(result.written_files) == 2
+    assert len({str(w) for w in result.written_files}) == 2  # 路径互异，未撞名
+    joined = "".join(w.read_text(encoding="utf-8") for w in result.written_files)
+    assert "FIRST_CONTENT" in joined
+    assert "SECOND_CONTENT" in joined
+
+
+@pytest.mark.asyncio
+async def test_illegal_char_path_does_not_abort_batch(
+    tmp_path: Path,
+) -> None:
+    """含非法字符（NUL）的路径被清洗，且不让整批渲染中断（B4 H2）。"""
+    sources = [
+        _make_source("src/a.cc", "AAA\n"),
+        _make_source("src/b\x00bad.cc", "BBB\n"),
+        _make_source("src/c.cc", "CCC\n"),
+    ]
+    result = await render_code_files(sources, tmp_path)  # 不应抛异常
+    joined = "".join(w.read_text(encoding="utf-8") for w in result.written_files)
+    assert "AAA" in joined
+    assert "CCC" in joined  # NUL 文件不影响其余文件写出
+    assert "BBB" in joined  # NUL 被清洗后该文件仍能写

@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -92,16 +93,26 @@ async def render_code_files(
     index_entries: list[dict[str, object]] = []
     document_chunks: list[str] = []
 
+    used_rel: set[str] = set()
     for src in sources:
         rel_path, reason = _safe_relative_path(src.path)
         if reason:
             skipped.append((src.path, reason))
+        # 同 rel_path（降级后同 basename、或上游消歧未尽）会互相覆盖丢文件，
+        # 这里兜底加唯一后缀（B4 H2）。
+        rel_path = _dedup_rel_path(rel_path, used_rel)
+        used_rel.add(rel_path)
         target = files_dir / rel_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        async with aiofiles.open(target, "w", encoding="utf-8") as f:
-            await f.write(src.merged_text)
-            if src.merged_text and not src.merged_text.endswith("\n"):
-                await f.write("\n")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            async with aiofiles.open(target, "w", encoding="utf-8") as f:
+                await f.write(src.merged_text)
+                if src.merged_text and not src.merged_text.endswith("\n"):
+                    await f.write("\n")
+        except (OSError, ValueError) as exc:
+            # 单文件写失败（残留非法路径/权限/超长等）不应中断整批渲染。
+            skipped.append((src.path, f"write_failed:{exc}"))
+            continue
         written.append(target)
         safe_sources.append((src, rel_path, target))
 
@@ -198,19 +209,49 @@ def _safe_relative_path(raw_path: str) -> tuple[str, str | None]:
 
     p = Path(raw_path)
     if p.is_absolute():
-        return f"{_UNKNOWN_DIR}/{p.name}", "absolute"
+        return f"{_UNKNOWN_DIR}/{_sanitize_segment(p.name)}", "absolute"
 
     # 拒绝任何 .. 段（即使在中间）
     parts = list(p.parts)
     if any(seg == ".." for seg in parts):
-        return f"{_UNKNOWN_DIR}/{p.name}", "traversal"
+        return f"{_UNKNOWN_DIR}/{_sanitize_segment(p.name)}", "traversal"
 
-    # 过滤空段、当前目录段
-    cleaned = [seg for seg in parts if seg and seg != "."]
+    # 过滤空段、当前目录段，并清洗各段非法字符
+    cleaned = [_sanitize_segment(seg) for seg in parts if seg and seg != "."]
     if not cleaned:
         return f"{_UNKNOWN_DIR}/_empty", "empty"
 
     return "/".join(cleaned), None
+
+
+# 文件名非法字符（NUL / 控制符）会让 mkdir/open 抛 ValueError 中断整批渲染，
+# 统一替换为下划线（B4 H2）。
+_ILLEGAL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _sanitize_segment(seg: str) -> str:
+    """清洗单个路径段的非法字符；全非法/空白则回退为 ``_``。"""
+    cleaned = _ILLEGAL_CHARS_RE.sub("_", seg).strip()
+    return cleaned or "_"
+
+
+def _dedup_rel_path(rel: str, used: set[str]) -> str:
+    """rel_path 已被占用时在扩展名前插入 ``__N`` 直到全局唯一（B4 H2）。"""
+    if rel not in used:
+        return rel
+    prefix, name = (rel.rsplit("/", 1)[0] + "/", rel.rsplit("/", 1)[1]) \
+        if "/" in rel else ("", rel)
+    if "." in name:
+        base, ext = name.rsplit(".", 1)
+        stem, tail = base, f".{ext}"
+    else:
+        stem, tail = name, ""
+    n = 1
+    while True:
+        cand = f"{prefix}{stem}__{n}{tail}"
+        if cand not in used:
+            return cand
+        n += 1
 
 
 def _render_document_chunk(rel_path: str, src: SourceFile) -> str:
