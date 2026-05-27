@@ -181,9 +181,12 @@ def _find_line_number_columns(
         nums = [int(ln.text.strip()) for ln in cluster_sorted]
         if len(nums) < 2:
             continue
-        ascending = sum(1 for i in range(len(nums) - 1) if nums[i + 1] > nums[i])
+        # 非递减计数（>=）：OCR 把同一行号识别成多框/相邻重复时不应惩罚，否则
+        # 重复行号偏多的栏会整簇被丢弃、整栏不组装；再要求整体递增（max>min）以
+        # 排除全等值的噪声数字列（B4 G8）。
+        ascending = sum(1 for i in range(len(nums) - 1) if nums[i + 1] >= nums[i])
         ratio = ascending / (len(nums) - 1)
-        if ratio < cfg.min_monotonic_ratio:
+        if ratio < cfg.min_monotonic_ratio or max(nums) <= min(nums):
             continue
         # 跨度过大 → 噪声（如 EXPLORER 文件名误识）
         if (max(nums) - min(nums)) > cfg.max_num_range:
@@ -205,6 +208,21 @@ def _find_line_number_columns(
 
     anchors.sort(key=lambda a: a.x1_center)
     return anchors
+
+
+def _column_for_line(
+    x1: int,
+    x_center: int,
+    column_spans: list[tuple[int, int]],
+) -> int | None:
+    """选行所属栏：优先按 x1 命中栏区间；x1 落空再用中心点兜底（B4 G7）。"""
+    for i, (col_left, col_right) in enumerate(column_spans):
+        if col_left <= x1 <= col_right:
+            return i
+    for i, (col_left, col_right) in enumerate(column_spans):
+        if col_left <= x_center <= col_right:
+            return i
+    return None
 
 
 def _assign_regions(
@@ -261,13 +279,10 @@ def _assign_regions(
             below.append(ln)
             continue
 
-        assigned = False
-        for i, (col_left, col_right) in enumerate(column_spans):
-            if col_left <= x1 <= col_right:
-                columns[i].append(ln)
-                assigned = True
-                break
-        if not assigned:
+        col_idx = _column_for_line(x1, x_center, column_spans)
+        if col_idx is None:
             other.append(ln)
+        else:
+            columns[col_idx].append(ln)
 
     return columns, above, below, sidebar, other

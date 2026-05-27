@@ -306,3 +306,36 @@ def test_split_recovers_code_line_left_of_anchor_right_edge() -> None:
     code_texts = [ln.text for ln in code_lines]
     assert "foo();" in code_texts  # 已恢复，不再丢失
     assert "int x = 1;" in code_texts
+
+
+def test_visual_width_counts_fullwidth_as_two() -> None:
+    """东亚全角字符按 2 计，避免含中文行把 char_width 拉小（B4 G4）。"""
+    from docrestore.processing.code_assembly import _visual_width
+
+    assert _visual_width("abc") == 3
+    assert _visual_width("中文") == 4
+    assert _visual_width("a中b") == 4
+
+
+def test_detect_gaps_ignores_trailing_outlier() -> None:
+    """单个尾部高离群行号（如 8→88 误读）不应制造大量虚假缺号（B4 G6）。"""
+    from docrestore.processing.code_assembly import _detect_line_number_gaps
+    from docrestore.processing.ide_layout import LineNumberAnchor
+
+    nums = [1, 2, 3, 4, 5, 6, 7, 8, 88]
+    lines = [
+        _line((100, 20 * i, 130, 20 * i + 16), str(n))
+        for i, n in enumerate(nums, 1)
+    ]
+    anchor = LineNumberAnchor(
+        x1_center=110, x1_min=100, x2_max=130, y_top=20, y_bottom=200,
+        line_count=len(nums), num_range=(1, 88), monotonic_ratio=1.0,
+    )
+    assert _detect_line_number_gaps(lines, anchor) == []  # 88 被剔除，1-8 连续
+
+    # 真实缺号仍能检出
+    real = [
+        _line((100, 20 * i, 130, 20 * i + 16), str(n))
+        for i, n in enumerate([1, 2, 4, 5], 1)
+    ]
+    assert _detect_line_number_gaps(real, anchor) == [3]

@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import re
 import statistics
+import unicodedata
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -240,18 +241,28 @@ def _split_line_numbers_and_code(
 def _estimate_char_width(
     code_lines: list[TextLine], min_text_len: int,
 ) -> float:
-    """字符宽度 = (x2 - x1) / len(text) 的中位数（仅长 text）"""
+    """字符宽度 = (x2 - x1) / 视觉宽度 的中位数（仅长 text）。
+
+    视觉宽度按东亚全角字符计 2、其余计 1，避免含中文注释/字符串的行把 char_width
+    拉小、进而放大该栏所有行的缩进（B4 G4）。
+    """
     widths: list[float] = []
     for ln in code_lines:
         text = ln.text
         if len(text) < min_text_len:
             continue
-        # 简单按 len 算；中文字符宽 ≈ 2 ASCII，为简化先不区分
-        # spike 数据全是 ASCII 代码，可接受
-        widths.append((ln.bbox[2] - ln.bbox[0]) / len(text))
+        widths.append((ln.bbox[2] - ln.bbox[0]) / _visual_width(text))
     if not widths:
         return 0.0
     return statistics.median(widths)
+
+
+def _visual_width(text: str) -> int:
+    """近似等宽字体像素占位：东亚全角字符计 2，其余计 1。"""
+    return sum(
+        2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        for ch in text
+    ) or 1
 
 
 def _estimate_line_height(line_no_lines: list[TextLine]) -> int:
@@ -337,12 +348,20 @@ def _detect_line_number_gaps(
     line_no_lines: list[TextLine],
     anchor: LineNumberAnchor,
 ) -> list[int]:
-    """检测 OCR 行号集与 anchor.num_range 期望连续序列的差集"""
+    """检测 OCR 行号集与期望连续序列的差集。
+
+    上界取实际行号集的稳健最大值：剔除单个把序列撑大的尾部高离群点（如 8→88
+    误读），否则 [lo, hi] 会凭空产生大量虚假缺号、误导下游精修（B4 G6）。
+    """
+    del anchor  # num_range 可能含 OCR 误读离群点，改用实际集的稳健边界
     if not line_no_lines:
         return []
     actual = {int(ln.text.strip()) for ln in line_no_lines}
-    lo, hi = anchor.num_range
-    expected = set(range(lo, hi + 1))
+    nums = sorted(actual)
+    # 顶值与其余整体跨度还大 → 孤立高离群点，剔除后再算缺号
+    if len(nums) >= 3 and (nums[-1] - nums[-2]) > max(2, nums[-2] - nums[0]):
+        nums = nums[:-1]
+    expected = set(range(nums[0], nums[-1] + 1))
     return sorted(expected - actual)
 
 

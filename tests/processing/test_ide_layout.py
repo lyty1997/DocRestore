@@ -297,3 +297,34 @@ class TestSpikeImages:
         layout = analyze_layout(text_lines, size)
         for i, col in enumerate(layout.columns):
             assert col, f"{stem} column_{i} 为空（异常）"
+
+
+def test_column_for_line_center_fallback() -> None:
+    """x1 落在首栏左界外但中心点在栏内 → 兜底归该栏，不丢进 other（B4 G7）。"""
+    from docrestore.processing.ide_layout import _column_for_line
+
+    spans = [(100, 300), (320, 600)]
+    assert _column_for_line(90, 150, spans) == 0   # x1<100 但 center 在栏 0
+    assert _column_for_line(350, 400, spans) == 1   # 正常命中栏 1
+    assert _column_for_line(10, 20, spans) is None  # x1/center 都在左侧 → None
+
+
+def test_repeated_line_numbers_still_detected_as_anchor() -> None:
+    """OCR 把行号识别成相邻重复（非递减）时仍应识别为行号列（B4 G8）。"""
+    nums = [1, 1, 2, 2, 3, 3, 4, 4, 5, 5]  # 严格递增比例仅 0.44，旧实现会丢弃
+    lines = [
+        _line((200, 100 + i * 30, 230, 130 + i * 30), str(n))
+        for i, n in enumerate(nums)
+    ]
+    layout = analyze_layout(lines, image_size=(1000, 800))
+    assert len(layout.anchors) == 1
+
+
+def test_constant_numbers_not_treated_as_anchor() -> None:
+    """全等值数字列不是行号列，max<=min 守卫应拒绝（B4 G8）。"""
+    lines = [
+        _line((200, 100 + i * 30, 230, 130 + i * 30), "5")
+        for i in range(10)
+    ]
+    layout = analyze_layout(lines, image_size=(1000, 800))
+    assert len(layout.anchors) == 0

@@ -442,8 +442,11 @@ def _stitch_breadcrumb_fragments(lines: list[TextLine]) -> str:
         if not out:
             out = text
         elif x_min < prev_x_max + 5:
-            # 相邻或重叠 → 尝试边界字符去重，无空格拼接
-            text = _dedup_overlap_boundary(out, text)
+            # 相邻或重叠 → 尝试边界字符去重，无空格拼接。去重字符数受实际像素
+            # 重叠约束，避免仅相邻、靠巧合边界字符匹配的片段被过度去重（B4 H4）。
+            overlap_px = prev_x_max - x_min
+            char_w = (x_max - x_min) / max(1, len(text))
+            text = _dedup_overlap_boundary(out, text, overlap_px, char_w)
             out += text
         else:
             out += " " + text
@@ -452,13 +455,24 @@ def _stitch_breadcrumb_fragments(lines: list[TextLine]) -> str:
     return out
 
 
-def _dedup_overlap_boundary(prev: str, curr: str) -> str:
+def _dedup_overlap_boundary(
+    prev: str,
+    curr: str,
+    overlap_px: int | None = None,
+    char_w: float = 0.0,
+) -> str:
     """两个相邻片段共享首尾字符时去重一份。
 
-    取最长共同 ``prev[-n:] == curr[:n]`` 的 n（≤ 8 防止误伤），从 curr
-    去掉前 n 个字符。无共享时返回原 curr。
+    取最长共同 ``prev[-n:] == curr[:n]`` 的 n，从 curr 去掉前 n 个字符。
+    去重字符数受实际像素重叠约束：仅去掉 ``overlap_px`` 按字符宽 ``char_w`` 折算
+    能解释的字符数（+1 容差），避免仅相邻、靠巧合边界字符匹配的片段被过度去重
+    而腐蚀文件名/路径（B4 H4）。未提供像素信息时退回旧上界 8。
     """
-    max_n = min(8, len(prev), len(curr))
+    if overlap_px is not None and char_w > 0:
+        max_by_px = max(1, round(overlap_px / char_w) + 1)
+    else:
+        max_by_px = 8
+    max_n = min(8, max_by_px, len(prev), len(curr))
     for n in range(max_n, 0, -1):
         if prev[-n:] == curr[:n]:
             return curr[n:]

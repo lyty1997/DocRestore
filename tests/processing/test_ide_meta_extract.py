@@ -492,3 +492,19 @@ class TestSpike:
                 or "gles" in all_filenames
             )
             assert has_known, f"{stem} 文件名 {all_filenames!r} 与已知不符"
+
+
+def test_dedup_overlap_bounded_by_pixel_overlap() -> None:
+    """重叠去重字符数受实际像素重叠约束，不因巧合多字符匹配腐蚀（B4 H4）。"""
+    from docrestore.processing.ide_meta_extract import _dedup_overlap_boundary
+
+    # 真实 1 字符重叠（像素重叠约 1 字符宽）→ 去掉共享的 '_'
+    assert _dedup_overlap_boundary(
+        "widget_", "_decode.cc", overlap_px=15, char_w=22.0,
+    ) == "decode.cc"
+    # 仅相邻（像素重叠极小）但巧合 3 字符 'get' 匹配 → 被像素上界限为 n≤1，不腐蚀
+    assert _dedup_overlap_boundary(
+        "app/get", "get_status.h", overlap_px=2, char_w=20.0,
+    ) == "get_status.h"
+    # 不传像素信息时退回旧上界 8（向后兼容）
+    assert _dedup_overlap_boundary("widget_", "_decode.cc") == "decode.cc"
