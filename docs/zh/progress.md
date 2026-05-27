@@ -1,5 +1,43 @@
 # 开发进度
 
+## 2026-05-27 22:50 CST - 代码模式 B7+B4 多 agent 评审与缺陷修复
+
+对 dev 相对 main 的 128 提交按阶段分段评审（B1-B7），本轮完成 B7（AGE-58 诊断/精修）
+与 B4（AGE-8 代码模式核心）两段的严重项 + 中优先级修复，并清理数据集特定关键词。
+
+完成内容：
+- **CLAUDE.md 质量门禁约定**：同步 codex 的 `scripts/check_quality.sh` + `pre-commit`
+  入口；`.gitignore` 解禁 CLAUDE.md、排除 `.claude/*.env`（密钥）与 `.claude/skills/`。
+- **B7 修复（9 commit）**：C1 column 二次 OCR `zip(strict)` 崩溃；C7 code_context
+  `read_text` 容错；C5/C6 ocr_postfix 误伤正则收紧；C13 诊断子进程进程组兜底；
+  C2/C3/C4 scoped repair 行号重映射 + 行数守恒 + audit 重诊断；C11/C12 阻塞 IO 移出
+  事件循环 + PUT 串行化；C8/C9 诊断失败行兜底抽取 + 纯语法工具归类；C19 实时诊断
+  同目录 `#include` 解析；C23 OCR 噪声列号还原源列。
+- **数据集关键词清理（1 commit，~47 文件）**：chromium/openmax/DSC* → 中性占位
+  （app/core/widget、page<N> 等），测试 fixture 输入与断言成对替换；保留浏览器
+  Chrome 区域术语与 package-lock.json。
+- **B4 严重修复（4 commit）**：G2 code_assembly 不再静默丢栏内代码行；H1 目录兼容
+  改全连接（空目录不桥接不同目录）；H3 消歧后缀全局唯一；H2 renderer 防同名覆盖 +
+  非法字符清洗 + per-file try/except；H5 落实 code.enable→OCR basic 自动切换。
+- **B4 中优先级修复（1 commit）**：G4 char_width 按东亚全角加权；G6 缺号检测剔除
+  尾部离群行号；G7 栏归属中心点兜底；G8 行号非递减计数 + max>min；H4 breadcrumb
+  重叠去重受像素重叠约束。
+
+验证：
+- 各修复均带回归用例，逐文件过 `mypy --strict` + `ruff` + `typos` + pre-commit。
+- 全量 `pytest`：989 passed（数据集清理后）/ 767 passed（B4 后子集），0 fail；
+  `tests/ocr` 的 3 fail+1 error 为本机缺 torchvision/DeepSeek 模型的环境问题，与本轮无关。
+- **真实数据 E2E（用户跑全量 272 图 before/after 对比）**：聚合脏度指标（OCR 错/CJK
+  噪声/格式/杂散数字）持平互有正负，质量报告内容一致、每文件状态一致 → 无质量下降；
+  大文件 615 行差异主要是 LLM 非确定性；可确定归因的确定性改动（如 C5 `1/`→`//`）均向好。
+
+遗留问题：
+- **B1/B2/B3/B5/B6 段未评审**（性能并行/流式 v2/质量链/回归 WYSIWYG/后续修复）。
+- G3（indent 基线均匀平移保留相对结构）、G5（跨页按行号拼接为合理约定）经评估非缺陷，未改。
+- E2E 因 LLM 随机性无法单次严格隔离"代码效果 vs 采样噪声"；如需严格对比应设 temperature=0。
+- `.gitignore` 数据目录名已中性化为 `ide_code_sample`，本地 `test_images/Chromium_VDA_code`
+  目录现为未跟踪状态，需手动重命名或保留（不入库）。
+
 ## 2026-05-14 22:59:47 CST - AGE-63 路径置信度参与代码文件分组
 
 完成内容：
