@@ -310,6 +310,21 @@ def _augment_metas_with_code_context(
             ))
 
 
+def _ocr_config_for_code_mode(
+    ocr: OCRConfig | None,
+    default_ocr: OCRConfig,
+) -> OCRConfig | None:
+    """代码模式所需的有效 OCR 配置：强制 PaddleOCR basic（产出行级 bbox）。
+
+    底座（请求级 ``ocr`` 或 ``default_ocr``）已是 basic 则原样返回 ``ocr``；
+    否则在底座上 ``model_copy`` 强制 ``paddle_pipeline="basic"``（B4 H5）。
+    """
+    base = ocr if ocr is not None else default_ocr
+    if base.paddle_pipeline == "basic":
+        return ocr
+    return base.model_copy(update={"paddle_pipeline": "basic"})
+
+
 def _stitch_final_chunks(chunks: list[str]) -> str:
     """拼接分块 final_refine 的结果。
 
@@ -810,24 +825,33 @@ class Pipeline:
             _report,
         )
 
+        # 请求级 code 覆盖优先；为 None 时回退到 pipeline 启动配置。
+        code_cfg = code if code is not None else self._config.code
+        # 代码模式强制 PaddleOCR basic（产出行级 bbox 的 text_lines）；vl 不产
+        # text_lines，代码模式会因无可组装内容而失败。文档声称启用时自动切 basic
+        # 但此前从未落实——在此统一强制，使任何代码模式请求都生效（B4 H5）。
+        ocr_effective = (
+            _ocr_config_for_code_mode(ocr, self._config.ocr)
+            if code_cfg.enable
+            else ocr
+        )
+
         ocr_task = asyncio.create_task(
             self._ocr_producer(
                 images, output_dir, gpu_lock, page_queue,
-                pages_ref, controller, _report, ocr, pii_cfg,
+                pages_ref, controller, _report, ocr_effective, pii_cfg,
                 quality=quality,
             ),
             name=f"ocr-producer-{image_dir.name}",
         )
         try:
-            # 请求级 code 覆盖优先；为 None 时回退到 pipeline 启动配置
-            code_cfg = code if code is not None else self._config.code
             if code_cfg.enable:
                 # AGE-8 代码模式：跳过 LLM 流式精修，OCR 收齐后跑 ide_layout
                 # → ide_meta_extract → code_assembly → group_into_files →
                 # render_code_files，按需 LLM 字符级修正每个 SourceFile
                 result = await self._code_pipeline(
                     page_queue, pages_ref, output_dir,
-                    llm, pii_cfg, _report, ocr, code_cfg,
+                    llm, pii_cfg, _report, ocr_effective, code_cfg,
                     quality=quality,
                 )
             else:
