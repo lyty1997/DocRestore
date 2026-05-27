@@ -231,10 +231,12 @@ def _split_line_numbers_and_code(
         if is_numeric and x1 >= anchor.x1_min - x_tolerance and x2 <= line_no_max_x:
             line_no_lines.append(ln)
         else:
-            # 非行号 = 代码行。即便 x1 落在行号列右缘左侧（OCR 把行号与代码合到
-            # 同一框、或行号-代码间距很小），也收录为代码行——该 line 已被
-            # ide_layout 归入本栏，静默丢弃会让整行真实代码消失（B4 G2）。
-            code_lines.append(ln)
+            # 非行号 = 代码行。收录 x1 落在行号列右缘左侧的行（OCR 把行号与代码合到
+            # 同一框、或行号-代码间距很小，B4 G2），但要求 x1 不远左于行号列左界——
+            # 更左的多是 _column_for_line 中心点兜底放进来的跨 gutter 宽噪声
+            # （sidebar/breadcrumb/minimap 残留），丢弃避免污染代码（自审 followup）。
+            if x1 >= anchor.x1_min - x_tolerance:
+                code_lines.append(ln)
     return line_no_lines, code_lines
 
 

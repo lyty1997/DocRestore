@@ -339,3 +339,25 @@ def test_detect_gaps_ignores_trailing_outlier() -> None:
         for i, n in enumerate([1, 2, 4, 5], 1)
     ]
     assert _detect_line_number_gaps(real, anchor) == [3]
+
+
+def test_split_drops_far_left_gutter_crossing_noise() -> None:
+    """x1 远左于行号列左界的跨 gutter 噪声行不应入代码（自审 followup）。"""
+    from docrestore.processing.code_assembly import _split_line_numbers_and_code
+    from docrestore.processing.ide_layout import LineNumberAnchor
+
+    anchor = LineNumberAnchor(
+        x1_center=110, x1_min=100, x2_max=130,
+        y_top=20, y_bottom=200, line_count=5, num_range=(1, 5),
+        monotonic_ratio=1.0,
+    )
+    x_tol = 10  # 下界 = x1_min - x_tol = 90
+    lines = [
+        _line((100, 20, 128, 36), "1"),            # 行号
+        _line((200, 20, 320, 36), "int x = 1;"),   # 常规代码
+        _line((20, 40, 480, 56), "EXPLORER tree noise"),  # x1=20<90 跨 gutter 噪声
+    ]
+    _, code_lines = _split_line_numbers_and_code(lines, anchor, x_tol)
+    code_texts = [ln.text for ln in code_lines]
+    assert "int x = 1;" in code_texts                       # 正常代码保留
+    assert all("EXPLORER" not in t for t in code_texts)     # 噪声被丢弃
