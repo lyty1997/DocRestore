@@ -300,29 +300,49 @@ def _rebuild_source_file(merged: SourceFile) -> SourceFile:
 
 
 def _disambiguate_duplicate_paths(files: list[SourceFile]) -> None:
-    """同 path 多 SourceFile 时给后续的加 ``:col<idx>`` 后缀（in-place）"""
-    seen: dict[str, int] = {}
+    """同 path 多 SourceFile 时加唯一后缀（in-place）。
+
+    后缀以最小列号为基（``__col<idx>``），但仅列号不保证唯一——多个同 path
+    文件的最小列号可能相同，会再次撞名被渲染层覆盖丢文件。故对已用路径递增序号
+    直到全局唯一（B4 H3）。
+    """
+    used: set[str] = set()
     for src in files:
-        if src.path not in seen:
-            seen[src.path] = 1
+        if src.path not in used:
+            used.add(src.path)
             continue
-        seen[src.path] += 1
         col_indices = sorted({pc.column_index for pc in src.pages})
-        suffix = f"__col{col_indices[0]}"
-        # 把后缀插到扩展名前：foo.cc → foo__col1.cc
-        if "." in src.filename:
-            base, ext = src.filename.rsplit(".", 1)
-            new_filename = f"{base}{suffix}.{ext}"
-        else:
-            new_filename = f"{src.filename}{suffix}"
-        # 同步改 path
-        if "/" in src.path:
-            head = src.path.rsplit("/", 1)[0]
-            src.path = f"{head}/{new_filename}"
-        else:
-            src.path = new_filename
+        base_suffix = f"__col{col_indices[0]}" if col_indices else "__dup"
+        new_path, new_filename = _path_with_suffix(
+            src.path, src.filename, base_suffix,
+        )
+        n = 1
+        while new_path in used:
+            n += 1
+            new_path, new_filename = _path_with_suffix(
+                src.path, src.filename, f"{base_suffix}_{n}",
+            )
+        used.add(new_path)
+        src.path = new_path
         src.filename = new_filename
         src.flags.append("code.grouping.disambiguated_by_column")
+
+
+def _path_with_suffix(
+    path: str, filename: str, suffix: str,
+) -> tuple[str, str]:
+    """把后缀插到扩展名前：``foo.cc`` → ``foo<suffix>.cc``，并同步 path。"""
+    if "." in filename:
+        base, ext = filename.rsplit(".", 1)
+        new_filename = f"{base}{suffix}.{ext}"
+    else:
+        new_filename = f"{filename}{suffix}"
+    if "/" in path:
+        head = path.rsplit("/", 1)[0]
+        new_path = f"{head}/{new_filename}"
+    else:
+        new_path = new_filename
+    return new_path, new_filename
 
 
 def _fuzzy_filename_key(name: str) -> str:
@@ -383,8 +403,11 @@ def _split_by_compatible_dir(
     sub_groups: list[set[int]] = []
     for i, c1 in enumerate(compacts):
         placed = False
+        # 全连接（与子组内所有成员都兼容）而非单连接：兼容关系非传递，空目录
+        # 又与任意目录兼容，单连接会让一个无目录的栏把 a/x 与 b/x 两个不同目录
+        # 桥接成一组，导致不同文件被误并、后续按 line_no 去重丢行（B4 H1）。
         for sg in sub_groups:
-            if any(_dirs_compatible(c1, compacts[j]) for j in sg):
+            if all(_dirs_compatible(c1, compacts[j]) for j in sg):
                 sg.add(i)
                 placed = True
                 break
