@@ -16,6 +16,8 @@ limitations under the License.
 
 # DeepSeek-OCR-2 Deployment & Invocation Reference
 
+> **Status**: Historical reference. The current source of truth is `backend/docrestore/ocr/deepseek_ocr2.py` together with `vendor/DeepSeek-OCR-2/`. Kept for environment-setup background; parameter details may drift from the active implementation.
+
 Based on source code analysis of `third_party/DeepSeek-OCR-2/`.
 
 ## 1. Environment Requirements

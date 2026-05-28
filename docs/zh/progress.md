@@ -1,5 +1,39 @@
 # 开发进度
 
+## 2026-05-29 - 仓库整体减熵：归档老 progress / references 加 STATUS / .gitignore 收尾
+
+通读 backend / frontend / docs / scripts 全量代码与文档后，对疑似 legacy 项逐条核实，多数被
+误报（memory 中"已决策保留项"明确保留），实际可减熵的有限。本轮处理：
+
+- **docs/progress.md → docs/progress.archive.md**：项目根的旧进度档案（2492 行，2026-03-14
+  ~ 2026-05-11）改名归档，顶部加 banner 说明"当前事实源为 `docs/zh/progress.md`"。修
+  `docs/zh/backend/performance_toolkit.md` / `docs/en/backend/performance_toolkit.md`
+  指向；更新 `docs/README.md` / `docs/zh/README.md` / `docs/en/README.md` 索引（en
+  README 原本的 `progress.md` 死链改为指 `../zh/progress.md` + archive）。
+- **docs/zh + en/backend/references/*.md（6 份）顶部加 STATUS 标签**：明确 streaming-pipeline
+  / pipeline-parallel / deepseek-ocr2 三份均为历史参考，当前以 `pipeline/` 代码 + 模块
+  事实源文档为准；防止未来维护者被旧设计 dict 签名 / 参数名误导。
+- **.gitignore 补 `test_images/Chromium_VDA_code`**：本机符号链接（→ `/mnt/TrueNAS_Share/
+  chromium/chromium_decode/code/`），与已 ignore 的 `TMedia_source_code` 同类，git status
+  不再挂残留。
+
+**未动（核实后确认是有意保留，非 legacy）**：
+- `parse_doc_boundaries` / `_split_by_doc_boundaries` / `DocBoundary` / `detect_doc_boundaries`
+  —— 多文档聚类逻辑，下一版代码照片还原恢复时复用
+- `tests/pipeline/test_process_tree.py`（仅末尾 `TestProcessTreeDocTitleDir` 标 skip，前
+  3 个 class 仍 active）与 `tests/pipeline/test_boundary_gap_combo.py`（全 skip）——
+  streaming-pipeline.md 明确"代码还原版解锁"
+- `compile_*` / `_legacy_compile_status` / `legacy_compile_failure` —— 前端 CodeViewer
+  仍硬依赖兼容字段
+- `_legacy_analytical_l_star()` —— rate_controller 冷启动 fallback，注释明确
+- `FixtureOCREngine` / 所有 `scripts/*` / 所有 i18n key / 所有 CSS class —— 引用核查全部命中
+- memory `MEMORY.md` 28 索引 ↔ 28 文件完全一致，无垃圾
+
+**未做（用户选项决议）**：`docs/en/known-issues.md` 仍未补（本轮范围限 legacy 清理，i18n
+缺失另行处理）。
+
+工程量：9 文件改动 + 1 rename，无源码改动。
+
 ## 2026-05-28 - 全量文档校齐：TextLine / 代码模式 OCR 契约 / 前端代码模式审查 / WYSIWYG 编辑器
 
 通读项目文档与代码后对齐近期改动遗留的几处不一致：

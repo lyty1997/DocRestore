@@ -90,6 +90,7 @@ docs/zh/
 - [DeepSeek-OCR-2 参考](backend/references/deepseek-ocr2.md)
 - [已知问题](known-issues.md)
 - [开发进度](progress.md)
+- [开发进度归档（2026-03 ~ 2026-05-11）](../progress.archive.md)
 
 ## 文档维护规则
 

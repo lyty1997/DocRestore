@@ -16,6 +16,8 @@ limitations under the License.
 
 # Streaming Pipeline Design
 
+> **Status**: Historical design reference. The streaming Pipeline has landed; the current source of truth is `docs/en/backend/pipeline.md` and the code under `backend/docrestore/pipeline/`. This document is retained to record the design reversals, the trade-offs behind disabling DOC_BOUNDARY aggregation, and the rationale for skip-marked tests. Names and signatures may drift from the active implementation.
+
 > **Note (2026-04-14)**: When this document was written, the Pipeline still used
 > request-level overrides in the `llm_override: dict` style. The Pipeline has
 > since been refactored to use Config objects — the API layer synthesizes the

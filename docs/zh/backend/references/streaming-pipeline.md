@@ -16,6 +16,8 @@ limitations under the License.
 
 # 流式并行 Pipeline 设计（Streaming Pipeline）
 
+> **Status**: 历史设计参考。流式 Pipeline 已落地，当前事实源为 `docs/zh/backend/pipeline.md` 与 `backend/docrestore/pipeline/` 代码。本文档保留以记录设计反转、停用 DOC_BOUNDARY 聚合的权衡和测试 skip 由来；细节如类名 / 参数签名可能与现行实现有出入。
+
 > **说明（2026-04-14）**：本文档成文时 Pipeline 仍采用 `llm_override: dict`
 > 风格的请求级覆盖。Pipeline 后续已完成 Config 对象化重构——API 层一次性
 > 合成完整 `LLMConfig / OCRConfig / PIIConfig` 并直接传入下游，`pipeline`

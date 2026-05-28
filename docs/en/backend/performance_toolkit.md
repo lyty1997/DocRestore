@@ -21,7 +21,7 @@ Scope: Plan 1 (OCR batch + pipelining) + GPU Monitor + end-to-end Pipeline Profi
 
 ## 1. Background and Goals
 
-Conclusions from the 2026-04-16 vLLM tuning baseline comparison (see `docs/progress.md`):
+Conclusions from the 2026-04-16 vLLM tuning baseline comparison (see [`../../progress.archive.md`](../../progress.archive.md)):
 
 - Generic vLLM parameters bring no steady-state throughput gains for either OCR engine
 - GPU utilization is low: PaddleOCR mean 20% / p95 66%; DeepSeek 52% / p95 73%
