@@ -403,11 +403,15 @@ def _split_by_compatible_dir(
     sub_groups: list[set[int]] = []
     for i, c1 in enumerate(compacts):
         placed = False
-        # 全连接（与子组内所有成员都兼容）而非单连接：兼容关系非传递，空目录
-        # 又与任意目录兼容，单连接会让一个无目录的栏把 a/x 与 b/x 两个不同目录
-        # 桥接成一组，导致不同文件被误并、后续按 line_no 去重丢行（B4 H1）。
+        # 单连接（与子组内任一成员兼容即可并入）：兼容关系非传递且空目录与
+        # 任意目录兼容，理论上单张 path=filename（无 dir）的 PC 可把 ``a/x``
+        # 与 ``b/x`` 两个不同目录桥接到一组。但实测主导回归是 OCR 把分隔符
+        # ``/`` 误识为 ``7`` 等噪声把同源 dir 拆成多变体——若改全连接堵桥接，
+        # ``media/gpu/openmax`` 与 ``media7gpu7openmax`` 的同名文件就会被
+        # 拆 7 个孤立桶丢给下游 audit/repair 触发截断 + 编译失败，损害远大于
+        # 边缘的 a/x↔b/x 误并风险。保持单连接，让空 dir 桥接吸收 OCR 噪声。
         for sg in sub_groups:
-            if all(_dirs_compatible(c1, compacts[j]) for j in sg):
+            if any(_dirs_compatible(c1, compacts[j]) for j in sg):
                 sg.add(i)
                 placed = True
                 break

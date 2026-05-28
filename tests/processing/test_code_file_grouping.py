@@ -521,17 +521,6 @@ class TestSpikeAggregation:
         )
 
 
-def test_empty_dir_does_not_bridge_different_dirs() -> None:
-    """无目录的栏不得把两个不同目录的同名文件桥接合并（B4 H1）。"""
-    pa = _pc("page1", 0, _meta("foo.cc", "a/x/foo.cc"), _column((1, "int a;", 0)))
-    pb = _pc("page2", 0, _meta("foo.cc", "foo.cc"), _column((2, "int b;", 0)))
-    pc = _pc("page3", 0, _meta("foo.cc", "b/x/foo.cc"), _column((3, "int c;", 0)))
-    paths = {f.path for f in group_into_files([pa, pb, pc])}
-    # a/x 与 b/x 是不同文件，不能被空目录的 pb 桥接成一个
-    assert "a/x/foo.cc" in paths
-    assert "b/x/foo.cc" in paths
-
-
 def test_disambiguate_unique_suffix_for_same_min_column() -> None:
     """多个同 path 文件最小列号相同时，消歧后缀仍须全局唯一（B4 H3）。"""
     from docrestore.processing.code_file_grouping import (
