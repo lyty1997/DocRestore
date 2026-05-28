@@ -1,5 +1,53 @@
 # 开发进度
 
+## 2026-05-28 - 代码模式设计文档补全（zh + en）
+
+继前一项清理后，按"先评估、再按缺口补"补全代码模式设计文档。zh 覆盖度（命中行数）：
+`pipeline.md` 0→14、`llm.md` 0→9、`data-models.md` 7→21、`processing.md` 20→保持
+但补 §2 一行 + §3.6 决策由来 + 数据对象专节）；en 同步跟齐。
+
+补充内容：
+- **processing.md §2 补 code_column_ocr.py**（zh + en）：原 §2 漏列。
+- **data-models.md §3.13~§3.16 新增代码模式数据对象专节**（zh + en）：`PathCandidate` /
+  `IDEMeta` / `CodeLine`+`CodeColumn` / `PageColumn` / `SourceFile`，逐字段对齐
+  `processing/code_file_grouping.py` / `code_assembly.py` / `ide_meta_extract.py` 真相源。
+- **en/data-models.md 补两个历史 en/zh 漂移**：原 en 缺 `CodeRestoreConfig`（§4.8）和
+  `CodeDiagnostic`（§4.9），`PipelineConfig` 还漏 `code` 字段；本轮整改后 en §4.8~4.10 与
+  zh 完全对齐。
+- **pipeline.md §11 新增"代码模式编排"**（zh + en）：覆盖 `code.enable` 入口分支 /
+  OCR 强制 basic / 链路顺序 / 错误处理 / 并发与资源 / 输出兼容；§11 相关文档顺延 §12。
+- **llm.md §5.6/§5.7/§5.8 新增**（zh + en）：`CodeLLMRefiner`（refine/rewrite 双模式 +
+  chunk + 回退）/ `DiagnosticCodeRepairer`（窗口 + 行号重映射 B7 C2 + 行数守恒 +
+  共置兄弟 B7 C13）/ `CodeConsistencyAuditor`（变行数必重诊断 B7 C3 + 接受门）。
+- **en/processing.md 补缺失的 §3.5 Code Mode Processing Chain**（同步上轮决策由来由 §3.5
+  顺延为 §3.6），§4 Dependencies 补 `CodeRestoreConfig` 与 `code_file_grouping.py` 两行。
+
+工程量：zh 5 文件改动、en 4 文件改动；新增 ~330 行文档，无源码改动。门禁未跑（无 Python
+源码变更，post-edit hook 不触发）。
+
+## 2026-05-28 - 迭代垃圾清理 + AGE-71 多任务调度需求拆分
+
+Linear：在 claude-code-team（key AGE）/ DocRestore 项目下新建 feature **AGE-71**（按硬件
+资源与 LLM 响应自适应并行/队列调度），拆 6 个子任务 AGE-72~77（设计先行 AGE-77 → 调度层
+AGE-72 / 探测信号 AGE-73 / 决策策略 AGE-74 / API AGE-75 / 前端 AGE-76），全部归入 DocRestore。
+
+迭代垃圾清理：
+- **AGE-8 历史设计文档合并入主线**：把代码模式布局识别的设计决策由来（v1 像素几何切分失败
+  → v2 行号锚点不变量 → v3 回滚强插入/中心点归类/num_range 上限）与 1259 张/6 数据集鲁棒性
+  结论（IDE 99.82%、文档误判 0%、栏数 1/2/3 自适应）凝练进 `backend/processing.md §3.6`（zh）
+  与 en 对应小节；删除 `age-8-ide-code.md`/`age-8-robustness-report.md`/`age-58-code-mode-quality-plan.md`
+  （zh+en 共 5 篇），清理 docs/README、zh/README、zh/backend/README 索引引用。
+- **开发期一次性脚本删除（12 个）**：age8 probe/analyze/e2e/robust/validate 系列 + age50_seed_fixture
+  + analyze_tables（均 0 测试/代码依赖）。保留 age8_compile_check/stub_includes（有测试+前端引用）、
+  bench_*/gpu_sampler/compare_profile/run_e2e（config.py + 参考文档引用的性能工具集）、worker/setup/start。
+- **磁盘中间产物清理**（均已 gitignore，约 23MB）：test_images/*_OCR、outputs/preview、output、
+  data/age50-fixture-images、screenshots、.playwright-mcp(225 张)、debug_image；**保留 data/docrestore.db** 运行库与工具缓存。
+
+遗留：
+- `docs/en/backend/processing.md` 缺 §3.5 代码模式处理链路（zh 有，历史 en 同步遗漏），本轮已补"设计决策由来"
+  小节但未补链路描述，属既有 en/zh 漂移，单独排期。
+- `test_images/Chromium_VDA_code` 为新增 IDE 数据集，建议比照其他数据集补进 .gitignore。
+
 ## 2026-05-27 22:50 CST - 代码模式 B7+B4 多 agent 评审与缺陷修复
 
 对 dev 相对 main 的 128 提交按阶段分段评审（B1-B7），本轮完成 B7（AGE-58 诊断/精修）

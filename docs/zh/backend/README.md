@@ -82,7 +82,6 @@ backend/docrestore/
 | PII 脱敏 | [privacy.md](privacy.md) | `PIIRedactor.redact_for_cloud()` |
 | Pipeline 编排 | [pipeline.md](pipeline.md) | `Pipeline.process_many()`, `TaskManager` |
 | API 层 | [api.md](api.md) | REST + WebSocket + 上传 + 鉴权 |
-| 代码模式质量方案 | [age-58-code-mode-quality-plan.md](age-58-code-mode-quality-plan.md) | `CodeSegment`, `PathCandidate`, 质量报告、诊断驱动修复 |
 
 ## 3. 模块依赖关系
 

@@ -192,7 +192,90 @@ class TaskProgress:
     message: str = ""
 ```
 
-The actual `stage` values are determined by each Pipeline phase. Common values: `ocr` / `clean` / `merge` / `pii_redaction` / `refine` / `gap_fill` / `final_refine` / `render`.
+The actual `stage` values are determined by each Pipeline phase. Common values: `ocr` / `clean` / `merge` / `pii_redaction` / `refine` / `gap_fill` / `final_refine` / `render`; code mode additionally emits `code_layout` / `code_group` / `code_refine` / `code_render`.
+
+### 3.13 PathCandidate / IDEMeta (Code Mode)
+
+`processing/ide_meta_extract.py` parses each column's file-path candidates from the IDE title bar / tab / breadcrumb. A single image may yield multiple candidates (different sources, different confidences); Pipeline selects the highest-confidence one as the final path.
+
+```python
+@dataclass(frozen=True)
+class PathCandidate:
+    path: str | None
+    filename: str | None
+    language: str | None
+    source: Literal["breadcrumb", "tab", "peer", "reference", "content"]
+    confidence: float                  # 0.0 ~ 1.0
+    raw_text: str = ""
+    flags: list[str] = field(default_factory=list)
+
+@dataclass
+class IDEMeta:
+    column_index: int
+    filename: str | None = None        # e.g. widget_status.h
+    path: str | None = None            # e.g. app/core/widget/widget_status.h
+    language: str | None = None
+    tab_readable: bool = False         # whether the tab filename was recognized
+    breadcrumb_readable: bool = False
+    raw_tab_lines: list[str] = field(default_factory=list)
+    raw_breadcrumb_lines: list[str] = field(default_factory=list)
+    flags: list[str] = field(default_factory=list)
+    path_candidates: list[PathCandidate] = field(default_factory=list)
+    path_confidence: float = 0.0       # confidence of the selected path
+```
+
+### 3.14 CodeColumn (Code Mode)
+
+`processing/code_assembly.py` assembles a single image's OCR `text_lines` into code columns anchored by line numbers. `CodeLine` is one line (line number + code + indent); `CodeColumn` aggregates all lines for one column in one image.
+
+```python
+@dataclass
+class CodeLine:
+    line_no: int                       # Line number (OCR-read or numerically inferred)
+    text: str                          # Code content without leading indent
+    indent: int                        # Indent character count (derived from char_width)
+    bbox: tuple[int, int, int, int] | None = None
+    is_inferred_line_no: bool = False  # True = inferred from numeric sequence rather than OCR
+
+@dataclass
+class CodeColumn:
+    column_index: int
+    bbox: tuple[int, int, int, int]    # Column bbox in the original image coordinate system
+    code_text: str                     # Full code text (with indent + newlines)
+    lines: list[CodeLine]
+```
+
+### 3.15 PageColumn (Code Mode)
+
+`processing/code_file_grouping.py` packs a `CodeColumn` (one column on one image) together with the matching `IDEMeta` (path candidates for the same column) into a `PageColumn`, the minimum unit consumed by cross-image grouping.
+
+```python
+@dataclass
+class PageColumn:
+    page_stem: str                     # Source image stem (no extension)
+    column_index: int                  # Column index inside its source image
+    meta: IDEMeta                      # File path / language candidates
+    column: CodeColumn                 # Assembled code column
+```
+
+### 3.16 SourceFile (Code Mode)
+
+`group_into_files(all_pcs)` groups `PageColumn`s across images by path / filename, keeping only the first copy on line-number overlap; unresolved gaps are marked via `flags`. `SourceFile` is the unit consumed by code-mode LLM refinement, ocr_postfix, and rendering.
+
+```python
+@dataclass
+class SourceFile:
+    path: str                          # canonical path (dir/filename or filename only)
+    filename: str
+    language: str | None
+    pages: list[PageColumn]            # sources (in line-number order)
+    merged_text: str                   # concatenated code (rewritten by the refine stage)
+    line_count: int
+    line_no_range: tuple[int, int]
+    flags: list[str] = field(default_factory=list)
+```
+
+Common `flags` values: `code.group.gap_unknown` (cross-page gap unresolvable) / `code.refine.*` / `code.repair.*` / `code.postfix.*`, written by the respective stages.
 
 ## 4. Configuration (pipeline/config.py)
 
@@ -352,7 +435,61 @@ class PIIConfig(BaseModel):
     block_cloud_on_detect_failure: bool = True
 ```
 
-### 4.8 PipelineConfig (Top-Level Configuration)
+### 4.8 CodeRestoreConfig
+
+AGE-8 IDE code-photo → source file configuration. When `enable=True`, Pipeline auto-switches: OCR falls back to PaddleOCR `basic` pipeline (PP-OCRv5 line-level bbox), and the IDE-specific chain (line-number anchors + column code assembly) takes over.
+
+```python
+class CodeRestoreConfig(BaseModel):
+    enable: bool = False
+    output_files_dir: str = "files"                # output_dir/<files_dir>/<relative-path>
+    file_grouping_strategy: Literal[
+        "tab_breadcrumb", "content_only",
+    ] = "tab_breadcrumb"                            # only tab_breadcrumb is implemented
+    secondary_column_ocr: bool = False              # crop + enhance + re-OCR each code column
+    secondary_column_ocr_scale: int = 2
+    secondary_column_ocr_padding_px: int = 6
+    secondary_column_ocr_contrast: float = 1.35
+    secondary_column_ocr_sharpness: float = 1.4
+    context_root: str = ""                          # optional read-only reference source root
+```
+
+Only the `tab_breadcrumb` grouping strategy is implemented; `content_only` is a reserved enum and should not be used as if implemented.
+
+### 4.9 CodeDiagnostic
+
+Code-mode lightweight diagnostics. Written into the `diagnostic` field of `files-index.json` and returned to the frontend through the live diagnostics API.
+
+```python
+@dataclass(frozen=True)
+class CodeDiagnosticItem:
+    line: int
+    column: int = 0
+    severity: str = "error"
+    category: str = "syntax"           # syntax / semantic / dependency
+    code: str = ""                     # parse_error / missing_include / ocr_noise_non_ascii ...
+    message: str = ""
+    source: str = ""                   # parser or tool name
+
+@dataclass(frozen=True)
+class CodeDiagnostic:
+    path: str
+    language: str
+    status: str                        # syntax_clean / syntax_dirty / dependency_dirty / ...
+    category: str
+    summary: str = ""
+    failing_lines: list[int] = field(default_factory=list)
+    syntax_errors: int = 0
+    semantic_errors: int = 0
+    dependency_errors: int = 0
+    items: list[CodeDiagnosticItem] = field(default_factory=list)
+    tool: str = ""
+    duration_ms: int = 0
+```
+
+The legacy fields `compile_status` / `compile_failing_lines` / `compile_error` are derived from `CodeDiagnostic` by `output/code_renderer.py` and kept only for historical compatibility.
+
+### 4.10 PipelineConfig (Top-Level Configuration)
 
 ```python
 class PipelineConfig(BaseModel):
@@ -361,6 +498,7 @@ class PipelineConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     pii: PIIConfig = Field(default_factory=PIIConfig)
+    code: CodeRestoreConfig = Field(default_factory=CodeRestoreConfig)
     db_path: str = "data/docrestore.db"    # SQLite persistence path
     debug: bool = True                     # Dump intermediates to output_dir/debug/
 ```
@@ -377,6 +515,7 @@ class PipelineConfig(BaseModel):
 | `processing/cleaner.py` | `PageOCR` |
 | `processing/dedup.py` | `PageOCR`, `MergeResult`, `MergedDocument`, `DedupConfig` |
 | `processing/segmenter.py` | `Segment` |
+| `processing/code_file_grouping.py` | `PageColumn`, `SourceFile` |
 | `llm/cloud.py` | `LLMConfig`, `RefineContext`, `RefinedResult`, `Gap` |
 | `llm/local.py` | `LLMConfig`, `RefineContext`, `RefinedResult`, `Gap` |
 | `privacy/` | `PIIConfig`, `RedactionRecord` |

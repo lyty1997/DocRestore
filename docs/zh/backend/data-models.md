@@ -192,7 +192,90 @@ class TaskProgress:
     message: str = ""
 ```
 
-实际使用的 `stage` 取值由 Pipeline 各阶段决定，常见值：`ocr` / `clean` / `merge` / `pii_redaction` / `refine` / `gap_fill` / `final_refine` / `render`。
+实际使用的 `stage` 取值由 Pipeline 各阶段决定，常见值：`ocr` / `clean` / `merge` / `pii_redaction` / `refine` / `gap_fill` / `final_refine` / `render`；代码模式额外有 `code_layout` / `code_group` / `code_refine` / `code_render`。
+
+### 3.13 PathCandidate / IDEMeta（代码模式）
+
+`processing/ide_meta_extract.py` 从 IDE 顶栏 / tab / breadcrumb 解析每个 column 的文件路径候选。一张图可能给出多个候选（不同来源、不同置信度），Pipeline 选择置信度最高者作为最终路径。
+
+```python
+@dataclass(frozen=True)
+class PathCandidate:
+    path: str | None
+    filename: str | None
+    language: str | None
+    source: Literal["breadcrumb", "tab", "peer", "reference", "content"]
+    confidence: float                  # 0.0 ~ 1.0
+    raw_text: str = ""
+    flags: list[str] = field(default_factory=list)
+
+@dataclass
+class IDEMeta:
+    column_index: int
+    filename: str | None = None        # 例：widget_status.h
+    path: str | None = None            # 例：app/core/widget/widget_status.h
+    language: str | None = None
+    tab_readable: bool = False         # 是否成功识别 tab 文件名
+    breadcrumb_readable: bool = False
+    raw_tab_lines: list[str] = field(default_factory=list)
+    raw_breadcrumb_lines: list[str] = field(default_factory=list)
+    flags: list[str] = field(default_factory=list)
+    path_candidates: list[PathCandidate] = field(default_factory=list)
+    path_confidence: float = 0.0       # 已选路径的置信度
+```
+
+### 3.14 CodeColumn（代码模式）
+
+`processing/code_assembly.py` 基于行号锚点把一张图的 OCR `text_lines` 组装为代码栏。`CodeLine` 是单行（行号 + 代码 + 缩进），`CodeColumn` 是同一图同一栏的所有 line 汇总。
+
+```python
+@dataclass
+class CodeLine:
+    line_no: int                       # 行号（OCR 抽取或数值序列推断）
+    text: str                          # 不含前导空格的代码内容
+    indent: int                        # 缩进字符数（按 char_width 推算）
+    bbox: tuple[int, int, int, int] | None = None
+    is_inferred_line_no: bool = False  # True = 行号靠数值序列推断而非 OCR 直读
+
+@dataclass
+class CodeColumn:
+    column_index: int
+    bbox: tuple[int, int, int, int]    # 该栏在原图坐标系的范围
+    code_text: str                     # 完整代码文本（含缩进 + 换行）
+    lines: list[CodeLine]
+```
+
+### 3.15 PageColumn（代码模式）
+
+`processing/code_file_grouping.py` 把 `CodeColumn`（来自单张图单栏）与 `IDEMeta`（同栏文件路径候选）打包成 `PageColumn`，作为跨张归类的最小单元。
+
+```python
+@dataclass
+class PageColumn:
+    page_stem: str                     # 来源图片 stem（不含扩展名）
+    column_index: int                  # 该栏在所在图中的列序号
+    meta: IDEMeta                      # 文件路径/语言候选
+    column: CodeColumn                 # 代码栏组装结果
+```
+
+### 3.16 SourceFile（代码模式）
+
+`group_into_files(all_pcs)` 按 path/filename 跨张归类，行号重叠只保留首份；无法确认的 gap 用 `flags` 标记。`SourceFile` 是代码模式 LLM 精修、ocr_postfix、render 阶段的输入输出单元。
+
+```python
+@dataclass
+class SourceFile:
+    path: str                          # canonical path（dir/filename 或仅 filename）
+    filename: str
+    language: str | None
+    pages: list[PageColumn]            # 来源（按行号顺序）
+    merged_text: str                   # 拼接后代码（精修阶段会改写）
+    line_count: int
+    line_no_range: tuple[int, int]
+    flags: list[str] = field(default_factory=list)
+```
+
+常见 `flags` 取值：`code.group.gap_unknown`（跨页 gap 无法确认）/ `code.refine.*` / `code.repair.*` / `code.postfix.*`，由对应阶段写入。
 
 ## 4. 配置（pipeline/config.py）
 

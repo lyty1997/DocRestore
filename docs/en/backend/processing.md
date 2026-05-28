@@ -18,7 +18,7 @@ limitations under the License.
 
 ## 1. Responsibilities
 
-Post-process OCR output: intra-page text cleaning + adjacent-page deduplication and merging + long-document segmentation. The three submodules are independent; Pipeline calls them in sequence.
+Post-process OCR output. The plain document mode covers intra-page text cleaning, adjacent-page deduplication and merging, and long-document segmentation; code mode additionally covers IDE layout detection, code column assembly, cross-page source file grouping, reference source lookup, and lightweight diagnostics. Each module stays a pure processing routine; Pipeline orchestrates them according to task configuration.
 
 ## 2. File List
 
@@ -27,6 +27,14 @@ Post-process OCR output: intra-page text cleaning + adjacent-page deduplication 
 | `processing/cleaner.py` | OCR output cleaning (intra-page deduplication, garbled text removal, whitespace normalization) |
 | `processing/dedup.py` | Adjacent-page overlap detection and merging, plus cross-page frequency filtering via `strip_repeated_lines()` |
 | `processing/segmenter.py` | Document segmenter (splits at semantic boundaries with line-level context) |
+| `processing/ide_layout.py` | IDE screenshot layout analysis, producing code-region, sidebar, and meta-info candidates |
+| `processing/code_assembly.py` | Assemble OCR `text_lines` into code columns using line-number anchors |
+| `processing/code_column_ocr.py` | Crop / enhance the detected code column and re-run OCR (`secondary_column_ocr`, off by default) |
+| `processing/code_file_grouping.py` | Aggregate cross-image `PageColumn`s into `SourceFile`s by path / filename |
+| `processing/code_context.py` | Retrieve relevant snippets from a read-only reference source tree to assist scoped repair |
+| `processing/code_diagnostics.py` | Lightweight multi-language diagnostics emitting syntax / semantic / dependency annotations |
+| `processing/ide_meta_extract.py` | Extract path, filename, and language candidates from IDE title bar / tab / breadcrumb |
+| `processing/ocr_postfix.py` | OCR character-level post-processing and common-confusion fixes |
 
 > `preprocessor.py` / `ngram_filter.py` reside under `ocr/` (used inside the worker); see [ocr.md](ocr.md).
 
@@ -140,12 +148,46 @@ class DocumentSegmenter:
 - Output: `list[Segment]`, each containing `text`/`start_line`/`end_line`
 - Context (`overlap_before`/`overlap_after`) is constructed separately by Pipeline in `RefineContext`; `Segment` itself only contains text and line numbers
 
+### 3.5 Code Mode Processing Chain
+
+When `PipelineConfig.code.enable` is on, Pipeline no longer feeds OCR text into the plain markdown segmenter; instead it consumes `PageOCR.text_lines` through the IDE-specific chain:
+
+1. `ide_layout.py` detects the code region and meta-info regions (sidebar / breadcrumb) in the IDE screenshot.
+2. `code_assembly.py` assembles each image's code columns from line-level bboxes and line-number anchors, retaining source page, column index, bbox, line-number range, and quality flags.
+3. `ide_meta_extract.py` extracts `filename` / `path` / `language` / `path_candidates` / `path_confidence`.
+4. `code_file_grouping.py` aggregates `PageColumn`s into `SourceFile`s, merging across pages by path / filename and keeping only the first copy when line numbers overlap; unresolved gaps surface as flags to the quality report.
+5. `llm/code_refine.py` and `llm/code_repair.py` perform character-level refinement and diagnostic-driven scoped repair on `SourceFile.merged_text`.
+6. `code_diagnostics.py` runs lightweight diagnostics either before writing out or live in the editor. Standard-library parsers take priority; missing external tools degrade to `tool_unavailable` rather than failing the task.
+
+`CodeDiagnosticRunner` currently supports standard-library parsing for Python / JSON / TOML / XML / YAML, and external-tool checks for JavaScript / TypeScript / C / C++ / Go / Rust. The diagnoser masks already-located syntax errors in a temporary copy, generates stub headers for missing includes and re-runs to surface subsequent independent errors, and scans the code region for CJK / full-width OCR noise.
+
+### 3.6 Code Mode Design Rationale (v1 → v2 → v3)
+
+> This section condenses the key design reversal and multi-dataset validation behind IDE code-mode layout detection, so maintainers understand why line-number anchors are used. Detailed per-dataset statistics were retired with the historical design docs and can be retrieved from git history.
+
+**v1 (abandoned) — pixel-variance geometric splitting**: detected and stripped IDE UI geometrically, then split columns by fixed ratios. The fundamental error was assuming fixed proportions for sidebar/tab/terminal — real IDEs are freely draggable (resizable splits, collapsible sidebar, font zoom, varying resolution), so every fixed threshold breaks. Across 8 spike images, 7/8 fell back to sidebar handling and 1/8 to a hard column cut — unusable. Alternatives surveyed (PaddleOCR-VL `merge_layout_blocks=False`, PP-DocBlockLayout lowered threshold, PP-StructureV3 reading-order) were all unusable; the last is directionally opposite and wrongly merges multi-column code into a single column.
+
+**v2 (current direction) — line-number column anchors**: uses the editor's intrinsic invariant — the line-number column — as a layout anchor (`text=^\d{1,4}$` + score≥0.8 → x1 clustering → monotonicity filtering → `LineNumberAnchor`). It is fully independent of font/zoom/drag/sidebar state, data-driven, and inherits OCR fault tolerance.
+
+**v3 correction (key lesson)**: the v2 first cut added "unpaired_codes inference insertion," seemingly recovering 6396 lines of code. After the user questioned "are we recovering garbage," a sampling audit found ~50% were OCR-fragmented shards plus breadcrumb / git-blame / status-bar UI noise — the "6396 lines" was a misleading metric. v3 therefore: (1) rolled back forced insertion, leaving unpaired lines flagged only and deferred to LLM refinement; (2) changed `ide_layout` region classification from bbox edges to **bbox center point** for above/below_code, keeping UI noise out of columns at the source (root fix); (3) capped `anchor.num_range` at 3000 to filter extreme-noise anchors (e.g. stack-trace PIDs) while still passing genuinely long files.
+
+**Multi-dataset robustness (1259 images / 6 datasets, v3 final)**:
+
+| Scenario | Detection / success | Notes |
+|---|---|---|
+| IDE code scenes (1137 imgs, 4 datasets) | **99.82%** (1135/1137) | 2 misses are binary/image diffs with no line-number column |
+| Column-count adaptivity | 1 / 2 / 3+ columns all covered | First single- and 3-column cases seen in ide_diff (git diff old/new line numbers + right-side file) |
+| False positives | **0%** | 73 non-code images (plain docs + Lark docs) never misidentified as code |
+
+Core lessons: (1) a "good-looking metric" ≠ actual quality — multi-dataset audits are indispensable; (2) fixing upstream boundary classification is robust, forced insertion only treats symptoms; (3) conservative code (no forced unpaired insertion) gives LLM refinement a clean base, which beats patching from polluted data.
+
 ## 4. Dependencies
 
 | Source | Usage |
 |---|---|
 | `models.py` | `PageOCR`, `MergeResult`, `MergedDocument`, `Region`, `Segment` |
-| `pipeline/config.py` | `DedupConfig` |
+| `pipeline/config.py` | `DedupConfig`, `CodeRestoreConfig` |
+| `processing/code_file_grouping.py` | `PageColumn`, `SourceFile` |
 
 Does not depend on the OCR layer, LLM layer, or output layer.
 

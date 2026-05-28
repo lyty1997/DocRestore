@@ -39,6 +39,8 @@ LLM 精修层负责对 OCR 合并去重后的 markdown 进行“格式修复 + �
 | `llm/cloud.py` | `CloudLLMRefiner(BaseLLMRefiner)`（云端实现，覆盖 `detect_pii_entities` 做真实实体检测） |
 | `llm/local.py` | `LocalLLMRefiner(BaseLLMRefiner)`（本地实现，`detect_pii_entities` 继承默认空实现） |
 | `llm/prompts.py` | prompt 模板 + GAP 解析（`parse_gaps()` 等） |
+| `llm/code_refine.py` | `CodeLLMRefiner`（代码模式字符级精修 / rewrite 模式） |
+| `llm/code_repair.py` | `DiagnosticCodeRepairer`（诊断驱动 scoped patch）+ `CodeConsistencyAuditor`（重诊断 + 接受门） |
 
 > 文档分段器 `DocumentSegmenter` 已迁至 `processing/segmenter.py`（见 [处理层文档](processing.md)）。分段不依赖 LLM，属于纯文本处理。
 
@@ -210,6 +212,39 @@ PII 兼容性策略：
 
 - 脱敏阶段 LLM 实体检测走 `BaseLLMRefiner.detect_pii_entities()`：基类默认返回 `([], [])`
 - `CloudLLMRefiner` 重写该方法走真实 LLM；`LocalLLMRefiner` 继承默认空实现 → 只执行正则脱敏
+
+### 5.6 CodeLLMRefiner（llm/code_refine.py，代码模式字符级精修）
+
+包装 `BaseLLMRefiner._call_llm`，对每个 `SourceFile.merged_text` 跑独立 LLM 调用；**不复用** markdown refine 的截断回退 / GAP 解析。两种模式由 `LLMConfig.code_refine_mode` 选择：
+
+| 模式 | 行为 | 解析键 | 行数约束 |
+|---|---|---|---|
+| `refine`（默认） | 字符级修正（白名单：OCR 噪声、明显拼写错） | `corrected_code` / `corrections` / `unresolved` | 严格 `输出 == 输入`，违反则回退原文 |
+| `rewrite` | 允许重排格式、合并断行、补编译必需语法元素 | `rewritten_code` / `summary` | 不强制行数（结构修复优先） |
+
+入口：`async def refine(source: SourceFile) -> CodeRefineResult`。大文件按 `_should_chunk_refine` 自动分片 refine 后拼接，行号偏移由 `_offset_corrections` / `_offset_unresolved` 修正。失败/超时/解析失败一律回退原文 + 标 `code.refine.*` flag，不抛异常打断同任务其他文件。
+
+返回 `CodeRefineResult(refined_text, flags, corrections=[CodeCorrection], unresolved=[CodeUnresolved])`，由 Pipeline 写回 `SourceFile.merged_text` 与 `flags`。
+
+### 5.7 DiagnosticCodeRepairer（llm/code_repair.py，诊断驱动 scoped repair）
+
+适用于诊断器报告 `syntax_dirty` 的 `SourceFile`。流程：
+
+1. **build_repair_contexts**（线程内跑，含 rglob/read_text 阻塞 IO）按诊断 `failing_lines` ± `window_radius` 切出多个小窗口；窗口互不重叠（`_merge_line_windows` 保证间隔）。
+2. 逐窗口调 LLM 拿 scoped patch（`ScopedPatch` 含 `edit_range` + `new_text`）。
+3. **行号重映射**：patch/edit_range 都是原文行号，按前面 patch 累计 `line_offset` 平移到 `current` 文本坐标系再应用（B7 C2 关键修复）。
+4. **行数守恒兜底**：标记 truncating patch（`_is_truncating_patch`）按 reject 处理，避免 LLM 把窗口尾巴截没。
+5. **隔离诊断共置兄弟文件**：repair 在临时副本里跑诊断时，把同目录头文件一起放进去，否则缺失 include 会被判 `dependency_dirty(score 0)` 骗过接受门（B7 C13 自审 followup）。
+
+失败/无窗口/全部 reject 时返回原文 + `code.repair.no_windows` 或 `code.repair.reject_*` flag。
+
+### 5.8 CodeConsistencyAuditor（llm/code_repair.py，repair 后接受门）
+
+repair 后的二次审查。流程：
+
+1. 若 repair **改变了行数**，必须基于改写后文本**重新诊断**（`diagnose_source_files([audit_source])`），不能复用 pre-refine 的原文行号诊断（否则授权窗口对不上行号，B7 C3 关键修复）。
+2. `audit()` 接受 `previous_result` 与重诊断结果，按"诊断分数未恶化"判定接受 patch；恶化则拒绝并回退到 repair 前文本。
+3. 把 audit 的 `flags` / `unresolved` 合并进最终 `CodeRefineResult`。
 
 ## 6. 截断检测（Truncation detection）
 

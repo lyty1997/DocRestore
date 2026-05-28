@@ -55,8 +55,6 @@ docs/
 │   │   ├── privacy.md
 │   │   ├── pipeline.md
 │   │   ├── api.md
-│   │   ├── age-8-ide-code.md
-│   │   ├── age-8-robustness-report.md
 │   │   ├── performance_toolkit.md
 │   │   └── references/
 │   │       ├── deepseek-ocr2.md
@@ -81,9 +79,6 @@ docs/
     │   ├── privacy.md
     │   ├── pipeline.md
     │   ├── api.md
-    │   ├── age-58-code-mode-quality-plan.md
-    │   ├── age-8-ide-code.md
-    │   ├── age-8-robustness-report.md
     │   ├── performance_toolkit.md
     │   └── references/
     │       ├── deepseek-ocr2.md

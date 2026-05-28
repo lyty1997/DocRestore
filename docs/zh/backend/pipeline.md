@@ -376,7 +376,55 @@ OCR → 清洗 → 去重合并 → PII 脱敏 → 分段精修（检测 DOC_BOU
 - `Pipeline.process_many()` / `process_tree()` 一律返回 `list[PipelineResult]`
 - `Task.results: list[PipelineResult]`；API `GET /tasks/{id}/results` 返回多文档列表，`GET /tasks/{id}/result` 返回列表首项（兼容）
 
-## 11. 相关文档
+## 11. 代码模式编排（`CodeRestoreConfig.enable=True`）
+
+`PipelineConfig.code.enable=True` 时，Pipeline 在 OCR 阶段后切到代码模式专用分支 `_code_pipeline`，跳过普通模式的流式精修 / dedup / segmenter 链路。入口分支位于 `Pipeline._stream_and_collect`，按 `code_cfg.enable` 二选一调用 `_code_pipeline` 或 `_stream_process`。
+
+### 11.1 OCR 引擎强制 basic
+
+代码模式强制把 OCR 切到 PaddleOCR `basic` pipeline（PP-OCRv5），因为只有 basic 输出行级 `text_lines`（含 bbox + 文本），代码栏组装依赖该输入；VL pipeline 不产 text_lines，启用代码模式会因无可组装内容而失败。请求级 `ocr` 覆盖经 `_ocr_config_for_code_mode` 统一改写，避免每个调用点重复判断（B4 H5）。
+
+### 11.2 链路（OCR 收齐后顺序执行）
+
+```
+逐图：analyze_layout → [secondary_column_ocr*] → extract_ide_metas → assemble_columns
+                    → 组装 PageColumn[]
+跨图：group_into_files → SourceFile[]
+后处：clean_code_ocr_text（OCR 字符级保守纠错，行数保持，PII/LLM 之前）
+PII：_redact_code_headers（仅 leading comment block）
+诊断：diagnose_source_files → 预诊断结果
+LLM 精修（每个 SourceFile 独立，串行）：
+  ├─ syntax_dirty       → DiagnosticCodeRepairer.repair → 重诊断 → CodeConsistencyAuditor.audit
+  ├─ 大文件超阈值       → 跳过，标 code.repair.skipped_large_file_no_window
+  └─ 其他               → CodeLLMRefiner.refine（mode=refine|rewrite）
+渲染：render_code_files → output_dir/files/<relative-path> + files-index.json
+质量：detect_code_mode_quality → .quality_report.json
+```
+
+`*` 表示 `code_cfg.secondary_column_ocr=True` 时对识别出的 column 裁剪增强后二次 OCR（默认关）。
+
+### 11.3 错误处理
+
+- **整图无 text_lines**：跳过该页并记入 `missing_line_pages`，列表用于上报；其他页继续。
+- **所有页都无 column**：`raise RuntimeError("代码模式：OCR producer 未产出任何页")`，由上层任务捕获写错误结果。
+- **单 SourceFile 的 LLM 精修/repair/audit 失败**：`catch Exception` 回退原文，写日志和 quality flag，不中断同任务其他文件。
+- **PII 失败**（云端实体检测异常）：与普通模式一致，单 SourceFile 降级跳过。
+- **诊断器外部工具缺失**：`CodeDiagnosticRunner` 降级为 `tool_unavailable`，不让任务失败（见 [processing.md §3.5](processing.md)）。
+
+### 11.4 并发与资源
+
+- OCR producer 与 `_code_pipeline` 通过 `page_queue` 解耦，OCR 受 `gpu_lock` 串行；`_code_pipeline` 在 OCR 队列排空后顺序执行后续阶段。
+- LLM 精修/repair/audit **逐文件串行**，不并发（避免对 LLM provider 同时打多个长上下文请求触发限流；当前 SourceFile 数量通常 ≤ 几十，串行可控）。
+- 阻塞 IO（`diagnose_source_files`、`build_repair_contexts` 的 rglob/read_text）统一用 `asyncio.to_thread` 移出事件循环（B7 C12 / S3）。
+
+### 11.5 输出与兼容
+
+`_code_pipeline` 返回 `PipelineResult(output_path=document.md, markdown="")`：
+- `output_path` 指向 `output_dir/document.md`（占位，兼容旧 UI 路由）
+- `markdown` 为空，前端通过 `files-index.json` 单独渲染代码模式审查视图（见 [frontend/features.md §7](../frontend/features.md)）
+- `warnings` 写一条 `code_mode: N files, M skipped` 摘要
+
+## 12. 相关文档
 
 - [数据模型](data-models.md)
 - [OCR 层](ocr.md)

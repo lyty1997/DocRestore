@@ -34,9 +34,9 @@ DocRestore 将连续拍摄的文档照片还原为格式化的 Markdown 文档�
 
 1. 当前实现事实源：`architecture.md`、`backend/*.md`、`frontend/*.md`、`deployment.md`。
 2. 迭代状态与经验沉淀：`progress.md`、`known-issues.md`。
-3. 历史设计与评估：`backend/age-*.md`、`backend/references/*.md`。这些文件可解释设计来源，但其中的“待实施”“后续”不一定仍成立，开发前必须回到当前模块文档和代码确认。
+3. 历史设计与评估：`backend/references/*.md`。这些文件可解释设计来源，但其中的“待实施”“后续”不一定仍成立，开发前必须回到当前模块文档和代码确认。
 
-当前代码模式实现以 `backend/processing.md`、`backend/api.md`、`frontend/features.md` 和代码本身为准；`age-8-ide-code.md` / `age-58-code-mode-quality-plan.md` 只作为历史方案和质量路线参考。
+当前代码模式实现以 `backend/processing.md`、`backend/api.md`、`frontend/features.md` 和代码本身为准；代码模式布局识别的设计决策由来（v1→v2→v3 反转、行号锚点、多数据集鲁棒性结论）已凝练进 `backend/processing.md` §3.6，更早的逐数据集统计可从 git 历史检索。
 
 ## 文档结构
 
@@ -56,8 +56,6 @@ docs/zh/
 │   ├── privacy.md               # PII 脱敏
 │   ├── pipeline.md              # Pipeline 编排
 │   ├── api.md                   # REST API
-│   ├── age-8-ide-code.md        # 代码模式历史设计与验证记录
-│   ├── age-58-code-mode-quality-plan.md # 代码模式质量路线参考
 │   └── references/              # 历史/专题参考文档
 │       ├── deepseek-ocr2.md     # DeepSeek-OCR-2 参考
 │       ├── streaming-pipeline.md # 流式并行设计记录

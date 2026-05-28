@@ -380,7 +380,56 @@ OCR -> Clean -> Dedup & Merge -> PII Redaction -> Segment Refinement (detect DOC
 - `Pipeline.process_many()` / `process_tree()` always return `list[PipelineResult]`
 - `Task.results: list[PipelineResult]`; API `GET /tasks/{id}/results` returns the multi-document list, `GET /tasks/{id}/result` returns the first item (backward compatible)
 
-## 11. Related Documents
+## 11. Code Mode Orchestration (`CodeRestoreConfig.enable=True`)
+
+When `PipelineConfig.code.enable=True`, Pipeline switches to the dedicated `_code_pipeline` branch after the OCR stage, skipping the plain-mode streaming refine / dedup / segmenter chain. The branching lives in `Pipeline._stream_and_collect` and dispatches to either `_code_pipeline` or `_stream_process` based on `code_cfg.enable`.
+
+### 11.1 OCR Engine Forced to `basic`
+
+Code mode forces the OCR engine to PaddleOCR's `basic` pipeline (PP-OCRv5), because only `basic` produces line-level `text_lines` (with bbox + text) and code-column assembly depends on that input; the VL pipeline does not emit `text_lines`, so enabling code mode would fail with nothing to assemble. Request-level `ocr` overrides are rewritten through `_ocr_config_for_code_mode` so the check is centralized rather than duplicated at every call site (B4 H5).
+
+### 11.2 Chain (Runs Sequentially After OCR Drains)
+
+```
+Per image: analyze_layout → [secondary_column_ocr*] → extract_ide_metas → assemble_columns
+                          → build PageColumn[]
+Cross images: group_into_files → SourceFile[]
+Post-OCR: clean_code_ocr_text (conservative character-level fixes, line-count preserved,
+          before PII / LLM)
+PII: _redact_code_headers (only the leading comment block of each file)
+Diagnose: diagnose_source_files → pre-refine diagnostics
+LLM refine (per SourceFile, sequential):
+  ├─ syntax_dirty       → DiagnosticCodeRepairer.repair → re-diagnose → CodeConsistencyAuditor.audit
+  ├─ Large file > threshold → skipped, flag code.repair.skipped_large_file_no_window
+  └─ Otherwise          → CodeLLMRefiner.refine (mode=refine|rewrite)
+Render: render_code_files → output_dir/files/<relative-path> + files-index.json
+Quality: detect_code_mode_quality → .quality_report.json
+```
+
+`*` runs only when `code_cfg.secondary_column_ocr=True` — each detected column is cropped, enhanced, and re-OCR'd (off by default).
+
+### 11.3 Error Handling
+
+- **Image with no `text_lines`**: the page is skipped and added to `missing_line_pages` (reported upstream); other pages continue.
+- **No columns produced at all**: `raise RuntimeError("代码模式：OCR producer 未产出任何页")`, caught at the task layer and written as an error result.
+- **Per-`SourceFile` LLM refine / repair / audit failure**: `catch Exception`, fall back to the original text, log + write a quality flag, do not interrupt other files in the same task.
+- **PII failure** (cloud entity detection error): same policy as plain mode — degrade per `SourceFile`.
+- **Missing external diagnostic tool**: `CodeDiagnosticRunner` degrades to `tool_unavailable` rather than failing the task (see [processing.md §3.5](processing.md)).
+
+### 11.4 Concurrency and Resources
+
+- The OCR producer and `_code_pipeline` are decoupled through `page_queue`; OCR is serialized by `gpu_lock`, and `_code_pipeline` runs the downstream stages sequentially once the OCR queue drains.
+- LLM refine / repair / audit run **sequentially per file**, not concurrently (avoid firing many long-context requests at the LLM provider simultaneously and triggering rate limits; the number of `SourceFile`s is typically ≤ a few dozen, sequential is manageable).
+- Blocking IO (`diagnose_source_files`, the rglob / read_text inside `build_repair_contexts`) is dispatched via `asyncio.to_thread` to keep the event loop responsive (B7 C12 / S3).
+
+### 11.5 Output and Compatibility
+
+`_code_pipeline` returns `PipelineResult(output_path=document.md, markdown="")`:
+- `output_path` points to `output_dir/document.md` (placeholder, kept for the legacy UI route)
+- `markdown` is empty; the frontend renders the code-mode review view from `files-index.json` (see [frontend/features.md §7](../frontend/features.md))
+- `warnings` carries a `code_mode: N files, M skipped` summary
+
+## 12. Related Documents
 
 - [Data Models](data-models.md)
 - [OCR Layer](ocr.md)
