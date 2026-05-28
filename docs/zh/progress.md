@@ -608,3 +608,24 @@ AGE-72 / 探测信号 AGE-73 / 决策策略 AGE-74 / API AGE-75 / 前端 AGE-76�
 遗留问题：
 - 英文文档仍有较多历史 AGE / references 表述，本次只在双语总入口标明事实源优先级；后续如需要对外发布英文文档，应单独同步当前代码模式 API 和前端说明。
 - AGE 历史文档未逐篇改写，保留为设计记录；开发时仍应以模块文档和代码为准。
+
+## 2026-05-28 CST - `_split_by_compatible_dir` 回退全连接为单连接（消除 OCR dir 噪声拆桶回归）
+
+完成内容：
+- 用户对照 baseline `12d71f4c` 与回归运行 `3b556ce7` 的 `.quality_report.json`、`files-index.json`，定位 Chromium VDA 数据集文件数 7→14、warn 20→37 的回归。
+- 锁定根因：`f8d16c1` 把 `code_file_grouping._split_by_compatible_dir` 的兼容判定从单连接 `any` 改为全连接 `all`，本意堵"空 dir 桥接 a/x↔b/x"边缘 case，但实际让 OCR 把面包屑 `/` 误识为 `7`、漏识、多识空段产出的同源 dir 噪声变体（如 `media7gpu7openmax/...h`、`media/gpu/openmax/-/...h`）无法再借空 dir 桥接回 canonical 主桶，被拆成 1–2 张照片的孤立小桶独立丢给 audit/repair，触发截断 + 编译失败。
+- 验证机制：用 baseline `e74eab0` 与 HEAD 的 `code_file_grouping.py` 各自跑同一份 PageColumn 输入，文件数分别 10 vs 14，差 4 个 dir 噪声变体；确认 `f8d16c1` H1 是唯一回归源。
+- 中间试过方案 A（在 `_merge_near_duplicate_filenames` 之前加一道 `_merge_near_duplicate_dirs` 兜底合并），但用户判定"在屎山上打补丁"不优雅，回退。
+- 选择直接 revert H1：把 `any` 改回（保留 `f8d16c1` H3 `_disambiguate_duplicate_paths` 唯一后缀修复，它是独立真实问题），在 `_split_by_compatible_dir` 注释里写明取舍依据（OCR 噪声常态压倒 a/x↔b/x 理论边缘 case），删除 `test_empty_dir_does_not_bridge_different_dirs` 回归用例。
+- revert 后用户重跑得到 `80d16349`：文件数 14→7、warn 37→21、audit.truncated 10→5、repair.truncated 9→5、diagnostic.syntax_dirty 12→5，全面恢复 baseline。
+- 提交 `f6b06a8`，pre-commit mypy/ruff/typos 均通过。
+
+验证：
+- `python -m pytest tests/processing/test_code_file_grouping.py -q`：20 passed, 3 skipped（age8-spike fixture 已删）。
+- `python -m pytest tests/processing tests/output tests/pipeline -q`：460 passed, 72 skipped。
+- 用同一份 OCR 数据跑 `group_into_files` probe：文件数从 14 降回 10，4 个噪声变体（`media7gpu7openmax/...h`、`media7gpu/openmax/...h`、`media/gpu/openmax/-/...h`、`media/gpu/openmaxom/bu/...cc`）被正确并回 canonical 主桶。
+- 真实 pipeline 跑 `80d16349`：files/ 树与 baseline 100% 一致，document.md 仅差 4 行（缩进微调）。
+
+遗留问题：
+- `80d16349` 中 `openmax_status.h` 出现 LLM `repair.truncated`（baseline 是 `repair.applied=1`），导致 OCR 噪声字符（如 `王`、枚举名首字母 `E` 误识为 `F`、`StatusTraits {` 误识为 `StatusTraits Y` 等）残留——属 LLM 输出长度抖动，与本次 revert 无关；可考虑独立排期 `code_repair` 的 truncated 重试或 max_tokens 自适应策略。
+- baseline 也合不到的 3 个剩余 noisy 变体（`media/gpu7openmax/...h`、`media/openmax_..._accelerator.h`、`media/openmax_..._accelerator.cc`）是 `_dirs_compatible` 旧规则盲区（compact 既不等也不互为后缀且不空），不在本次回归范围；若未来要堵 a/x↔b/x 桥接，正确做法是先在 `_dirs_compatible` 内为非空 compact 加 Levenshtein ≤ 2 容忍再换全连接（方案 B），不要直接砍单连接。
