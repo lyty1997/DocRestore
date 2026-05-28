@@ -5,7 +5,7 @@
 import { useEffect, useRef } from "react";
 
 import { useFileUpload } from "../features/task/useFileUpload";
-import { useTranslation } from "../i18n";
+import { renderLocalized, useTranslation } from "../i18n";
 import { UploadPreviewPanel } from "./UploadPreviewPanel";
 
 /** 允许的图片 MIME */
@@ -223,7 +223,11 @@ export function FileUploader({
       {/* 上传错误 */}
       {stage === "error" && (
         <div className="upload-error">
-          <p>{error ?? t("fileUploader.uploadFailed")}</p>
+          <p>
+            {error === undefined
+              ? t("fileUploader.uploadFailed")
+              : renderLocalized(error, t)}
+          </p>
           <button type="button" onClick={reset}>
             {t("common.retry")}
           </button>

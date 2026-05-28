@@ -27,6 +27,16 @@ DocRestore 将连续拍摄的文档照片还原为格式化的 Markdown 文档�
 | [English](en/README.md) | Full English documentation |
 | [中文](zh/README.md) | 完整中文文档 |
 
+## Current Source Of Truth / 当前事实源
+
+- Current implementation docs live under `docs/zh/` and are the primary source for active development.
+- `docs/zh/progress.md` is the iteration log, not a design contract. Before coding, prefer `architecture.md` and the relevant module docs.
+- AGE documents and `references/` are historical design notes unless the Chinese index explicitly links them as current.
+
+- 当前实现文档以 `docs/zh/` 为主；开发前优先查看 `architecture.md` 和对应模块文档。
+- `docs/zh/progress.md` 是迭代流水，不是接口契约。旧进度条目可能已被后续实现覆盖。
+- AGE 文档和 `references/` 目录默认视为历史设计记录；只有中文索引明确列为当前事实源时才按当前实现使用。
+
 ## Directory Structure / 目录结构
 
 ```
@@ -45,7 +55,11 @@ docs/
 │   │   ├── privacy.md
 │   │   ├── pipeline.md
 │   │   ├── api.md
+│   │   ├── performance_toolkit.md
 │   │   └── references/
+│   │       ├── deepseek-ocr2.md
+│   │       ├── streaming-pipeline.md
+│   │       └── pipeline-parallel.md
 │   └── frontend/
 │       ├── README.md
 │       ├── tech-stack.md
@@ -54,6 +68,7 @@ docs/
     ├── README.md
     ├── architecture.md
     ├── deployment.md
+    ├── known-issues.md
     ├── progress.md
     ├── backend/
     │   ├── README.md
@@ -64,7 +79,11 @@ docs/
     │   ├── privacy.md
     │   ├── pipeline.md
     │   ├── api.md
+    │   ├── performance_toolkit.md
     │   └── references/
+    │       ├── deepseek-ocr2.md
+    │       ├── streaming-pipeline.md
+    │       └── pipeline-parallel.md
     └── frontend/
         ├── README.md
         ├── tech-stack.md

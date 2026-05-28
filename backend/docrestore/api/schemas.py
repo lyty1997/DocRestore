@@ -16,16 +16,26 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from typing import Literal
+
+from pydantic import BaseModel, Field
 
 
 class LLMConfigRequest(BaseModel):
     """LLM 配置（请求级覆盖）"""
 
+    #: provider 选择：``cloud`` 走云端 API（litellm 默认路径，含 PII 实体识别），
+    #: ``local`` 走本地 OpenAI 兼容服务（vLLM / ollama / llama.cpp 等，
+    #: 数据不出本地、跳过 LLM 实体识别只走 regex 脱敏）。
+    #: 用 Literal 严格校验，非法值（拼写错误等）直接 422 拒绝。
+    provider: Literal["cloud", "local"] | None = None
     model: str | None = None
     api_base: str | None = None
     api_key: str | None = None
     max_chars_per_segment: int | None = None
+    #: 代码模式 LLM 修正策略：``refine``（行数守恒，安全） /
+    #: ``rewrite``（允许重排 + 补语法，激进，需更强模型）
+    code_refine_mode: str | None = None
 
 
 class OCRConfigRequest(BaseModel):
@@ -33,6 +43,7 @@ class OCRConfigRequest(BaseModel):
 
     model: str | None = None
     gpu_id: str | None = None  # GPU 选择（CUDA_VISIBLE_DEVICES）
+    paddle_pipeline: Literal["basic", "vl"] | None = None
     paddle_python: str | None = None
     paddle_ocr_timeout: int | None = None
     paddle_server_url: str | None = None
@@ -60,6 +71,19 @@ class PIIConfigRequest(BaseModel):
     ) = None
 
 
+class CodeRestoreConfigRequest(BaseModel):
+    """AGE-8 IDE 代码模式配置（请求级覆盖）"""
+
+    enable: bool | None = None
+    output_files_dir: str | None = None
+    secondary_column_ocr: bool | None = None
+    secondary_column_ocr_scale: int | None = None
+    secondary_column_ocr_padding_px: int | None = None
+    secondary_column_ocr_contrast: float | None = None
+    secondary_column_ocr_sharpness: float | None = None
+    context_root: str | None = None
+
+
 class CreateTaskRequest(BaseModel):
     """创建任务请求"""
 
@@ -68,12 +92,55 @@ class CreateTaskRequest(BaseModel):
     llm: LLMConfigRequest | None = None
     ocr: OCRConfigRequest | None = None
     pii: PIIConfigRequest | None = None
+    code: CodeRestoreConfigRequest | None = None
 
 
 class UpdateMarkdownRequest(BaseModel):
     """更新文档 Markdown 内容"""
 
     markdown: str
+
+
+class UpdateCodeFileRequest(BaseModel):
+    """更新代码模式源文件内容"""
+
+    content: str
+
+
+class DiagnoseCodeFileRequest(BaseModel):
+    """诊断代码模式源文件草稿内容"""
+
+    file_path: str
+    content: str
+
+
+class CodeDiagnosticItemResponse(BaseModel):
+    """代码诊断单条行级标注"""
+
+    line: int
+    column: int = 0
+    severity: str = "error"
+    category: str = "syntax"
+    code: str = ""
+    message: str = ""
+    source: str = ""
+
+
+class CodeDiagnosticResponse(BaseModel):
+    """代码诊断响应"""
+
+    path: str
+    language: str
+    status: str
+    category: str
+    summary: str = ""
+    failing_lines: list[int] = Field(default_factory=list)
+    syntax_errors: int = 0
+    semantic_errors: int = 0
+    dependency_errors: int = 0
+    items: list[CodeDiagnosticItemResponse] = Field(default_factory=list)
+    tool: str = ""
+    duration_ms: int = 0
 
 
 class ProgressResponse(BaseModel):
@@ -84,6 +151,7 @@ class ProgressResponse(BaseModel):
     total: int
     percent: float
     message: str
+    subtask: str = ""  # 子目录标识（非空=process_tree 并行的某一路）
 
 
 class TaskResponse(BaseModel):
@@ -96,13 +164,18 @@ class TaskResponse(BaseModel):
 
 
 class TaskResultResponse(BaseModel):
-    """任务结果响应（单篇文档）"""
+    """任务结果响应（单篇文档）
+
+    error 非空时表示该子文档处理失败：markdown 可能为空或残缺，前端应显示
+    错误文本而非 markdown 预览。成功子文档 error=""。
+    """
 
     task_id: str
     output_path: str
     markdown: str
     doc_title: str = ""
     doc_dir: str = ""
+    error: str = ""
 
 
 class TaskResultsResponse(BaseModel):
@@ -141,6 +214,25 @@ class TaskListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class TaskCleanupRequest(BaseModel):
+    """批量清理任务请求。
+
+    出于安全考虑，仅允许清理终态任务（completed / failed），禁止传入
+    pending / processing，避免误删运行中的任务。
+    """
+
+    statuses: list[str]
+
+
+class TaskCleanupResponse(BaseModel):
+    """批量清理任务响应"""
+
+    deleted: int = 0
+    failed: int = 0
+    deleted_ids: list[str] = []
+    errors: list[str] = []
 
 
 # ── 文件上传 ──────────────────────────────────────────
@@ -250,10 +342,13 @@ class UploadCompleteResponse(BaseModel):
 
 
 class OCRWarmupRequest(BaseModel):
-    """OCR 引擎预热请求"""
+    """OCR 引擎预热请求
+
+    gpu_id 为 None 时由后端自动探测（`gpu_detect.pick_best_gpu`）。
+    """
 
     model: str = "paddle-ocr/ppocr-v4"
-    gpu_id: str = "1"
+    gpu_id: str | None = None
 
 
 class OCRStatusResponse(BaseModel):
@@ -261,5 +356,26 @@ class OCRStatusResponse(BaseModel):
 
     current_model: str
     current_gpu: str
+    current_gpu_name: str = ""  # 人类可读型号，便于 UI 区分同机多卡
     is_ready: bool
     is_switching: bool
+
+
+# ── GPU 列表 ──────────────────────────────────────────────
+
+
+class GPUInfoResponse(BaseModel):
+    """单张 GPU 的可展示信息（透传 gpu_detect.GPUInfo）。"""
+
+    index: str
+    name: str
+    memory_total_mb: int
+    memory_free_mb: int | None = None
+    compute_capability: str | None = None
+
+
+class GPUListResponse(BaseModel):
+    """GET /gpus 响应：GPU 列表 + 推荐索引。"""
+
+    gpus: list[GPUInfoResponse]
+    recommended: str | None = None

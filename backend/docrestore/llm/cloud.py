@@ -17,9 +17,37 @@
 from __future__ import annotations
 
 import json
+import re
 
 from docrestore.llm.base import BaseLLMRefiner
 from docrestore.llm.prompts import build_pii_detect_prompt
+
+# 匹配 ```json\n...\n``` / ```\n...\n``` 两种 markdown code fence
+_CODE_FENCE_RE = re.compile(
+    r"^```(?:json)?\s*\n(.*?)\n```\s*$",
+    re.DOTALL,
+)
+
+
+def _extract_json_payload(raw: str) -> str:
+    """从 LLM 输出中剥出 JSON 文本。
+
+    兼容两种常见响应形态：
+    - 纯 JSON：原样返回
+    - markdown code fence（```json ... ``` 或 ``` ... ```）：剥掉围栏
+    - 无围栏但含前后说明：返回首个 `{` 到末个 `}` 之间的内容
+    """
+    text = raw.strip()
+    m = _CODE_FENCE_RE.match(text)
+    if m:
+        return m.group(1).strip()
+
+    # 退化匹配：取第一个 { 到最后一个 }（应对模型在 JSON 前后啰嗦说明的情况）
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        return text[start:end + 1]
+    return text
 
 
 class CloudLLMRefiner(BaseLLMRefiner):
@@ -45,9 +73,10 @@ class CloudLLMRefiner(BaseLLMRefiner):
             raise RuntimeError(msg)
 
         raw: str = response.choices[0].message.content or ""
+        payload = _extract_json_payload(raw)
 
         try:
-            data = json.loads(raw)
+            data = json.loads(payload)
         except json.JSONDecodeError as exc:
             msg = f"PII 实体检测返回非 JSON: {raw[:200]}"
             raise RuntimeError(msg) from exc

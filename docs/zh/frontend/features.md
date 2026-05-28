@@ -24,8 +24,8 @@ limitations under the License.
    - **服务器文件聚合**：多选服务器文件 → `POST /sources/server` → 符号链接临时目录
 2. `TaskForm` 填写 `output_dir` + 可选高级配置（LLM 模型 / OCR 引擎 / PII 设置）→ 创建任务；可选点击 **预加载引擎** 提前触发后端 OCR 引擎切换
 3. `TaskProgress` 展示实时进度（WebSocket 优先，轮询降级）；`SourceImagePanel` 同步展示当前处理的源图片
-4. `TaskDetail` 汇总：`TaskResult` 展示 Markdown（含图）+ 多子文档导航（单文档任务只有一项）
-5. 下载（`/download` zip）/ 人工精修保存（`PUT /results/{index}`）/ 重试 / 删除
+4. `TaskDetail` 汇总：普通文档任务由 `TaskResult` 展示 Markdown（含图）+ 多子文档导航；代码模式任务由 `CodeViewer` 展示源文件、来源图片和诊断标注
+5. 下载（`/download` zip）/ 人工精修保存（`PUT /results/{index}` 或 `PUT /files/{path}`）/ 重试 / 删除
 
 ## 2. 状态管理
 
@@ -94,7 +94,8 @@ App
 ├── TaskDetail               # 已创建任务的详情视图
 │   ├── TaskProgress         # 进度展示（WS + 轮询降级）
 │   ├── SourceImagePanel     # 源图片查看器（/source-images）
-│   └── TaskResult           # 子文档 tab + Markdown 渲染 + 精修/下载
+│   ├── TaskResult           # 子文档 tab + Markdown 渲染 + 精修/下载
+│   └── CodeViewer           # 代码模式源文件列表、编辑器、诊断和来源图片联动
 ├── BackToTopButton          # 长 Markdown 辅助
 └── ConfirmDialog            # 删除/取消确认
 ```
@@ -110,7 +111,7 @@ Markdown 中的图片引用需要重写为 assets API 路径，兼容多文档�
 
 实现方式：react-markdown 自定义 `img` 组件，通过当前 result 的 `doc_dir` 拼接 prefix。
 
-## 5.5 OCR 引擎预热
+## 6. OCR 引擎预热
 
 `TaskForm` 顶部的 **预加载引擎** 按钮允许用户在提交任务前先把模型/GPU 切到目标位置，避免第一张图等待引擎冷启动。
 
@@ -127,7 +128,20 @@ Markdown 中的图片引用需要重写为 assets API 路径，兼容多文档�
 - 进入 `warming` 后启动 3s 轮询 `/ocr/status`，命中目标且 `is_ready` 立即停止；最长 60s 自动放弃以释放定时器
 - `useRef<setInterval>` 在卸载时 `clearInterval`
 
-## 6. 下载功能
+## 7. 代码模式审查
+
+`TaskDetail` 检测到任务存在 `files-index.json` 时进入代码模式审查视图。核心数据流：
+
+- `GET /tasks/{task_id}/files-index` 获取文件索引，索引项包含路径、语言、来源页、行号范围、质量 flags 和 `diagnostic`。
+- 选中文件后按需 `GET /tasks/{task_id}/files/{path}` 读取源文件正文。
+- `CodeViewer` 左侧显示文件列表，中间显示代码正文或编辑 textarea，右侧按 `source_pages` 反查 `/source-images` 中的原图并同步滚动。
+- 非编辑态使用 `diagnostic.items` 和兼容 `compile_*` 字段渲染行号 gutter 标注与 tooltip。
+- 编辑态对草稿内容做 350ms debounce，调用 `POST /tasks/{task_id}/code-diagnostics` 获取实时诊断；保存时调用 `PUT /tasks/{task_id}/files/{path}`。
+- 用户可按条接受可解释诊断（例如缺失 include），接受记录按任务、文件、诊断信息和当前行文本写入 `localStorage`，可一键恢复。
+
+当前编辑器基于原生 textarea，诊断标注落在 gutter 和列表中；若需要 IDE 式内联波浪线，应独立评估 CodeMirror/Monaco 替换。
+
+## 8. 下载功能
 
 点击"下载结果"按钮：
 ```typescript
@@ -143,24 +157,24 @@ const downloadResult = async (taskId: string) => {
 }
 ```
 
-## 7. 错误处理
+## 9. 错误处理
 
-### 7.1 网络错误
+### 9.1 网络错误
 - API 调用失败：显示错误提示，允许重试
 - WebSocket 断开：自动降级轮询
 
-### 7.2 任务失败
+### 9.2 任务失败
 - 显示错误摘要
 - 可选展开详细 traceback（折叠面板）
 
-## 8. 资源清理
+## 10. 资源清理
 
 组件卸载时必须清理：
 - WebSocket 连接：`ws.close()`
 - 轮询定时器：`clearInterval()`
 - AbortController：`abort()`
 
-## 9. 相关文档
+## 11. 相关文档
 
 - [技术栈](tech-stack.md)
 - [后端 API](../backend/api.md)

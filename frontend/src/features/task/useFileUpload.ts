@@ -12,6 +12,7 @@ import {
   uploadFiles,
 } from "../../api/client";
 import type { UploadFileItem } from "../../api/schemas";
+import { fromUnknown, localized, type LocalizedError } from "../../i18n";
 
 /** 上传阶段 */
 type UploadStage = "idle" | "uploading" | "completed" | "error";
@@ -34,8 +35,8 @@ interface UseFileUploadReturn {
   deletingFileIds: string[];
   /** 最终确认后的 image_dir（用于创建任务） */
   imageDir: string | undefined;
-  /** 错误信息 */
-  error: string | undefined;
+  /** 错误信息（i18n key + 占位符）；组件用 ``renderLocalized`` 渲染 */
+  error: LocalizedError | undefined;
   /** 开始上传（relativePaths 用于保留目录结构） */
   startUpload: (files: File[], relativePaths?: readonly string[]) => void;
   /** 确认使用当前上传结果 */
@@ -51,6 +52,17 @@ interface UseFileUploadReturn {
 /** 每批上传的文件数 */
 const BATCH_SIZE = 3;
 
+/** 内部封装：把单批失败的 ``LocalizedError`` 通过 throw 透传到外层 catch */
+class BatchUploadError extends Error {
+  readonly localized: LocalizedError;
+
+  constructor(localized: LocalizedError) {
+    super(localized.fallback ?? localized.key);
+    this.name = "BatchUploadError";
+    this.localized = localized;
+  }
+}
+
 export function useFileUpload(): UseFileUploadReturn {
   const [stage, setStage] = useState<UploadStage>("idle");
   const [uploadedCount, setUploadedCount] = useState(0);
@@ -60,7 +72,7 @@ export function useFileUpload(): UseFileUploadReturn {
   const [uploadedFiles, setUploadedFiles] = useState<UploadFileItem[]>([]);
   const [deletingFileIds, setDeletingFileIds] = useState<string[]>([]);
   const [imageDir, setImageDir] = useState<string | undefined>();
-  const [error, setError] = useState<string | undefined>();
+  const [error, setError] = useState<LocalizedError | undefined>();
   const abortRef = useRef<AbortController | undefined>(undefined);
 
   const reset = useCallback((): void => {
@@ -85,7 +97,7 @@ export function useFileUpload(): UseFileUploadReturn {
       const complete = await completeUpload(sessionId);
       setImageDir(complete.image_dir);
     } catch (error_: unknown) {
-      setError(error_ instanceof Error ? error_.message : "确认上传失败");
+      setError(fromUnknown(error_, "errors.upload.confirmFailed"));
     }
   }, [sessionId, uploadedFiles]);
 
@@ -104,7 +116,7 @@ export function useFileUpload(): UseFileUploadReturn {
           setImageDir(undefined);
         }
       } catch (error_: unknown) {
-        setError(error_ instanceof Error ? error_.message : "删除图片失败");
+        setError(fromUnknown(error_, "errors.upload.deleteFailed"));
       } finally {
         setDeletingFileIds((prev) => prev.filter((id) => id !== fileId));
       }
@@ -130,25 +142,49 @@ export function useFileUpload(): UseFileUploadReturn {
           const allFailed: string[] = [];
           let uploaded = 0;
 
+          const totalBatches = Math.ceil(files.length / BATCH_SIZE);
           for (let i = 0; i < files.length; i += BATCH_SIZE) {
             const batch = files.slice(i, i + BATCH_SIZE);
             const batchPaths = relativePaths?.slice(i, i + BATCH_SIZE);
-            const resp = await uploadFiles(
-              session.session_id,
-              batch,
-              batchPaths,
-              controller.signal,
-            );
-
-            uploaded += resp.uploaded.length;
-            allFailed.push(...resp.failed);
-            setUploadedCount(uploaded);
-            setFailedFiles([...allFailed]);
+            const batchIdx = Math.floor(i / BATCH_SIZE) + 1;
+            try {
+              const resp = await uploadFiles(
+                session.session_id,
+                batch,
+                batchPaths,
+                controller.signal,
+              );
+              uploaded += resp.uploaded.length;
+              allFailed.push(...resp.failed);
+              setUploadedCount(uploaded);
+              setFailedFiles([...allFailed]);
+            } catch (error_: unknown) {
+              /* 取消透传到外层 try 的 AbortError 分支 */
+              if (error_ instanceof DOMException && error_.name === "AbortError") {
+                throw error_;
+              }
+              /* 单批失败：包成 LocalizedError，外层 catch 直接 setError */
+              const cause = fromUnknown(error_, "errors.unknown");
+              const causeMsg = cause.fallback ?? cause.key;
+              throw new BatchUploadError({
+                key: "errors.upload.batchFailed",
+                params: {
+                  batch: batchIdx,
+                  total: totalBatches,
+                  uploaded,
+                  count: files.length,
+                  cause: causeMsg,
+                },
+                fallback:
+                  `第 ${batchIdx.toString()}/${totalBatches.toString()} 批失败` +
+                  `（已成功 ${uploaded.toString()}/${files.length.toString()}）：\n${causeMsg}`,
+              });
+            }
           }
 
           if (uploaded === 0) {
             setStage("error");
-            setError("没有文件上传成功");
+            setError(localized("errors.upload.noneSucceeded"));
             return;
           }
 
@@ -161,7 +197,11 @@ export function useFileUpload(): UseFileUploadReturn {
             return;
           }
           setStage("error");
-          setError(error_ instanceof Error ? error_.message : "上传失败");
+          if (error_ instanceof BatchUploadError) {
+            setError(error_.localized);
+          } else {
+            setError(fromUnknown(error_, "errors.upload.confirmFailed"));
+          }
         } finally {
           abortRef.current = undefined;
         }

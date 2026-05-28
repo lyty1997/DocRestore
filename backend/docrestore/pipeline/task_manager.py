@@ -21,6 +21,7 @@ import logging
 import tempfile
 import traceback
 import uuid
+from collections.abc import Coroutine
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -29,7 +30,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from docrestore.models import PipelineResult, TaskProgress
-from docrestore.pipeline.config import LLMConfig, OCRConfig, PIIConfig
+from docrestore.pipeline.config import (
+    CodeRestoreConfig,
+    LLMConfig,
+    OCRConfig,
+    PIIConfig,
+)
 from docrestore.pipeline.pipeline import Pipeline
 from docrestore.pipeline.scheduler import PipelineScheduler
 
@@ -54,7 +60,7 @@ class TaskStatus(Enum):
 class Task:
     """任务记录。
 
-    llm/ocr/pii 为本次任务的完整 Config 快照：
+    llm/ocr/pii/code 为本次任务的完整 Config 快照：
     - None → pipeline 使用默认配置
     - 非空 → 上游（API 层）合成的完整 Config，下游直接使用、不再合并
     """
@@ -66,6 +72,7 @@ class Task:
     llm: LLMConfig | None = None
     ocr: OCRConfig | None = None
     pii: PIIConfig | None = None
+    code: CodeRestoreConfig | None = None
     progress: TaskProgress | None = None
     results: list[PipelineResult] = field(default_factory=list)
     error: str | None = None
@@ -75,6 +82,17 @@ class Task:
     def result(self) -> PipelineResult | None:
         """兼容属性：返回第一份结果。"""
         return self.results[0] if self.results else None
+
+
+def _read_text_or_empty(path: Path) -> str:
+    """阻塞读取文本文件，失败/不存在 → 空串（task_manager.load_persisted_tasks 用）"""
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        logger.warning("load_persisted_tasks: 读取 markdown 失败 (%s)", path)
+        return ""
 
 
 def _write_debug_error(output_dir: Path, content: str) -> None:
@@ -103,11 +121,107 @@ class TaskManager:
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
         self._subscribers: dict[str, set[asyncio.Queue[TaskProgress]]] = {}
+        self._hydrated_from_db = False
+        # 追踪所有 fire-and-forget 的后台协程（DB 持久化 / 进度广播 /
+        # 引擎预热等）。shutdown 时统一 cancel + gather，避免残留任务
+        # 持续跑或在 event loop 关闭后抛未捕获异常。
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def pipeline(self) -> Pipeline:
         """暴露底层 Pipeline，用于 API 层读取默认 Config 合成请求快照。"""
         return self._pipeline
+
+    async def load_persisted_tasks(  # noqa: C901
+        self, *, page_size: int = 200,
+    ) -> int:
+        """从 DB 把全部历史任务装回 ``_tasks`` 内存缓存。
+
+        重启后让 ``GET /tasks/{id}`` / ``/results`` / 代码模式 files-index 等
+        同步路由能命中已完成任务，不需要每个 handler 都改成 async DB 回退。
+        markdown 内容从磁盘 ``output_path`` 读回；读不到则留空，前端按错误
+        分支处理。重复调用幂等（已 hydrate 过 → 直接返回 0）。
+        """
+        if self._hydrated_from_db or self._db is None:
+            return 0
+
+        loaded = 0
+        page = 1
+        while True:
+            try:
+                listing = await self._db.list_tasks(
+                    page=page, page_size=page_size,
+                )
+            except Exception:
+                logger.exception("load_persisted_tasks: list_tasks 失败")
+                break
+            for item in listing.tasks:
+                if item.task_id in self._tasks:
+                    continue
+                row = await self._db.get_task(item.task_id)
+                if row is None:
+                    continue
+                task = Task(
+                    task_id=row.task_id,
+                    status=TaskStatus(row.status),
+                    image_dir=row.image_dir,
+                    output_dir=row.output_dir,
+                    llm=row.llm,
+                    ocr=row.ocr,
+                    pii=row.pii,
+                    code=row.code,
+                    error=row.error,
+                    created_at=datetime.fromisoformat(row.created_at),
+                )
+                # 加载结果元信息 + 从磁盘 fallback markdown
+                try:
+                    rows = await self._db.get_results(item.task_id)
+                except Exception:
+                    logger.exception(
+                        "load_persisted_tasks: get_results 失败 (%s)",
+                        item.task_id,
+                    )
+                    rows = []
+                for r in rows:
+                    output_path = Path(r.output_path)
+                    markdown = await asyncio.to_thread(
+                        _read_text_or_empty, output_path,
+                    )
+                    task.results.append(PipelineResult(
+                        output_path=output_path,
+                        markdown=markdown,
+                        doc_title=r.doc_title or "",
+                        doc_dir=r.doc_dir or "",
+                        error=r.error or "",
+                    ))
+                self._tasks[task.task_id] = task
+                loaded += 1
+            if (page * page_size) >= listing.total:
+                break
+            page += 1
+
+        self._hydrated_from_db = True
+        if loaded > 0:
+            logger.info(
+                "load_persisted_tasks: 从 DB 装回 %d 个历史任务", loaded,
+            )
+        return loaded
+
+    def spawn_background(
+        self,
+        coro: Coroutine[object, object, None],
+        *,
+        name: str = "",
+    ) -> asyncio.Task[None]:
+        """登记一个后台任务，shutdown 时会统一 cancel + gather。
+
+        所有 fire-and-forget 协程（DB 写入、进度广播、OCR 预热等）都
+        应走这里，避免被 GC 掉或在应用关闭后仍在运行。
+        """
+        task = asyncio.create_task(coro, name=name or None)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
 
     def subscriber_count(self, task_id: str) -> int:
         """返回指定任务的订阅者数量（测试/诊断用）。
@@ -125,6 +239,7 @@ class TaskManager:
         llm: LLMConfig | None = None,
         ocr: OCRConfig | None = None,
         pii: PIIConfig | None = None,
+        code: CodeRestoreConfig | None = None,
     ) -> Task:
         """创建任务，状态为 PENDING。同步返回，DB 写入由后台完成。"""
         task_id = uuid.uuid4().hex[:8]
@@ -138,12 +253,16 @@ class TaskManager:
             llm=llm,
             ocr=ocr,
             pii=pii,
+            code=code,
         )
         self._tasks[task_id] = task
 
         # 异步写 DB（不阻塞创建流程）
         if self._db is not None:
-            asyncio.create_task(self._persist_new_task(task))
+            self.spawn_background(
+                self._persist_new_task(task),
+                name=f"persist-new-task-{task_id}",
+            )
 
         return task
 
@@ -160,6 +279,7 @@ class TaskManager:
                 llm=task.llm,
                 ocr=task.ocr,
                 pii=task.pii,
+                code=task.code,
                 created_at=task.created_at.isoformat(),
             )
         except Exception:
@@ -205,7 +325,10 @@ class TaskManager:
             return
         task.progress = progress
         if self._subscribers.get(task_id):
-            asyncio.create_task(self._broadcast_progress(task_id, progress))
+            self.spawn_background(
+                self._broadcast_progress(task_id, progress),
+                name=f"broadcast-progress-{task_id}",
+            )
 
     async def _broadcast_progress(
         self, task_id: str, progress: TaskProgress
@@ -247,13 +370,49 @@ class TaskManager:
                 gpu_lock=gpu_lock,
                 pii=task.pii,
                 ocr=task.ocr,
+                code=task.code,
             )
+
+            # process_tree 在 2026-04-21 之后不再对子目录异常 raise，而是把失败
+            # 转成 PipelineResult(error=...) 占位。这里按 error 聚合：
+            # - 任一失败 → task 整体 FAILED，但 results 保留成功部分供 UI 预览
+            # - 全成功 → COMPLETED
+            failed_docs = [r for r in results if r.error]
+            if failed_docs:
+                err_msg = self._summarize_failed_docs(
+                    failed_docs, total=len(results),
+                )
+                logger.warning(
+                    "任务 %s 部分失败: %s", task_id, err_msg,
+                )
+                async with self._lock:
+                    task.status = TaskStatus.FAILED
+                    task.results = results
+                    task.error = err_msg
+                await self._persist_results(
+                    task_id, results, status="failed", error=err_msg,
+                )
+                self.publish_progress(
+                    task_id,
+                    TaskProgress(
+                        stage="failed",
+                        current=len(results) - len(failed_docs),
+                        total=len(results),
+                        percent=0.0,
+                        message=err_msg,
+                        # err_msg 本身可能来自后端异常（已是英文/中文混合），
+                        # 前端用 message_key fallback 到 message 原文即可
+                    ),
+                )
+                return
 
             async with self._lock:
                 task.status = TaskStatus.COMPLETED
                 task.results = results
 
-            await self._persist_completed(task_id, results)
+            await self._persist_results(
+                task_id, results, status="completed",
+            )
             # 发送终结进度，让 WS 客户端检测到 completed 状态并退出
             self.publish_progress(
                 task_id,
@@ -263,6 +422,7 @@ class TaskManager:
                     total=1,
                     percent=100.0,
                     message="处理完成",
+                    message_key="progress.completed",
                 ),
             )
         except asyncio.CancelledError:
@@ -282,6 +442,7 @@ class TaskManager:
                         total=0,
                         percent=0.0,
                         message="任务取消",
+                        message_key="progress.cancelled",
                     ),
                 )
             except Exception:  # noqa: BLE001 — 关闭阶段不阻断
@@ -312,6 +473,7 @@ class TaskManager:
                     total=0,
                     percent=0.0,
                     message="处理失败",
+                    message_key="progress.failed",
                 ),
             )
         finally:
@@ -331,24 +493,53 @@ class TaskManager:
         except Exception:
             logger.exception("持久化状态变更失败: %s → %s", task_id, status)
 
-    async def _persist_completed(
+    async def _persist_results(
         self,
         task_id: str,
         results: list[PipelineResult],
+        *,
+        status: str,
+        error: str | None = None,
     ) -> None:
-        """将完成状态和结果写入 DB。"""
+        """将结果列表持久化到 DB；适用 completed 或 partial-failed 两种终态。
+
+        FAILED 任务保留已成功子文档的 results row，让前端 detail 页能预览
+        "10 篇文档，2 篇失败" 的部分成果。失败 doc（markdown 为空）也写入
+        以保留 doc_dir 信息，前端根据 error 字段区分状态。
+        """
         if self._db is None:
             return
         try:
-            await self._db.update_status(task_id, "completed")
+            await self._db.update_status(task_id, status, error=error)
             if results:
                 rows = [
-                    (str(r.output_path), r.doc_title, r.doc_dir)
+                    (str(r.output_path), r.doc_title, r.doc_dir, r.error)
                     for r in results
                 ]
                 await self._db.insert_results(task_id, rows)
         except Exception:
-            logger.exception("持久化完成结果失败: %s", task_id)
+            logger.exception("持久化结果失败: %s (status=%s)", task_id, status)
+
+    @staticmethod
+    def _summarize_failed_docs(
+        failed: list[PipelineResult],
+        *,
+        total: int,
+    ) -> str:
+        """生成 task.error 摘要：'3/5 子文档失败: docA (err1); docB (...)'"""
+        parts: list[str] = []
+        # 只展示前 3 条避免 error 字段过长
+        for r in failed[:3]:
+            label = r.doc_dir or "(根目录)"
+            parts.append(f"{label} ({r.error})")
+        suffix = ""
+        if len(failed) > 3:
+            suffix = f"；另 {len(failed) - 3} 个子目录亦失败"
+        return (
+            f"{len(failed)}/{total} 子文档失败: "
+            + "; ".join(parts)
+            + suffix
+        )
 
     def get_task(self, task_id: str) -> Task | None:
         """查询任务状态（仅内存，同步接口保持兼容）。"""
@@ -463,6 +654,51 @@ class TaskManager:
         """注册后台运行的 asyncio.Task 引用（供取消使用）。"""
         self._running_tasks[task_id] = bg
 
+    async def shutdown(self) -> None:
+        """服务关闭时调用：cancel 所有运行中任务和后台协程并等待退出。
+
+        必要性：Pipeline.shutdown 会释放 OCR 引擎 stdin/stdout；若此时仍有
+        task 协程在 _send_command 里读写 stream，会与 engine.shutdown 并发
+        抢占导致协议错乱/阻塞。先在这里统一 cancel + gather 保证串行。
+
+        除了用户任务（_running_tasks），还要清理 fire-and-forget 的后台协程
+        （DB 写入、进度广播、OCR 预热等），否则 event loop 关闭后它们会抛
+        "got Future <...> attached to a different loop" 或残留运行。
+        """
+        running = list(self._running_tasks.values())
+        background = list(self._background_tasks)
+        if not running and not background:
+            return
+
+        if running:
+            logger.info(
+                "TaskManager.shutdown 取消 %d 个运行中任务", len(running),
+            )
+        if background:
+            logger.info(
+                "TaskManager.shutdown 取消 %d 个后台协程", len(background),
+            )
+
+        for bg in running:
+            bg.cancel()
+        for bg in background:
+            bg.cancel()
+
+        all_tasks = running + background
+        results = await asyncio.gather(*all_tasks, return_exceptions=True)
+        for bg, result in zip(all_tasks, results, strict=True):
+            if isinstance(result, BaseException) and not isinstance(
+                result, asyncio.CancelledError,
+            ):
+                logger.warning(
+                    "shutdown 期间任务 %s 抛出非预期异常",
+                    bg.get_name(),
+                    exc_info=result,
+                )
+
+        self._running_tasks.clear()
+        self._background_tasks.clear()
+
     async def cancel_task(self, task_id: str) -> str | None:
         """取消运行中的任务。
 
@@ -525,8 +761,113 @@ class TaskManager:
 
         return ""
 
+    async def collect_referenced_image_dirs(self) -> set[str]:
+        """返回所有任务（内存 + DB）引用的 image_dir 集合。
+
+        供上传会话清理循环用：cleanup TTL 到期前先过滤掉仍被任务引用的
+        upload_dir，避免"历史任务的原图预览"在 1h 后因 rmtree 失效（烂图
+        占位）。终态任务（completed / failed）也要包含 —— 用户可能在
+        任务完成后回看预览。
+        """
+        dirs: set[str] = set()
+        async with self._lock:
+            dirs.update(
+                t.image_dir for t in self._tasks.values() if t.image_dir
+            )
+
+        if self._db is not None:
+            for status in (
+                "pending", "processing", "completed", "failed",
+            ):
+                page = 1
+                while True:
+                    try:
+                        result = await self._db.list_tasks(
+                            status=status, page=page, page_size=200,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "DB list_tasks 失败 status=%s page=%d",
+                            status, page,
+                        )
+                        break
+                    dirs.update(
+                        t.image_dir for t in result.tasks if t.image_dir
+                    )
+                    if len(result.tasks) < 200:
+                        break
+                    page += 1
+        return dirs
+
+    async def _collect_cleanup_targets(
+        self,
+        statuses: list[str],
+    ) -> list[str]:
+        """收集待清理的 task_id。内存 + DB 合并去重排序。"""
+        target_ids: set[str] = set()
+        async with self._lock:
+            target_ids.update(
+                task.task_id
+                for task in self._tasks.values()
+                if task.status.value in statuses
+            )
+
+        if self._db is not None:
+            # 分页拿全量（page_size 上限较大，一次尽量拿多）
+            for status in statuses:
+                page = 1
+                while True:
+                    result = await self._db.list_tasks(
+                        status=status, page=page, page_size=200,
+                    )
+                    target_ids.update(t.task_id for t in result.tasks)
+                    if len(result.tasks) < 200:
+                        break
+                    page += 1
+        return sorted(target_ids)
+
+    async def cleanup_tasks(
+        self,
+        statuses: list[str],
+    ) -> tuple[list[str], list[tuple[str, str]]]:
+        """批量清理指定状态的任务及其产物。
+
+        参数：
+        - statuses：需要清理的任务状态，仅允许 "completed" / "failed"
+
+        返回：
+        - (已删除的 task_id 列表, [(失败的 task_id, 原因)] 列表)
+
+        允许状态外的 status 会被直接忽略（不抛异常），
+        调用方应在更外层（API 路由）做入参校验。
+        """
+        allowed = {TaskStatus.COMPLETED.value, TaskStatus.FAILED.value}
+        normalized = [s for s in statuses if s in allowed]
+        if not normalized:
+            return [], []
+
+        target_ids = await self._collect_cleanup_targets(normalized)
+
+        deleted: list[str] = []
+        errors: list[tuple[str, str]] = []
+        for tid in target_ids:
+            try:
+                err = await self.delete_task(tid)
+            except Exception as exc:  # noqa: BLE001
+                errors.append((tid, str(exc)))
+                continue
+            if err is None:
+                errors.append((tid, "任务不存在"))
+            elif err:
+                errors.append((tid, err))
+            else:
+                deleted.append(tid)
+        return deleted, errors
+
     async def retry_task(self, task_id: str) -> Task | str | None:
         """重试失败的任务，返回新任务。
+
+        与 resume_task 的区别：不复用原 output_dir（从头跑）。
 
         返回值：
         - None：原任务不存在
@@ -541,9 +882,59 @@ class TaskManager:
             return f"任务状态为 {task.status.value}，仅失败任务可重试"
 
         # 用原任务配置创建新任务
+        code = self._retry_code_config(task)
         return self.create_task(
             image_dir=task.image_dir,
             llm=task.llm,
             ocr=task.ocr,
             pii=task.pii,
+            code=code,
         )
+
+    async def resume_task(self, task_id: str) -> Task | str | None:
+        """继续失败任务 — 复用原 output_dir 让 OCR 层缓存命中，跳过已完成图。
+
+        与 retry_task 的唯一区别是保留 output_dir：OCR 引擎 `ocr()` 方法检查
+        `{stem}_OCR/result.mmd` 存在就直接 load，所以只有未完成图会真的跑。
+        LLM 精修 / PII / dedup 仍会全量重算，断点续只省 OCR 时间。
+
+        返回值：
+        - None：原任务不存在
+        - 错误信息字符串：原任务不可继续
+        - Task：新创建的任务（共享原 output_dir）
+        """
+        task = await self.get_task_async(task_id)
+        if task is None:
+            return None
+
+        if task.status != TaskStatus.FAILED:
+            return f"任务状态为 {task.status.value}，仅失败任务可继续"
+
+        code = self._retry_code_config(task)
+        return self.create_task(
+            image_dir=task.image_dir,
+            output_dir=task.output_dir,  # 关键：复用 → OCR cache 命中
+            llm=task.llm,
+            ocr=task.ocr,
+            pii=task.pii,
+            code=code,
+        )
+
+    @staticmethod
+    def _retry_code_config(task: Task) -> CodeRestoreConfig | None:
+        """重试/继续时恢复代码模式配置。
+
+        正常路径直接沿用 ``task.code``。兼容旧 bug：历史 retry/resume 任务可能
+        丢失 code 快照但 output_dir 已有代码模式产物，此时补一个最小 code 配置，
+        让后续重试继续走代码分支。
+        """
+        if task.code is not None:
+            return task.code
+
+        output_dir = Path(task.output_dir)
+        if (
+            (output_dir / "files-index.json").exists()
+            or (output_dir / "files").is_dir()
+        ):
+            return CodeRestoreConfig(enable=True)
+        return None

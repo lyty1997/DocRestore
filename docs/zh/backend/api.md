@@ -25,6 +25,7 @@ API 层对外暴露 REST API 与 WebSocket：
 - 获取最终结果（markdown + 输出路径）
 - 下载单任务结果 zip（`document.md` + `images/`）
 - 受限静态资源访问（白名单 + 路径穿越防护）
+- 代码模式文件索引、源文件读取/保存和编辑态实时诊断
 
 API 层只依赖 Pipeline 层（调度/任务管理/结果模型），不直接依赖 OCR/处理/LLM/输出等内部实现细节。
 
@@ -68,6 +69,7 @@ class LLMConfigRequest(BaseModel):
 class OCRConfigRequest(BaseModel):
     model: str | None = None               # 如 "paddle-ocr/ppocr-v4" / "deepseek/ocr-2"
     gpu_id: str | None = None              # CUDA_VISIBLE_DEVICES
+    paddle_pipeline: Literal["basic", "vl"] | None = None
     paddle_python: str | None = None
     paddle_ocr_timeout: int | None = None
     paddle_server_url: str | None = None
@@ -81,6 +83,16 @@ class PIIConfigRequest(BaseModel):
     enable: bool | None = None
     # 兼容 list[str]（纯字符串）和 list[CustomSensitiveWord]（对象）两种写法
     custom_sensitive_words: list[CustomSensitiveWord] | list[str] | None = None
+
+class CodeRestoreConfigRequest(BaseModel):
+    enable: bool | None = None
+    output_files_dir: str | None = None
+    secondary_column_ocr: bool | None = None
+    secondary_column_ocr_scale: int | None = None
+    secondary_column_ocr_padding_px: int | None = None
+    secondary_column_ocr_contrast: float | None = None
+    secondary_column_ocr_sharpness: float | None = None
+    context_root: str | None = None
 ```
 
 路由 `_to_custom_words()` 统一将两种形态转为 `list[CustomWord]`，写入 `pii_override`。
@@ -94,6 +106,7 @@ class CreateTaskRequest(BaseModel):
     llm: LLMConfigRequest | None = None
     ocr: OCRConfigRequest | None = None
     pii: PIIConfigRequest | None = None
+    code: CodeRestoreConfigRequest | None = None
 
 class ProgressResponse(BaseModel):
     stage: str; current: int; total: int; percent: float; message: str
@@ -109,6 +122,13 @@ class ActionResponse(BaseModel):
 
 class UpdateMarkdownRequest(BaseModel):
     markdown: str
+
+class UpdateCodeFileRequest(BaseModel):
+    content: str
+
+class DiagnoseCodeFileRequest(BaseModel):
+    file_path: str
+    content: str
 ```
 
 **任务结果（多文档兼容）**：
@@ -166,6 +186,33 @@ class SourceImagesResponse(BaseModel):
     images: list[str]
 ```
 
+**代码模式文件与诊断**：
+
+```python
+class CodeDiagnosticItemResponse(BaseModel):
+    line: int
+    column: int = 0
+    severity: str = "error"
+    category: str = "syntax"          # syntax / semantic / dependency
+    code: str = ""                    # 如 parse_error / missing_include
+    message: str = ""
+    source: str = ""                  # parser/tool 名
+
+class CodeDiagnosticResponse(BaseModel):
+    path: str
+    language: str
+    status: str                        # syntax_clean / syntax_dirty / dependency_dirty / ...
+    category: str
+    summary: str = ""
+    failing_lines: list[int] = []
+    syntax_errors: int = 0
+    semantic_errors: int = 0
+    dependency_errors: int = 0
+    items: list[CodeDiagnosticItemResponse] = []
+    tool: str = ""
+    duration_ms: int = 0
+```
+
 **分片上传会话**（前端 `FileUploader` 流程使用）：
 
 ```python
@@ -205,13 +252,25 @@ class UploadCompleteResponse(BaseModel):
 ```python
 class OCRWarmupRequest(BaseModel):
     model: str = "paddle-ocr/ppocr-v4"
-    gpu_id: str = "1"
+    gpu_id: str | None = None   # 为 None 时后端 pick_best_gpu 自动选
 
 class OCRStatusResponse(BaseModel):
     current_model: str
     current_gpu: str
+    current_gpu_name: str = "" # 可读型号，便于前端显示
     is_ready: bool       # _engine.is_ready
     is_switching: bool   # _switch_lock.locked()
+
+class GPUInfoResponse(BaseModel):
+    index: str
+    name: str
+    memory_total_mb: int
+    memory_free_mb: int | None = None
+    compute_capability: str | None = None
+
+class GPUListResponse(BaseModel):
+    gpus: list[GPUInfoResponse]
+    recommended: str | None = None
 ```
 
 ### 3.3 路由（api/routes.py + api/upload.py）
@@ -227,12 +286,18 @@ class OCRStatusResponse(BaseModel):
 | `GET` | `/tasks/{id}/results` | 多文档结果列表（`TaskResultsResponse`） |
 | `PUT` | `/tasks/{id}/results/{result_index}` | 更新指定子文档 Markdown（按索引定位，人工精修） |
 | `GET` | `/tasks/{id}/assets/{asset_path:path}` | 受限资源访问（白名单 + 路径穿越防护） |
+| `GET` | `/tasks/{id}/files-index` | 读取代码模式 `files-index.json`；非代码模式或未完成返回 404 |
+| `GET` | `/tasks/{id}/files/{file_path:path}` | 读取代码模式 `files/` 下已有源文件文本 |
+| `PUT` | `/tasks/{id}/files/{file_path:path}` | 保存代码模式已有源文件，并同步 `files-index.json` 行数摘要 |
+| `POST` | `/tasks/{id}/code-diagnostics` | 对代码模式源文件草稿做只读实时诊断，不保存文件 |
 | `GET` | `/tasks/{id}/download` | 下载任务结果 zip（含多文档子目录） |
 | `GET` | `/tasks/{id}/source-images` | 列出任务输入图片文件名 |
 | `GET` | `/tasks/{id}/source-images/{filename:path}` | 获取任务输入源图片文件 |
 | `POST` | `/tasks/{id}/cancel` | 取消运行中的任务 |
-| `POST` | `/tasks/{id}/retry` | 重试失败的任务（创建新任务） |
+| `POST` | `/tasks/{id}/retry` | 重试失败的任务（创建新任务，**新 output_dir**，从头跑） |
+| `POST` | `/tasks/{id}/resume` | 继续失败任务（创建新任务，**复用原 output_dir**，OCR 自动跳过已完成图，LLM 精修按 `{output_dir}/.llm_cache/` 命中跳过已精修段） |
 | `DELETE` | `/tasks/{id}` | 删除任务及产物 |
+| `POST` | `/tasks/cleanup` | 批量清理终态任务（仅允许 `completed` / `failed`）|
 | `WS` | `/tasks/{id}/progress` | WebSocket 进度推送（受 `require_auth_ws` 保护） |
 | `GET` | `/filesystem/dirs?path=&include_files=` | 服务器目录浏览 |
 | `POST` | `/sources/server` | 将服务器文件 stage 为 `image_dir`（符号链接，上限 5000） |
@@ -265,6 +330,10 @@ class OCRStatusResponse(BaseModel):
       {"word": "张伟", "code": "化名A"},
       "公司内部代号"
     ]
+  },
+  "code": {
+    "enable": false,
+    "context_root": ""
   }
 }
 ```
@@ -343,7 +412,7 @@ class OCRStatusResponse(BaseModel):
 - WebSocket 连接，发送端先推送初始进度，随后增量推送进度事件，任务终止时关闭连接
 - 握手时通过 `require_auth_ws` 校验；未认证或任务不存在返回 1008/1011 关闭码
 - payload 与 `TaskProgress` dataclass 字段一致（`stage/current/total/percent/message`）
-- 详见 [ws_progress.md](ws_progress.md)
+- 当前契约以本文件和 `tests/api/test_ws_progress.py` 为准
 
 #### GET /api/v1/tasks/{task_id}/assets/{asset_path:path} — 受限资源访问
 
@@ -351,7 +420,18 @@ class OCRStatusResponse(BaseModel):
 - 安全策略（`_validate_asset_path` + `_resolve_asset_path`）：
   - 拒绝绝对路径、`..`、`.` 等非法片段
   - `Path.resolve()` + `is_relative_to()` 防止软链接/路径穿越
-- 用于前端预览/增量加载资源。详见 [result_delivery.md](result_delivery.md)
+- 用于前端预览/增量加载资源。
+
+#### 代码模式文件 API
+
+这些接口只访问 `task.output_dir/files/` 和根目录 `files-index.json`。`file_path` 会拒绝绝对路径、`.`、`..` 和空片段；保存接口只允许覆盖已存在文件，不允许通过 API 新建任意路径。
+
+- `GET /tasks/{task_id}/files-index`：返回 `files-index.json` 数组。没有代码模式产物、任务未完成或索引不存在时返回 404。
+- `GET /tasks/{task_id}/files/{file_path:path}`：返回 `text/plain; charset=utf-8` 源文件内容。
+- `PUT /tasks/{task_id}/files/{file_path:path}`：请求体 `{ "content": "..." }`，写回已有源文件，并更新索引中的 `line_count` / `line_no_range`。
+- `POST /tasks/{task_id}/code-diagnostics`：请求体 `{ "file_path": "src/a.cc", "content": "..." }`，在临时文件中调用 `diagnose_text()`，返回 `CodeDiagnosticResponse`。该接口不保存草稿内容，前端编辑态 debounce 调用它渲染实时诊断列表。
+
+`files-index.json` 中的 `diagnostic` 是当前行级标注事实源；旧字段 `compile_status`、`compile_failing_lines`、`compile_error` 仅用于兼容旧前端/历史产物。
 
 #### GET /api/v1/tasks/{task_id}/download — 下载结果 zip
 
@@ -379,6 +459,14 @@ doc-2/images/...
 - `cancel`：取消运行中的任务；非运行态返回 409
 - `retry`：将失败任务的 `image_dir / output_dir / config snapshot` 复制为新任务并启动，响应 `task_id` 为新任务 ID
 - `DELETE`：删除任务记录与产物目录；任务仍在运行时返回 409
+
+#### POST /api/v1/tasks/cleanup — 批量清理终态任务
+
+- 请求：`TaskCleanupRequest { statuses: list[str] }`，仅允许 `"completed"` / `"failed"`；
+  传入其他状态（如 `pending`/`processing`）或空数组 → 400（运行中的任务不可清理，安全兜底）
+- 响应：`TaskCleanupResponse { deleted: int, failed: int, deleted_ids: list[str], errors: list[str] }`
+- 实现：`TaskManager.cleanup_tasks` 合并内存 + DB 的目标集合后逐个调用 `delete_task`，
+  单个失败记入 `errors`（形如 `"<task_id>: <原因>"`）不影响其他条目
 
 #### GET /api/v1/filesystem/dirs — 服务器目录浏览
 
@@ -411,12 +499,18 @@ doc-2/images/...
 
 #### GET /api/v1/ocr/status — 查询当前 OCR 引擎状态
 
-- 返回 `OCRStatusResponse { current_model, current_gpu, is_ready, is_switching }`，字段直接来自 `EngineManager` 同名属性
+- 返回 `OCRStatusResponse { current_model, current_gpu, current_gpu_name, is_ready, is_switching }`，字段直接来自 `EngineManager` 同名属性；`current_gpu_name` 供前端展示可读型号
 - `app.state.engine_manager` 未挂载时返回 500（注入引擎或未启动 lifespan 的测试场景）
+
+#### GET /api/v1/gpus — 枚举可用 GPU + 推荐索引
+
+- 返回 `GPUListResponse { gpus: GPUInfoResponse[], recommended: str | None }`；`docrestore.ocr.gpu_detect.list_gpus()` 优先 pynvml、退回 `nvidia-smi`，结果进程级缓存
+- `recommended` 来自 `pick_best_gpu()`（优先 CUDA compute capability，其次空闲显存、总显存、索引升序）
+- 前端 TaskForm 挂载时调用；返回为空或接口失败时 UI 降级为"仅 '自动' 一项"
 
 #### POST /api/v1/ocr/warmup — 触发引擎预热
 
-- 请求 `OCRWarmupRequest { model, gpu_id }`，缺省值 `paddle-ocr/ppocr-v4 + GPU 1`
+- 请求 `OCRWarmupRequest { model, gpu_id }`；`gpu_id` 省略或传 `null` 时路由调 `pick_best_gpu()` 落地为具体物理索引再传给 `ensure()`
 - 响应 `{ status, message }`：
   - `ready`：当前引擎已就绪且 model/gpu_id 都匹配，立即返回
   - `switching`：`EngineManager._switch_lock` 被持有（其它请求触发的切换正在进行中）

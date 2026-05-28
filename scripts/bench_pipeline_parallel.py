@@ -243,7 +243,7 @@ async def main() -> None:
     parser.add_argument("--ocr-max-tokens", type=int, default=8192)
     parser.add_argument(
         "--llm-model",
-        default="openai/gemini-3.1-flash-lite-preview",
+        default="openai/gemini-3-flash-preview-nothinking",
     )
     parser.add_argument(
         "--llm-api-base", default="https://poloai.top/v1",

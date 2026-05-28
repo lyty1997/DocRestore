@@ -36,6 +36,7 @@ import pytest
 
 from docrestore.models import PipelineResult, TaskProgress
 from docrestore.persistence.database import TaskDatabase, TaskRow
+from docrestore.pipeline.config import CodeRestoreConfig
 from docrestore.pipeline.task_manager import Task, TaskManager, TaskStatus
 
 
@@ -122,6 +123,7 @@ class TestGetTaskAsync:
                 llm=None,
                 ocr=None,
                 pii=None,
+                code=None,
                 error="boom",
                 created_at="2026-04-08T10:00:00",
                 updated_at="2026-04-08T11:00:00",
@@ -352,6 +354,91 @@ class TestRetryTask:
         assert new.status is TaskStatus.PENDING
         assert new.image_dir == failed.image_dir
 
+    @pytest.mark.asyncio
+    async def test_retry_preserves_code_config(self) -> None:
+        mgr = _make_manager()
+        failed = Task(
+            task_id="failed-code",
+            status=TaskStatus.FAILED,
+            image_dir="/orig/imgs",
+            output_dir="/orig/out",
+            code=CodeRestoreConfig(enable=True, output_files_dir="src"),
+        )
+        mgr._tasks[failed.task_id] = failed
+
+        new = await mgr.retry_task(failed.task_id)
+
+        assert isinstance(new, Task)
+        assert new.code == failed.code
+
+    @pytest.mark.asyncio
+    async def test_retry_infers_legacy_code_mode_from_output(
+        self, tmp_path: Path,
+    ) -> None:
+        mgr = _make_manager()
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "files-index.json").write_text("[]", encoding="utf-8")
+        failed = Task(
+            task_id="legacy-code",
+            status=TaskStatus.FAILED,
+            image_dir="/orig/imgs",
+            output_dir=str(out),
+            code=None,
+        )
+        mgr._tasks[failed.task_id] = failed
+
+        new = await mgr.retry_task(failed.task_id)
+
+        assert isinstance(new, Task)
+        assert new.code is not None
+        assert new.code.enable is True
+
+
+class TestResumeTask:
+    """resume_task 保留 output_dir，并延续代码模式配置"""
+
+    @pytest.mark.asyncio
+    async def test_resume_preserves_code_config(self) -> None:
+        mgr = _make_manager()
+        failed = Task(
+            task_id="failed-code",
+            status=TaskStatus.FAILED,
+            image_dir="/orig/imgs",
+            output_dir="/orig/out",
+            code=CodeRestoreConfig(enable=True, output_files_dir="src"),
+        )
+        mgr._tasks[failed.task_id] = failed
+
+        new = await mgr.resume_task(failed.task_id)
+
+        assert isinstance(new, Task)
+        assert new.output_dir == failed.output_dir
+        assert new.code == failed.code
+
+    @pytest.mark.asyncio
+    async def test_resume_infers_legacy_code_mode_from_output(
+        self, tmp_path: Path,
+    ) -> None:
+        mgr = _make_manager()
+        out = tmp_path / "out"
+        (out / "files").mkdir(parents=True)
+        failed = Task(
+            task_id="legacy-code",
+            status=TaskStatus.FAILED,
+            image_dir="/orig/imgs",
+            output_dir=str(out),
+            code=None,
+        )
+        mgr._tasks[failed.task_id] = failed
+
+        new = await mgr.resume_task(failed.task_id)
+
+        assert isinstance(new, Task)
+        assert new.output_dir == failed.output_dir
+        assert new.code is not None
+        assert new.code.enable is True
+
 
 class TestListTasksInMemory:
     """无 DB 时从内存分页"""
@@ -402,6 +489,102 @@ class TestListTasksInMemory:
         assert only_failed.tasks[0].task_id == "b"
 
 
+class TestCollectReferencedImageDirs:
+    """collect_referenced_image_dirs：合并内存 + DB 的 image_dir。
+
+    upload 清理循环用这个集合跳过"仍被任务引用的 upload_dir"，修复
+    2026-04-23 的烂图预览 bug（task 复用 upload_dir，1h 后被 rmtree）。
+    """
+
+    @pytest.mark.asyncio
+    async def test_memory_only_when_no_db(self, tmp_path: Path) -> None:
+        mgr = _make_manager()
+        dir_a = str(tmp_path / "a")
+        dir_b = str(tmp_path / "b")
+        mgr._tasks["a"] = Task(
+            task_id="a", status=TaskStatus.COMPLETED,
+            image_dir=dir_a, output_dir="/",
+        )
+        mgr._tasks["b"] = Task(
+            task_id="b", status=TaskStatus.PROCESSING,
+            image_dir=dir_b, output_dir="/",
+        )
+        mgr._tasks["c"] = Task(
+            task_id="c", status=TaskStatus.FAILED,
+            image_dir="", output_dir="/",  # 空串应被过滤
+        )
+
+        dirs = await mgr.collect_referenced_image_dirs()
+        assert dirs == {dir_a, dir_b}
+
+    @pytest.mark.asyncio
+    async def test_merges_memory_and_db(self, tmp_path: Path) -> None:
+        from docrestore.persistence.database import (
+            TaskListItem as DBTaskListItem,
+        )
+        from docrestore.persistence.database import TaskListResult
+
+        db = MagicMock(spec=TaskDatabase)
+        dir_mem = str(tmp_path / "mem-only")
+        dir_db = str(tmp_path / "from-db")
+
+        def _fake_list(
+            status: str,
+            page: int,
+            page_size: int,
+        ) -> TaskListResult:
+            # db 里再多一个 dir_db 的已完成任务
+            if status == "completed" and page == 1:
+                return TaskListResult(
+                    tasks=[
+                        DBTaskListItem(
+                            task_id="db1",
+                            status="completed",
+                            image_dir=dir_db,
+                            output_dir="/",
+                            error=None,
+                            created_at="2026-04-23T00:00:00",
+                            result_count=1,
+                        ),
+                    ],
+                    total=1,
+                    page=1,
+                    page_size=page_size,
+                )
+            return TaskListResult(
+                tasks=[], total=0, page=page, page_size=page_size,
+            )
+
+        db.list_tasks = AsyncMock(side_effect=_fake_list)
+
+        mgr = _make_manager(db=db)
+        mgr._tasks["mem1"] = Task(
+            task_id="mem1", status=TaskStatus.PROCESSING,
+            image_dir=dir_mem, output_dir="/",
+        )
+
+        dirs = await mgr.collect_referenced_image_dirs()
+        assert dirs == {dir_mem, dir_db}
+
+    @pytest.mark.asyncio
+    async def test_db_exception_does_not_break(
+        self, tmp_path: Path,
+    ) -> None:
+        """DB 故障时只从内存收集，保守返回；不让 cleanup 崩。"""
+        db = MagicMock(spec=TaskDatabase)
+        db.list_tasks = AsyncMock(side_effect=RuntimeError("db down"))
+
+        dir_m = str(tmp_path / "m")
+        mgr = _make_manager(db=db)
+        mgr._tasks["m"] = Task(
+            task_id="m", status=TaskStatus.COMPLETED,
+            image_dir=dir_m, output_dir="/",
+        )
+
+        dirs = await mgr.collect_referenced_image_dirs()
+        assert dirs == {dir_m}
+
+
 class TestProgressPubSub:
     """进度发布/订阅"""
 
@@ -445,3 +628,64 @@ class TestProgressPubSub:
         # 只保留最新
         assert got.current in {1, 5}
         assert q.empty()
+
+
+class TestShutdown:
+    """TaskManager.shutdown：cancel 所有运行中任务。"""
+
+    @pytest.mark.asyncio
+    async def test_shutdown_cancels_pending_running_tasks(self) -> None:
+        """挂起的运行中任务被 cancel，shutdown 完成后清空注册表。"""
+        mgr = _make_manager()
+
+        task_done_events: list[asyncio.Event] = []
+
+        async def hang_forever() -> None:
+            done = asyncio.Event()
+            task_done_events.append(done)
+            try:
+                await asyncio.Future()  # 永远挂起
+            except asyncio.CancelledError:
+                done.set()
+                raise
+
+        bg1 = asyncio.create_task(hang_forever(), name="task1")
+        bg2 = asyncio.create_task(hang_forever(), name="task2")
+        mgr.register_running_task("tid1", bg1)
+        mgr.register_running_task("tid2", bg2)
+
+        # 让挂起任务先 schedule
+        await asyncio.sleep(0)
+        assert len(task_done_events) == 2
+        assert all(not e.is_set() for e in task_done_events)
+
+        await mgr.shutdown()
+
+        # 两个任务都被 cancel 并走到 CancelledError 分支
+        assert all(e.is_set() for e in task_done_events)
+        assert bg1.done()
+        assert bg2.done()
+        assert mgr._running_tasks == {}  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_shutdown_noop_when_no_running_tasks(self) -> None:
+        """没有运行中任务时 shutdown 快速返回。"""
+        mgr = _make_manager()
+        # 不注册任何任务，直接 shutdown 应立即返回
+        await mgr.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_swallows_task_exceptions(self) -> None:
+        """任务抛非 CancelledError 异常时 shutdown 只记录不重抛。"""
+        mgr = _make_manager()
+
+        async def raise_runtime() -> None:
+            raise RuntimeError("boom")
+
+        bg = asyncio.create_task(raise_runtime(), name="err-task")
+        mgr.register_running_task("err", bg)
+        await asyncio.sleep(0)  # 让任务产生异常
+
+        # shutdown 不应把 RuntimeError 抛出来
+        await mgr.shutdown()
+        assert bg.done()

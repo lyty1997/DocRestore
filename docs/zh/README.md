@@ -21,11 +21,22 @@ limitations under the License.
 DocRestore 将连续拍摄的文档照片还原为格式化的 Markdown 文档（含插图）。
 
 核心能力：
-- OCR 识别（DeepSeek-OCR-2 / PaddleOCR）
+- OCR 识别（PaddleOCR / DeepSeek-OCR-2）
 - 相邻页去重合并
 - LLM 精修（云端/本地）
 - PII 脱敏（可选）
 - Web 界面与 REST API
+- 代码模式：IDE 代码照片还原为源文件，支持来源图片联动、轻量诊断和人工编辑保存
+
+## 当前事实源
+
+为避免历史方案影响代码开发，按下面优先级读取文档：
+
+1. 当前实现事实源：`architecture.md`、`backend/*.md`、`frontend/*.md`、`deployment.md`。
+2. 迭代状态与经验沉淀：`progress.md`、`known-issues.md`。
+3. 历史设计与评估：`backend/references/*.md`。这些文件可解释设计来源，但其中的“待实施”“后续”不一定仍成立，开发前必须回到当前模块文档和代码确认。
+
+当前代码模式实现以 `backend/processing.md`、`backend/api.md`、`frontend/features.md` 和代码本身为准；代码模式布局识别的设计决策由来（v1→v2→v3 反转、行号锚点、多数据集鲁棒性结论）已凝练进 `backend/processing.md` §3.6，更早的逐数据集统计可从 git 历史检索。
 
 ## 文档结构
 
@@ -34,6 +45,7 @@ docs/zh/
 ├── README.md                    # 本文件（文档索引）
 ├── architecture.md              # 系统架构总览
 ├── deployment.md                # 部署与环境配置
+├── known-issues.md              # 已知问题与可复用处理策略
 ├── progress.md                  # 开发进度记录
 ├── backend/                     # 后端文档
 │   ├── README.md                # 后端架构总览
@@ -44,9 +56,10 @@ docs/zh/
 │   ├── privacy.md               # PII 脱敏
 │   ├── pipeline.md              # Pipeline 编排
 │   ├── api.md                   # REST API
-│   └── references/              # 参考文档
+│   └── references/              # 历史/专题参考文档
 │       ├── deepseek-ocr2.md     # DeepSeek-OCR-2 参考
-│       └── streaming-pipeline.md # 流式并行设计（待实施）
+│       ├── streaming-pipeline.md # 流式并行设计记录
+│       └── pipeline-parallel.md # Pipeline 并行设计记录
 └── frontend/                    # 前端文档
     ├── README.md                # 前端架构总览
     ├── tech-stack.md            # 技术栈与工程规范
@@ -75,6 +88,7 @@ docs/zh/
 
 ### 参考资料
 - [DeepSeek-OCR-2 参考](backend/references/deepseek-ocr2.md)
+- [已知问题](known-issues.md)
 - [开发进度](progress.md)
 
 ## 文档维护规则
@@ -83,3 +97,4 @@ docs/zh/
 - 接口变更：必须同步更新 `data-models.md` 和相关模块文档
 - 新增功能：在 `progress.md` 记录，完成后更新对应模块文档
 - 设计决策：记录在对应模块文档的"设计决策"章节
+- AGE / references 文档若与当前模块文档冲突，以当前模块文档和代码为准；必要时在索引或模块文档中标明历史状态

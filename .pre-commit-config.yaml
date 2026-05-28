@@ -5,13 +5,15 @@ repos:
         name: mypy --strict
         entry: mypy --strict
         language: system
+        files: ^(backend|tests|scripts)/.*\.py$
         types: [python]
         pass_filenames: true
 
       - id: ruff-check
         name: ruff check
-        entry: ruff check --select E,F,W,B,C4,C90,UP,T20,ARG,RET,S,ASYNC,SIM105,PT --ignore RUF001,RUF002,RUF003
+        entry: ruff check
         language: system
+        files: ^(backend|tests|scripts)/.*\.py$
         types: [python]
         pass_filenames: true
 
@@ -19,5 +21,19 @@ repos:
         name: typos
         entry: /usr/local/bin/typos/typos
         language: system
-        types: [python]
+        files: ^(backend|tests|scripts|frontend|docs)/.*|^(AGENTS\.md|README\.md|README\.en\.md|pyproject\.toml)$
         pass_filenames: true
+
+      - id: frontend-tsc
+        name: frontend typecheck
+        entry: npm --prefix frontend run typecheck
+        language: system
+        files: ^frontend/.*\.(ts|tsx|js|jsx|json)$
+        pass_filenames: false
+
+      - id: frontend-eslint
+        name: frontend eslint
+        entry: npm --prefix frontend run lint
+        language: system
+        files: ^frontend/.*\.(ts|tsx|js|jsx)$
+        pass_filenames: false

@@ -24,8 +24,10 @@ from __future__ import annotations
 import hmac
 import logging
 
-from fastapi import Depends, HTTPException, Query, status
+from fastapi import Depends, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+from docrestore.api.errors import APIErrorCode, ApiBusinessError
 
 logger = logging.getLogger(__name__)
 
@@ -78,9 +80,10 @@ async def require_auth(
         provided = token_query
 
     if provided is None or not _constant_time_equal(provided, _API_TOKEN):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"code": "UNAUTHORIZED", "message": "缺少或无效的 API Token"},
+        raise ApiBusinessError(
+            APIErrorCode.UNAUTHORIZED,
+            status.HTTP_401_UNAUTHORIZED,
+            "缺少或无效的 API Token",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -101,7 +104,8 @@ async def require_auth_ws(
     if token is None or not _constant_time_equal(token, _API_TOKEN):
         # FastAPI WS Depends 在 accept() 之前执行，
         # 抛出 HTTPException 会导致握手被拒绝（HTTP 403）
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"code": "UNAUTHORIZED", "message": "缺少或无效的 API Token"},
+        raise ApiBusinessError(
+            APIErrorCode.UNAUTHORIZED,
+            status.HTTP_401_UNAUTHORIZED,
+            "缺少或无效的 API Token",
         )

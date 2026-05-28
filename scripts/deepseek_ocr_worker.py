@@ -50,8 +50,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _send(data: dict[str, object]) -> None:
-    """向 stdout 写一行 JSON。"""
+def _send(data: dict[str, object], *, seq: object = None) -> None:
+    """向 stdout 写一行 JSON；seq 非空时注入 `seq` 字段以便主进程对齐响应。"""
+    if seq is not None and "seq" not in data:
+        data = {**data, "seq": seq}
     sys.stdout.write(json.dumps(data, ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
@@ -756,14 +758,15 @@ def main() -> None:
                 break
 
             cmd = request.get("cmd", "")
+            seq = request.get("seq")
 
             if cmd == "initialize":
                 config = {
-                    k: v for k, v in request.items() if k != "cmd"
+                    k: v for k, v in request.items() if k not in ("cmd", "seq")
                 }
                 _send(loop.run_until_complete(
                     worker.handle_initialize(config)
-                ))
+                ), seq=seq)
             elif cmd == "ocr":
                 _send(loop.run_until_complete(
                     worker.handle_ocr(
@@ -776,7 +779,7 @@ def main() -> None:
                             str(request.get("column_filter_min_sidebar", 5))
                         ),
                     )
-                ))
+                ), seq=seq)
             elif cmd == "ocr_batch":
                 image_paths_raw = request.get("image_paths", [])
                 image_paths: list[str]
@@ -795,18 +798,18 @@ def main() -> None:
                             str(request.get("column_filter_min_sidebar", 5))
                         ),
                     )
-                ))
+                ), seq=seq)
             elif cmd == "reocr_page":
                 _send(loop.run_until_complete(
                     worker.handle_reocr_page(
                         image_path=str(request.get("image_path", "")),
                     )
-                ))
+                ), seq=seq)
             elif cmd == "shutdown":
-                _send(loop.run_until_complete(worker.handle_shutdown()))
+                _send(loop.run_until_complete(worker.handle_shutdown()), seq=seq)
                 break
             else:
-                _send({"ok": False, "error": f"未知命令: {cmd}"})
+                _send({"ok": False, "error": f"未知命令: {cmd}"}, seq=seq)
     finally:
         loop.close()
 

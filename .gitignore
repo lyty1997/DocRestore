@@ -7,8 +7,9 @@ vendor/
 # 模型权重
 models/
 
-# 测试输出目录
-output/
+# 测试输出目录（仅根目录下的 output/；不影响 backend/docrestore/output/
+# 这个源码模块，否则 renderer.py 等永远 untracked）
+/output/
 test_images/*_OCR
 test_images/linux_sdk
 
@@ -30,12 +31,10 @@ build/
 .ruff_cache/
 .pytest_cache/
 
-# claude环境
-.claude/
-CLAUDE.md
-
-# 项目进度
-docs/progress.md
+# claude 本地密钥（中转站 token，禁止入库）
+.claude/*.env
+# claude 自带默认 skill 包（任意安装可复现，无需入库）
+.claude/skills/
 
 # playwright
 node_modules/
@@ -48,3 +47,25 @@ package.json
 data/
 screenshots/
 test_images/TMedia_source_code
+
+# 运行时日志
+logs/
+
+# 本地调试输出（OCR 截图等）
+debug_image/
+
+# 并行测试数据集（含 symlink 形式，所以不加尾斜杠以匹配文件和目录）
+test_images/parallel_test
+test_images/ide_code_sample
+
+# 裁剪对比测试数据（局部生成，按 CLAUDE.md 测试规则不入库）
+test_images/crop_compare/
+
+# 个人调试笔记，避免误入库
+项目经验.md
+
+# Pipeline 生成的 OCR 预览图，按需重新生成，不入库
+outputs/preview/
+
+# 测试图片
+test_images/PPT

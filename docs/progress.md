@@ -16,6 +16,1184 @@ limitations under the License.
 
 # DocRestore 开发进度
 
+## 2026-05-11 流式分段避开跨页重叠区
+
+时间：2026-05-11 13:36:12 CST
+
+主题：避免把跨页拍照重叠字段拆给不同 LLM 请求，降低段级精修误判整页重复的概率。
+
+完成内容：
+- 明确云端 KV/prompt cache 不能作为跨请求正文记忆使用；重复判断必须让重复对出现在同一次 LLM 输入里。
+- 调整 `StreamSegmentExtractor`：
+  - 不再把 `<!-- page: ... -->` 作为优先切点。
+  - page marker 前后 600 字符内不切段，避免把“前页末尾 + 后页开头”的重叠对拆开。
+  - 如果当前窗口只有 page marker 高风险区，则返回 `None` 等待更多 OCR 文本；只有无 page marker 风险时才按旧逻辑强制切。
+- 更新 `tests/processing/test_stream_segmenter.py` 覆盖：
+  - page marker 高风险区内不切，等待更多文本。
+  - 文本足够后切到 marker 风险区之后，并保证 marker 留在同一段输入中。
+
+验证：
+- `python -m pytest -q tests/processing/test_stream_segmenter.py tests/pipeline/test_selective_rerun.py tests/llm/test_prompts.py`：55 passed。
+- `ruff check backend/docrestore/processing/segmenter.py tests/processing/test_stream_segmenter.py backend/docrestore/pipeline/pipeline.py backend/docrestore/llm/prompts.py tests/pipeline/test_selective_rerun.py`：通过。
+
+遗留问题：
+- 该策略会让某些段略长，可能增加单段 LLM 延迟；但相比跨请求误删有效内容，这是可接受的保守取舍。
+- 若连续多页都在很短间隔内出现 page marker，可能需要后续增加“最大等待字符数”护栏；当前先按实际拍照重叠场景收窄处理。
+
+## 2026-05-10 LLM 短段截断无法二分恢复
+
+时间：2026-05-10 22:37:30 CST
+
+主题：处理任务日志中 `RateController cold start timeout` 与 `段 2 截断但无法继续二分（input=914 字符）` 现场，补齐短段截断恢复路径。
+
+完成内容：
+- 确认 `RateController cold start timeout (60.0s), samples=1` 是多子目录 warmup 采样不足后的保守段长 fallback，不会中断任务。
+- 修复短段截断路径：当段落被判定截断但低于二分安全下限时，先带 `retry_hint` 对同一输入重试一次；重试成功则采用重试结果，重试仍截断或异常才回退原文。
+- 保留原有长段递归二分策略与“截断输出不进入最终文档”的安全策略。
+- 新增 `docs/zh/known-issues.md`，沉淀短段截断无法二分的现象与处理策略。
+- 新增/更新 `tests/pipeline/test_selective_rerun.py` 覆盖短段重试恢复和重试仍截断回退。
+- 复查 `test_images/crop_compare/AI子系统-裁剪/Linux_AI子系统_开发指南`：
+  - 视觉对照 `page07966.JPG` / `page07967.JPG` 确认二者是拍照重叠页，不是整页重复。
+  - 定位到 `seg_0b8cd2de12a092b74adbf7ec734f2725.json` 段级 LLM 缓存已把 `page07966.JPG` 替换成 `<!-- 本页内容与上一页完全重复，已去除 -->`，说明误删发生在段级精修阶段。
+  - 更新 refine/final_refine prompt：HTML `<img src="...">` 与 Markdown 图片占位符同等保留；禁止用“本页重复已去除”注释替代页面。
+  - 新增段级防护 `_maybe_retry_refine_on_page_drop()`：检测整页误删注释后带提示重试，仍失败则回退原段并标记 `truncated=True`，防止坏输出写入缓存。
+
+验证：
+- `python -m pytest -q tests/pipeline/test_selective_rerun.py`：27 passed。
+- `python -m pytest -q tests/pipeline/test_truncation.py tests/pipeline/test_selective_rerun.py`：27 passed, 11 skipped。
+- `ruff check backend/docrestore/pipeline/pipeline.py tests/pipeline/test_selective_rerun.py`：通过。
+- `python -m pytest -q tests/pipeline/test_selective_rerun.py tests/llm/test_prompts.py`：42 passed。
+- `ruff check backend/docrestore/pipeline/pipeline.py backend/docrestore/llm/prompts.py tests/pipeline/test_selective_rerun.py`：通过。
+
+遗留问题：
+- 本次未重跑真实 OCR/LLM 端到端任务；真实 provider 若持续对短段返回 `finish_reason=length`，最终仍会按安全策略回退原文并保留告警。
+- 新 prompt 会让 LLM 段级缓存 key 变化，后续重跑不会命中本次问题中的旧坏缓存；但 `/tmp/docrestore_10c60875/.../.llm_cache/seg_0b8...json` 作为历史产物仍保留旧内容。
+
+## 2026-05-08 GPU 自动选卡策略回归修复
+
+主题：对比 OCR/GPU 相关历史 diff，定位默认预热从 GPU1 跑偏到 A2 的回归来源，并修正自动推荐策略。
+
+完成内容：
+- 对比提交 `267374c feat(core): 流式 Pipeline v2 + GPU 自动探测 + 断点续跑 + 部分失败可见`：
+  - 该提交将 `OCRConfig.gpu_id` 从默认 `"1"` 改成 `None`。
+  - `scripts/start.sh` 同时将 `PPOCR_GPU_ID` 默认 `"1"` 改成空，未显式指定时不再固定 4070。
+  - `pick_best_gpu()` 原策略按 `memory_total_mb DESC`，当前 A2 总显存 15GB 大于 4070 SUPER 12GB，因此默认预热会选 GPU0/A2。
+- 修复 `backend/docrestore/ocr/gpu_detect.py::pick_best_gpu()`：
+  - 自动推荐改为优先 CUDA compute capability，其次空闲显存、总显存、索引升序。
+  - 显式 `gpu_id`、前端下拉选择、`PPOCR_GPU_ID` 仍完全优先生效。
+- 新增 `tests/ocr/test_gpu_detect.py` 覆盖：
+  - A2(8.6/15GB) + 4070 SUPER(8.9/12GB) 时自动推荐 GPU1。
+  - 同架构设备按空闲显存选择。
+  - 完全同规格时按索引升序稳定选择。
+- 同步 zh/en 文档中 GPU 推荐策略说明，去掉“显存最大”旧描述。
+
+验证：
+- `conda run -n docrestore python -m pytest -q tests/ocr/test_gpu_detect.py`：3 passed。
+- `conda run -n docrestore python -m pytest -q tests/test_config.py`：41 passed。
+- `conda run -n docrestore ruff check backend/docrestore/ocr/gpu_detect.py tests/ocr/test_gpu_detect.py`：通过。
+- 手工调用 `pick_best_gpu([A2, 4070 SUPER])` 返回 `"1"`。
+
+遗留问题：
+- `tests/api/test_ocr_endpoints.py` 本次单独运行超过 45s 无输出，已终止；此前与本次改动直接相关的 `gpu_detect` 策略测试已覆盖。
+- 当前机器 NVML/CUDA 仍有独立故障：`nvidia-smi` 对 GPU0 报 Unknown Error，PyTorch 在 OCR conda 环境中 `CUDA_VISIBLE_DEVICES=1` 仍可能初始化失败。策略修复能避免默认再主动选 A2，但不能替代系统层 GPU/驱动修复。
+
+## 2026-05-08 OCR 引擎切换真实启动验证
+
+主题：真实启动后端，验证 OCR 引擎/GPU 预加载切换是否能落到后端与 GPU 初始化。
+
+完成内容：
+- 启动 `bash scripts/start.sh backend`，后端正常完成 lifespan startup。
+- 调用 `GET /api/v1/gpus` 成功枚举两张 GPU：
+  - GPU 0：NVIDIA A2，15356 MB，总显存最大，被后端推荐为 `recommended="0"`。
+  - GPU 1：NVIDIA GeForce RTX 4070 SUPER，12282 MB。
+- 默认 PaddleOCR-VL 预热尝试启动 ppocr-server，但 vLLM 初始化失败；`/ocr/status` 回到空闲态。
+- 显式调用 `POST /api/v1/ocr/warmup`：
+  - `{"model":"paddle-ocr/ppocr-v4","gpu_id":"1"}` 返回 `accepted`，说明后端收到目标 GPU，但 ppocr-server 仍失败。
+  - `{"model":"deepseek/ocr-2","gpu_id":"1"}` 返回 `accepted`，但 DeepSeek worker 初始化失败。
+- 在 `deepseek_ocr` 与 `ppocr_vlm` 环境中执行 `CUDA_VISIBLE_DEVICES=1` 的 PyTorch 探测，均得到 `torch.cuda.device_count() == 0`，并出现 `Can't initialize NVML / CUDA unknown error`。
+- 后端已优雅停止，未发现 ppocr-server / worker / uvicorn 残留。
+
+结论：
+- 前端/API 层的 OCR 引擎与 GPU 切换请求能到达后端；当前真实启动失败不是“切换不生效”，而是系统 GPU/NVML 层异常。
+- 关键现场：`nvidia-smi` 现在对物理 GPU0 报 `Unable to determine the device handle ... Unknown Error`，即使设置 `CUDA_VISIBLE_DEVICES=1`，PyTorch 仍无法初始化 CUDA。
+
+遗留问题：
+- 需要先恢复 NVIDIA 驱动/NVML 对 GPU0 的正常访问，或从系统层屏蔽故障 GPU0；否则 PaddleOCR-VL 与 DeepSeek-OCR-2 都无法真实初始化。
+- GPU 恢复后建议重跑：`GET /gpus` → 显式 warmup GPU 1 → 切回 GPU 0 或自动 → 观察 `/ocr/status.current_gpu` 与 `EngineManager.ensure()` 日志。
+
+## 2026-05-07 预加载引擎 GPU 切换修复
+
+主题：修复前端任务表单中 OCR 预加载在切换 GPU 时可能不生效或状态误判的问题。
+
+完成内容：
+- `frontend/src/components/TaskForm.tsx`：
+  - 预加载轮询绑定当前 `{model, gpuId}` 目标，切换 OCR 引擎或 GPU 时立即停止旧轮询，避免旧目标把新选择误标为“已就绪”。
+  - 当 `/ocr/warmup` 返回 `switching` 时，前端会继续轮询；待后端不再切换且目标仍未就绪时，自动重发当前目标的 warmup 请求，避免后端正在切换期间吞掉用户新选 GPU。
+  - 轮询超时从 60s 调整到 120s，匹配 PaddleOCR-VL 冷启动可能超过 60s 的实际情况；超时后将当前目标标记为错误，避免按钮长期卡在“加载中”。
+- `frontend/src/App.css`：
+  - OCR 引擎 / GPU / 预加载状态区域改为响应式 grid，小宽度下状态文字不再被按钮和下拉框挤压。
+
+验证：
+- `npm run typecheck`：通过。
+- `npm run lint`：通过（仅保留 ESLint 多 tsconfig 性能提示）。
+- Playwright 模拟：第一次 `/ocr/warmup` 返回 `switching`，后端空闲后前端第二次 POST 仍携带 `gpu_id: "0"`，最终状态显示“已就绪”。
+- 视觉验证：`scripts/screenshot.js` 当前不存在，改用 Playwright 保存并查看 `screenshots/current.png`，未发现 OCR/GPU/预加载区域文字挤压。
+
+遗留问题：未接入真实多 GPU OCR 进程验证，当前验证基于前端路由模拟；真实机器上仍需观察后端 `EngineManager.ensure()` 日志确认物理 GPU 切换耗时与状态一致。
+
+## 2026-05-07 Codex MCP 服务迁移配置
+
+主题：将此前 Claude Code 中已安装的 `chrome-devtools`、`context7`、`playwright`
+MCP 服务迁移到 Codex 全局配置。
+
+完成内容：
+- 从 `/home/lyty/.claude.json` 中定位 Claude Code 的 `mcpServers` 配置，确认
+  三个服务均为 stdio 模式，启动命令通过 `npx` 执行。
+- 使用 `codex mcp add` 写入 Codex 全局配置，新增服务名保持为
+  `chrome-devtools`、`context7`、`playwright`。
+- 运行 `codex mcp list` 验证 Codex 已列出新增服务，状态均为 `enabled`；
+  原有 `pencil` 服务保持不变。
+
+遗留问题：当前会话已经启动，新增 MCP 工具通常需要重启 Codex 会话后才会注入到
+可用工具列表。
+
+## 2026-04-27 英文文档全量同步（zh → en，补 zh-only + 重译 streaming-pipeline）
+
+主题：把 4-15 ~ 4-25 累积的 zh-only 文档与 4-22 大改的 streaming-pipeline 同步到
+`docs/en/`，让英文目录与中文目录达到结构一致。
+
+完成内容：
+- 顶层 `docs/README.md` 索引修正：补 `progress.md` 真实位置（在 `docs/progress.md`，
+  不是 zh 子目录）；补全 `references/` 子目录列表；新增 age-8-* /
+  performance_toolkit / pipeline-parallel 列表项
+- 翻译 4 篇 zh-only 文档（结构 1:1，标题节点数 zh==en 全等）：
+  - `docs/en/backend/age-8-ide-code.md`：339 行（zh 338）
+  - `docs/en/backend/age-8-robustness-report.md`：227 行（zh 235）
+  - `docs/en/backend/performance_toolkit.md`：394 行（zh 393，含 license header）
+  - `docs/en/backend/references/pipeline-parallel.md`：553 行（zh 494，英文行更长）
+- 全量重译 `docs/en/backend/references/streaming-pipeline.md` 至 824 行（zh 786）：
+  - 老版 4-16 还包含已删的 DocumentState / `_handle_refined_result` /
+    `_split_refined_at_boundary` / `_finalize_document` / `_move_to_root`
+  - 新版按 4-22 zh 结构重排：4.3 DocumentState (Removed) / 5.4 RateController
+    切段精修 / 5.5 _finalize_single_doc / 5.6 RateController / 5.7 process_tree
+    Parallel Branch (Warmup Cold Start) / 7. PipelineResult Temporary Sorting
+    Field (Removed)
+- ASCII 时序图里残留的中文标注做了二次补译（gpu_lock 锁等待图、performance
+  data flow 图、`logger.warning` 日志样本、NullProfiler/MemoryProfiler docstring）
+- 已确认保留的中文：NAS 路径里的中文段（`Linux系统/视频子系统/...`）/
+  Linear URL slug（`ide-代码照片-源文件还原`）/ 真实代码里的 Chinese exception
+  消息和 pytest skip reason —— 翻译这些会让样例与生产代码漂移
+- 同行数 zh/en 对（architecture / deployment / backend README / api / data-models
+  / pipeline / processing / llm / privacy / ocr / frontend 三件 / deepseek-ocr2）
+  4-22 已统一同步过，本次确认无漂移
+
+兼容性：英文目录从 9 篇扩到 13 篇（+age-8-ide-code, age-8-robustness-report,
+performance_toolkit, references/pipeline-parallel），结构与中文 1:1。
+
+遗留问题：无（zh ↔ en 文档对达成结构一致；下一次 zh 新增/重构时按本次链路补 en 即可）
+
+
+
+主题：把"后端 HTTPException 中文 detail → 前端 setError(中文)"这条
+绕过 i18n 的硬编码链路全部改成"后端给 code + 前端按 code 翻译"。
+
+背景：i18n 系统级策略本身设计良好（zh-CN 真相源 + Record 严格 + 三层
+fallback + 占位符），但只在 JSX 层贯彻。后端 60+ 处 raise HTTPException
+直接塞中文 detail，前端 hook / api 层（不在组件树，不能 useTranslation）
+也大量 setError("中文 fallback")。结果：英文版 UI 触发任何错误时仍显示
+中文，i18n 形同虚设。
+
+完成内容：
+
+后端
+- 新增 backend/docrestore/api/errors.py：
+  - APIErrorCode(StrEnum) 列举 33 个业务错误码（TASK_NOT_FOUND /
+    UPLOAD_SESSION_NOT_FOUND / STAGE_PATH_NOT_ABSOLUTE / FILES_INDEX_PARSE_ERROR
+    / TASK_ACTION_CONFLICT 等）
+  - ApiBusinessError(HTTPException) 携带 code + params；detail 保留中文做
+    log/调试 fallback
+  - api_business_error_handler 把响应体扩成 {code, detail, params}
+- app.py 注册 exception_handler；auth / routes / upload 共 60+ 处 raise
+  替换为 ApiBusinessError(code, status, detail, params=...)
+- 测试：tests/api/test_auth.py 更新断言（顶层 code，body 含 params）；
+  pytest tests/ 不含 e2e 880 passed / 73 skipped
+
+前端
+- api/client.ts ApiError 重构：
+  - 新增 code / params / messageKey / hintKey 字段；保留 message 中文
+    fallback 给 console.error
+  - handleResponse 解析 ApiBusinessError 响应体（code/detail/params）；
+    hintForStatus 改返回 i18n key（errors.http.413/504/5xx）
+  - uploadFiles 网络层失败改 messageKey + hintKey 而非中文长串
+- 新增 i18n/errors.ts 工具：
+  - LocalizedError 类型 = { key, params?, hintKey?, hintParams?, fallback? }
+  - fromApiError / fromUnknown / localized / renderLocalized 四个 helper
+  - 渲染策略：t() 命中 → 翻译；返回 key 字面量且有 fallback → 用 fallback；
+    都失败 → key 字面量；hintKey 存在时主信息 + hint 用 \n 拼接
+- i18n 三语补 50+ 个键：errors.api.* 与后端 APIErrorCode 一一对应；
+  errors.http.* 是状态诊断；errors.client.* 是客户端层；
+  errors.task.* / errors.upload.* 是 hook fallback；errors.unknown 兜底
+- hook 改造：useFileUpload / useTaskRunner 的 error 类型从 string 改为
+  LocalizedError | undefined；setError 全部走 fromUnknown / localized /
+  显式构造对象（任务失败 reason 走 errors.task.runFailedWithReason）
+- 组件 App.tsx / FileUploader.tsx 用 renderLocalized(error, t) 渲染
+- 新增 tests/errors.test.ts 13 用例覆盖四个 helper 各分支；vitest 50 passed
+
+兼容性：后端 detail 中文字段保留 → 旧客户端不识别 code 时仍显示原文；
+前端 ApiError.message 也保留中文 fallback 给 console.error 调试。
+
+遗留问题：无（全栈错误链路已 i18n 化；新增业务错误时按 errors.api.<code>
+约定加 zh-CN 字典即可，en/zh-TW 因 Record<TranslationKey,string> 严格匹配
+会强制补齐）
+
+## 2026-04-27 前端透出本地 LLM provider 选择
+
+主题：本地 LLM 后端早已实现（`LocalLLMRefiner` + `LLMConfig.provider`），但
+前端 `LLMConfigRequest` / `TaskForm` 没有透出 provider 字段，用户没法在 UI
+上选择"云端 / 本地"，只能改后端 yaml。补齐这块。
+
+完成内容：
+- `backend/docrestore/api/schemas.py::LLMConfigRequest` 新增
+  `provider: Literal["cloud", "local"] | None`，非法值会被 422 拒绝；路由
+  `model_copy(update=...)` 自动透传到 `LLMConfig.provider`，
+  `Pipeline._create_refiner` 既有分支无需改动
+- `frontend/src/components/TaskForm.tsx`：
+  - `LLMConfig` 接口加 `provider` 字段；新增 `LLMProvider` 类型 +
+    `DEFAULT_LLM_PROVIDER="cloud"` + `normalizeProvider()` 收窄旧 localStorage
+    数据
+  - LLM 区域顶部新增"云端 API / 本地服务"radio + 动态 hint（描述本地模式
+    PII 行为差异）
+  - localStorage `StoredLLMConfig` 加上 `provider` 持久化
+  - `handleSubmit` 仅在 provider 非默认值时才透传，避免污染默认请求
+- `frontend/src/App.css`：补 `.llm-provider-field/.llm-provider-options/
+  .llm-provider-option(--active)/.llm-provider-hint` 样式
+- 三语 i18n（zh-CN / zh-TW / en）补 `taskForm.providerLabel /
+  provider_cloud / provider_local / providerHint_cloud / providerHint_local`
+- 验证：mypy --strict / ruff / `pytest tests/test_config.py
+  tests/llm/test_local.py tests/llm/test_model_normalize.py`(53)/
+  `tests/api/test_routes.py`(14) 全绿；前端 tsc / eslint / vitest 37 个全绿
+- 文档批量补齐 LLM 接入说明（与代码同批落地）：
+  - `README.md` / `README.en.md`：「配置」节拆 cloud / local 两段，列
+    ollama / vLLM / llama.cpp 启动样例 + api_base；REST API cURL 增加传
+    `llm.provider` 的云端 / 本地两份示例 + `openai/` 前缀注意事项
+  - `docs/zh/deployment.md` / `docs/en/deployment.md` §3.4 + §4.4：扩为
+    `LLMConfig` 字段表 + cloud / ollama / vLLM 三段 yaml 范例，明确本地
+    模式跳过 LLM 实体识别只走 regex 的 PII 行为差异
+
+遗留问题：无（本地 LLM 端到端已可在 UI 直选；云端模式行为与历史完全一致）
+
+## 2026-04-27 代码模式归类 4 类回归修复（page06953/07050/06873 + UI 滚动）
+
+主题：跑 211 张 示例 IDE 截图后发现 4 个归类/UI bug，逐一修复
++ 补单测/playwright 截图验证。
+
+### #1 page06953 / page07002 col0 误归到 gles2_dmabuf_to_egl_image_translator.cc
+
+- 现象：本应归到 ``widget_decode_helper.cc`` 的 col0，被错
+  归到同 col0 但完全不同的 gles2 文件
+- 根因：col0 breadcrumb OCR 拆成多 bbox（``widget_`` + ``_video_decode_
+  accelerator.cc``），单段不含 ``>`` → ``_split_lines_by_kind`` 把它当
+  tab；``_pick_best_tab_filename`` 在 tab bar 同时显示 .cc tab、谁也
+  没 ``×`` 时退回 "y 最小者优先"，命中 gles2
+- 修复（``ide_meta_extract.py``）：
+  - ``_detect_breadcrumb_band``：以含 ``>`` 行的 y 范围定义 breadcrumb
+    带，同 y 带的所有片段都视为 breadcrumb（即使无 ``>``）
+  - ``_stitch_breadcrumb_fragments``：按 x 排序拼接，相邻 bbox 重叠时用
+    ``_dedup_overlap_boundary`` 去重首尾共享字符 1-8 个
+  - 拼接后走单行 ``_parse_breadcrumb`` —— ``widget_`` 与 ``_video_
+    decode_accelerator.cc`` 在 ``_`` 处共享，去重后还原完整 filename
+  - 兜底：``_pick_best_tab_filename`` 加 ``hint_lines`` 参数，无 ``×``
+    标记时用 breadcrumb-row 片段 suffix-match 消歧 tab 候选
+
+### #3 page07050 col0 出现幽灵 _decode_accelerator.cc
+
+- 现象：1 page、24 行的 ``_decode_accelerator.cc`` 是不存在的文件
+- 根因：page07050 col0 breadcrumb 含 ``_decode_accelerator.cc>{}media>``
+  + ``widget_video_`` 两片段，OCR 漏识 dir 与 filename 间的 ``>``，
+  解析出截断版 filename + 丢失 ``widget`` 段路径
+- 修复（``ide_meta_extract.py``）：
+  - ``_looks_truncated_filename`` + ``_complete_via_tab_suffix``：
+    filename 以 ``_`` 开头且某 tab 候选 endswith 它 → 用 tab 完整版
+  - ``_parse_breadcrumb`` 文件段前缀提取：当 dir 与 filename 在同一段
+    （``widget C+widget_decode_helper.cc``），按空白分词
+    + ``_looks_like_icon_word`` 滤掉 ``C/C+/H/J`` 等图标残留 → 把
+    剩余的 ``widget`` 追加进 path
+
+### #2 page06873 col0 拼写错 acceleratorr.cc 误成独立文件
+
+- 现象：1 page 的 ``widget_decode_helperr.cc``（OCR 多识
+  一个 ``r``）与 256 page 的正确版被识别成两份不同文件
+- 修复（``code_file_grouping.py``）：``group_into_files`` 末尾增 ``
+  _merge_near_duplicate_filenames`` 二次合并：
+  - 同 (compact_dir, ext) 桶内
+  - filename Levenshtein ≤ 2 或一方是另一方真后缀
+  - 小组占比 ≤ 10%（保护两份真实独立文件）
+  - 满足时小组并入大组、保留大组 canonical filename，重建 merged_text
+  - 标 ``code.grouping.merged_near_duplicate``
+
+### #4 右栏被 source_pages tag 列表撑满，原图缩略图被挤出可视区
+
+- 现象：长文件有 255 个 source_pages，``code-source-pages-list`` 渲染
+  全部 tag → 撑满 ``code-source-images`` 列高，``code-source-images-
+  list`` 被推到滚动区外
+- 修复（``CodeViewer.tsx`` + ``App.css`` + 三语 i18n）：
+  - 用 ``<details>`` 包裹页面 tag 列表（默认收起，summary 显示数量
+    "255 张原图来源（点击展开）"）
+  - ``.code-source-pages-details``：``max-height: 30%; overflow-y: auto``
+    展开时仅占右栏 30% 高度内自滚，images list 始终可见
+  - 加 i18n key ``codeViewer.sourcePagesCount``（zh-CN/zh-TW/en）
+  - playwright 截图验证收起/展开两态 OK
+
+### 测试
+
+- ``tests/processing/test_ide_meta_extract.py``：+4 回归用例（片段拼接
+  与 overlap 去重、tab suffix 截断补全、文件段含 path 前缀、icon word
+  ``C`` 不当作 dir）
+- ``tests/processing/test_code_file_grouping.py``：+4 回归用例（typo
+  并入大组、suffix-match 并入、规模相当不合并、扩展名不同永不合并）
+- 全量 ``tests/processing/`` + ``tests/llm/test_code_refine.py``：197
+  passed / 14 skipped
+- TS：``tsc --noEmit`` + ``eslint`` 无报错
+
+遗留问题：现有 示例_v3 task 的 ``files-index.json`` 是修复前生成
+的，需重新跑该任务（或 resume）才能让 fix 生效到这份数据上。
+
+### #7 修复 OCR worker stdout 空行/日志行导致 task 整体失败
+
+- 现象：跑 示例_v4 任务时，worker 在 init 期间 stdout 偶发出现空行或
+  vLLM/transformers 日志，命中 ``base.py::_read_response`` 的默认实现：
+  ``json.loads(b"\\n")`` → ``JSONDecodeError: Expecting value: line 2
+  column 1 (char 1)`` → 整个 task 推到 failed
+- traceback 链：``ocr.ocr → _restart_worker → initialize → _send_init_
+  command → _send_command → _read_next_response → _read_response → 抛``
+- 根因：``base.py`` 默认 ``_read_response`` 单纯 ``json.loads(raw)``，
+  对空行/日志噪声零容忍。``deepseek_ocr2.py`` 早就独立写了一个 robust 版
+  （``while True: skip blank/non-JSON; readline``），但 PaddleOCR 走默认
+  实现没受益
+- 修复：把 DeepSeek 的 robust 版上提到 ``base.WorkerBackedOCREngine.
+  _read_response``：跳过空行 + 跳过 ``json.JSONDecodeError`` 行（DEBUG
+  日志记录前 200 字），EOF 时调 ``_raise_worker_exited()``（拼 stderr_
+  tail，比原 deepseek 版的裸 RuntimeError 信息更丰富）
+- DeepSeek 的本地 ``_read_response`` 删除（避免重复）；同步删除已不再使用
+  的 ``import json``
+- 测试：``tests/ocr/test_paddle_ocr.py::test_initialize_skips_blank_and_
+  log_lines`` 直接复现原始崩溃路径——4 行 stdout 序列「空行 → vLLM
+  日志 → 空行 → 合法 JSON」，断言 ``initialize()`` 成功 + 4 行全消费
+- 全量回归：``tests/ocr/`` + ``tests/processing/`` + ``tests/llm/`` 共
+  395 passed / 20 skipped
+
+### #6 文档模式编辑器换 Tiptap WYSIWYG（类 Word，所见即所得）
+
+- 现象：原 ``DocCodePreview`` 编辑模式是裸 ``<textarea>``，用户看到的是
+  markdown 源码（``## 标题`` / ``| 表头 |``），不直观、不所见即所得
+- 用户要求："类 Word 的编辑体验，不要露出 markdown 源码"
+- 修复（前端纯前端改动）：
+  - 新增 ``MarkdownWysiwygEditor.tsx``（Tiptap 集成）：StarterKit + Image
+    + Link + Table 系列 + Placeholder + 自定义 ``PageAnchor`` Node
+    （把 ``<!-- page: X -->`` 当成 atom block 显示为「📄 X」灰条）
+  - 顶部 toolbar：标题级别下拉（正文/H1-H4）+ B/I/S/code + 列表（无序/
+    有序/引用/分隔线）+ 表格 + 链接 + 撤销/重做；按钮跟随光标位置高亮
+  - ``markdownRoundtrip.ts`` 双向转换：``marked`` (md→html) +
+    ``turndown + turndown-plugin-gfm`` (html→md)；自定义 turndown 规则
+    把 page-anchor div 还原为 HTML 注释
+  - Word 风格 CSS：白底文档纸面 / 衬线字体 / 1.75 行距 / 标题阶梯字号 /
+    表格全边框 + 表头灰底 + 行 hover 高亮 / 行内 code 灰底框
+  - 替换 ``DocCodePreview`` 编辑分支：``<textarea>`` → ``<MarkdownWysiwyg
+    Editor>``；``editText`` 状态保持不变，``onChange`` 收到的是 turndown
+    转回的 markdown，``handleSave`` 不变
+  - i18n 三语 key：``editor.placeholder`` / ``editor.h1-4`` / ``editor.bold``
+    / ``editor.bulletList`` / ``editor.insertTable`` / ``editor.linkPrompt``
+    等共 18 个
+  - playwright 截图验证：U-Boot 用户手册 task 进入编辑模式 → 标题渲染
+    为大字 / GFM 表格全边框 / 输入文字立即生效 / Save 按钮变绿
+- 测试：``tests/markdownRoundtrip.test.ts`` 11 用例 round-trip 验证
+  （headings / GFM table / lists / page-anchor / bold/italic/strike），
+  全部通过
+- TS：``tsc --noEmit`` 与 ``eslint`` 无报错
+- 用户偏好：AGE-48（code refine LLM）由用户关闭，专注文档模式 UX
+
+### #5 强化 code refine prompt + 加 rewrite 模式
+
+- 现象：LLM 修正后的代码仍残留大量 OCR 噪声 —— 行尾幽灵字符（`Y`/
+  `工`/`王`/`I`/`2`）、整行 `}` 错识为 `2`/`3`、标识符大小写漂移
+  （`oMX_`/`OMx_`/`oMx_` vs `OMX_`）、`OMX_HANDLETYPEhComponent` 之类
+  缺空格粘连
+- 原 prompt 偏保守，太多"仅当上下文明确指示时"的限定 → LLM 不敢动；
+  没明确"行尾孤立中文字符必删"的指令；没要求"全文标识符大小写归一"
+- 修复：
+  - ``CODE_REFINE_SYSTEM_PROMPT`` 重写：心态调到"大胆改"，加 8 条
+    "必修"清单（行尾幽灵 / 整行 1 字 / 标识符多数派归一 / 缺空格切分
+    / 闭合符号 / 全角半角 / 字符混淆 / IDE chrome 残留），每条带本数据集
+    的实测样例（`oMx_ErrorNone` / `OMX_HANDLETYPEhComponent` / `} Y`）
+  - 新增 ``CODE_REWRITE_SYSTEM_PROMPT``：允许 LLM 重排格式 / 合并断行 /
+    补编译必需的语法元素，**不强制行数守恒**；禁编造业务逻辑
+  - ``CodeLLMRefiner`` 加 ``mode="refine"|"rewrite"``：rewrite 模式解
+    析 ``rewritten_code``，flag 含 ``code.refine.mode=rewrite`` +
+    ``code.refine.line_delta=±N``
+  - ``LLMConfig.code_refine_mode`` 默认 ``"refine"``；
+    ``LLMConfigRequest`` 透出该字段，前端可在创建任务时选 rewrite
+- 测试：``test_code_refine.py`` +4 用例（rewrite 行数差异接受 / 空
+  payload 回退 / prompt template 切换 / 非法 mode 拒绝）；全量 312 个
+  llm+processing+zip_code 测试通过
+
+## 2026-04-26 代码模式回归 5 大问题修复 — 前后端组件解耦 + LLM provider 兜底
+
+主题：用户跑完 211 张 示例 IDE 截图后发现 5 个回归问题，
+按优先级一并修复。
+
+### #5 LiteLLM provider 缺失（base.py + test_model_normalize.py）
+- 实测：UI 填 `model=deepseek-v4-flash` + `base_url=https://api.deepseek.com`
+  → litellm.BadRequestError "LLM Provider NOT provided"
+- 修复：`_normalize_model_id(model, api_base)` 在 `_build_kwargs` 入口归一：
+  - 已含 litellm 内置 provider 前缀 → 透传
+  - 否则 `api_base` 非空 → 自动加 `openai/`（DeepSeek/GLM/中转站/vLLM 都
+    走 OpenAI 兼容协议）
+  - `api_base` 为空 → 透传，让 litellm 按模型名 fallback
+- 单测 4 条覆盖：已知前缀透传 / 自定义 model + api_base / 无 api_base / 空字符串
+
+### #2 下载 zip 缺源文件（routes.py + test_zip_code_mode.py）
+- `_add_doc_to_zip` 历史只打 `document.md` + `images/`；代码模式还原出来
+  的 `files/` 整树和 `files-index.json` 不进 zip → 用户下载只看到文档
+- 修复：抽 `_add_subtree_to_zip(doc_dir, subdir, prefix)` 通用函数，
+  代码模式额外打 `files/` + `files-index.json` + `.quality_report.json`
+- 单测 4 条：纯文档模式不混入 / 代码模式三件套 / 字节内容一致 / 多子目录命名空间
+
+### #3 IDE meta：breadcrumb 是唯一真相（ide_meta_extract.py）
+- 实测 page06953/07002：col0 IDE 显示 `.h` 但被归到 `.cc`，根因是
+  `_reconcile_with_tab` 在"breadcrumb 末段截断 + tab 名是 prefix"时
+  让 tab 覆盖 breadcrumb，OCR 多 tab 噪声直接污染文件归类
+- 用户决策：含 `>` 的 breadcrumb 必然是当前打开的源文件（IDE 不会撒谎），
+  tab bar 跨栏 leak 不可信 —— breadcrumb 必须是唯一真相
+- 修复：删 `_reconcile_with_tab`；breadcrumb 给出 filename 后绝不让 tab
+  override，仅在 breadcrumb 完全没解出 filename 时回退 tab；保留同图栏间
+  路径补全（peer dir 借用 / 粘连段还原）
+- 新加单测 2 条：多 tab + 不同扩展名场景 / breadcrumb 给的文件名跟 tab
+  完全不同也以 breadcrumb 为准
+
+### #1 抽 DocCodePreview 共享组件（前端解耦）
+- 之前 TaskResult（新建任务后主视图）和 TaskDetail（任务列表详情页）
+  各自实现"文档/代码切换 + 多文档 tab + 编辑保存 + 源图同步滚动"，
+  TaskResult 漏了代码模式 toggle + CodeViewer
+- 抽 `DocCodePreview` 组件：探测 files-index → 渲染 view-mode toggle →
+  按 viewMode 路由到 CodeViewer 或 markdown 预览；TaskResult/TaskDetail
+  只负责任务级 header（标题/下载/删除）
+- TaskResult 用 `headerExtras` 注入下载按钮；TaskDetail 用上层 task header
+  自带 download
+
+### #4 ImageLightbox 抽组件 + CodeViewer 接入（视觉验证已截图）
+- `<ImageLightbox src onClose>`：useRef + useEffect 自动 focus，配合
+  `tabIndex={0}` 让 Esc 关闭可用；`role="button"` 保证可达性
+- SourceImagePanel 与 CodeViewer 都复用；CodeViewer 历史漏写 onClick，
+  CSS 只有 `cursor: pointer` 但点击无效 → 现已修
+- 视觉验证：`screenshots/code-mode-detail-doc.png` /
+  `code-mode-detail-code.png` / `code-mode-lightbox.png`，三栏布局正常、
+  缩略图点击放大 OK
+
+### 收益
+- `tests/llm/test_model_normalize.py` +4
+- `tests/api/test_zip_code_mode.py` +4
+- `tests/processing/test_ide_meta_extract.py` +2（page06953 回归守护）
+- 全量回归 135 passed / 4 skipped
+
+### 二阶段：遗留三项（用户后续决策"按你的修法修复"）
+**#A gap 填充加阈值**：`code_file_grouping._merge_columns_by_line_no` 单次
+gap > 50 行不再批量塞空行，改插单行注释占位（`// ... N lines missing ...`
+或 `# ... ...` 按 language 选）。回归 page06953 案例的 587 连续空行雪崩。
+新 flag `code.grouping.large_gap_collapsed` 标识被压缩。
++`tests/processing/test_code_file_grouping.py` 3 用例（cpp / python / 混合 gap）。
+
+**#C 熔断器 key 含 (model, api_base)**：`get_breaker(model, api_base="")`
++ 内部 `_endpoint_key`，同 model 不同中转站独立熔断。`get_breaker` 第 2
+位置参数从 `config` 改为 `api_base`，`config` 强制 keyword-only —— 旧调
+用 `get_breaker(m, my_config)` 必须改成 `get_breaker(m, config=my_config)`。
+`base.py::_call_llm` + `pipeline._subscribe_breaker` 都同步传 api_base。
++`tests/llm/test_circuit_breaker.py` 2 用例（同 model 不同 base 隔离 / 空
+api_base 与显式 base 区分）。
+
+**#B tab 仅观察 flag（无功能改动）**：`code.tab_only_fallback` 在 filename
+来自 tab 兜底（breadcrumb 失败）时标记，让运维 / quality_report 统计 tab
+兜底比例评估 OCR 质量。breadcrumb-truth 策略已在 #3 确立，未发现进一步
+切分必要；若未来再出归类异常，再考虑 tab x_center 严格栏内 + 多 active
+tab 区分。
++`tests/processing/test_ide_meta_extract.py` 1 用例（tab 兜底场景不应错
+标 breadcrumb_path_missing）。
+
+二阶段全量回归：150 passed / 7 skipped（含 LLM/processing/zip 全套）；
+pipeline 测试 181 passed 无破坏。
+
+---
+
+## 2026-04-26 AGE-8 真端到端验证 — OCR 质量链 + 真 g++ 语法验证
+
+主题：用户回归代码模式发现两件大事，分别修复。
+
+### 链路 bug：前端代码模式形同虚设（commit 804f28c）
+- routes.py 算了 `code_cfg` 但调 `manager.create_task()` 时没传，
+  `Task / TaskManager / Pipeline.process_tree / process_many / _stream_pipeline`
+  整条链路都没 `code` 参数 → pipeline 永远只看启动配置
+  `self._config.code.enable=False`，前端勾代码模式只切了
+  PP-OCRv5 basic（变快），结果还是被当文档喂给 LLM 拼接
+- 修复：把 `code` 参数沿整条链路接通；DB tasks 表加 `code` 列 + 迁移；
+  `_stream_pipeline` 用 `code or self._config.code` 决定分支
+- 链路守护测试 `tests/api/test_create_task_code_mode.py` +2 条端到端
+  HTTP API → `task.code` 透传到 `_tasks` 验证
+
+### OCR 质量两层（commit 71e6465 + 8df8d71 + 4a8c9ea + e095fe2）
+**L1 规则纠错（保守、行数严格保持）**
+- `processing/ocr_postfix.py`：A 中英文标点统一 + B 标识符里 0→O
+  - 模式 `(?<=[A-Za-z_])0(?=[A-Za-z])` 仅前后字母时改
+  - hex（0xDEAD）/ 十进制（100）/ var0_name 不动；按字符串字面量
+    边界保护（用户中文文案不被改）
+  - render 之前对每个 `SourceFile.merged_text` 跑一遍
+- 30 条单元测试覆盖（含 spike 真实样本 + 边界反例）
+
+**L2 LLM refine prompt 加强**
+- `llm/prompts.py CODE_REFINE_SYSTEM_PROMPT` 告诉 LLM 上游已规则纠错，
+  重点修剩余的 D（粘连）/ E（IDE chrome 残留）/ 缺 = 号 等
+
+**实测 spike diff**：`kWidqetStateInvalid → kWidgetStateInvalid`、
+`kWidgetStateExecuting g=4，→ kWidgetStateExecuting g=4,`、
+`if（current_cpu → if(current_cpu` 等全部修正，无误伤。
+
+### 真 C/C++ 语法验证（不再 mock）
+- `scripts/age8_compile_check.py` 真起 `g++ -fsyntax-only` 子进程
+- `scripts/age8_stub_includes.py`：扫源文件 `#include` 自动落 stub header
+  - 标准库头跳过；EGL/ / base/logging.h / media/base/status.h 等关键
+    类型族注入 typedef stub 让 g++ 不一片红
+- 错误分类（区分 OCR 噪声 vs 缺 示例 sysroot）：
+  - `syntax_clean` / `syntax_dirty`（真 OCR 粘连）/ `sysroot_missing`（缺类型）
+    / `skipped`
+  - syntax patterns 只匹配强 OCR 信号（invalid preprocessing directive /
+    stray / unable to find numeric literal），cascade 错归 semantic 不污染指标
+- `scripts/age8_e2e_report.py` 一键端到端验收报告
+- 6 条**真起 g++ 子进程**的端到端集成测试 + 12 条分类单测 + 13 条 stub 单测
+
+### 示例 VDA 真任务回归
+- 输入 252 张 示例 VDA 模块照片 → 真 OCR + LLM refine + 后处理
+- 期望：files-index.json 落盘 + 文件树按 示例 路径组织 + g++ syntax
+  报告 syntax_dirty 数尽量低（OCR postfix + LLM refine 应已处理大部分）
+- _typos.toml 加白名单：OCR 反例的故意错拼（dEfine / regsiter）需要豁免
+
+### 测试统计
+- pre-commit 全绿；mypy --strict + ruff --strict + typos
+- 915+ 单测 + 18 真 g++ 集成测试
+
+遗留问题：无（示例 真任务回归正在跑）
+
+## 2026-04-26 AGE-8 收官 — E2E + 代码模式视图
+
+主题：AGE-52 E2E + AGE-50 前端代码模式 + Pipeline 集成代码分支 + DB 历史任务自动 hydrate。
+
+### AGE-52 E2E 端到端验收（commit 70607a0）
+- `tests/pipeline/test_age8_e2e.py`：8 张 spike 全链路 7 条断言（≥3 文件 / 示例 路径 / IDE UI 剥离 / 行号剥离 / 缩进保留 / index 字段完整 / 关键文件恢复）
+- LLM 精修验证（deepseek-v4-flash）：widget_status.h 13 处字符级修正 100% 正确，行数严格保持
+
+### AGE-50 代码模式视图（commit df70356）
+- **Pipeline 集成 `_code_pipeline` 分支**：`code.enable=True` 时跳过 LLM 流式精修，OCR 收齐后跑 ide_layout → ide_meta_extract → code_assembly → group_into_files → 可选 CodeLLMRefiner → render_code_files
+- **API 端点**：`GET /tasks/{id}/files-index` + `GET /tasks/{id}/files/{path:path}`（路径穿越防护）
+- **TaskManager.load_persisted_tasks**：lifespan 启动时把 DB 历史任务装回内存，让 GET /tasks/{id} 等同步路由在重启后也能命中（解决 sidebar 列得到、详情页打不开的老 bug）
+- **前端 CodeViewer**：三栏布局（文件树 / 代码 / 原图），compile_failed 标红、compile_passed 加绿条，files-index.json 探测成功 → 启用「文档模式 ↔ 代码模式」toggle，三语 i18n
+- **视觉验证**：`scripts/age50_seed_fixture.py` 灌 fixture → Playwright 实际打开 → 文档/代码模式渲染、文件切换、原图列表对照全部正确
+
+### AGE-8 整体收尾
+所有 sub-issues 都已 In Review 或 Done：AGE-41/42/43/44 取消（v1 方案放弃）、AGE-45/46/47/48/49/51/52/53/54/55/50 全部完成。算法 + LLM 精修 + 编译验证 + 前端展示链路打通。
+
+## 2026-04-25 AGE-8 设计反转 + v2 方案 100% 验证
+
+### 背景
+4-24 落地的 v1 方案（像素方差几何切分）在 8 张 spike 实测中暴露根本性问题：
+7/8 sidebar fallback、1/8 column fallback 硬切。**用户洞察**：分栏拖拽、
+sidebar 折叠/展开、字体缩放等真实场景下，**任何固定比例阈值都会失效**。
+
+### 调研业内方案（全部不可用）
+- **PaddleOCR-VL `merge_layout_blocks=False`**：实测无效，VL layout 模型
+  对复杂 IDE 直接输出单 content block 是模型能力极限
+- **PP-DocBlockLayout 阈值 0.05~0.5**：永远输出单一 Region 覆盖整图
+- **PP-StructureV3 / MinerU 的 reading order pointer network**：方向反——
+  它们优化"多栏论文 → 单列阅读顺序"，会把多栏代码错误合并
+
+### v2 突破：行号列锚点
+**核心**：用 IDE 编辑器的内在不变量——**行号列**——做布局锚点。
+- text 严格匹配 `^\d{1,4}$` + score≥0.8 + x1 聚类 + 数值单调递增
+- 三重锚定使误报概率几乎为零（代码里不存在连续 5 行纯数字 x 对齐）
+- **完全数据驱动**——不依赖任何固定比例/像素阈值
+
+### 落地内容
+**新增模块**（AGE-53）：
+- `backend/docrestore/models.py`：`TextLine` 数据类 + `PageOCR.text_lines`
+  字段（默认空 list，向后兼容）
+- `backend/docrestore/processing/ide_layout.py`：`analyze_layout` 主入口
+  + `LineNumberAnchor` / `IDELayout` / `LayoutConfig`
+- `tests/processing/test_ide_layout.py`：32 单测（24 合成 + 8 spike fixture）
+
+**实测脚本**：
+- `scripts/age8_probe_basic_ocr.py`：PP-OCRv5 行级 OCR
+- `scripts/age8_analyze_line_layout.py`：行号列锚点分析
+- `scripts/age8_validate_full_dataset.py`：批量统计验证
+- `scripts/age8_probe_*.py`：调研用（VL、layout、low-threshold 等）
+
+**删除（v1 错误代码）**：
+- `backend/docrestore/processing/{ide_ui_strip,code_columns}.py`
+- `tests/processing/test_{ide_ui_strip,code_columns}.py`
+- `scripts/preview_ide_columns.py`
+
+### 实测证据（硬数字）
+**8 张 spike**（`output/age8-line-layout/`）：
+- 全部检出 2 个 anchor，单调性 100%
+- 折叠 sidebar 5 张 / 展开 sidebar（EXPLORER）3 张
+
+**全 NAS 272 张**（`output/age8-validate-full/summary.json`）：
+- success_rate: **1.0 (272/272)**
+- anchor_count_distribution: `{2: 272}`
+- avg_max_monotonic: **1.0**
+- code.no_anchor: **0 张**
+- 唯一 warning：page06875 右栏含三位数行号 OCR 偶发噪声（mono=0.676），
+  但仍检出 2 anchor + max_mono=1.0，整体可用
+
+**回归测试**：873 passed / 49 skipped / 0 failed（含 ide_layout 32 + 现有 841）
+
+### Linear 操作
+- **Cancel**：AGE-41/42/43（v1 像素方差方向）/ AGE-44（per-column OCR）
+- **新建** v2 子 issue：
+  - AGE-53 [P1.2 v2] `ide_layout.py` ✅ **In Review**
+  - AGE-54 [P1.3 v2] `code_assembly.py` 栏代码组装
+  - AGE-55 [P1.4 v2] OCR pipeline 切换（basic/vl）
+- **更新**：AGE-8 主 issue 描述（v1 → v2 反转 + 实测证据）
+- **重写**：`docs/zh/backend/age-8-ide-code.md` v2 全文
+
+### 遗留 / 下一步
+- AGE-54 实施：栏代码组装（行号/代码分离 + 缩进保留 + 缺号检测）
+- AGE-55 实施：OCR worker 加 basic pipeline 分支 + EngineManager 按 pipeline
+  决定是否拉 vllm-server
+- 后续 AGE-45/46/47/48/49/50/52 沿用，输入改为 `IDELayout`
+
+## 2026-04-24 AGE-8 启动 + Phase 1 落地（IDE 代码照片 → 源文件）
+
+> ⚠️ **历史记录** — v1 方案次日（4-25）整体反转，详见上节。本节代码已删除。
+
+### 背景
+
+`docs/zh/backend/age-8-ide-code.md` 已完成设计；本次把设计同步到 Linear AGE-8
+主 issue，按 Phase 1/2/3 拆成 12 个子 issue（AGE-41~52），并落地 Phase 1 全部
+三个子 issue。
+
+### 子 issue 清单
+- AGE-51 [P0] `CodeRestoreConfig` 配置入口 + API/前端开关
+- AGE-41 [P1.1] `processing/ide_ui_strip.py` IDE-UI 剪裁 ✅ In Review
+- AGE-42 [P1.2] `processing/code_columns.py` 多栏切割 ✅ In Review
+- AGE-43 [P1.3] `scripts/preview_ide_columns.py` 视觉切分预览 CLI ✅ In Review
+- AGE-44 [P2.1] 每栏独立 OCR + cleaner `strip_ide_line_numbers`
+- AGE-45 [P2.2] `processing/ide_meta_extract.py` tab/breadcrumb 元数据
+- AGE-46 [P2.3] `processing/code_file_grouping.py` 跨张文件归类
+- AGE-47 [P2.4] `output/code_renderer.py` 代码渲染器
+- AGE-48 [P3.1] `CODE_REFINE_SYSTEM_PROMPT` LLM 字符级精修
+- AGE-49 [P3.2] `scripts/age8_compile_check.py` 编译验证
+- AGE-50 [P3.3] 前端「原图 ↔ 还原代码」对照视图
+- AGE-52 [E2E] 8 张 spike 端到端集成测试
+
+### Phase 1 落地内容
+
+**P1.1 IDE-UI 剪裁（ide_ui_strip.py）**
+- 两阶段几何检测：先全宽行方差找 top/bottom 分隔线，再在 editor 行区间内算
+  列方差找 sidebar（避免 top/bottom 非分隔条像素污染列统计）
+- 邻区 sanity check：分隔条左右至少一侧邻区需为高方差内容区，过滤 sidebar
+  内部偶发的零方差列（伪分隔条）
+- 策略：`geometric` / `hybrid`（默认，失败比例 fallback） / `ocr_anchored`（预留）
+- 9 个单测：合成图（numpy 批量 noise）+ spike 真实照片 golden
+
+**P1.2 code_columns.py 多栏切割**
+- 中央垂直低方差带 = VSCode split editor 间隙（宽 4-20px + 贯穿 ≥ 80%）
+- 多候选取最靠中央；aspect ≥ 1.6 但无分隔条 → 硬切 50/50 + flag
+- 11 个单测：单/双栏 + 宽屏 fallback + 边界（过窄/过宽分隔条）
+
+**P1.3 preview_ide_columns.py CLI**
+- 批量跑，每张图导出 original（红框标 code region）/ stripped / col_N
+- 生成 summary.html 网格视图供人眼验收；单张失败不中断
+- 8 张 spike 烟测通过
+
+### 依赖变更
+- `numpy` 从 `ocr` extras 提到默认依赖（Phase 1/2/3 多模块共用）
+
+### 遗留 / 下一步
+- Phase 1 参数调优：8 张 spike 里 7/8 走 sidebar_fallback、全部走 column_fallback_split；
+  这是"真实 IDE 照片参数不同于合成图"的信号，跑完 273 张预览后根据人工标注回调阈值
+- Phase 2 起步：AGE-44 每栏 OCR + cleaner 行号剥离
+
+## 2026-04-21 五补：任务列表单项删除 + 批量清理终态任务
+
+### 背景
+
+生产环境积累了 100+ 历史任务，但之前删除入口仅存在于 TaskDetail 页（需要先点进详情再删除），
+对"我只想把旧任务全扫掉"的场景非常不友好，用户反馈"既不能访问也不能清理"。
+
+### 落地
+
+**后端**
+- `TaskManager.cleanup_tasks(statuses) -> (deleted_ids, errors)`：内存 + DB 合并去重，
+  逐个复用已有 `delete_task` 的状态机校验；`_collect_cleanup_targets` 拆出以压 C901 复杂度
+- `POST /tasks/cleanup` 路由：仅接受 `completed`/`failed` 两种状态（校验在路由层做，
+  兜底防止运行中任务被误删）；响应 `{deleted, failed, deleted_ids, errors}`
+
+**前端**
+- `SidebarTaskList.tsx` 结构从 `<button>` 单项 → `<div.stl-item-row>` 包住选择 `<button>`
+  + 删除 `<button>`（嵌套 button 是无效 HTML，必须拆开）；悬停露出 "×"
+- 头部渲染 "清理已结束" 按钮（当本地已加载任务中含终态任务时），一键调用 cleanup 接口
+- 删除后通过 `onDeleted(tid)` 冒泡，`App` 若选中的正是被删任务则回到新建模式
+- 双确认走复用的 `ConfirmDialog`，提示消息通过 i18n 带上 `{id}`/`{count}` 占位符
+- i18n 三语补齐 `taskList.deleteItem` / `deleteConfirmMessage` / `clearFinished` / `clearFinishedMessage` / `clearFinishedResult` / `cannotDeleteRunning`
+
+**测试**
+- `tests/api/test_task_actions.py::TestCleanupTasks` 四用例（空入参 400、非终态状态 400、
+  只清 completed+failed、无匹配 noop）
+
+### 关键不变式
+
+1. cleanup 永远只清 completed+failed；非终态状态 → 400（路由层先校验，manager 层也再过滤）
+2. 已在运行的任务：单项删除按钮 `disabled`，批量清理走不到
+3. 删除是逐个 `delete_task`，某条失败不影响其他（失败收集在 errors 数组返回）
+
+### 验证
+
+tsc + eslint + vitest（5 通过）前端全绿；mypy --strict + ruff + 23 个任务操作测试后端全绿。
+
+---
+
+## 2026-04-21 四补：TaskDetail 实时进度 + resume/retry 自动切新 task
+
+### 背景
+
+resume/retry 成功后创建了**新 task_id**，但前端：
+- `handleResume/handleRetry` 只 refresh 列表 + 重拉**旧 task** 的信息，用户仍停在 failed 态详情页
+- TaskDetail 没有订阅 WS 进度，即使用户手动点进新 task 也看不到进度条 — 只有一个 "处理中" badge 在转
+- 新建任务页（App.tsx）用 `useTaskRunner` 订阅 WS + 渲染 `<TaskProgress>`；详情页没有复用该能力
+
+用户需求：resume/retry 后也能和新建任务一样看到主进度 + 子目录分轨进度。
+
+### 落地
+
+**新 hook** `frontend/src/features/task/useTaskProgress.ts`
+- 精简版"按 taskId 订阅 WS + 轮询降级"（80% 复制 `useTaskRunner` 的 connectWs/startPolling/cleanup 逻辑，但不涉及创建任务、不拉结果）
+- 入口先 REST 查一次状态：已 terminal 直接触发 `onTerminal` 不开 WS；否则建 WS + 5s 连接超时 + 降级轮询
+- `taskId` / `enabled` 变化时自动重订阅；本轮 onTerminal 只触发一次；`onTerminal` 用 ref 存，不触发无谓重订阅
+
+**TaskDetail 改造**
+- 新 prop `onSelectTask(taskId: string)`：resume/retry 成功后调 `onSelectTask(resp.task_id)`，App 的 `selectedTaskId` 切新值 → `key={selectedTaskId}` 让 TaskDetail 重挂载 → 新 taskId 自动 fetch + 订阅
+- 头部 status badge 下方插 `<TaskProgress>` 段落，仅 `pending/processing` 态渲染
+- `onTerminal` 回调重拉 `fetchTaskInfo + fetchResults + onTaskListRefresh`，UI 自动从"进度条"切到"结果预览"
+- `.task-detail-progress` 加 margin 与新建任务视觉对齐
+
+**App.tsx** 把 `handleSelectTask` 作为 `onSelectTask` 透传给 TaskDetail。
+
+### 不变式
+
+- `useTaskRunner` 完全不动（新建任务流程和旧版一致，降低回归风险）
+- TaskDetail `key={selectedTaskId}` 保证切 task 时所有 state 重置
+- 已终态任务挂载时不开 WS：先 REST 查一次，若 completed/failed 直接跳过 connectWs（后端本就会对终态立即 close，但省一次 WS 握手更干净）
+
+### 验证
+
+- `tsc --noEmit` + `eslint src/` + `vitest`：全过
+- 浏览器级 E2E 未做（需真 OCR 跑起来才能触发 pending/processing 态）
+
+## 2026-04-21 三补：部分失败可见（TaskDetail 多文档状态 UI）
+
+### 背景
+
+resume / retry 能让用户继续失败任务，但：
+- `process_tree` 用 `asyncio.gather`（无 `return_exceptions`）— 任一子目录失败整个 task 直接 FAILED，已成功 doc 的结果**丢失**（`task.results` 留空）
+- `/tasks/{id}/results` 强制要求 `status=completed`，failed 态一律 404
+- 前端失败态只能看"整体 error"，看不到哪几篇子文档完成了、哪篇为什么失败
+
+用户需求：打开历史任务后看到"各子文档进度 + 失败原因 + 已完成子文档可分别预览"。
+
+### 落地
+
+**后端**
+- `PipelineResult.error: str = ""` — 子文档级错误字段
+- `Pipeline.process_tree` 改 `asyncio.gather(..., return_exceptions=True)`；子目录异常转成 `PipelineResult(doc_dir=..., markdown="", error="{ExcType}: ...")` 占位；`asyncio.CancelledError` 仍一路传播（shutdown/用户取消语义不变）
+- `TaskManager.run_task`：process_tree 返回后按 `r.error` 聚合判定：
+  - 全成功 → `COMPLETED`
+  - 任一失败 → `FAILED`，`task.error = "N/M 子文档失败: ..."`（`_summarize_failed_docs`），但 **`task.results` 保留所有结果**（含成功部分 + 失败占位）
+- 新 `_persist_results(results, status, error)` 统一持久化 completed / failed 两态
+- `/tasks/{id}/results` 放宽：只要有 results 就返回；透传 `error` 字段
+- `TaskResultResponse.error: str = ""`
+- zip 下载按 `r.error == ""` 过滤 doc_dirs，失败 doc 不参与打包
+
+**前端**
+- `TaskResultResponseSchema` 加 `error: z.string().default("")`（兼容老后端）
+- `TaskDetail.tsx`：
+  - 顶部汇总条："已完成 X/N，Y 个失败"
+  - 多文档 tab 加 ✓/✗ 徽章 + hover tooltip 显示 error
+  - 选中失败 tab → 显示 `<pre>{error}</pre>` 面板 + 提示"点击继续复用已完成部分"
+  - 失败 tab 自动禁用编辑/保存按钮组
+- i18n 三语：`taskDetail.docSummaryAll` / `docSummaryPartial` / `docFailedTitle` / `docFailedHint`
+- App.css：`.btn-resume` / `.doc-tab--failed` / `.doc-tab-badge` / `.doc-summary` / `.doc-failed-panel`
+
+**测试**
+- `tests/pipeline/test_process_tree.py::TestProcessTreePartialFailure` — 一个子目录失败不影响其他；顺便加 `_fast_cold_start` autouse fixture 把 `RateController.COLD_START_TIMEOUT_S` 从 60s 缩到 0.5s（mock refiner 跑太快凑不齐 3 样本，每个测试原本都要等 60s 超时 fallback）
+- 全量 `pytest tests/ --ignore=...`：536 passed / 31 skipped
+
+### 不变式
+
+- 外层 `asyncio.CancelledError`（shutdown/用户取消）**不吞**：`process_tree` 在 gather 结果里遇到 CancelledError 直接 raise，保持原有语义
+- 部分失败的 task 仍保留 output_dir 下成功 doc 的 `document.md` + `images/`；resume 按钮复用它们继续跑失败部分
+
+### 遗留
+
+- 历史任务的 **per-doc 进度历史**（如"doc_A 在 OCR 70%，doc_B 已完成 final_refine"）仍无持久化：`task.progress` 只存最后一帧，WS 结束后查不到；本次按"终态显示已完成/失败"做到够用，未上 per-doc 进度历史（需改 Task 数据模型 + DB schema）
+- warmup leaf（最长子目录）失败时冷启动超时等 60s — 不在本次 scope
+
+## 2026-04-21 再补：LLM 精修断点续传
+
+### 背景
+
+B 方案让 resume 复用了 `output_dir` → OCR 层借 `{stem}_OCR/result.mmd` 自动跳过已完成图，但 LLM 精修没有任何缓存，resume 还是会把段级 / 整文档级精修全部重跑一遍。云端 LLM 是整个流水线的大头，这一段不省意义就小。
+
+### 落地
+
+- **新模块 `backend/docrestore/llm/cache.py::LLMCache`**：内容寻址的磁盘缓存
+  - key = sha256(kind | model | api_base | prompt 字面量 | 输入文本) 前 32 字符
+  - 段级（`seg_`）/ 整文档级（`final_`）独立命名空间
+  - **truncated=True 的结果永远不写**（put 内部过滤）— 避免 resume 永久沿用半截输出
+  - 异常 fallback 不写缓存（put 只在 refine 成功分支后调用）
+  - 原子写（tmp → rename）防止 Ctrl+C 留半截文件
+  - 目录创建失败自动降级为 `enabled=False`；json 损坏静默视作 miss
+- **Pipeline 接入**（流式路径）：
+  - `Pipeline._refine_segment_with_cache` helper 返回 `(result, used_refiner)`；`used_refiner=False` 时**不喂 `controller.record_llm`**（避免缓存命中的"伪时延"污染 RateController 的 L* 估算）
+  - `_stream_process` 入口按 `{output_dir}/.llm_cache/` + `llm_cfg.enable_cache` 构造 cache
+  - `_try_extract_and_refine`（主循环）/ `_stream_process`（末尾段）/ `_do_final_refine` / `_final_refine` 都接 cache + llm_cfg 参数
+- **`LLMConfig.enable_cache: bool = True`**（默认开）
+- **zip 打包**：`_build_result_zip_bytes` 只走 `document.md` + `images/`，不会扫 `.llm_cache`（验证过）
+
+### 不变式
+
+- 同一输入文本 + 同 model + 同 api_base + 同 prompt 字面量 → 必然命中
+- 改 prompt（`prompts.py` 修改）→ fingerprint 自动变 → 旧缓存 miss（测试覆盖 `test_prompt_change_invalidates`）
+- 截断 / 异常 → 不写，下次 resume 一定重试
+
+### 验证
+
+- 新增测试：`tests/llm/test_cache.py`（10 用例，覆盖命名空间隔离、disabled 无副作用、损坏 json、prompt 失效）+ `tests/pipeline/test_llm_cache_integration.py`（6 用例，覆盖 helper tuple 契约 + controller 不喂脏时延）
+- `mypy --strict backend/docrestore` + `ruff check`：全绿
+- `pytest tests/ --ignore=tests/pipeline`：417 passed
+
+### 遗留
+
+- gap_fill / pii_detect / doc_boundary 的 LLM 调用暂未纳入 cache（这些通常单次任务只调一两次，性价比低；后续有需要再加）
+- 缓存不限大小 / 不 TTL：用户删除整个 output_dir 就清空；单次任务段数有限不担心撑爆磁盘
+
+## 2026-04-21 补：断点续 OCR（B 方案：resume 路由）
+
+### 背景
+
+OCR 引擎层早已有"`{stem}_OCR/result.mmd` 存在即 load"的跳过逻辑（paddle_ocr.py / deepseek_ocr2.py），但 task 层只有 `retry_task`，复制原 config 的时候**不复用 output_dir**，所以重试会全量重跑，OCR 缓存形同虚设。
+
+### 落地
+
+- **`TaskManager.resume_task(task_id)`**（task_manager.py）：镜像 `retry_task`，唯一区别是把 `task.output_dir` 一起传给 `create_task`。状态校验同 retry（仅 FAILED 可继续；cancel 会把状态设为 FAILED 所以"用户取消"也能走 resume）
+- **`POST /api/v1/tasks/{task_id}/resume`**（routes.py）：镜像 retry 路由，返回 `ActionResponse { task_id, message="已创建续跑任务" }`
+- **前端 TaskDetail**：失败态按钮组新增"继续"（`btn-resume`，绿色主操作），位于"重试"之前；两个按钮都带 `title` tooltip 说明差异
+  - `api/client.ts::resumeTask`
+  - 三语 i18n 新增 `taskDetail.resumeTask / resumeHint / resumeFailed` + `retryHint`
+  - App.css 加 `.btn-resume` 样式
+- **测试** `tests/api/test_task_actions.py::TestResumeTask`：nonexistent / pending rejected / completed rejected / failed 成功（关键断言 `new_task.output_dir == old.output_dir`）+ retry 测试新增 `new != old` 的反向断言
+
+### 边界
+
+- 只省 OCR 时间：LLM 精修 / PII / dedup 仍然全量重跑
+- Task 模型未改（不加 `resumed_from` 血缘字段），避免 DB migration
+- 后端进程崩溃后无自动恢复；用户需要手动点"继续"
+
+### 验证
+
+- `mypy --strict` + `pytest tests/api/test_task_actions.py`：19 passed
+- 前端 `tsc --noEmit` + `eslint`：通过
+
+## 2026-04-21：GPU 设备选择去硬编码 + 自动探测
+
+### 背景
+
+用户拔掉 GPU0 (NVIDIA A2) 后仅剩 RTX 4070 SUPER，启动 ppocr-server 报 `NVMLError_InvalidArgument`。根因：项目多处 hard-code `PPOCR_GPU_ID=1` / `OCRConfig.gpu_id="1"` / 前端下拉写死 `"0"/"1"` 标签带 "A2"/"RTX 4070 Super"；换机器或改硬件即失效。
+
+### 落地
+
+1. **新模块 `backend/docrestore/ocr/gpu_detect.py`**
+   - `list_gpus()`：pynvml 优先（带进程级缓存），失败回退 `nvidia-smi --query-gpu=index,name,memory.total,memory.free,compute_cap --format=csv,noheader,nounits`
+   - `pick_best_gpu()`：按 `memory_total DESC, memory_free DESC, index ASC` 排序取第一
+   - `GPUInfo(index, name, memory_total_mb, memory_free_mb, compute_capability)`
+
+2. **OCRConfig.gpu_id: `str = "1"` → `str | None = None`**（`None` = 自动）。`OCRWarmupRequest.gpu_id` 同步。
+
+3. **EngineManager**
+   - `ensure()` 入口处 `config.gpu_id is None` 时调 `pick_best_gpu() or "0"` 并 `model_copy` 落地，保证下游 `_is_matched` / `_start_ppocr_server` / `CUDA_VISIBLE_DEVICES` 都基于具体值
+   - 新增 `current_gpu_name` 属性（借 `list_gpus()` 缓存反查）
+   - `_start_ppocr_server` / `paddle_ocr.py` / `deepseek_ocr2.py` 都加了 `gpu_id or pick_best_gpu() or "0"` 兜底，以防 pipeline 直连 `create_engine` 未落地
+
+4. **新路由 `GET /api/v1/gpus`** → `GPUListResponse { gpus, recommended }`；`/ocr/status` 响应新增 `current_gpu_name`；`/ocr/warmup` 对 `gpu_id=None` 的请求先 `pick_best_gpu()` 再传给 `ensure()`
+
+5. **app.py `PPOCR_GPU_ID`** 覆盖仅在非空时生效，空/未设保留 `None`
+
+6. **前端**
+   - `api/client.ts::listGpus` + schemas；TaskForm 挂载时拉列表，下拉首项 "自动（推荐 GPU N - 型号）"，其余动态渲染
+   - i18n 三语（zh-CN/zh-TW/en）移除 `taskForm.gpu0/gpu1`，新增 `taskForm.gpuAuto` / `taskForm.gpuAutoWithHint`
+   - `warmupOcrEngine` 对空 gpuId 不再写进请求 body，交由后端自动选
+   - 状态匹配逻辑：`gpuId=""` 时只要 model 匹配即视为就绪（不再比较 current_gpu）
+
+7. **scripts/start.sh**：`PPOCR_GPU_ID` 默认改空；空值时不导出 `CUDA_VISIBLE_DEVICES`，让 vLLM 自动枚举
+
+8. **文档** zh/en 的 `deployment.md` / `backend/ocr.md` / `backend/api.md` / `backend/data-models.md` 同步新行为，systemd 片段改成可注释的模板
+
+### 验证
+
+- `mypy --strict backend/docrestore`：43 个文件 0 error
+- `ruff check backend/docrestore`：通过
+- `pytest tests/ --ignore=tests/pipeline`：413 passed / 7 skipped
+- 新增测试：`test_warmup_without_gpu_id_uses_pick_best`、`TestGpuListing`（覆盖 `/gpus` + 空列表路径）
+- 前端 `tsc --noEmit` + `eslint src/` + `vitest`：全通过
+- 线下烟测：`GET /api/v1/gpus` 在当前单卡 4070 SUPER 上返回 `gpus=[{index:"0", name:"NVIDIA GeForce RTX 4070 SUPER", memory_total_mb:12282, ...}], recommended:"0"`
+
+### 遗留
+
+- 现在系统只剩 1 张 GPU，自动选"最好"只有一个候选；多卡机器上的 tie-break / LLM 任务抢占行为需要真实场景再验证
+- 如果将来 A2 重新插回，用户可在前端直接选下拉切换，或显式设置 `PPOCR_GPU_ID`
+
+## 2026-04-17 补：PII JSON 解析容错 + 精修截断一律回退原文
+
+### 背景
+
+用户实测两个问题同时出现：
+
+1. **PII 实体检测 JSON 解析失败**：某些 LLM（GLM-5 等）在 instruct 模式下会把 JSON 用 markdown code fence 包裹返回：
+   ```
+   ```json
+   {"person_names": ["..."], "org_names": ["..."]}
+   ```
+   ```
+   `json.loads` 直接对整串解析必然 JSONDecodeError，PII 检测抛 RuntimeError，后续云端 LLM 精修被 `block_cloud_on_detect_failure` 全部跳过。
+
+2. **"段 X 疑似截断（输入 N 行 → 输出 M 行）"只是 warning 没 fallback**：输出不到输入一半的截断段，`result.markdown` 仍是截断内容，直接进入下游 reassemble + final_refine。一旦截断，后半段内容丢失，下游拿到残缺文档。
+
+### 完成内容
+
+**PII JSON 解析容错**（`backend/docrestore/llm/cloud.py`）
+- 新增 `_extract_json_payload(raw) -> str`：
+  - 纯 JSON → 原样返回
+  - ```` ```json\n...\n``` ```` / ```` ```\n...\n``` ```` → 正则剥围栏
+  - 无围栏但前后带说明文字 → 取首 `{` 到末 `}` 之间子串
+- `detect_pii_entities` 先走 `_extract_json_payload` 再 `json.loads`；错误信息保留原始 raw（前 200 字）便于调试
+
+**截断段一律回退原文**（`backend/docrestore/pipeline/pipeline.py::_refine_segments`）
+- 统一 `finish_reason=length`（refiner 自报）与行数比例启发式为单一分支
+- 任一判定 truncated=True → `markdown = seg.text`，`gaps = []`（截断后 LLM 返回的 gap 坐标不可信），保留 `truncated` 标记供 `_collect_warnings` 产生 warnings
+- 日志从"疑似截断"改为"疑似截断（...），回退到原文"
+
+**整篇精修截断回退**（`backend/docrestore/pipeline/pipeline.py::_final_refine`）
+- `result.truncated=True` → 返回原 `doc`（不用被截断的 `result.markdown`）
+- 非截断路径照常用精修结果
+
+### 测试
+
+- `tests/llm/test_cloud_truncation.py`（+9 用例）：
+  - `TestExtractJsonPayload`(5)：纯 JSON / ```json / ```/ 前后空白 / 前后说明
+  - `TestDetectPiiEntitiesJsonParse`(3)：code fence 复现用户场景 / 裸 JSON / 完全非 JSON RuntimeError
+- `tests/pipeline/test_truncation.py`：
+  - 调整 `test_short_output_gets_flagged_truncated` / `test_refiner_self_reported_truncation_falls_back`：断言 markdown 回退 `input_text` 且 gaps 清空
+  - 新增 `TestFinalRefineFallback`(2)：truncated 回退原 doc / 未截断使用精修结果
+- `tests/pipeline/test_warnings_e2e.py::test_all_three_warning_types_aggregate`：因"truncated 清空 gaps"语义调整，改为 `max_chars_per_segment=30` 强制按标题分段，段 1 启发式截断 + 段 2 产生 gap + final_refine 截断，三种警告独立产生
+
+### 回归
+
+- pytest: 521 passed + 8 skipped（原 511+8，新增 10 个）
+- mypy --strict: 108 文件 0 错误
+- ruff check: 全部通过
+
+### 语义变化（需要注意的向下兼容风险）
+
+- 旧行为：截断段的 `RefinedResult.markdown` 是 LLM 截断输出；下游得到半截的"精修"markdown
+- 新行为：截断段的 `RefinedResult.markdown` 是**原文**；下游得到原始 OCR 结果（未精修但信息完整）
+- `_collect_warnings` 仍会告知用户该段截断；用户看到 warnings 时输出的正确读法是"段 X 未精修，按原文拼接"
+- 如果有外部消费者依赖 "truncated=True 时 markdown 非空且是 LLM 输出"，需要同步调整（本仓库内已全部同步）
+
+---
+
+## 2026-04-17 补：ppocr-server 孤儿进程四层兜底清理（atexit/PDEATHSIG/SIGHUP/启动扫描）
+
+### 背景
+
+上一轮（同日）shutdown 链路加固仅覆盖 async lifespan 能完整执行完的退出路径；实测发现用户在 "任务 OCR 超时 → lifespan shutdown 卡住 → Ctrl+C 两次" 场景下，uvicorn force-quit 直接 `sys.exit`，`_stop_ppocr_server` 根本没机会跑，残留现场：
+
+```
+PID 2708324  PPID=1         paddleocr genai_server ...   ← ppocr-server 被 init 收养
+PID 2708805  PPID=2708324   VLLM::EngineCore             ← 7758MiB 显存占用
+```
+
+手工 `killpg(2708324, SIGTERM)` 一次性带走整个进程组（ppocr-server + vLLM + resource_tracker）—— killpg 机制本身正确，问题是根本没被触发。
+
+### 根因
+
+async lifespan 清理路径在下列退出场景全部失效：
+- **uvicorn force-quit（两次 Ctrl+C）**：第二次 SIGINT 设 `server.force_exit=True`，跳出 main loop，lifespan shutdown 的 `await` 被截断
+- **SIGTERM/SIGHUP 默认行为**：Python 默认对 SIGTERM/SIGHUP 是 terminate，不跑 atexit；uvicorn 接管 SIGINT/SIGTERM，不管 SIGHUP
+- **SIGKILL / OOM killer**：任何软件层机制都救不了；vLLM 作为 ppocr-server 子进程未继承 PDEATHSIG
+
+### 完成内容
+
+四层兜底清理机制（`backend/docrestore/ocr/engine_manager.py` 模块级）：
+
+**A. atexit hook** —— 主防线
+- `_kill_pgid_sync(pgid, grace_seconds=3.0)`：同步 SIGTERM → 轮询探活 → SIGKILL
+- `_track_pgid(pgid)` / `_untrack_pgid(pgid)`：幂等注册/取消 atexit 回调
+- `_start_ppocr_server` 启动成功后 `_track_pgid(proc.pid)`；`_stop_ppocr_server` 开头 `_untrack_pgid(pid)` 避免重复 kill
+- 覆盖：uvicorn force-quit / sys.exit / Python 主线程正常结束
+
+**B. PDEATHSIG(SIGKILL)** —— kill -9 兜底
+- `_prctl_set_pdeathsig()`（preexec_fn）：Linux only，ctypes 调 libc `prctl(PR_SET_PDEATHSIG, SIGKILL)`；fork 子进程里 logging 不安全，异常静默吞掉
+- 传给 `asyncio.create_subprocess_exec(..., preexec_fn=_prctl_set_pdeathsig)`
+- 覆盖：docrestore 被 SIGKILL → 内核自动 SIGKILL ppocr-server（vLLM 孤儿仍依赖 D 下次启动兜底）
+
+**C. SIGHUP handler** —— 终端关闭 / SSH 断开
+- `_sighup_handler`：同步 killpg 所有 tracked pgid + 转发 SIGTERM 给自己（让 uvicorn 走正常 shutdown）
+- `_install_signal_handlers()`：幂等安装，SIGINT/SIGTERM 交给 uvicorn
+- 覆盖：uvicorn 不接管的 SIGHUP
+
+**D. 启动时扫描清理** —— 上次遗留
+- `cleanup_stale_ppocr_servers()`：遍历 `/proc`，按 cmdline 匹配 `paddleocr` + `genai_server`，解析 `/proc/<pid>/stat` 字段 4（pgid）去重后批量 `_kill_pgid_sync`
+- `lifespan` startup 开头 `asyncio.to_thread(cleanup_stale_ppocr_servers)`
+- 覆盖：上次 kill -9 残留的 vLLM 孤儿
+
+### 测试（`tests/ocr/test_engine_manager.py`）
+
+新增 14 个用例：
+- `TestKillPgidSync`(3)：SIGTERM 生效 / SIGKILL 兜底 / ProcessLookupError 早退
+- `TestPgidTracking`(4)：注册 atexit+signal / 幂等 / untrack / 未 track 的 pgid noop
+- `TestSighupHandler`(1)：killpg 所有 tracked + 转发 SIGTERM
+- `TestExtractPaddleocrPgid`(3)：正向解析 / 非 paddleocr / cmdline 读失败
+- `TestCleanupStaleServers`(3)：pgid 去重 / 非 Linux / listdir OSError
+
+### 回归
+
+- pytest: 511 passed + 8 skipped（原 497+8，新增 14）
+- mypy --strict: 108 源文件 0 错误
+- ruff check: 全部通过
+- 手工验证：`killpg(2708324, SIGTERM)` 一次带走整个进程组包括 vLLM
+
+### 残余风险
+
+- docrestore 被 SIGKILL（kill -9 / OOM killer）时 atexit 不跑，PDEATHSIG 能杀 ppocr-server 但 vLLM 仍孤儿 —— 依赖下次启动 D 扫描兜底
+- 非 Linux 平台（macOS/Windows）PDEATHSIG 和 /proc 扫描都不可用（本项目本就要求 Linux + CUDA，已接受）
+
+---
+
+## 2026-04-17 修复 OCR worker 假死/shutdown 孤儿进程（vLLM EngineCore）
+
+### 背景
+
+用户反馈：任务处理多篇子文档，第 5 篇 OCR 响应超时触发 `_restart_worker` 重试，worker 没能重启而是卡住，用户 Ctrl+C 退出后，`VLLM::EngineCore` 成为孤儿进程（ppocr-server 随之残留）。
+
+### 根因
+
+四层叠加：
+
+1. **A — `base.py::shutdown` 无短超时**：graceful `{"cmd":"shutdown"}` 命令的响应等待继承 `paddle_ocr_timeout=300s`，worker 假死时雪崩。
+2. **B — `engine_manager.py::_shutdown_current` 清理顺序脆弱**：`_stop_ppocr_server` 不在 finally，`engine.shutdown` 抛 `CancelledError` 时直接跳过，ppocr-server（独立 session leader，`start_new_session=True`）连同内部 vLLM EngineCore 永远无人清理。
+3. **C — lifespan shutdown 不 cancel 运行中任务**：OCR 任务仍在 `_send_command` 里读写 worker stdin/stdout 时，`pipeline.shutdown()` 并发调用 `engine.shutdown` → 两个协程争抢同一 StreamReader，行为未定义。
+4. **D — `_restart_worker` 走 graceful 路径**：worker 已假死仍先发 shutdown 命令属于无用操作（A 修好后影响变小，但语义应该直接）。
+
+### 完成内容
+
+**OCR 引擎改动**（`backend/docrestore/ocr/base.py`）
+- 新增类常量 `SHUTDOWN_COMMAND_TIMEOUT_SECONDS = 3.0`
+- `WorkerBackedOCREngine.shutdown(*, force: bool = False)`：
+  - `force=False` 默认：`asyncio.wait_for(_send_command({"cmd":"shutdown"}), timeout=3.0)`，TimeoutError/Exception 立刻跳到 `_terminate_process`
+  - `force=True`：跳过 graceful 命令，直接 terminate
+- `_restart_worker` 改为 `await self.shutdown(force=True)`
+
+**EngineManager 改动**（`backend/docrestore/ocr/engine_manager.py`）
+- `_shutdown_current` 改 try/finally 结构：`_stop_ppocr_server` 始终在外层 finally，内层 `engine = None` 也在 finally → engine.shutdown 成功/失败/CancelledError 都不影响 ppocr-server 清理
+
+**TaskManager 改动**（`backend/docrestore/pipeline/task_manager.py`）
+- 新增 `async def shutdown(self)`：cancel 所有 `_running_tasks` + `asyncio.gather(return_exceptions=True)` 等退出，记录非 CancelledError 的异常
+
+**lifespan 改动**（`backend/docrestore/api/app.py`）
+- cleanup 顺序调整：`warmup_task.cancel` → `manager.shutdown()` → `cleanup_task.cancel` → `pipeline.shutdown()`
+- 保证 pipeline.shutdown 运行时没有并发的 OCR 任务抢 worker 流
+
+### 测试
+
+- `tests/ocr/test_paddle_ocr.py`（+3 用例）：
+  - `test_shutdown_fast_when_worker_unresponsive` — readline 永不返回时 shutdown < 5s
+  - `test_shutdown_force_skips_graceful_command` — force=True 零延迟 + 不发 shutdown 命令
+  - `test_restart_worker_uses_force_shutdown` — `_restart_worker` 不发 shutdown 命令
+- `tests/ocr/test_engine_manager.py`（+1 用例）：
+  - `test_shutdown_stops_ppocr_even_if_engine_shutdown_cancelled` — engine.shutdown 抛 CancelledError 时 `_stop_ppocr_server` 仍被调一次
+- `tests/pipeline/test_task_manager.py`（+3 用例）：
+  - `test_shutdown_cancels_pending_running_tasks` — 挂起任务被 cancel + running_tasks 清空
+  - `test_shutdown_noop_when_no_running_tasks` — 空集合快速返回
+  - `test_shutdown_swallows_task_exceptions` — 任务非 CancelledError 异常不向外抛
+
+### 回归
+
+- `pytest -q`：497 passed, 8 skipped（新增 7 用例）
+- `mypy --strict backend/`：41 files 0 errors
+- `ruff check backend/ tests/`：All checks passed
+
+---
+
+## 2026-04-17 process_tree 多子目录并行（asyncio.gather）
+
+### 背景
+
+用户反馈：含 2 个子目录的 image_dir 处理时，subdir 1 进入 PII/LLM 精修阶段后 GPU 空闲（`nvidia-smi` 0%），subdir 2 要等 subdir 1 完全处理完才开始 OCR。
+
+根因：`pipeline/pipeline.py::process_tree` 的 `for leaf in leaf_dirs: await process_many(...)` 是**同步 for 循环**，从 `eed4c8a` 初版就如此。`a778bcc` 的 "Pipeline 级并行" 优化覆盖的是**跨 API task** 并发 + LLM API 全局限流，**不覆盖单 task 内多子目录**。
+
+### 完成内容
+
+**Pipeline 改动**（`backend/docrestore/pipeline/pipeline.py`）
+- `process_tree` 多子目录分支：`for` 循环 → `asyncio.gather(*[_process_leaf(...) for ...])`
+- 抽出 `_process_leaf(index, leaf, ...)` 协程：负责单个叶子目录的 `process_many` 调用 + `doc_dir` 补全
+- 异常语义保持：`asyncio.gather` 默认 fail-fast，任一 subdir 失败即整个 task FAILED
+- profiler 兼容：`current_profiler()` 依赖 ContextVar，asyncio.Task copy 时自动继承父 context → 多子目录共享同一根 profiler，事件按时间戳合并无污染
+
+**并发模型**（已由锁机制天然保证）
+- OCR：`gpu_lock` 串行（峰值 ≤ 1），防 GPU OOM
+- LLM：`llm_semaphore` 限流（默认 3），多 subdir 的 refine/fill_gap/doc_boundary 可并发
+- PII regex / dedup / reassemble / render：纯 CPU/IO，真正并行
+
+**前端进度分轨展示（配套）**
+- `TaskProgress` dataclass + `ProgressResponse` pydantic 模型新增 `subtask: str = ""` 字段；`_wrap_progress` 除原有 message 前缀外，把 `dir_label` 写入 `p.subtask`
+- `useTaskRunner` 把 `progress: TaskProgress | undefined` 改为 `progresses: Record<string, TaskProgress>`，WS / polling 收到帧时按 `subtask` 作为 key 分桶更新
+- `TaskProgress.tsx` 重构：主进度条（key = ""）+ 虚线分隔 + "并行处理 N 个子文档" + 每个 subtask 一条直接展开的进度条（不折叠），含 subtask label / stage / counts / percent / message
+- 三语 i18n 加 `taskProgress.subtasksLabel`；`App.css` 加 `.subtasks / .subtask-row / .subtask-label` 样式
+- 视觉验证：`screenshots/task_progress_parallel_subtasks.png`（用 `?mock=progresses` URL query 注入 mock 数据截图后回滚，dev 代码未保留）
+
+**测试**
+- `tests/pipeline/test_process_tree_parallel.py`（3 用例）
+  - `test_subdir_ocr_overlaps_with_prior_subdir_refine`：时间轴观察，断言 subdir 2 OCR start < subdir 1 refine end（跨子目录并行成立）
+  - `test_ocr_still_serialized_by_gpu_lock`：OCR 峰值并发 = 1（gpu_lock 仍然兜底）
+  - `test_progress_subtask_field_is_populated`：多子目录推送的 progress 帧 `subtask` 都非空且与 leaf 对应
+- 回归：`tests/pipeline/` + `tests/api/` + `tests/llm/` 共 263 passed + 2 skipped；`mypy --strict` 41 文件 0 error；`ruff check` 0 issue；frontend `tsc` / `eslint` 0 error
+
+**文档**
+- `docs/zh/backend/pipeline.md` §9.3 新增"子目录并行"，原 §9.3 改为 §9.4
+- `docs/en/backend/pipeline.md` 同步
+- §3.1 调用约定句末补 "多子目录时用 asyncio.gather 并行调用"
+
+### 关键决策
+
+1. **为何不引入 `max_concurrent_subdirs` 配置？** 子目录并发度已由 gpu_lock（OCR 串行）和 llm_semaphore（LLM 限流）隐式约束，再加一个显式上限会让配置面冗余。当前语义清晰：子目录无条件并行，具体"并多少"由底层锁决定。
+2. **为何用 `asyncio.gather` 而非 `TaskGroup`？** Python 3.11+ 的 `TaskGroup` 语义更严格但兼容性要求更高；项目 3.12 虽支持，但 `gather` + fail-fast 已经满足需求，不引入语法转换成本。
+3. **为何把 `_process_leaf` 抽成实例方法而非内嵌函数？** 便于测试单独 mock（虽然目前没用到），且 profiler stage 的参数单独列出可读性更好。
+
+### 遗留
+
+- AGE-16 流式并行 Pipeline（单 task 内 OCR/LLM 页级流水）仍未实施，设计文档 `docs/zh/backend/references/streaming-pipeline.md` 保留
+- 多任务 API 并发入口仍只有 `curl`/MCP，前端 `TaskForm` UX 是"一次一提交"
+
+### 相关提交
+
+- 本次（待提交）：process_tree 多子目录 asyncio.gather 并行
+
 ## 2026-04-17 OCR 引擎按需预热接口与前端预加载按钮
 
 ### 背景

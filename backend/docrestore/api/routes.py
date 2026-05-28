@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import io
+import json
 import logging
 import zipfile
 from contextlib import suppress
@@ -29,29 +30,40 @@ from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
 from fastapi.responses import FileResponse, Response
 from starlette.websockets import WebSocketDisconnect
 
+from docrestore.api.errors import APIErrorCode, ApiBusinessError
+
 from docrestore.api.auth import require_auth_ws
 
 from docrestore.api.schemas import (
     ActionResponse,
     BrowseDirsResponse,
+    CodeDiagnosticResponse,
     CreateTaskRequest,
     CustomSensitiveWord,
+    DiagnoseCodeFileRequest,
     DirEntry,
+    GPUInfoResponse,
+    GPUListResponse,
     OCRStatusResponse,
     OCRWarmupRequest,
     ProgressResponse,
     SourceImagesResponse,
     StageServerSourceRequest,
     StageServerSourceResponse,
+    TaskCleanupRequest,
+    TaskCleanupResponse,
     TaskListItem,
     TaskListResponse,
     TaskResponse,
     TaskResultResponse,
     TaskResultsResponse,
+    UpdateCodeFileRequest,
     UpdateMarkdownRequest,
 )
+from docrestore.ocr.gpu_detect import list_gpus, pick_best_gpu
 from docrestore.models import TaskProgress
 from docrestore.pipeline.config import (
+    CodeRestoreConfig,
     CustomWord,
     LLMConfig,
     OCRConfig,
@@ -83,7 +95,9 @@ def set_task_manager(manager: TaskManager | None) -> None:
 def _get_manager() -> TaskManager:
     """获取 TaskManager，未初始化时报 500"""
     if _task_manager is None:
-        raise HTTPException(status_code=500, detail="服务未初始化")
+        raise ApiBusinessError(
+            APIErrorCode.SERVICE_NOT_INITIALIZED, 500, "服务未初始化",
+        )
     return _task_manager
 
 
@@ -173,24 +187,59 @@ def _build_result_zip_bytes(output_dir: Path, doc_dirs: list[str]) -> bytes:
     return buf.getvalue()
 
 
+#: 代码模式额外打包内容：
+#: - ``files/`` 整树（还原出来的源文件）
+#: - ``files-index.json``（路径 + 行号 + 来源页 + flags 索引）
+#: - ``.quality_report.json``（debug，便于离线复盘）
+_CODE_MODE_EXTRA_FILES: tuple[str, ...] = (
+    "files-index.json",
+    ".quality_report.json",
+)
+_CODE_MODE_EXTRA_DIRS: tuple[str, ...] = ("files",)
+
+
 def _add_doc_to_zip(
     zf: zipfile.ZipFile,
     doc_dir: Path,
     prefix: str,
 ) -> None:
-    """将单个文档目录的 document.md + images/ 写入 zip。"""
+    """将单个文档目录写入 zip：
+    - 文档模式：``document.md`` + ``images/``
+    - 代码模式叠加：``files/`` 整树 + ``files-index.json``（+ debug 报告）
+    """
     doc_path = doc_dir / "document.md"
     if doc_path.exists():
         arcname = f"{prefix}/document.md" if prefix else "document.md"
         zf.write(doc_path, arcname=arcname)
 
-    images_dir = doc_dir / "images"
-    if images_dir.exists():
-        for p in sorted(images_dir.rglob("*")):
-            if p.is_file():
-                rel = p.relative_to(doc_dir).as_posix()
-                arcname = f"{prefix}/{rel}" if prefix else rel
-                zf.write(p, arcname=arcname)
+    _add_subtree_to_zip(zf, doc_dir, "images", prefix)
+
+    # 代码模式产物（仅在存在时写入；非代码模式静默跳过）
+    for extra_dir in _CODE_MODE_EXTRA_DIRS:
+        _add_subtree_to_zip(zf, doc_dir, extra_dir, prefix)
+    for extra_file in _CODE_MODE_EXTRA_FILES:
+        p = doc_dir / extra_file
+        if p.is_file():
+            arcname = f"{prefix}/{extra_file}" if prefix else extra_file
+            zf.write(p, arcname=arcname)
+
+
+def _add_subtree_to_zip(
+    zf: zipfile.ZipFile,
+    doc_dir: Path,
+    subdir: str,
+    prefix: str,
+) -> None:
+    """把 ``doc_dir/subdir/`` 整树写入 zip（保持相对路径）。不存在则跳过。"""
+    sub_root = doc_dir / subdir
+    if not sub_root.is_dir():
+        return
+    for p in sorted(sub_root.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(doc_dir).as_posix()
+        arcname = f"{prefix}/{rel}" if prefix else rel
+        zf.write(p, arcname=arcname)
 
 
 def _build_task_response(task_id: str) -> TaskResponse:
@@ -198,7 +247,9 @@ def _build_task_response(task_id: str) -> TaskResponse:
     manager = _get_manager()
     task = manager.get_task(task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
 
     progress = None
     if task.progress is not None:
@@ -241,7 +292,9 @@ async def ws_task_progress(
 
     try:
         initial = task.progress or TaskProgress(
-            stage="ocr", message="等待开始",
+            stage="ocr",
+            message="等待开始",
+            message_key="progress.waiting",
         )
         await websocket.send_json(dataclasses.asdict(initial))
 
@@ -331,16 +384,32 @@ async def create_task(
             )
         pii_cfg = defaults.pii.model_copy(update=pii_update)
 
+    code_cfg: CodeRestoreConfig | None = None
+    if req.code is not None:
+        code_cfg = defaults.code.model_copy(
+            update=req.code.model_dump(exclude_none=True),
+        )
+
     task = manager.create_task(
         image_dir=req.image_dir,
         output_dir=req.output_dir,
         llm=llm_cfg,
         ocr=ocr_cfg,
         pii=pii_cfg,
+        code=code_cfg,
     )
     logger.info("任务已创建: task_id=%s", task.task_id)
-    bg = asyncio.create_task(manager.run_task(task.task_id))
-    manager.register_running_task(task.task_id, bg)
+    bg = asyncio.create_task(
+        manager.run_task(task.task_id),
+        name=f"run-task-{task.task_id}",
+    )
+    try:
+        manager.register_running_task(task.task_id, bg)
+    except BaseException:
+        # register_running_task 抛出（极少见，例如 dict 被外部篡改）时
+        # 必须 cancel bg，否则 create_task 启动的协程完全脱管
+        bg.cancel()
+        raise
     logger.info("后台任务已启动，准备返回响应")
     return TaskResponse(
         task_id=task.task_id,
@@ -362,18 +431,18 @@ async def get_result(
     manager = _get_manager()
     task = manager.get_task(task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
 
     if task.status.value != "completed":
-        raise HTTPException(
-            status_code=404,
-            detail="任务尚未完成或已失败",
+        raise ApiBusinessError(
+            APIErrorCode.TASK_RESULT_NOT_READY, 404, "任务尚未完成或已失败",
         )
 
     if task.result is None:
-        raise HTTPException(
-            status_code=404,
-            detail="任务尚未完成或已失败",
+        raise ApiBusinessError(
+            APIErrorCode.TASK_RESULT_NOT_READY, 404, "任务尚未完成或已失败",
         )
 
     return TaskResultResponse(
@@ -389,16 +458,23 @@ async def get_result(
 async def get_results(
     task_id: str,
 ) -> TaskResultsResponse:
-    """获取已完成任务的全部文档结果列表。"""
+    """获取任务已有的全部文档结果列表。
+
+    放宽规则（2026-04-21）：completed 和 failed 都返回，只要 results 非空。
+    failed 任务里每个成功子文档可正常预览；失败子文档的 `error` 非空，
+    前端据此切换展示（错误文本 vs markdown）。
+    """
     manager = _get_manager()
     task = manager.get_task(task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
 
-    if task.status.value != "completed" or not task.results:
-        raise HTTPException(
-            status_code=404,
-            detail="任务尚未完成或已失败",
+    if not task.results:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NO_RESULTS, 404,
+            "任务尚无结果（未完成或根级错误）",
         )
 
     items = [
@@ -408,6 +484,7 @@ async def get_results(
             markdown=r.markdown,
             doc_title=r.doc_title,
             doc_dir=r.doc_dir,
+            error=r.error,
         )
         for r in task.results
     ]
@@ -432,7 +509,10 @@ async def update_result_markdown(
         task_id, result_index, req.markdown,
     )
     if error is not None:
-        raise HTTPException(status_code=400, detail=error)
+        raise ApiBusinessError(
+            APIErrorCode.MARKDOWN_UPDATE_FAILED, 400, error,
+            params={"reason": error},
+        )
 
     return ActionResponse(task_id=task_id, message="保存成功")
 
@@ -446,17 +526,327 @@ async def get_task_asset(task_id: str, asset_path: str) -> FileResponse:
     manager = _get_manager()
     task = manager.get_task(task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
 
     rel = _validate_asset_path(asset_path)
     if rel is None:
-        raise HTTPException(status_code=404, detail="资源不存在")
+        raise ApiBusinessError(
+            APIErrorCode.ASSET_NOT_FOUND, 404, "资源不存在",
+        )
 
     target = _resolve_asset_path(Path(task.output_dir), rel)
     if target is None or not target.exists() or not target.is_file():
-        raise HTTPException(status_code=404, detail="资源不存在")
+        raise ApiBusinessError(
+            APIErrorCode.ASSET_NOT_FOUND, 404, "资源不存在",
+        )
 
     return FileResponse(path=target)
+
+
+@router.get("/tasks/{task_id}/files-index")
+async def get_task_files_index(
+    task_id: str,
+) -> list[dict[str, object]]:
+    """返回 AGE-8 代码模式的 ``files-index.json``。
+
+    没跑代码模式 / 任务未完成 / 索引不存在 → 404。
+    """
+    import json as _json
+
+    manager = _get_manager()
+    task = manager.get_task(task_id)
+    if task is None:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
+
+    output_dir = Path(task.output_dir)
+    # 多文档场景下 doc_dir 也可能含 files-index.json，简单起见只看根目录
+    index_path = output_dir / "files-index.json"
+    if not index_path.is_file():
+        raise ApiBusinessError(
+            APIErrorCode.FILES_INDEX_NOT_FOUND, 404,
+            "任务未生成代码索引（非代码模式或未完成）",
+        )
+
+    try:
+        data = _json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, _json.JSONDecodeError) as exc:
+        raise ApiBusinessError(
+            APIErrorCode.FILES_INDEX_PARSE_ERROR, 500,
+            f"索引解析失败: {exc}",
+            params={"reason": str(exc)},
+        ) from exc
+
+    if not isinstance(data, list):
+        raise ApiBusinessError(
+            APIErrorCode.FILES_INDEX_BAD_FORMAT, 500, "索引格式异常（非数组）",
+        )
+
+    return data
+
+
+@router.get("/tasks/{task_id}/files/{file_path:path}")
+async def get_task_code_file(
+    task_id: str,
+    file_path: str,
+) -> Response:
+    """返回 AGE-8 代码模式渲染的源文件文本内容。
+
+    路径限定在 ``output_dir/files/`` 下；任何 ``..`` / 绝对路径 / 非法
+    字符 → 404，避免任意文件读取。
+    """
+    manager = _get_manager()
+    task = manager.get_task(task_id)
+    if task is None:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
+
+    rel = _validate_code_file_path(file_path)
+    if rel is None:
+        raise ApiBusinessError(
+            APIErrorCode.FILE_NOT_FOUND, 404, "文件不存在",
+        )
+
+    output_dir = Path(task.output_dir)
+    files_root = (output_dir / "files").resolve(strict=False)
+    if not files_root.is_dir():
+        raise ApiBusinessError(
+            APIErrorCode.CODE_DIR_NOT_FOUND, 404, "代码目录不存在",
+        )
+
+    target = (files_root / Path(*rel.parts)).resolve(strict=False)
+    if not target.is_relative_to(files_root):
+        raise ApiBusinessError(
+            APIErrorCode.FILE_NOT_FOUND, 404, "文件不存在",
+        )
+    if not target.is_file():
+        raise ApiBusinessError(
+            APIErrorCode.FILE_NOT_FOUND, 404, "文件不存在",
+        )
+
+    try:
+        content = target.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise ApiBusinessError(
+            APIErrorCode.READ_FAILED, 500,
+            f"读取失败: {exc}",
+            params={"reason": str(exc)},
+        ) from exc
+
+    return Response(content=content, media_type="text/plain; charset=utf-8")
+
+
+@router.post(
+    "/tasks/{task_id}/code-diagnostics",
+    response_model=CodeDiagnosticResponse,
+)
+async def diagnose_task_code_file(
+    task_id: str,
+    req: DiagnoseCodeFileRequest,
+) -> CodeDiagnosticResponse:
+    """对代码模式源文件草稿做只读实时诊断。"""
+    from docrestore.processing.code_diagnostics import diagnose_text
+
+    manager = _get_manager()
+    task = manager.get_task(task_id)
+    if task is None:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
+
+    rel = _validate_code_file_path(req.file_path)
+    if rel is None:
+        raise ApiBusinessError(
+            APIErrorCode.FILE_NOT_FOUND, 404, "文件不存在",
+        )
+
+    output_dir = Path(task.output_dir)
+    files_root = (output_dir / "files").resolve(strict=False)
+    target = (files_root / Path(*rel.parts)).resolve(strict=False)
+    if (
+        not files_root.is_dir()
+        or not target.is_relative_to(files_root)
+        or not target.is_file()
+    ):
+        raise ApiBusinessError(
+            APIErrorCode.FILE_NOT_FOUND, 404, "文件不存在",
+        )
+
+    language = _code_file_language_from_index(output_dir, rel)
+    diagnostic = await asyncio.to_thread(
+        diagnose_text,
+        path=rel.as_posix(),
+        language=language,
+        text=req.content,
+        include_root=files_root,
+        # 草稿在隔离临时目录诊断，传入真实兄弟目录让同目录 #include 可解析，
+        # 避免对依赖同目录头文件的 C/C++ 草稿误报缺失依赖（B7 C19）。
+        extra_include_roots=[target.parent],
+    )
+    return CodeDiagnosticResponse.model_validate(diagnostic.to_index_dict())
+
+
+# 串行化代码文件保存：write_text + files-index 的 read-modify-write 必须互斥，
+# 否则并发 PUT 会相互覆盖、丢失另一文件的 line_count 更新（B7 PUT 竞态）。
+_CODE_FILE_WRITE_LOCK = asyncio.Lock()
+
+
+@router.put(
+    "/tasks/{task_id}/files/{file_path:path}",
+    response_model=ActionResponse,
+)
+async def update_task_code_file(
+    task_id: str,
+    file_path: str,
+    req: UpdateCodeFileRequest,
+) -> ActionResponse:
+    """保存 AGE-8 代码模式渲染的单个源文件。
+
+    只允许写入已存在的 ``output_dir/files/`` 子文件，禁止通过新建路径扩大
+    可写范围；保存后同步更新 ``files-index.json`` 的行数摘要。
+    """
+    manager = _get_manager()
+    task = manager.get_task(task_id)
+    if task is None:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
+
+    rel = _validate_code_file_path(file_path)
+    if rel is None:
+        raise ApiBusinessError(
+            APIErrorCode.FILE_NOT_FOUND, 404, "文件不存在",
+        )
+
+    output_dir = Path(task.output_dir)
+    files_root = (output_dir / "files").resolve(strict=False)
+    if not files_root.is_dir():
+        raise ApiBusinessError(
+            APIErrorCode.CODE_DIR_NOT_FOUND, 404, "代码目录不存在",
+        )
+
+    target = (files_root / Path(*rel.parts)).resolve(strict=False)
+    if not target.is_relative_to(files_root) or not target.is_file():
+        raise ApiBusinessError(
+            APIErrorCode.FILE_NOT_FOUND, 404, "文件不存在",
+        )
+
+    try:
+        # 阻塞文件 IO + 索引 RMW 放到线程里跑，并用锁串行化避免并发覆盖（B7 PUT）。
+        async with _CODE_FILE_WRITE_LOCK:
+            await asyncio.to_thread(
+                _write_code_file_and_index,
+                target, output_dir, rel, req.content,
+            )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ApiBusinessError(
+            APIErrorCode.WRITE_FAILED, 500,
+            f"保存失败: {exc}",
+            params={"reason": str(exc)},
+        ) from exc
+
+    return ActionResponse(task_id=task_id, message="代码文件已保存")
+
+
+def _validate_code_file_path(file_path: str) -> PurePosixPath | None:
+    """校验 ``files/`` 下的相对路径，禁止 .. / 绝对路径 / 隐藏目录。"""
+    if not file_path:
+        return None
+    p = PurePosixPath(file_path)
+    if p.is_absolute() or ".." in p.parts or "." in p.parts:
+        return None
+    if any(seg.startswith(".") for seg in p.parts):
+        return None
+    return p
+
+
+def _count_code_lines(content: str) -> int:
+    """按前端编辑器的 ``\\n`` 语义统计显示行数。"""
+    return 0 if content == "" else content.count("\n") + 1
+
+
+def _write_code_file_and_index(
+    target: Path,
+    output_dir: Path,
+    rel: PurePosixPath,
+    content: str,
+) -> None:
+    """同步写入代码文件并刷新 files-index（在线程内执行，由调用方持锁串行化）。"""
+    target.write_text(content, encoding="utf-8")
+    _update_code_index_after_write(output_dir, rel, content)
+
+
+def _update_code_index_after_write(
+    output_dir: Path,
+    rel: PurePosixPath,
+    content: str,
+) -> None:
+    """保存代码文件后同步刷新 files-index 中的基础行数信息。"""
+    index_path = output_dir / "files-index.json"
+    if not index_path.is_file():
+        return
+
+    data: object = json.loads(index_path.read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        return
+
+    rel_path = rel.as_posix()
+    line_count = _count_code_lines(content)
+    changed = False
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        if item.get("path") != rel_path:
+            continue
+        item["line_count"] = line_count
+        raw_range = item.get("line_no_range")
+        if (
+            isinstance(raw_range, list)
+            and len(raw_range) >= 1
+            and isinstance(raw_range[0], int)
+        ):
+            start = raw_range[0]
+            item["line_no_range"] = (
+                [start, start + line_count - 1] if line_count > 0 else []
+            )
+        changed = True
+        break
+
+    if changed:
+        index_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+
+def _code_file_language_from_index(
+    output_dir: Path,
+    rel: PurePosixPath,
+) -> str | None:
+    """从 files-index 读取代码语言，索引异常时交给诊断器按扩展名推断。"""
+    index_path = output_dir / "files-index.json"
+    if not index_path.is_file():
+        return None
+    try:
+        data: object = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, list):
+        return None
+
+    rel_path = rel.as_posix()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        if item.get("path") != rel_path:
+            continue
+        language = item.get("language")
+        return language if isinstance(language, str) and language else None
+    return None
 
 
 @router.get("/tasks/{task_id}/download")
@@ -465,12 +855,18 @@ async def download_task_result(task_id: str) -> Response:
     manager = _get_manager()
     task = manager.get_task(task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
 
     output_dir = Path(task.output_dir)
 
-    # 收集子目录列表
-    doc_dirs = [r.doc_dir for r in task.results] if task.results else []
+    # 收集子目录列表；跳过失败的子文档（markdown 未落盘，没什么可下载的）
+    doc_dirs = (
+        [r.doc_dir for r in task.results if not r.error]
+        if task.results
+        else []
+    )
 
     # 至少有一个 document.md 存在才能下载
     has_any = any(
@@ -478,7 +874,9 @@ async def download_task_result(task_id: str) -> Response:
         for d in (doc_dirs or [""])
     )
     if not has_any:
-        raise HTTPException(status_code=404, detail="任务尚未完成或已失败")
+        raise ApiBusinessError(
+            APIErrorCode.TASK_RESULT_NOT_READY, 404, "任务尚未完成或已失败",
+        )
 
     zip_bytes = _build_result_zip_bytes(output_dir, doc_dirs)
     filename = f"docrestore_{task_id}.zip"
@@ -496,6 +894,57 @@ async def download_task_result(task_id: str) -> Response:
 _IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"})
 
 
+@router.get("/tasks/{task_id}/quality")
+async def get_task_quality_report(task_id: str) -> dict[str, object]:
+    """返回任务级质量报告（.quality_report.json）。
+
+    process_tree 多子目录时合并所有子目录的报告；单目录直接返回。
+    没有报告（老任务或任务失败前）返回空 issues + 空 summary。
+    """
+    import asyncio
+    import json as _json
+
+    manager = _get_manager()
+    task = manager.get_task(task_id)
+    if task is None:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
+
+    def _load() -> dict[str, object]:
+        output_root = Path(task.output_dir)
+        if not output_root.is_dir():
+            return {"summary": {"total": 0}, "issues": []}
+
+        # 收集所有子目录的 .quality_report.json
+        reports: list[dict[str, object]] = []
+        for p in output_root.rglob(".quality_report.json"):
+            try:
+                reports.append(_json.loads(
+                    p.read_text(encoding="utf-8"),
+                ))
+            except (OSError, _json.JSONDecodeError):
+                continue
+
+        if not reports:
+            return {"summary": {"total": 0}, "issues": []}
+        if len(reports) == 1:
+            return reports[0]
+
+        # 多子目录：合并 issues 列表，聚合 summary 计数
+        merged_issues: list[dict[str, object]] = []
+        for r in reports:
+            issues = r.get("issues", [])
+            if isinstance(issues, list):
+                merged_issues.extend(issues)
+        return {
+            "summary": {"total": len(merged_issues)},
+            "issues": merged_issues,
+        }
+
+    return await asyncio.to_thread(_load)
+
+
 @router.get(
     "/tasks/{task_id}/source-images",
     response_model=SourceImagesResponse,
@@ -505,7 +954,9 @@ async def list_source_images(task_id: str) -> SourceImagesResponse:
     manager = _get_manager()
     task = manager.get_task(task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
 
     import asyncio
 
@@ -532,11 +983,15 @@ async def get_source_image(task_id: str, filename: str) -> FileResponse:
     manager = _get_manager()
     task = manager.get_task(task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
 
     # 路径安全校验
     if not filename or ".." in filename or filename.startswith("/"):
-        raise HTTPException(status_code=400, detail="非法文件名")
+        raise ApiBusinessError(
+            APIErrorCode.INVALID_FILENAME, 400, "非法文件名",
+        )
 
     def _resolve() -> Path | None:
         """同步解析并校验图片路径。"""
@@ -553,7 +1008,9 @@ async def get_source_image(task_id: str, filename: str) -> FileResponse:
     target = await asyncio.to_thread(_resolve)
 
     if target is None:
-        raise HTTPException(status_code=404, detail="图片不存在")
+        raise ApiBusinessError(
+            APIErrorCode.IMAGE_NOT_FOUND, 404, "图片不存在",
+        )
 
     return FileResponse(path=target)
 
@@ -568,10 +1025,15 @@ async def cancel_task(task_id: str) -> ActionResponse:
     result = await manager.cancel_task(task_id)
 
     if result is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
 
     if result:
-        raise HTTPException(status_code=409, detail=result)
+        raise ApiBusinessError(
+            APIErrorCode.TASK_ACTION_CONFLICT, 409, result,
+            params={"reason": result},
+        )
 
     return ActionResponse(
         task_id=task_id,
@@ -586,10 +1048,15 @@ async def delete_task(task_id: str) -> ActionResponse:
     result = await manager.delete_task(task_id)
 
     if result is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
 
     if result:
-        raise HTTPException(status_code=409, detail=result)
+        raise ApiBusinessError(
+            APIErrorCode.TASK_ACTION_CONFLICT, 409, result,
+            params={"reason": result},
+        )
 
     return ActionResponse(
         task_id=task_id,
@@ -597,25 +1064,103 @@ async def delete_task(task_id: str) -> ActionResponse:
     )
 
 
+@router.post("/tasks/cleanup", response_model=TaskCleanupResponse)
+async def cleanup_tasks(req: TaskCleanupRequest) -> TaskCleanupResponse:
+    """批量清理指定状态的任务（仅允许 completed / failed）。
+
+    对 100+ 历史任务场景，逐个调用 DELETE /tasks/{id} 会产生大量往返，
+    此接口一次性清理并返回汇总结果。
+    """
+    allowed = {"completed", "failed"}
+    invalid = [s for s in req.statuses if s not in allowed]
+    if invalid:
+        raise ApiBusinessError(
+            APIErrorCode.CLEANUP_STATUSES_INVALID, 400,
+            f"仅允许清理终态任务（completed / failed），非法状态: {invalid}",
+            params={"invalid": invalid},
+        )
+    if not req.statuses:
+        raise ApiBusinessError(
+            APIErrorCode.CLEANUP_STATUSES_EMPTY, 400, "statuses 不能为空",
+        )
+
+    manager = _get_manager()
+    deleted_ids, errors = await manager.cleanup_tasks(req.statuses)
+    return TaskCleanupResponse(
+        deleted=len(deleted_ids),
+        failed=len(errors),
+        deleted_ids=deleted_ids,
+        errors=[f"{tid}: {msg}" for tid, msg in errors],
+    )
+
+
 @router.post("/tasks/{task_id}/retry", response_model=ActionResponse)
 async def retry_task(task_id: str) -> ActionResponse:
-    """重试失败的任务"""
+    """重试失败的任务（从头跑，不复用 output_dir）"""
     manager = _get_manager()
     result = await manager.retry_task(task_id)
 
     if result is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
 
     if isinstance(result, str):
-        raise HTTPException(status_code=409, detail=result)
+        raise ApiBusinessError(
+            APIErrorCode.TASK_ACTION_CONFLICT, 409, result,
+            params={"reason": result},
+        )
 
     # result 是新创建的 Task
-    bg = asyncio.create_task(manager.run_task(result.task_id))
-    manager.register_running_task(result.task_id, bg)
+    bg = asyncio.create_task(
+        manager.run_task(result.task_id),
+        name=f"run-task-{result.task_id}",
+    )
+    try:
+        manager.register_running_task(result.task_id, bg)
+    except BaseException:
+        bg.cancel()
+        raise
 
     return ActionResponse(
         task_id=result.task_id,
         message="已创建重试任务",
+    )
+
+
+@router.post("/tasks/{task_id}/resume", response_model=ActionResponse)
+async def resume_task(task_id: str) -> ActionResponse:
+    """继续失败任务 — 复用原 output_dir，OCR 层自动跳过已完成图。
+
+    仅 FAILED 状态（含用户取消）可继续。返回新建 task 的 task_id。
+    """
+    manager = _get_manager()
+    result = await manager.resume_task(task_id)
+
+    if result is None:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
+
+    if isinstance(result, str):
+        raise ApiBusinessError(
+            APIErrorCode.TASK_ACTION_CONFLICT, 409, result,
+            params={"reason": result},
+        )
+
+    bg = asyncio.create_task(
+        manager.run_task(result.task_id),
+        name=f"run-task-{result.task_id}",
+    )
+    try:
+        manager.register_running_task(result.task_id, bg)
+    except BaseException:
+        bg.cancel()
+        raise
+
+    return ActionResponse(
+        task_id=result.task_id,
+        message="已创建续跑任务",
     )
 
 
@@ -681,15 +1226,19 @@ def _scan_dir(p: str, with_files: bool) -> BrowseDirsResponse:
     """同步扫描目录。"""
     target = Path(p).expanduser().resolve()
     if not target.is_dir():
-        raise HTTPException(
-            status_code=400, detail=f"路径不是目录: {target}",
+        raise ApiBusinessError(
+            APIErrorCode.BROWSE_NOT_DIR, 400,
+            f"路径不是目录: {target}",
+            params={"path": str(target)},
         )
 
     try:
         children = sorted(target.iterdir(), key=lambda x: x.name.lower())
     except PermissionError:
-        raise HTTPException(  # noqa: B904
-            status_code=403, detail=f"无权限访问: {target}",
+        raise ApiBusinessError(  # noqa: B904
+            APIErrorCode.BROWSE_PERMISSION_DENIED, 403,
+            f"无权限访问: {target}",
+            params={"path": str(target)},
         )
 
     entries: list[DirEntry] = []
@@ -731,22 +1280,30 @@ def _resolve_stage_path(raw: str) -> Path:
     """校验单个 stage 路径：绝对、可解析、普通文件、图片扩展名。"""
     p = Path(raw).expanduser()
     if not p.is_absolute():
-        raise HTTPException(
-            status_code=400, detail=f"路径必须为绝对路径: {raw}",
+        raise ApiBusinessError(
+            APIErrorCode.STAGE_PATH_NOT_ABSOLUTE, 400,
+            f"路径必须为绝对路径: {raw}",
+            params={"path": raw},
         )
     try:
         real = p.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
-        raise HTTPException(  # noqa: B904
-            status_code=400, detail=f"路径无法解析: {raw} ({exc})",
+        raise ApiBusinessError(  # noqa: B904
+            APIErrorCode.STAGE_PATH_UNRESOLVABLE, 400,
+            f"路径无法解析: {raw} ({exc})",
+            params={"path": raw, "reason": str(exc)},
         )
     if not real.is_file():
-        raise HTTPException(
-            status_code=400, detail=f"不是普通文件: {real}",
+        raise ApiBusinessError(
+            APIErrorCode.STAGE_PATH_NOT_FILE, 400,
+            f"不是普通文件: {real}",
+            params={"path": str(real)},
         )
     if real.suffix.lower() not in _IMAGE_EXTS:
-        raise HTTPException(
-            status_code=400, detail=f"不支持的文件类型: {real}",
+        raise ApiBusinessError(
+            APIErrorCode.STAGE_PATH_BAD_EXT, 400,
+            f"不支持的文件类型: {real}",
+            params={"path": str(real)},
         )
     return real
 
@@ -780,9 +1337,10 @@ def _stage_files(raw_paths: list[str]) -> StageServerSourceResponse:
             (stage_dir / name).symlink_to(src)
         except OSError as exc:
             shutil.rmtree(stage_dir, ignore_errors=True)
-            raise HTTPException(  # noqa: B904
-                status_code=500,
-                detail=f"创建符号链接失败: {src} → {exc}",
+            raise ApiBusinessError(  # noqa: B904
+                APIErrorCode.STAGE_SYMLINK_FAILED, 500,
+                f"创建符号链接失败: {src} → {exc}",
+                params={"path": str(src), "reason": str(exc)},
             )
 
     logger.info(
@@ -806,11 +1364,14 @@ async def stage_server_source(
     - 返回临时目录路径，调用方使用后自行管理生命周期（不自动清理）
     """
     if not req.paths:
-        raise HTTPException(status_code=400, detail="paths 不能为空")
+        raise ApiBusinessError(
+            APIErrorCode.STAGE_PATHS_EMPTY, 400, "paths 不能为空",
+        )
     if len(req.paths) > _STAGE_FILES_MAX:
-        raise HTTPException(
-            status_code=400,
-            detail=f"单次最多 {_STAGE_FILES_MAX} 个文件",
+        raise ApiBusinessError(
+            APIErrorCode.STAGE_TOO_MANY_FILES, 400,
+            f"单次最多 {_STAGE_FILES_MAX} 个文件",
+            params={"max": _STAGE_FILES_MAX},
         )
 
     return await asyncio.to_thread(_stage_files, req.paths)
@@ -823,9 +1384,9 @@ def _get_engine_manager(request: Request) -> EngineManager:
     """从 app.state 获取 EngineManager 实例。"""
     em: EngineManager | None = getattr(request.app.state, "engine_manager", None)
     if em is None:
-        raise HTTPException(
-            status_code=500,
-            detail="EngineManager 未初始化",
+        raise ApiBusinessError(
+            APIErrorCode.ENGINE_MANAGER_NOT_INITIALIZED, 500,
+            "EngineManager 未初始化",
         )
     return em
 
@@ -837,8 +1398,32 @@ async def get_ocr_status(request: Request) -> OCRStatusResponse:
     return OCRStatusResponse(
         current_model=em.current_model,
         current_gpu=em.current_gpu,
+        current_gpu_name=em.current_gpu_name,
         is_ready=em.is_ready,
         is_switching=em.is_switching,
+    )
+
+
+@router.get("/gpus", response_model=GPUListResponse)
+async def list_available_gpus() -> GPUListResponse:
+    """枚举系统可见的 GPU + 推荐索引。
+
+    前端据此渲染"GPU 选择"下拉；"自动"项默认 value="" 交给后端的
+    `pick_best_gpu()`。GPU 探测不抢 gpu_lock，允许并发调用。
+    """
+    gpus = await asyncio.to_thread(list_gpus)
+    return GPUListResponse(
+        gpus=[
+            GPUInfoResponse(
+                index=g.index,
+                name=g.name,
+                memory_total_mb=g.memory_total_mb,
+                memory_free_mb=g.memory_free_mb,
+                compute_capability=g.compute_capability,
+            )
+            for g in gpus
+        ],
+        recommended=pick_best_gpu(gpus),
     )
 
 
@@ -850,8 +1435,15 @@ async def warmup_ocr_engine(
     """预加载指定 OCR 引擎（后台异步，立即返回）。"""
     em = _get_engine_manager(request)
 
+    # gpu_id=None 先落地成推荐值，便于 is_ready 匹配和日志可读
+    target_gpu = req.gpu_id or pick_best_gpu() or "0"
+
     # 已匹配且就绪 → 直接返回
-    if em.is_ready and em.current_model == req.model and em.current_gpu == req.gpu_id:
+    if (
+        em.is_ready
+        and em.current_model == req.model
+        and em.current_gpu == target_gpu
+    ):
         return {"status": "ready", "message": "引擎已就绪"}
 
     # 正在切换 → 返回 switching 状态
@@ -861,7 +1453,7 @@ async def warmup_ocr_engine(
     # 构造完整配置并发起后台预热
     manager = _get_manager()
     warmup_config = manager.pipeline.config.ocr.model_copy(
-        update={"model": req.model, "gpu_id": req.gpu_id},
+        update={"model": req.model, "gpu_id": target_gpu},
     )
 
     async def _do_warmup() -> None:
@@ -870,10 +1462,15 @@ async def warmup_ocr_engine(
             await em.ensure(warmup_config)
             logger.info(
                 "OCR 引擎预热完成: %s (GPU %s)",
-                req.model, req.gpu_id,
+                req.model, target_gpu,
             )
+        except asyncio.CancelledError:
+            # 应用 shutdown 时 TaskManager 会 cancel 所有后台任务
+            logger.info("OCR 引擎预热被取消")
+            raise
         except Exception:
             logger.warning("OCR 引擎预热失败", exc_info=True)
 
-    asyncio.create_task(_do_warmup())
+    # 通过 TaskManager 统一追踪，shutdown 时 cancel + gather
+    manager.spawn_background(_do_warmup(), name=f"ocr-warmup-{req.model}")
     return {"status": "accepted", "message": "引擎预热已开始"}

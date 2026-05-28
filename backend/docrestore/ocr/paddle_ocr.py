@@ -27,7 +27,7 @@ import os
 import re
 from pathlib import Path
 
-from docrestore.models import PageOCR, Region
+from docrestore.models import PageOCR, Region, TextLine
 from docrestore.ocr.base import (
     OCR_DEBUG_COORDS_FILENAME,
     OCR_RESULT_FILENAME,
@@ -108,12 +108,20 @@ class PaddleOCREngine(WorkerBackedOCREngine):
 
         # 与 ppocr-server 使用同一块 GPU
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-        env["CUDA_VISIBLE_DEVICES"] = self._config.gpu_id
+        # gpu_id=None 兜底：pipeline 直接调 create_engine 时没走 engine_manager
+        from docrestore.ocr.gpu_detect import pick_best_gpu
+        env["CUDA_VISIBLE_DEVICES"] = (
+            self._config.gpu_id or pick_best_gpu() or "0"
+        )
         return env
 
     def _build_init_cmd(self) -> dict[str, object]:
-        init_cmd: dict[str, object] = {"cmd": "initialize"}
-        if self._config.paddle_server_url:
+        init_cmd: dict[str, object] = {
+            "cmd": "initialize",
+            "pipeline": self._config.paddle_pipeline,
+        }
+        # vl 模式才需要 server_url（basic 不依赖 vllm-server）
+        if self._config.paddle_pipeline == "vl" and self._config.paddle_server_url:
             init_cmd["server_url"] = self._config.paddle_server_url
             init_cmd["server_model_name"] = (
                 self._config.paddle_server_model_name
@@ -145,7 +153,7 @@ class PaddleOCREngine(WorkerBackedOCREngine):
         self, image_path: Path, output_dir: Path
     ) -> PageOCR:
         """单张 OCR，结果写入 output_dir/{stem}_OCR/"""
-        await self._recover_desync_if_needed()
+        await self._resync_if_needed()
 
         # 增量OCR：优先检查裁剪后版本，再检查原始版本
         cropped_ocr_dir = output_dir / f"{image_path.stem}_cropped_OCR"
@@ -186,6 +194,7 @@ class PaddleOCREngine(WorkerBackedOCREngine):
 
         raw_text = str(resp.get("raw_text", ""))
         image_size = self._parse_image_size(resp.get("image_size", [0, 0]))
+        text_lines = self._parse_text_lines(resp.get("text_lines", []))
 
         # 处理坐标并检测侧栏
         coordinates_raw = resp.get("coordinates", [])
@@ -224,6 +233,7 @@ class PaddleOCREngine(WorkerBackedOCREngine):
             regions=regions,
             output_dir=ocr_dir,
             has_eos=True,
+            text_lines=text_lines,
         )
 
     async def _send_ocr_cmd(
@@ -245,6 +255,32 @@ class PaddleOCREngine(WorkerBackedOCREngine):
         if not isinstance(raw, list) or len(raw) < 2:
             return (0, 0)
         return (int(raw[0]), int(raw[1]))
+
+    @staticmethod
+    def _parse_text_lines(raw: object) -> list[TextLine]:
+        """basic pipeline 返回的行级 [{bbox, text, score}] 反序列化为 TextLine。
+
+        vl pipeline 返回 None/[]，输出仍是空 list。
+        """
+        if not isinstance(raw, list) or not raw:
+            return []
+        out: list[TextLine] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            bbox = item.get("bbox")
+            if not isinstance(bbox, list) or len(bbox) < 4:
+                continue
+            try:
+                x1, y1, x2, y2 = (int(v) for v in bbox[:4])
+            except (TypeError, ValueError):
+                continue
+            out.append(TextLine(
+                bbox=(x1, y1, x2, y2),
+                text=str(item.get("text", "")),
+                score=float(item.get("score", 0.0) or 0.0),
+            ))
+        return out
 
     # ── 侧栏检测与裁剪重跑 ──────────────────────────────
 

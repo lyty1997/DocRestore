@@ -24,11 +24,17 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+import time
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
 import litellm
 
+from docrestore.llm.circuit_breaker import (
+    LLMCircuitOpenError,
+    get_breaker,
+)
 from docrestore.llm.prompts import (
     GAP_FILL_EMPTY_MARKER,
     build_doc_boundary_detect_prompt,
@@ -39,8 +45,76 @@ from docrestore.llm.prompts import (
 )
 from docrestore.models import DocBoundary, Gap, RefineContext, RefinedResult
 from docrestore.pipeline.config import LLMConfig
+from docrestore.pipeline.profiler import current_profiler
 
 logger = logging.getLogger(__name__)
+_timing_logger = logging.getLogger("docrestore.llm.timing")
+
+
+def _ensure_timing_file_handler() -> None:
+    """把 docrestore.llm.timing 路由到文件（幂等）。
+
+    路径取 env DOCRESTORE_LLM_TIMING_LOG，默认 logs/llm_timing.log；
+    设为空字符串可禁用。无论是否走 FastAPI create_app 都会初始化，
+    覆盖 scripts/run_e2e.py 等脚本路径。
+    """
+    log_path = os.environ.get(
+        "DOCRESTORE_LLM_TIMING_LOG", "logs/llm_timing.log",
+    ).strip()
+    if not log_path:
+        return
+    target = os.path.abspath(log_path)
+    for h in _timing_logger.handlers:
+        if (
+            isinstance(h, logging.FileHandler)
+            and os.path.abspath(h.baseFilename) == target
+        ):
+            return
+    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+    handler = logging.FileHandler(target, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s.%(msecs)03d %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    _timing_logger.addHandler(handler)
+    _timing_logger.setLevel(logging.INFO)
+    _timing_logger.propagate = False
+
+
+_ensure_timing_file_handler()
+
+
+#: litellm 已知 provider 前缀（按 `provider/model` 解析时的左半段）。
+#: 用户在 UI 直接填 `gpt-4o` / `claude-sonnet-4` / `deepseek-chat` 等
+#: litellm 内置识别的模型名时不需要前缀；填了厂商自有 / 中转模型名
+#: （如 `deepseek-v4-flash`、`glm-5-air`）必须带前缀，否则 litellm 报
+#: "LLM Provider NOT provided"。
+_LITELLM_KNOWN_PROVIDERS: frozenset[str] = frozenset({
+    "openai", "azure", "anthropic", "bedrock", "cohere", "huggingface",
+    "ollama", "vertex_ai", "gemini", "google", "deepseek", "groq",
+    "mistral", "perplexity", "together_ai", "fireworks_ai", "replicate",
+    "openrouter", "xai", "watsonx", "sagemaker", "cloudflare", "nvidia_nim",
+    "deepinfra", "anyscale", "voyage", "custom_openai", "text-completion-openai",
+})
+
+
+def _normalize_model_id(model: str, api_base: str) -> str:
+    """litellm provider 兜底：用户传 `deepseek-v4-flash` + 自定义 `api_base`
+    时 litellm 不知道 provider，会抛 BadRequestError。规则：
+
+    - model 已含 `provider/...` 形式 → 原样透传（用户显式选择）
+    - 否则 api_base 非空 → 加 `openai/` 前缀（OpenAI 兼容协议通用兜底，
+      DeepSeek / GLM / 中转站 / vLLM 都走 OpenAI schema）
+    - api_base 为空 → 原样透传，让 litellm 按 model 名 fallback
+    """
+    if not model:
+        return model
+    head = model.split("/", 1)[0].lower()
+    if head in _LITELLM_KNOWN_PROVIDERS:
+        return model
+    if api_base:
+        return f"openai/{model}"
+    return model
 
 
 class LLMRefiner(Protocol):
@@ -62,8 +136,21 @@ class LLMRefiner(Protocol):
         """从 re-OCR 文本中提取 gap 缺失内容。"""
         ...
 
-    async def final_refine(self, markdown: str) -> RefinedResult:
-        """整篇文档级精修：去除跨段重复和页眉水印。"""
+    async def final_refine(
+        self,
+        markdown: str,
+        *,
+        chunk_index: int = 1,
+        total_chunks: int = 1,
+        retry_hint: str = "",
+    ) -> RefinedResult:
+        """整篇文档级精修：去除跨段重复和页眉水印。
+
+        chunk_index/total_chunks 默认 1/1 表示单次整篇；分块并行时
+        调用方填入实际切片号，模型据此判断当前是整篇还是切片。
+        retry_hint 非空表示这是 A-2 选择性重跑，会在 prompt 前置一段
+        "上一轮未处理好"的提示 + 具体问题描述。
+        """
         ...
 
     async def detect_doc_boundaries(
@@ -101,20 +188,63 @@ class BaseLLMRefiner:
         self._config = config
         self._semaphore = semaphore
 
-    def _build_kwargs(
+    def _compute_timeout(
         self, messages: list[dict[str, str]],
+    ) -> int:
+        """按 input 大小动态调单次 LLM timeout。
+
+        公式：`base + per_1k * (chars / 1000)`，并 clamp 到 `[base, timeout_max_s]`。
+        小段快速失败（避免服务端挂起拖死 subdir），大段线性放宽（LLM 本身就慢）。
+        """
+        msg_chars = sum(
+            len(str(m.get("content", "")))
+            for m in messages
+        )
+        adaptive = (
+            self._config.timeout
+            + self._config.timeout_per_1k_chars_s
+            * msg_chars / 1000.0
+        )
+        clamped = min(
+            float(self._config.timeout_max_s),
+            max(float(self._config.timeout), adaptive),
+        )
+        return int(clamped)
+
+    def _build_kwargs(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        prediction_content: str | None = None,
     ) -> dict[str, object]:
-        """构造 litellm.acompletion 公共参数。"""
+        """构造 litellm.acompletion 公共参数。
+
+        prediction_content 非空且 config.enable_prediction=True 时，追加
+        OpenAI Predicted Outputs 参数（仅 gpt-4o 系支持，gpt-5 全系原生不支持）。
+
+        timeout 按 input 大小动态调整（见 _compute_timeout）：短段快挂断，长段
+        宽限；litellm 的 num_retries 负责重试。
+        """
         kwargs: dict[str, object] = {
-            "model": self._config.model,
+            "model": _normalize_model_id(
+                self._config.model, self._config.api_base,
+            ),
             "messages": messages,
             "num_retries": self._config.max_retries,
-            "timeout": self._config.timeout,
+            "timeout": self._compute_timeout(messages),
         }
         if self._config.api_base:
             kwargs["base_url"] = self._config.api_base
         if self._config.api_key:
             kwargs["api_key"] = self._config.api_key
+        if (
+            self._config.enable_prediction
+            and prediction_content
+        ):
+            kwargs["prediction"] = {
+                "type": "content",
+                "content": prediction_content,
+            }
         return kwargs
 
     @contextlib.asynccontextmanager
@@ -127,13 +257,63 @@ class BaseLLMRefiner:
             yield
 
     async def _call_llm(self, kwargs: dict[str, object]) -> Any:
-        """统一出口：限流 + litellm.acompletion。
+        """统一出口：熔断器 + 限流 + litellm.acompletion。
 
-        所有 refine / fill_gap / final_refine / detect_* 都必须经此方法，
-        确保 LLM API 全局并发受 scheduler.llm_semaphore 约束。
+        埋两个 profiler span：
+        - llm.sem_wait：等待 llm_semaphore（定位并发瓶颈）
+        - llm.api_call：真实 litellm 网络/重试耗时（定位上游慢）
+
+        熔断器处于 open 时直接抛 LLMCircuitOpenError（不占用 semaphore，
+        不记 timing log），由上层 fallback 捕获退到原文/reassembled。
         """
+        prof = current_profiler()
+        model = str(kwargs.get("model", ""))
+        api_base = str(kwargs.get("base_url", ""))
+        raw_messages = kwargs.get("messages", [])
+        messages = raw_messages if isinstance(raw_messages, list) else []
+        msg_chars = sum(
+            len(str(m.get("content", "")))
+            for m in messages
+            if isinstance(m, dict)
+        )
+
+        # 熔断按 (model, api_base) 维度隔离：同 model 不同中转站独立计费
+        breaker = await get_breaker(model, api_base)
+        try:
+            await breaker.before_call()
+        except LLMCircuitOpenError:
+            _timing_logger.info(
+                "llm_call model=%s status=circuit_open wait_s=0.000 "
+                "call_s=0.000 input_chars=%d",
+                model, msg_chars,
+            )
+            raise
+
+        wait_start = time.monotonic()
         async with self._rate_limit():
-            return await litellm.acompletion(**kwargs)
+            wait_s = time.monotonic() - wait_start
+            prof.record_external("llm.sem_wait", wait_s, model=model)
+            call_start = time.monotonic()
+            status = "ok"
+            try:
+                with prof.stage(
+                    "llm.api_call", model=model, input_chars=msg_chars,
+                ):
+                    response = await litellm.acompletion(**kwargs)
+            except Exception:
+                status = "error"
+                await breaker.on_failure()
+                raise
+            else:
+                await breaker.on_success()
+                return response
+            finally:
+                call_s = time.monotonic() - call_start
+                _timing_logger.info(
+                    "llm_call model=%s status=%s wait_s=%.3f call_s=%.3f "
+                    "input_chars=%d",
+                    model, status, wait_s, call_s, msg_chars,
+                )
 
     async def refine(
         self, raw_markdown: str, context: RefineContext,
@@ -146,7 +326,10 @@ class BaseLLMRefiner:
         4. 返回 RefinedResult
         """
         messages = build_refine_prompt(raw_markdown, context)
-        kwargs = self._build_kwargs(messages)
+        # 精修输出 ≈ 输入（只改格式 + 去重复），把原文作为 prediction 给支持的模型
+        kwargs = self._build_kwargs(
+            messages, prediction_content=raw_markdown,
+        )
 
         response = await self._call_llm(kwargs)
         if not response.choices:
@@ -194,11 +377,24 @@ class BaseLLMRefiner:
         return fill_content.strip()
 
     async def final_refine(
-        self, markdown: str,
+        self,
+        markdown: str,
+        *,
+        chunk_index: int = 1,
+        total_chunks: int = 1,
+        retry_hint: str = "",
     ) -> RefinedResult:
         """整篇文档级精修：去除跨段重复和页眉水印。"""
-        messages = build_final_refine_prompt(markdown)
-        kwargs = self._build_kwargs(messages)
+        messages = build_final_refine_prompt(
+            markdown,
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+            retry_hint=retry_hint,
+        )
+        # final_refine 同样是改写任务，输出高度相似输入 → 可用 prediction
+        kwargs = self._build_kwargs(
+            messages, prediction_content=markdown,
+        )
 
         response = await self._call_llm(kwargs)
         if not response.choices:

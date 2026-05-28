@@ -105,8 +105,29 @@ async def test_insert_and_get_results(db: TaskDatabase) -> None:
     assert len(results) == 2
     assert results[0].doc_title == "文档一"
     assert results[0].doc_dir == ""
+    assert results[0].error == ""
     assert results[1].doc_title == "文档二"
     assert results[1].doc_dir == "sub"
+
+
+async def test_insert_and_get_result_errors(db: TaskDatabase) -> None:
+    """子文档级错误应持久化，服务重启后仍能区分失败 tab。"""
+    await db.insert_task(
+        task_id="t002err",
+        status="failed",
+        image_dir="/img",
+        output_dir="/out",
+    )
+    await db.insert_results("t002err", [
+        ("/out/ok/document.md", "成功文档", "ok", ""),
+        ("/out/bad/document.md", "失败文档", "bad", "OCR 超时"),
+    ])
+
+    results = await db.get_results("t002err")
+    assert len(results) == 2
+    assert results[0].error == ""
+    assert results[1].doc_dir == "bad"
+    assert results[1].error == "OCR 超时"
 
 
 async def test_delete_task_cascades_results(db: TaskDatabase) -> None:

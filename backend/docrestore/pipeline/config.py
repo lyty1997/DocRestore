@@ -21,6 +21,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -97,7 +99,10 @@ class OCRConfig(BaseModel):
     )
 
     # GPU 选择（两个引擎通用，前端可选）
-    gpu_id: str = "1"  # CUDA_VISIBLE_DEVICES，默认 GPU 1
+    # None 表示 "自动"：engine_manager 组装 CUDA_VISIBLE_DEVICES 时会调
+    # gpu_detect.pick_best_gpu() 选 OCR 默认卡，保持跨机器可移植。
+    # 显式传入如 "0"/"1" 时以配置为准。
+    gpu_id: str | None = None
 
     # === 两引擎共有的 vLLM 优化参数 ===
     # DeepSeek 进程内直接透传到 AsyncEngineArgs；
@@ -124,6 +129,13 @@ class OCRConfig(BaseModel):
     gpu_memory_safety_margin_mib: int = 1024
 
     # === PaddleOCR 专用（model="paddle-ocr/..." 时生效）===
+    #: PaddleOCR pipeline 选择
+    #: - ``vl``：PaddleOCR-VL（vllm-server 模式），文档场景默认；输出 markdown
+    #:   + 块级 layout（``parsing_res_list``），需先拉 ppocr-server 进程
+    #: - ``basic``：PP-OCRv5（DBNet+CRNN），AGE-8 IDE 代码场景；输出**行级**
+    #:   ``rec_boxes``+text+score（填充到 ``PageOCR.text_lines``），不需要
+    #:   vllm-server，纯本地推理
+    paddle_pipeline: Literal["basic", "vl"] = "vl"
     paddle_python: str = ""  # PaddleOCR conda 环境的 python 路径
     paddle_ocr_timeout: int = 300  # 单张 OCR 超时（秒）
     paddle_restart_interval: int = 20  # 每 N 张图片重启 worker（0 禁用）
@@ -189,8 +201,25 @@ class LLMConfig(BaseModel):
     max_chars_per_segment: int = 8000  # 分段上限（中文字符 token 密度高，需保守）
     segment_overlap_lines: int = 5
     max_retries: int = 2
-    timeout: int = 600  # 单次请求超时（秒），慢速中转站需要更大值
+    #: 基础超时（秒）。实际 timeout 按 input_chars 线性放大，见 effective_timeout。
+    #: 默认 60s —— 正常 API p95 远低于此值；超时代表服务端真的挂了，快速失败
+    #: + litellm num_retries 自动重试比长等实用。历史上设 600s（10 分钟），
+    #: gpt-5.4-nano profile 出现过 904s 单次挂起 —— 那是 timeout=600 触发一次
+    #: retry 凑出来的。改小后类似 outlier 在 180s 内就被切断。
+    timeout: int = 60
+    #: 每 1000 个 input 字符额外给多少秒。大段 LLM 本身就慢，要线性放宽。
+    timeout_per_1k_chars_s: float = 3.0
+    #: 单次 timeout 上限（秒）。防止超长 input 把 timeout 放到天上去。
+    timeout_max_s: int = 180
     enable_final_refine: bool = True  # 分段精修后是否做整篇文档级精修
+    # 整篇精修分块：文档超过 final_refine_min_chars 时切成 final_refine_chunks 块
+    # 并行调用；块数 ≤1 退化为单次整篇调用。每块按 <!-- page: --> 边界切分。
+    final_refine_chunks: int = 3
+    final_refine_min_chars: int = 20000
+    # OpenAI Predicted Outputs (prediction 参数)：对 refine/final_refine 这类
+    # 输出 ≈ 输入的改写任务可提速 2-4×。仅 gpt-4o 系支持，gpt-5 全系不支持。
+    # 默认关闭；切换到支持模型时置 True 即可生效。
+    enable_prediction: bool = False
     enable_gap_fill: bool = True  # 检测到 gap 时是否尝试 re-OCR 自动补充
     # 截断检测：输出行数少于输入 * (1 - ratio) 时视为可能被截断
     truncation_ratio_threshold: float = 0.3
@@ -198,6 +227,15 @@ class LLMConfig(BaseModel):
     truncation_min_input_lines: int = 20
     # 全局 LLM API 并发上限（跨所有 pipeline 共享的 asyncio.Semaphore 名额）
     max_concurrent_requests: int = 3
+    # 精修结果磁盘缓存：写到 {output_dir}/.llm_cache/；同 input+model+prompt
+    # 指纹的段自动命中，resume 任务可跳过已精修段。只缓存非截断的成功结果。
+    enable_cache: bool = True
+    #: 代码模式 LLM 修正策略：
+    #:   - "refine"（默认）：字符级修正，**严格保持行数**，安全但部分
+    #:     OCR 损伤（如整行 `}` 错识为多字符）修不动
+    #:   - "rewrite"：允许 LLM 重新排版/合并断行/补编译必需的语法元素，
+    #:     不强制行数守恒；适合长文件 OCR 损伤密集的场景，但需要更强模型
+    code_refine_mode: str = "refine"
 
 
 class OutputConfig(BaseModel):
@@ -251,6 +289,33 @@ class PIIConfig(BaseModel):
     block_cloud_on_detect_failure: bool = True
 
 
+class CodeRestoreConfig(BaseModel):
+    """AGE-8 IDE 代码照片 → 源文件还原配置
+
+    enable=True 时启用 IDE 代码场景，pipeline 自动切换：
+      - OCR 切到 ``basic`` pipeline（PP-OCRv5 行级 bbox）
+      - 走行号列锚点 + 栏代码组装的 IDE 专用流程
+    """
+
+    enable: bool = False
+    #: 输出源文件子目录名（output_dir/<files_dir>/<relative-path>）
+    output_files_dir: str = "files"
+    #: 跨张归类策略：tab_breadcrumb（用 tab+breadcrumb 路径分组，AGE-46
+    #: 默认）/ content_only（仅按代码内容连续性分组，未实现）
+    file_grouping_strategy: Literal["tab_breadcrumb", "content_only"] = (
+        "tab_breadcrumb"
+    )
+    #: 是否在首轮整图 OCR 找到 IDE column 后，对每个代码 column 裁剪增强并
+    #: 重跑 OCR。默认关闭，避免对不支持临时图片 OCR 的测试/轻量环境增加成本。
+    secondary_column_ocr: bool = False
+    secondary_column_ocr_scale: int = 2
+    secondary_column_ocr_padding_px: int = 6
+    secondary_column_ocr_contrast: float = 1.35
+    secondary_column_ocr_sharpness: float = 1.4
+    #: 可选参考源码根目录。默认空字符串表示关闭；只读离线检索，不联网。
+    context_root: str = ""
+
+
 class PipelineConfig(BaseModel):
     """Pipeline 总配置"""
 
@@ -259,6 +324,7 @@ class PipelineConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     pii: PIIConfig = Field(default_factory=PIIConfig)
+    code: CodeRestoreConfig = Field(default_factory=CodeRestoreConfig)
     db_path: str = "data/docrestore.db"  # SQLite 持久化路径
     debug: bool = True  # 落盘各阶段中间结果到 output_dir/debug/
 

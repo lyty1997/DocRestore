@@ -35,6 +35,17 @@ from docrestore.pipeline.config import (
     PipelineConfig,
 )
 from docrestore.pipeline.pipeline import Pipeline
+from docrestore.pipeline.rate_controller import RateController
+
+
+@pytest.fixture(autouse=True)
+def _fast_cold_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把 RateController 冷启动超时从 60s 缩到 0.5s，避免样本不足时测试轮空等待。
+
+    模块的 mock refiner.refine 极快，通常无法凑够 3 个 LLM 样本触发正常完成，
+    所有测试都会走超时 fallback — 默认 60s 会让 test suite 变龟速。
+    """
+    monkeypatch.setattr(RateController, "COLD_START_TIMEOUT_S", 0.5)
 
 
 def _build_pipeline() -> Pipeline:
@@ -209,6 +220,68 @@ class TestProcessTreeMultiSubdir:
             await pipeline.process_tree(empty, tmp_path / "out")
 
 
+class TestProcessTreePartialFailure:
+    """某个子目录失败不拖垮其他子目录（2026-04-21）
+
+    注意：process_tree 的多子目录路径是 "最大子目录 warmup + rest 并行"，
+    warmup leaf 失败会让 RateController 冷启动超时（60s）— 这是另一个
+    话题。此处测试让失败子目录成为 rest 之一，覆盖"并行分支某个子目录
+    失败，其他正常完成"这个主要使用场景。
+    """
+
+    @pytest.mark.asyncio
+    async def test_one_subdir_fails_others_succeed(
+        self, tmp_path: Path,
+    ) -> None:
+        pipeline = _build_pipeline()
+
+        # 重写 OCR 逻辑：子目录名含 "bad" 时抛异常，其他正常
+        mock_engine = MagicMock()
+
+        async def _ocr(image_path: Path, _out_dir: Path) -> PageOCR:
+            if image_path.parent.name == "bad":
+                raise RuntimeError("ocr broke on this subdir")
+            return PageOCR(
+                image_path=image_path,
+                image_size=(100, 100),
+                raw_text=f"正文 {image_path.name}",
+                cleaned_text=f"正文 {image_path.name}",
+            )
+
+        mock_engine.ocr = AsyncMock(side_effect=_ocr)
+        mock_engine.shutdown = AsyncMock(return_value=None)
+        pipeline.set_ocr_engine(mock_engine)
+
+        root = tmp_path / "root"
+        root.mkdir()
+        # warmup 选页数最多的子目录：good1 用 3 张图保证成为 warmup，
+        # bad / good2 作为 rest 并行，bad 的 OCR 抛异常不影响 good2
+        _make_image_dir(root, "good1", ["a.jpg", "b.jpg", "c.jpg"])
+        _make_image_dir(root, "bad", ["p.jpg"])
+        _make_image_dir(root, "good2", ["q.jpg"])
+
+        results = await pipeline.process_tree(root, tmp_path / "out")
+
+        assert len(results) == 3
+        by_dir = {r.doc_dir: r for r in results}
+
+        # 失败子目录 error 非空、markdown 空
+        assert "bad" in by_dir
+        assert by_dir["bad"].error != ""
+        assert "ocr broke" in by_dir["bad"].error
+        assert by_dir["bad"].markdown == ""
+
+        # 成功的 good1 / good2 正常产出
+        assert by_dir["good1"].error == ""
+        assert by_dir["good1"].markdown != ""
+        assert by_dir["good2"].error == ""
+        assert by_dir["good2"].markdown != ""
+
+
+@pytest.mark.skip(
+    reason="流式 Pipeline 停用 DOC_BOUNDARY 聚合（streaming-pipeline §10）；"
+    "下一版代码照片还原恢复后再启用",
+)
 class TestProcessTreeDocTitleDir:
     """多子目录 + 子目录内多文档 → doc_dir 叠加子目录路径 + 标题"""
 

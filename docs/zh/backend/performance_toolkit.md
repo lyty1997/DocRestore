@@ -21,7 +21,7 @@ limitations under the License.
 
 ## 1. 背景与目标
 
-2026-04-16 的 vLLM 优化参数基线对比结论（见 `docs/progress.md`）：
+2026-04-16 的 vLLM 优化参数基线对比结论（见 `../progress.md`）：
 
 - 通用 vLLM 参数对两款 OCR 引擎稳态吞吐无收益
 - GPU 利用率偏低：PaddleOCR 均值 20% / p95 66%；DeepSeek 52% / p95 73%

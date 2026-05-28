@@ -33,6 +33,20 @@ class Region:
 
 
 @dataclass
+class TextLine:
+    """单行文字识别结果（OCR 引擎提供的行级 bbox + text）
+
+    用于 AGE-8 IDE 代码场景：从 PageOCR 的行级输出做布局聚类。代码模式
+    只依赖这个抽象产物，不依赖具体 OCR provider；任意引擎只要填充
+    ``PageOCR.text_lines`` 即可接入。
+    """
+
+    bbox: tuple[int, int, int, int]  # (x1, y1, x2, y2) 像素坐标
+    text: str
+    score: float
+
+
+@dataclass
 class PageOCR:
     """单张照片的 OCR 结果"""
 
@@ -43,6 +57,9 @@ class PageOCR:
     regions: list[Region] = field(default_factory=list)
     output_dir: Path | None = None  # {output_dir}/{image_stem}_OCR/
     has_eos: bool = True  # 是否正常结束
+    #: 行级 bbox + text + score。代码模式必填，用于行号列锚点布局识别。
+    #: 不支持行级输出的 OCR 引擎可留空，代码模式会给出能力错误。
+    text_lines: list[TextLine] = field(default_factory=list)
 
 
 @dataclass
@@ -91,6 +108,9 @@ class RefineContext:
     total_segments: int  # 总段数
     overlap_before: str  # 与前段重叠的上下文（空字符串表示第一段）
     overlap_after: str  # 与后段重叠的上下文（空字符串表示最后一段）
+    #: 重试提示：A-2 选择性重跑时注入的额外指令，提醒 LLM 上一轮具体
+    #: 漏掉/错做的事（如"还有 3 处 UI 噪音未清"），空=无重试提示。
+    retry_hint: str = ""
 
 
 @dataclass
@@ -135,6 +155,10 @@ class PipelineResult:
     )
     doc_title: str = ""  # 文档标题（多文档标识）
     doc_dir: str = ""  # 相对于 task.output_dir 的子目录名（空=根目录）
+    # 子文档级错误：process_tree 某个 leaf 失败时用此字段占位；空串代表成功。
+    # 允许前端按 doc 粒度展示"部分完成"状态：成功 doc 可正常预览，失败 doc
+    # 只展示 error 文本 + 保留 doc_dir 供 resume 跳过。
+    error: str = ""
 
 
 @dataclass
@@ -145,4 +169,14 @@ class TaskProgress:
     current: int = 0
     total: int = 0
     percent: float = 0.0
+    #: 人类可读文本，服务端默认用简体中文拼，保留给 CLI / 日志 / 老客户端 fallback。
     message: str = ""
+    # 并行子目录标识：非空表示这是某个子目录的进度帧（见 process_tree）；
+    # 空表示任务级/单目录主进度。前端按该字段分轨渲染。
+    subtask: str = ""
+    #: 结构化文案 key（i18n 入口）：前端按当前语言渲染，避免服务端写死语言。
+    #: 典型值见 pipeline.py 各 report_fn 调用点；空串表示本帧无结构化文案，
+    #: 前端 fallback 到 `message` 原文。
+    message_key: str = ""
+    #: 结构化文案的插值参数（值统一 str，避免 WS JSON 里混 int/float 抖动）。
+    message_params: dict[str, str] = field(default_factory=dict)

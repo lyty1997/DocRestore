@@ -8,10 +8,13 @@ import {
   CreateTaskResponseSchema,
   SourceImagesResponseSchema,
   StageServerSourceResponseSchema,
+  TaskCleanupResponseSchema,
   TaskListResponseSchema,
   TaskResponseSchema,
   TaskResultResponseSchema,
   TaskResultsResponseSchema,
+  FilesIndexSchema,
+  DiagnoseCodeFileResponseSchema,
   UploadCompleteResponseSchema,
   UploadFilesResponseSchema,
   UploadSessionFileDeleteResponseSchema,
@@ -19,15 +22,19 @@ import {
   UploadSessionResponseSchema,
   OcrStatusResponseSchema,
   OcrWarmupResponseSchema,
+  GpuListResponseSchema,
   type ActionResponse,
   type BrowseDirsResponse,
   type CreateTaskResponse,
   type SourceImagesResponse,
   type StageServerSourceResponse,
+  type TaskCleanupResponse,
   type TaskListResponse,
   type TaskResponse,
   type TaskResultResponse,
   type TaskResultsResponse,
+  type FilesIndex,
+  type DiagnoseCodeFileResponse,
   type UploadCompleteResponse,
   type UploadFilesResponse,
   type UploadSessionFileDeleteResponse,
@@ -35,6 +42,7 @@ import {
   type UploadSessionResponse,
   type OcrStatusResponse,
   type OcrWarmupResponse,
+  type GpuListResponse,
 } from "./schemas";
 import { appendTokenToUrl, getAuthHeaders, loadApiToken } from "./auth";
 
@@ -60,6 +68,11 @@ interface CreateTaskBody {
   ocr?: {
     model?: string | undefined;
     gpu_id?: string | undefined;
+    paddle_pipeline?: "basic" | "vl" | undefined;
+  } | undefined;
+  code?: {
+    enable: boolean;
+    output_files_dir?: string | undefined;
   } | undefined;
 }
 
@@ -68,16 +81,137 @@ function apiHeaders(extra?: Record<string, string>): Record<string, string> {
   return { ...getAuthHeaders(), ...extra };
 }
 
+/** API 错误分类：网络层未拿到响应 / HTTP 非 2xx / 响应解析失败 */
+export type ApiErrorKind = "network" | "http" | "parse";
+
+/** i18n 占位符的可序列化值（数字直显 / 字符串字面 / 数组拼接） */
+export type ApiErrorParams = Record<string, string | number | readonly string[]>;
+
+/** 统一 API 错误：携带后端 code/params + 前端 i18n key，UI 用 i18n 翻译。
+ *
+ * 主信息翻译优先级：
+ * 1. ``code`` 非空 → ``errors.api.<code-lowercase>``，``params`` 为占位符
+ * 2. ``code`` 为空（network/parse 等客户端错误）→ ``messageKey``
+ * 3. ``messageKey`` 也无 → ``message``（中文 fallback，开发友好）
+ *
+ * ``message`` 字段保留中文 fallback 便于 console.error 调试。
+ */
+export class ApiError extends Error {
+  readonly kind: ApiErrorKind;
+  readonly httpStatus?: number;
+  /** 后端 APIErrorCode（如 ``TASK_NOT_FOUND``）；网络/parse 错误为空 */
+  readonly code?: string;
+  /** 后端响应 params（路径 / 原因 / 上限值等占位符值） */
+  readonly params: ApiErrorParams;
+  /** 客户端兜底主信息 i18n key（仅在没有 ``code`` 时使用） */
+  readonly messageKey?: string;
+  readonly messageKeyParams?: ApiErrorParams;
+  /** HTTP 状态码诊断 hint i18n key（如 ``errors.http.504``） */
+  readonly hintKey?: string;
+
+  constructor(
+    message: string,
+    init: {
+      kind: ApiErrorKind;
+      httpStatus?: number;
+      code?: string;
+      params?: ApiErrorParams;
+      messageKey?: string;
+      messageKeyParams?: ApiErrorParams;
+      hintKey?: string;
+      cause?: unknown;
+    },
+  ) {
+    super(message, init.cause === undefined ? undefined : { cause: init.cause });
+    this.name = "ApiError";
+    this.kind = init.kind;
+    if (init.httpStatus !== undefined) this.httpStatus = init.httpStatus;
+    if (init.code !== undefined) this.code = init.code;
+    this.params = init.params ?? {};
+    if (init.messageKey !== undefined) this.messageKey = init.messageKey;
+    if (init.messageKeyParams !== undefined) {
+      this.messageKeyParams = init.messageKeyParams;
+    }
+    if (init.hintKey !== undefined) this.hintKey = init.hintKey;
+  }
+}
+
+/** HTTP 状态码 → 客户端诊断 hint i18n key（不含主错误，只是补充提示）。 */
+function hintKeyForStatus(status: number): string | undefined {
+  if (status === 413) return "errors.http.413";
+  if (status === 504) return "errors.http.504";
+  if (status >= 500) return "errors.http.5xx";
+  return undefined;
+}
+
+/** 解析后端业务异常响应体（``ApiBusinessError`` 处理器输出形态）。 */
+function parseBusinessErrorBody(text: string): {
+  code?: string;
+  detail?: string;
+  params: ApiErrorParams;
+} {
+  try {
+    const data: unknown = JSON.parse(text);
+    if (typeof data !== "object" || data === null) return { params: {} };
+    const obj = data as Record<string, unknown>;
+    const code = typeof obj.code === "string" ? obj.code : undefined;
+    const detail = typeof obj.detail === "string" ? obj.detail : undefined;
+    const rawParams =
+      typeof obj.params === "object" && obj.params !== null ? obj.params : {};
+    /* params 只接收 string | number | string[]，其余字段静默忽略 */
+    const params: ApiErrorParams = {};
+    for (const [k, v] of Object.entries(rawParams)) {
+      if (typeof v === "string" || typeof v === "number") {
+        params[k] = v;
+      } else if (
+        Array.isArray(v) &&
+        v.every((item) => typeof item === "string")
+      ) {
+        params[k] = v as readonly string[];
+      }
+    }
+    return {
+      ...(code === undefined ? {} : { code }),
+      ...(detail === undefined ? {} : { detail }),
+      params,
+    };
+  } catch {
+    return { params: {} };
+  }
+}
+
 /** 统一错误处理 */
 async function handleResponse<T>(
   response: Response,
   schema: { parse: (data: unknown) => T },
 ): Promise<T> {
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`HTTP ${response.status.toString()}: ${text}`);
+    const text = await response.text().catch(() => "");
+    const parsed = parseBusinessErrorBody(text);
+    const fallback = parsed.detail ?? (text || response.statusText);
+    const hintKey = hintKeyForStatus(response.status);
+    throw new ApiError(
+      `HTTP ${response.status.toString()}: ${fallback}`,
+      {
+        kind: "http",
+        httpStatus: response.status,
+        ...(parsed.code === undefined ? {} : { code: parsed.code }),
+        params: parsed.params,
+        ...(hintKey === undefined ? {} : { hintKey }),
+      },
+    );
   }
-  const json: unknown = await response.json();
+  let json: unknown;
+  try {
+    json = await response.json();
+  } catch (error_: unknown) {
+    throw new ApiError("响应解析失败：非合法 JSON", {
+      kind: "parse",
+      messageKey: "errors.client.parseFailed",
+      hintKey: "errors.client.parseFailedHint",
+      cause: error_,
+    });
+  }
   return schema.parse(json);
 }
 
@@ -144,9 +278,34 @@ export async function deleteTask(taskId: string): Promise<ActionResponse> {
   return handleResponse(response, ActionResponseSchema);
 }
 
-/** 重试任务 */
+/**
+ * 批量清理指定状态的任务（仅允许 completed / failed）。
+ *
+ * 返回 {deleted, failed, deleted_ids, errors}；调用方据此给用户反馈。
+ */
+export async function cleanupTasks(
+  statuses: readonly ("completed" | "failed")[],
+): Promise<TaskCleanupResponse> {
+  const response = await fetch(`${API_BASE}/tasks/cleanup`, {
+    method: "POST",
+    headers: { ...apiHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ statuses }),
+  });
+  return handleResponse(response, TaskCleanupResponseSchema);
+}
+
+/** 重试任务（从头跑） */
 export async function retryTask(taskId: string): Promise<ActionResponse> {
   const response = await fetch(`${API_BASE}/tasks/${taskId}/retry`, {
+    method: "POST",
+    headers: apiHeaders(),
+  });
+  return handleResponse(response, ActionResponseSchema);
+}
+
+/** 继续失败任务（复用 output_dir，OCR 跳过已完成图） */
+export async function resumeTask(taskId: string): Promise<ActionResponse> {
+  const response = await fetch(`${API_BASE}/tasks/${taskId}/resume`, {
     method: "POST",
     headers: apiHeaders(),
   });
@@ -188,6 +347,63 @@ export async function updateResultMarkdown(
     },
   );
   return handleResponse(response, ActionResponseSchema);
+}
+
+/** 获取代码模式 files-index.json；任务非代码模式 → 抛 HTTP 404 错误 */
+export async function getFilesIndex(taskId: string): Promise<FilesIndex> {
+  const response = await fetch(`${API_BASE}/tasks/${taskId}/files-index`, {
+    headers: apiHeaders(),
+  });
+  return handleResponse(response, FilesIndexSchema);
+}
+
+/** 获取代码模式单文件内容（text/plain） */
+export async function getCodeFileContent(
+  taskId: string,
+  filePath: string,
+): Promise<string> {
+  const url = `${API_BASE}/tasks/${taskId}/files/${filePath
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/")}`;
+  const response = await fetch(url, { headers: apiHeaders() });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`HTTP ${response.status.toString()}: ${text}`);
+  }
+  return response.text();
+}
+
+/** 保存代码模式单文件内容 */
+export async function updateCodeFileContent(
+  taskId: string,
+  filePath: string,
+  content: string,
+): Promise<ActionResponse> {
+  const url = `${API_BASE}/tasks/${taskId}/files/${filePath
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/")}`;
+  const response = await fetch(url, {
+    method: "PUT",
+    headers: apiHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ content }),
+  });
+  return handleResponse(response, ActionResponseSchema);
+}
+
+/** 对代码模式单文件草稿做实时诊断 */
+export async function diagnoseCodeFileContent(
+  taskId: string,
+  filePath: string,
+  content: string,
+): Promise<DiagnoseCodeFileResponse> {
+  const response = await fetch(`${API_BASE}/tasks/${taskId}/code-diagnostics`, {
+    method: "POST",
+    headers: apiHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ file_path: filePath, content }),
+  });
+  return handleResponse(response, DiagnoseCodeFileResponseSchema);
 }
 
 /** 获取源图片列表 */
@@ -257,6 +473,13 @@ export async function uploadFiles(
   relativePaths?: readonly string[],
   signal?: AbortSignal,
 ): Promise<UploadFilesResponse> {
+  const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+  const sizeMb = (totalBytes / 1024 / 1024).toFixed(1);
+  const startedAt = Date.now();
+  const filenamesPreview =
+    files.slice(0, 3).map((f) => f.name).join(", ") +
+    (files.length > 3 ? ` …(+${(files.length - 3).toString()})` : "");
+
   const formData = new FormData();
   for (const file of files) {
     formData.append("files", file);
@@ -266,12 +489,49 @@ export async function uploadFiles(
       formData.append("paths", p);
     }
   }
-  const response = await fetch(`${API_BASE}/uploads/${sessionId}/files`, {
-    method: "POST",
-    headers: apiHeaders(),
-    body: formData,
-    signal,
-  });
+
+  let response: Response;
+  try {
+    const init: RequestInit = {
+      method: "POST",
+      headers: apiHeaders(),
+      body: formData,
+    };
+    if (signal !== undefined) init.signal = signal;
+    response = await fetch(`${API_BASE}/uploads/${sessionId}/files`, init);
+  } catch (error_: unknown) {
+    /* AbortError 透传给 hook 层做"用户取消"分支 */
+    if (error_ instanceof DOMException && error_.name === "AbortError") {
+      throw error_;
+    }
+    const elapsedMs = Date.now() - startedAt;
+    const detailMsg = error_ instanceof Error ? error_.message : String(error_);
+    /* 写一条结构化 console.error，便于在 F12 直接查诊断细节 */
+    console.error("[uploadFiles] 网络层失败 — 浏览器未拿到 HTTP 响应", {
+      sessionId,
+      fileCount: files.length,
+      totalBytes,
+      elapsedMs,
+      filenames: files.map((f) => f.name),
+      cause: error_,
+    });
+    throw new ApiError(
+      `上传失败（${files.length.toString()} 张 / ${sizeMb} MB / ${elapsedMs.toString()}ms）：${detailMsg}`,
+      {
+        kind: "network",
+        messageKey: "errors.client.uploadNetworkFailed",
+        messageKeyParams: {
+          count: files.length,
+          sizeMb,
+          elapsedMs,
+          detail: detailMsg,
+        },
+        hintKey: "errors.client.uploadNetworkFailedHint",
+        params: { filenames: filenamesPreview },
+        cause: error_,
+      },
+    );
+  }
   return handleResponse(response, UploadFilesResponseSchema);
 }
 
@@ -316,15 +576,25 @@ export async function getOcrStatus(): Promise<OcrStatusResponse> {
   return handleResponse(response, OcrStatusResponseSchema);
 }
 
-/** 预热 OCR 引擎 */
+/** 预热 OCR 引擎；gpuId 为空字符串 → 后端 pick_best_gpu 自动选 */
 export async function warmupOcrEngine(
   model: string,
   gpuId: string,
 ): Promise<OcrWarmupResponse> {
+  const body: { model: string; gpu_id?: string } = { model };
+  if (gpuId !== "") body.gpu_id = gpuId;
   const response = await fetch(`${API_BASE}/ocr/warmup`, {
     method: "POST",
     headers: apiHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ model, gpu_id: gpuId }),
+    body: JSON.stringify(body),
   });
   return handleResponse(response, OcrWarmupResponseSchema);
+}
+
+/** 枚举系统可见的 GPU + 推荐索引 */
+export async function listGpus(): Promise<GpuListResponse> {
+  const response = await fetch(`${API_BASE}/gpus`, {
+    headers: apiHeaders(),
+  });
+  return handleResponse(response, GpuListResponseSchema);
 }

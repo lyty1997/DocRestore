@@ -126,7 +126,7 @@ After the services are running:
 | `BACKEND_HOST` | `0.0.0.0` | Backend listen address |
 | `BACKEND_PORT` | `8000` | Backend listen port |
 | `FRONTEND_PORT` | `5173` | Frontend dev server port |
-| `PPOCR_GPU_ID` | `1` | GPU used by PaddleOCR server |
+| `PPOCR_GPU_ID` | empty (auto) | GPU used by PaddleOCR server; when empty, `gpu_detect.pick_best_gpu` recommends one automatically |
 | `PPOCR_PORT` | `8119` | PaddleOCR server port |
 | `PPOCR_MODEL` | `PaddleOCR-VL-1.5-0.9B` | PaddleOCR model name |
 
@@ -148,17 +148,35 @@ After the services are running:
 
 ### 3.4 LLM API Configuration
 
-Create a `.env` file:
+LLM refinement runs through [litellm](https://docs.litellm.ai/) and supports two providers: **cloud** and **local**.
+
+#### Cloud mode (default)
+
+Create a `.env` and set the key matching your model:
 
 ```bash
-# LLM API Key (choose based on the model you use)
+# LLM API Key (litellm picks the right key by model name)
 GEMINI_API_KEY=sk-xxx
 OPENAI_API_KEY=sk-xxx
 GLM_API_KEY=sk-xxx
 
-# Or use a custom API base
+# When routing through a proxy, also set the base
 OPENAI_API_BASE=https://your-proxy.com/v1
 ```
+
+Cloud mode also issues an extra LLM call for PII entity detection (person/org names) on top of regex redaction.
+
+#### Local mode (data never leaves the machine)
+
+Hook up any OpenAI-compatible local server; no API key required:
+
+| Backend | Sample command | Default api_base |
+|---------|---------------|------------------|
+| ollama | `ollama serve` + `ollama pull qwen2.5:14b` | `http://localhost:11434/v1` |
+| vLLM | `vllm serve Qwen/Qwen2.5-14B-Instruct --port 8001` | `http://localhost:8001/v1` |
+| llama.cpp | `llama-server -m model.gguf --port 8080` | `http://localhost:8080/v1` |
+
+In local mode `LocalLLMRefiner.detect_pii_entities` returns empty by default → the LLM-based entity detection is skipped, only regex redaction runs, and **no data is sent to any external service**. The `.env` API key may be left empty.
 
 ## 4. OCR Engine Configuration
 
@@ -173,7 +191,7 @@ Specified via `OCRConfig.model`. Supported identifiers:
 | `deepseek/ocr-2` | DeepSeek-OCR-2 | High-accuracy grounding OCR |
 | `deepseek` | DeepSeek-OCR-2 | Short form |
 
-**GPU selection**: `OCRConfig.gpu_id` (default `"1"`) controls which GPU both engines use. The GPU can be selected when creating a task from the frontend, or set via the `PPOCR_GPU_ID` environment variable.
+**GPU selection**: `OCRConfig.gpu_id` (default `None`) controls which GPU both engines use. When unset, the backend calls `docrestore.ocr.gpu_detect.pick_best_gpu()` before starting ppocr-server and recommends a GPU by CUDA compute capability first, then free VRAM and total VRAM. The frontend task form fetches the list via `GET /api/v1/gpus` so users can override it, and `PPOCR_GPU_ID` can pin it explicitly.
 
 ### 4.2 PaddleOCR Configuration
 
@@ -231,13 +249,48 @@ huggingface-cli download deepseek-ai/DeepSeek-OCR-2 \
 
 ### 4.4 LLM Configuration
 
+`LLMConfig` fields (`backend/docrestore/pipeline/config.py`):
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `provider` | `"cloud"` | `"cloud"` uses litellm + LLM-based PII entity detection; `"local"` targets an OpenAI-compatible local service and skips the LLM entity detection (regex only) |
+| `model` | -- | litellm model name; for local services keep the `openai/` prefix (OpenAI schema fallback) |
+| `api_base` | `""` | Custom API endpoint; required for local mode |
+| `api_key` | `""` | When empty, litellm auto-reads from `.env`; can stay empty for local mode |
+| `max_concurrent_requests` | `3` | Global concurrency cap (asyncio.Semaphore shared across pipelines) |
+| `code_refine_mode` | `"refine"` | Code mode: `refine` preserves line count; `rewrite` allows reflow (needs a stronger model) |
+
+#### Cloud example
+
 ```yaml
 llm:
-  provider: "cloud"          # "cloud" or "local"
-  model: "openai/gemini-3.1-flash-lite-preview"
+  provider: "cloud"
+  model: "openai/gemini-3-flash-preview-nothinking"
   api_base: "https://poloai.top/v1"
   api_key: ""                # When empty, auto-reads from environment variables
 ```
+
+#### Local example (ollama)
+
+```yaml
+llm:
+  provider: "local"
+  model: "openai/qwen2.5:14b"            # ollama tag you've pulled
+  api_base: "http://localhost:11434/v1"  # ollama OpenAI-compatible endpoint
+  api_key: ""                            # local service needs no auth
+```
+
+#### Local example (vLLM)
+
+```yaml
+llm:
+  provider: "local"
+  model: "openai/Qwen/Qwen2.5-14B-Instruct"
+  api_base: "http://localhost:8001/v1"
+  api_key: ""
+```
+
+> The frontend "Provider" radio maps 1:1 to this field; when calling the REST API, pass it under the `llm` field of `POST /api/v1/tasks`. See [API docs](backend/api.md) and the README REST API examples.
 
 ## 5. Verifying the Installation
 
@@ -311,7 +364,8 @@ After=network.target
 Type=simple
 User=docrestore
 Environment="PATH=/path/to/conda/envs/ppocr_vlm/bin"
-Environment="CUDA_VISIBLE_DEVICES=1"
+# Pin to a specific GPU if needed (leave unset to let vLLM enumerate every visible GPU)
+# Environment="CUDA_VISIBLE_DEVICES=0"
 ExecStart=/path/to/conda/envs/ppocr_vlm/bin/paddleocr genai_server --model_name PaddleOCR-VL-1.5-0.9B --backend vllm --port 8119
 Restart=always
 

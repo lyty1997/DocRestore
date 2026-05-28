@@ -126,7 +126,7 @@ class TestFillGaps:
 
         result_doc, filled = await pipeline._fill_gaps(
             doc, [gap], page_map, page_order,
-            None, refiner, lambda *_a: None,
+            None, refiner, lambda *_a, **_kw: None,
         )
 
         assert filled == 1
@@ -162,7 +162,7 @@ class TestFillGaps:
 
         result_doc, filled = await pipeline._fill_gaps(
             doc, [gap], {}, [],
-            None, refiner, lambda *_a: None,
+            None, refiner, lambda *_a, **_kw: None,
         )
 
         assert filled == 0
@@ -189,7 +189,7 @@ class TestFillGaps:
             doc, [gap],
             {"p1.jpg": Path("/imgs/p1.jpg")},
             ["p1.jpg"],
-            None, refiner, lambda *_a: None,
+            None, refiner, lambda *_a, **_kw: None,
         )
 
         assert filled == 0
@@ -213,7 +213,7 @@ class TestFillGaps:
             doc, [gap],
             {"p1.jpg": Path("/p1.jpg"), "p2.jpg": Path("/p2.jpg")},
             ["p1.jpg", "p2.jpg"],
-            None, refiner, lambda *_a: None,
+            None, refiner, lambda *_a, **_kw: None,
         )
 
         assert filled == 0
@@ -260,7 +260,7 @@ class TestFillGaps:
 
         await pipeline._fill_gaps(
             doc, [gap1, gap2], page_map, page_order,
-            None, refiner, lambda *_a: None,
+            None, refiner, lambda *_a, **_kw: None,
         )
 
         # 每个独立路径只 re-OCR 一次
@@ -303,7 +303,7 @@ class TestFillGaps:
 
         result = await pipeline._maybe_fill_gaps(
             doc, [gap], pages, Path("/out"),
-            None, None, lambda *_a: None,
+            None, None, lambda *_a, **_kw: None,
         )
 
         # 直接返回原文档
@@ -334,7 +334,7 @@ class TestFillGaps:
 
         result = await pipeline._maybe_fill_gaps(
             doc, [gap], pages, Path("/out"),
-            None, None, lambda *_a: None,
+            None, None, lambda *_a, **_kw: None,
         )
 
         assert result.markdown == "content"
@@ -357,7 +357,7 @@ class TestFillGaps:
             doc, [gap],
             {"last.jpg": Path("/last.jpg")},
             ["last.jpg"],
-            None, refiner, lambda *_a: None,
+            None, refiner, lambda *_a, **_kw: None,
         )
 
         assert filled == 1

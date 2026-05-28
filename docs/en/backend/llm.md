@@ -39,6 +39,8 @@ Two **providers** are supported -- cloud and local:
 | `llm/cloud.py` | `CloudLLMRefiner(BaseLLMRefiner)` (cloud implementation, overrides `detect_pii_entities` for real entity detection) |
 | `llm/local.py` | `LocalLLMRefiner(BaseLLMRefiner)` (local implementation, `detect_pii_entities` inherits the default empty implementation) |
 | `llm/prompts.py` | Prompt templates + GAP parsing (`parse_gaps()`, etc.) |
+| `llm/code_refine.py` | `CodeLLMRefiner` (code-mode character-level refine / rewrite mode) |
+| `llm/code_repair.py` | `DiagnosticCodeRepairer` (diagnostic-driven scoped patches) + `CodeConsistencyAuditor` (re-diagnosis + acceptance gate) |
 
 > The document segmenter `DocumentSegmenter` has been moved to `processing/segmenter.py` (see [Processing Layer](processing.md)). Segmentation does not depend on an LLM; it is pure text processing.
 
@@ -210,6 +212,39 @@ PII compatibility strategy:
 
 - During the redaction stage, LLM entity detection goes through `BaseLLMRefiner.detect_pii_entities()`: the base class returns `([], [])` by default
 - `CloudLLMRefiner` overrides this method with real LLM detection; `LocalLLMRefiner` inherits the default empty implementation -> only regex-based redaction is performed
+
+### 5.6 CodeLLMRefiner (llm/code_refine.py, Code-Mode Character-Level Refine)
+
+Wraps `BaseLLMRefiner._call_llm` to run an independent LLM call on every `SourceFile.merged_text`; **does not reuse** the markdown-refine truncation fallback or GAP parsing. Two modes selected via `LLMConfig.code_refine_mode`:
+
+| Mode | Behavior | Parse keys | Line-count constraint |
+|---|---|---|---|
+| `refine` (default) | Character-level fixes (whitelist: OCR noise, obvious typos) | `corrected_code` / `corrections` / `unresolved` | Strict `output == input`; violations fall back to the original |
+| `rewrite` | Allow reformatting, merging broken lines, supplying compilation-required syntax | `rewritten_code` / `summary` | No line-count constraint (structural fix priority) |
+
+Entry point: `async def refine(source: SourceFile) -> CodeRefineResult`. Large files are auto-chunked via `_should_chunk_refine`, refined per chunk, and concatenated; line-number offsets across corrections / unresolved entries are fixed by `_offset_corrections` / `_offset_unresolved`. Failure / timeout / parse failure all fall back to the original text + a `code.refine.*` flag, never raising and interrupting the rest of the task.
+
+Returns `CodeRefineResult(refined_text, flags, corrections=[CodeCorrection], unresolved=[CodeUnresolved])`; Pipeline writes back into `SourceFile.merged_text` and `flags`.
+
+### 5.7 DiagnosticCodeRepairer (llm/code_repair.py, Diagnostic-Driven Scoped Repair)
+
+Applies to `SourceFile`s the diagnoser reports as `syntax_dirty`. Flow:
+
+1. **build_repair_contexts** (runs in a thread because of rglob / read_text blocking IO) carves multiple small windows around each diagnostic's `failing_lines` ± `window_radius`; windows do not overlap (`_merge_line_windows` keeps a gap).
+2. Call the LLM per window to obtain a scoped patch (`ScopedPatch` with `edit_range` + `new_text`).
+3. **Line-number remapping**: both `patch` and `edit_range` reference original-text line numbers; later patches shift their coordinates by the cumulative `line_offset` of earlier accepted patches before being applied to `current` (B7 C2 key fix).
+4. **Line-count conservation fallback**: truncating patches (`_is_truncating_patch`) are treated as rejected, preventing the LLM from cutting off the tail of a window.
+5. **Isolated diagnosis must co-locate sibling files**: when re-diagnosing the repaired copy, repair places same-directory header files alongside, otherwise missing-include errors get classified as `dependency_dirty (score 0)` and spoof the acceptance gate (B7 C13 self-review follow-up).
+
+On failure / no windows / all-rejected, returns the original text plus a `code.repair.no_windows` or `code.repair.reject_*` flag.
+
+### 5.8 CodeConsistencyAuditor (llm/code_repair.py, Post-Repair Acceptance Gate)
+
+Second-pass review after repair. Flow:
+
+1. If repair **changed the line count**, re-diagnose against the rewritten text (`diagnose_source_files([audit_source])`) — reusing the pre-refine diagnostics on original line numbers would misalign authorization windows (B7 C3 key fix).
+2. `audit()` takes the `previous_result` and re-diagnosed result, accepts a patch when "the diagnostic score did not degrade", and rejects + reverts to the pre-repair text otherwise.
+3. The audit's `flags` / `unresolved` are merged into the final `CodeRefineResult`.
 
 ## 6. Truncation Detection
 

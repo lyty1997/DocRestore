@@ -30,13 +30,20 @@ from importlib.metadata import version as pkg_version
 from fastapi import Depends, FastAPI
 
 from docrestore.api.auth import configure_auth, require_auth
+from docrestore.api.errors import (
+    ApiBusinessError,
+    api_business_error_handler,
+)
 from docrestore.api.routes import router, set_task_manager, ws_router
 from docrestore.api.upload import (
     cleanup_all_sessions,
     start_cleanup_task,
     upload_router,
 )
-from docrestore.ocr.engine_manager import EngineManager
+from docrestore.ocr.engine_manager import (
+    EngineManager,
+    cleanup_stale_ppocr_servers,
+)
 from docrestore.persistence.database import TaskDatabase
 from docrestore.pipeline.config import PipelineConfig
 from docrestore.pipeline.pipeline import Pipeline
@@ -86,8 +93,9 @@ def _auto_configure_paddle(config: PipelineConfig) -> None:
             config.ocr.paddle_server_python = detected
             logger.info("自动检测 ppocr_vlm python: %s", detected)
 
-    # 从环境变量读取 GPU / 端口（与 start.sh 默认值一致）
-    env_gpu = os.environ.get("PPOCR_GPU_ID", "")
+    # 从环境变量读取 GPU / 端口（用户显式指定时生效；未设置则保持 None，
+    # engine_manager 启动 ppocr-server 时会调 gpu_detect.pick_best_gpu 自动选）
+    env_gpu = os.environ.get("PPOCR_GPU_ID", "").strip()
     if env_gpu:
         config.ocr.gpu_id = env_gpu
         logger.info("从环境变量 PPOCR_GPU_ID 配置 GPU: %s", env_gpu)
@@ -153,7 +161,7 @@ def _auto_configure_llm(config: PipelineConfig) -> None:
 
 
 
-def create_app(
+def create_app(  # noqa: C901
     config: PipelineConfig | None = None,
 ) -> FastAPI:
     """创建 FastAPI 应用。
@@ -173,6 +181,15 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         """启动时初始化 Pipeline + Scheduler，关闭时释放资源"""
+        # 上次意外退出（kill -9 / OOM）可能留下 paddleocr genai_server 孤儿
+        # 进程（含 vLLM EngineCore 占 GPU 显存），启动前扫描清理
+        stale = await asyncio.to_thread(cleanup_stale_ppocr_servers)
+        if stale:
+            logger.warning(
+                "启动前清理了 %d 个残留 ppocr-server 进程组: %s",
+                len(stale), stale,
+            )
+
         pipeline = Pipeline(config)
 
         # 创建全局调度器
@@ -225,14 +242,27 @@ def create_app(
         await db.initialize()
 
         manager = TaskManager(pipeline, scheduler=scheduler, db=db)
+        # 把 DB 里历史任务装回内存：让 GET /tasks/{id} / results /
+        # files-index 等同步路由在重启后仍能命中（不然 sidebar 列得到、
+        # 详情页打不开）。失败不阻断启动。
+        try:
+            await manager.load_persisted_tasks()
+        except Exception:
+            logger.warning(
+                "从 DB 装回历史任务失败（不影响新任务）", exc_info=True,
+            )
         set_task_manager(manager)
         app.state.task_manager = manager
         app.state.engine_manager = engine_manager
         app.state.scheduler = scheduler
         app.state.db = db
 
-        # 启动上传会话清理后台任务
-        cleanup_task = await start_cleanup_task()
+        # 启动上传会话清理后台任务：provider 从 TaskManager 收集活跃
+        # 任务的 image_dir，清理循环据此跳过仍被引用的 upload_dir，避免
+        # 预览原图在 TTL 到期后被 rmtree 擦掉（烂图 bug）。
+        cleanup_task = await start_cleanup_task(
+            manager.collect_referenced_image_dirs,
+        )
 
         yield
 
@@ -242,7 +272,16 @@ def create_app(
             with contextlib.suppress(asyncio.CancelledError):
                 await warmup_task
 
+        # 先 cancel 运行中的 OCR 任务，避免它们与 pipeline.shutdown 并发
+        # 抢占 worker stdin/stdout（会导致 StreamReader 冲突或长时间阻塞）
+        await manager.shutdown()
+
+        # 取消上传会话清理循环：必须 await，否则 CancelledError 可能
+        # 在 event loop 关闭后才抛出，产生 "Task was destroyed but it
+        # is pending!" 警告或残留 shutil 操作。
         cleanup_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await cleanup_task
         cleanup_all_sessions()
         await pipeline.shutdown()
         await db.close()
@@ -252,6 +291,10 @@ def create_app(
         version=pkg_version("docrestore"),
         lifespan=lifespan,
         redirect_slashes=False,
+    )
+    # 业务异常 → {code, detail, params} 响应体，前端按 code 走 i18n
+    app.add_exception_handler(
+        ApiBusinessError, api_business_error_handler,  # type: ignore[arg-type]
     )
     _auth_deps = [Depends(require_auth)]
     app.include_router(router, prefix="/api/v1", dependencies=_auth_deps)

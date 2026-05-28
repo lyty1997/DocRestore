@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import shutil
 import subprocess
@@ -60,6 +61,16 @@ from pathlib import Path
 # 项目根目录
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "backend"))
+
+# 让 docrestore.* logger 的 INFO 可见（默认 WARNING 会吞掉诊断信息）
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logging.getLogger("docrestore").setLevel(logging.INFO)
+# litellm 太吵，保持 WARNING
+logging.getLogger("litellm").setLevel(logging.WARNING)
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
 
 def _detect_conda_python(env_name: str) -> str:
@@ -174,7 +185,7 @@ async def main() -> None:
     )
     parser.add_argument(
         "--llm-model",
-        default="openai/gemini-3.1-flash-lite-preview",
+        default="openai/gemini-3-flash-preview-nothinking",
         help="LLM 模型名称",
     )
     parser.add_argument(
@@ -240,13 +251,21 @@ async def main() -> None:
             model=args.llm_model,
             api_base=args.llm_api_base,
             api_key=api_key,
-            max_retries=5,
-            timeout=900,
+            max_retries=2,
+            timeout=120,
+            max_concurrent_requests=3,
         ),
     )
 
-    # 创建 pipeline
+    # 创建 pipeline + scheduler（提供 gpu_lock / llm_semaphore，
+    # process_tree 并行分支下保证 OCR 串行 + LLM 限流，否则 stdio 会并发冲突）
+    from docrestore.pipeline.scheduler import PipelineScheduler
+
     pipeline = Pipeline(config)
+    scheduler = PipelineScheduler(
+        max_concurrent_llm_requests=config.llm.max_concurrent_requests,
+    )
+    pipeline.set_llm_semaphore(scheduler.llm_semaphore)
 
     print(f"\n初始化 pipeline（OCR 模型: {args.ocr_model}）...")
     t0 = time.time()
@@ -265,6 +284,7 @@ async def main() -> None:
         image_dir=image_root,
         output_dir=output_root,
         on_progress=on_progress,
+        gpu_lock=scheduler.gpu_lock,
     )
 
     elapsed = time.time() - t1

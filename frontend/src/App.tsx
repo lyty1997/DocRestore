@@ -9,7 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { cancelTask } from "./api/client";
 import { BackToTopButton } from "./components/BackToTopButton";
 import { Sidebar } from "./components/Sidebar";
-import { useTranslation } from "./i18n";
+import { renderLocalized, useTranslation } from "./i18n";
 import { useTheme } from "./hooks/useTheme";
 import type { SidebarTaskListHandle } from "./components/SidebarTaskList";
 import { TaskDetail } from "./components/TaskDetail";
@@ -32,7 +32,8 @@ function App(): React.JSX.Element {
   const {
     taskId,
     status,
-    progress,
+    progresses,
+    llmUnavailable,
     allResults,
     error,
     wsState,
@@ -62,6 +63,11 @@ function App(): React.JSX.Element {
     taskListRef.current?.refresh();
   }, []);
 
+  /** 侧边栏删除任务回调：若被删的是当前选中的任务，退回新建模式 */
+  const handleTaskDeleted = useCallback((tid: string) => {
+    setSelectedTaskId((current) => (current === tid ? undefined : current));
+  }, []);
+
   /** 任务完成/失败后刷新侧边栏 */
   const isTerminal = status === "completed" || status === "failed";
   const prevTerminalRef = useRef(false);
@@ -86,6 +92,7 @@ function App(): React.JSX.Element {
         selectedTaskId={selectedTaskId}
         onSelectTask={handleSelectTask}
         onNewTask={handleNewTask}
+        onTaskDeleted={handleTaskDeleted}
         onWidthChange={handleWidthChange}
         onTokenSettings={() => { setShowTokenSettings(true); }}
         theme={theme}
@@ -106,9 +113,10 @@ function App(): React.JSX.Element {
               <section className="section-progress">
                 <TaskProgress
                   taskId={taskId}
-                  progress={progress}
+                  progresses={progresses}
                   wsState={wsState}
                   pollingEnabled={pollingEnabled}
+                  llmUnavailable={llmUnavailable}
                 />
                 {taskId !== undefined && (
                   <button
@@ -131,7 +139,11 @@ function App(): React.JSX.Element {
               <section className="section-error">
                 <div className="error-box">
                   <h2>{t("app.processingFailed")}</h2>
-                  <p>{error ?? t("app.unknownError")}</p>
+                  <p>
+                    {error === undefined
+                      ? t("app.unknownError")
+                      : renderLocalized(error, t)}
+                  </p>
                   <button type="button" onClick={reset}>
                     {t("taskResult.resetBtn")}
                   </button>
@@ -164,6 +176,7 @@ function App(): React.JSX.Element {
               refreshTaskList();
             }}
             onTaskListRefresh={refreshTaskList}
+            onSelectTask={handleSelectTask}
           />
         )}
       </main>

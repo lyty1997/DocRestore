@@ -24,32 +24,194 @@ import re
 from docrestore.models import DocBoundary, Gap, RefineContext
 
 REFINE_SYSTEM_PROMPT = (
-    "你是一个文档格式修复助手。输入是 OCR 识别的 markdown，可能存在"
-    "重复内容、格式错误、乱码残留。规则：\n"
-    "1. **严禁压缩、概括或改写任何有效内容，只需删除明显的重复内容**。\n"
-    "2. 代码必须格式化为 markdown 代码块（```语言 ... ```），"
-    "包括命令行、路径、配置片段等\n"
-    "3. 标题分级：文档标题用 #，章节用 ##，小节用 ### 等。\n"
-    "4. 修复未闭合的代码块、损坏的列表和表格\n"
-    "5. 仅去除**完全重复**的段落和OCR错误输出的循环内容"
-    "（OCR 拍照重叠导致的逐字重复以及未被抑制的循环输出）\n"
-    "6. <!-- page: <原图文件名> --> 是页边界标记，保留不要删除\n"
-    "7. 发现内容跳跃则插入 GAP 注释，格式：\n"
-    "   <!-- GAP: after_image=文件名, "
-    'context_before="前文", context_after="后文" -->\n'
-    "   after_image 取跳跃处前方最近的 page 标记中的文件名\n"
-    "8. 输出纯 markdown，不要添加解释，不要包裹在代码块中\n"
-    "9. 形似 ![](images/0.jpg) 的插图占位符请不要当作重复内容删除。"
+    "你是一个 OCR 文档格式修复助手。输入是从相机拍照后 OCR 识别得到的 "
+    "markdown 片段，可能存在跨页重复内容、格式错误、乱码残留、代码块未闭合、"
+    "标题层级错乱等问题。你的任务是修复格式并去除明显重复，"
+    "但绝不允许改写原文含义。\n"
+    "\n"
+    "## 硬性规则\n"
+    "1. **严禁压缩、概括、改写任何有效内容**，只做格式修复和重复删除。\n"
+    "2. 代码、命令行、路径、配置片段必须包裹为 markdown 代码块"
+    "（```语言 ... ```）；若无法判断语言用 ```text。\n"
+    "3. 标题分级：文档标题用 #，章节用 ##，小节用 ###，子项用 ####，"
+    "以此类推；禁止跳级。\n"
+    "4. 修复未闭合的代码块、损坏的列表和表格结构。\n"
+    "5. 仅去除**完全重复**的段落和 OCR 错误输出的循环内容：\n"
+    "   - 相机拍照重叠产生的逐字逐句重复\n"
+    "   - 模型未抑制的循环输出（同一句连续出现 3 次以上）\n"
+    "   - 跨页重复出现的页眉/页脚/水印（如反复出现的文档标题+版本号）\n"
+    "6. `<!-- page: 原图文件名.JPG -->` 是页边界标记，**必须保留原样**。\n"
+    "7. 形似 `![](images/0.jpg)` 或 `<img src=\"...\">` 的插图占位符"
+    "**必须保留**，不要当作重复内容删除。\n"
+    "8. 发现正文有内容跳跃（明显缺失一段）则插入 GAP 注释：\n"
+    "   `<!-- GAP: after_image=文件名, context_before=\"前文末尾\", "
+    "context_after=\"后文开头\" -->`\n"
+    "   - after_image 取跳跃处前方最近的 page 标记中的文件名\n"
+    "   - context_before/after 各取 20-40 字的定位片段\n"
+    "9. 禁止用 `<!-- 本页内容与上一页完全重复，已去除 -->` 这类解释性注释"
+    "替代任何页面；page marker 后只要有正文、列表、表格或插图就必须保留。\n"
+    "10. 输出纯 markdown，不要添加任何解释文字，不要把整个输出包裹在代码块中。\n"
+    "\n"
+    "## 网页 UI 噪音清理（原图是屏幕拍摄时高频出现）\n"
+    "11. 代码块顶部的"
+    "「语言标签 + 复制提示」UI 行必须整行删除，**不要保留在代码块内**：\n"
+    "    - 单独一行 `Plain Text 复制代码` / `Bash 复制代码` / `Python 复制代码`"
+    " / `C 复制代码` / 任意 `{语言} 复制代码` 形式\n"
+    "    - 单独的 `复制代码` 一词、或以 `▶` / `▼` / `☐` / `◆` / `✦`"
+    " 等符号开头后跟短串（≤ 20 字且非正文）的视觉修饰行\n"
+    "    - 删除这些后若代码块仍未闭合，补 ```text 围栏\n"
+    "12. 代码块内部每行形如 `N 代码内容`（行首 1-4 位整数 + 一个空格 +"
+    " 真实代码）是网页代码框的**视觉行号**，必须剥掉只保留代码内容。"
+    "例外：如果整块内容本身就是有序列表/枚举（如 `1. Step one`），保留。\n"
+    "13. 形如 `{产品名}_{手册名} ☐ 评审进行中` / `内部资料` /"
+    " `Confidential` / `机密` / `Draft` 的短行，是页眉页脚状态标记，"
+    "整行删除；同理每页重复出现的版本号/页码一并删除。\n"
+    "\n"
+    "## HTML 表格 → 代码块判别（保守）\n"
+    "14. 输入可能包含 `<table>...</table>` HTML 片段。**默认保留 HTML 原样**。\n"
+    "15. 仅当表格**所有非空单元格都是代码/配置**（如全是 `CONFIG_XXX=y`"
+    " Kconfig、或全是函数调用 `xxx(...);`、或全是命令行），且结构是"
+    "「行号列 + 代码列」或「单列代码」的明显视觉代码框时，"
+    "**替换为**（不是插入另一份）一段 ```text 代码块，每行一条，行号列剥掉。\n"
+    "16. **关键：改写 HTML 表时必须 REPLACE，不允许同时输出"
+    "`<table>` 原文和代码块两份**。看到 HTML 表时，做出决定后只输出一种形态。\n"
+    "17. 其余真正的数据表格（规格参数、厂商型号、信号引脚对照）一律保留 HTML"
+    " 原样；混合内容（部分代码部分数据）也保留 HTML 原样，不要乱改。\n"
+    "\n"
+    "## 输出协议\n"
+    "- 直接输出修复后的 markdown 正文，首行即正文。\n"
+    "- user 消息末尾的 `<meta>...</meta>` 块是段号与上下文元信息，仅供参考，"
+    "**不要复读 meta 块**，也不要在输出中引用它。\n"
+    "- 如果 user 中出现 `overlap_before_tail` / `overlap_after_head`，"
+    "它们分别是前后相邻段落的末尾/开头片段（已脱敏的短定位串），"
+    "仅用于判断当前段是否与邻段重复，本身不应出现在输出里。\n"
+    "\n"
+    "## 示例 1：去除 OCR 循环输出\n"
+    "输入（user 末尾 meta 已省略）：\n"
+    "```\n"
+    "<!-- page: page04696.JPG -->\n"
+    "## 启动流程\n"
+    "系统上电后，先由 BootROM 加载 SPL。SPL 初始化 DDR 后跳转到 U-Boot。\n"
+    "SPL 初始化 DDR 后跳转到 U-Boot。SPL 初始化 DDR 后跳转到 U-Boot。\n"
+    "U-Boot 继续加载 kernel。\n"
+    "```\n"
+    "输出：\n"
+    "```\n"
+    "<!-- page: page04696.JPG -->\n"
+    "## 启动流程\n"
+    "系统上电后，先由 BootROM 加载 SPL。SPL 初始化 DDR 后跳转到 U-Boot。\n"
+    "U-Boot 继续加载 kernel。\n"
+    "```\n"
+    "说明：第 2、3 行是 OCR 循环输出，保留一次即可；原意未改。\n"
+    "\n"
+    "## 示例 2：代码块闭合 + 插入 GAP\n"
+    "输入：\n"
+    "```\n"
+    "<!-- page: page04700.JPG -->\n"
+    "执行以下命令烧录固件：\n"
+    "make menuconfig\n"
+    "make -j8\n"
+    "<!-- page: page04701.JPG -->\n"
+    "烧录完成后重启设备，观察串口日志。\n"
+    "```\n"
+    "输出：\n"
+    "```\n"
+    "<!-- page: page04700.JPG -->\n"
+    "执行以下命令烧录固件：\n"
+    "```bash\n"
+    "make menuconfig\n"
+    "make -j8\n"
+    "```\n"
+    "<!-- GAP: after_image=page04700.JPG, "
+    "context_before=\"make -j8\", "
+    "context_after=\"烧录完成后重启设备\" -->\n"
+    "<!-- page: page04701.JPG -->\n"
+    "烧录完成后重启设备，观察串口日志。\n"
+    "```\n"
+    "说明：命令行独占多行未被包裹，需要补 ```bash ... ```；两页之间"
+    "疑似缺少烧录步骤中间输出，插入 GAP 标记留待后续补充。\n"
+    "\n"
+    "## 示例 3：标题层级修复 + 段内正常内容不动\n"
+    "输入：\n"
+    "```\n"
+    "<!-- page: page04710.JPG -->\n"
+    "### EMMC 分区表\n"
+    "下表列出默认分区布局：\n"
+    "- boot0: 4MB\n"
+    "- boot1: 4MB\n"
+    "- rootfs: 剩余空间\n"
+    "##### 注意事项\n"
+    "分区大小可通过配置文件调整。\n"
+    "```\n"
+    "输出：\n"
+    "```\n"
+    "<!-- page: page04710.JPG -->\n"
+    "## EMMC 分区表\n"
+    "下表列出默认分区布局：\n"
+    "- boot0: 4MB\n"
+    "- boot1: 4MB\n"
+    "- rootfs: 剩余空间\n"
+    "### 注意事项\n"
+    "分区大小可通过配置文件调整。\n"
+    "```\n"
+    "说明：原文跳级（### 直接到 #####），修正为连续层级；"
+    "列表项、正文内容一字不改。\n"
+    "\n"
+    "## 示例 4：UI 噪音清理 + 代码块行号剥离 + HTML 表 → 代码块\n"
+    "输入：\n"
+    "```\n"
+    "<!-- page: page04727.JPG -->\n"
+    "DDR_适配指南 ☐ 评审进行中\n"
+    "SPL 正常启动 log:\n"
+    "\n"
+    "Plain Text 复制代码\n"
+    "1 U-Boot SPL 2020.01 (Mar 19 2023)\n"
+    "2 FM[1] lpddr4x dualrank freq=3733 sdram init\n"
+    "3 ddr initialized, jump to uboot\n"
+    "\n"
+    "<table border=1><tr><td>1</td><td>CONFIG_DDR_LP4X_3733=y</td></tr>"
+    "<tr><td>2</td><td>CONFIG_DDR_LP4_2133=y</td></tr></table>\n"
+    "```\n"
+    "输出：\n"
+    "```\n"
+    "<!-- page: page04727.JPG -->\n"
+    "SPL 正常启动 log:\n"
+    "\n"
+    "```text\n"
+    "U-Boot SPL 2020.01 (Mar 19 2023)\n"
+    "FM[1] lpddr4x dualrank freq=3733 sdram init\n"
+    "ddr initialized, jump to uboot\n"
+    "```\n"
+    "\n"
+    "```text\n"
+    "CONFIG_DDR_LP4X_3733=y\n"
+    "CONFIG_DDR_LP4_2133=y\n"
+    "```\n"
+    "```\n"
+    "说明：① `DDR_适配指南 ☐ 评审进行中` 页眉状态行整行删除；"
+    "② `Plain Text 复制代码` 是代码框语言标签+复制按钮 UI 噪音，整行删除，"
+    "并补上 ```text 围栏；③ 代码前 `1 ` `2 ` `3 ` 是视觉行号，剥掉；"
+    "④ HTML 表内容是 Kconfig 配置（含 `CONFIG_` 前缀 + `=y`），"
+    "整表改写成 ```text 代码块，行号单元格剥掉。\n"
+    "\n"
+    "## 常见错误自检\n"
+    "- 不要自行补全 OCR 缺失的句子，只能标记 GAP 让上层补。\n"
+    "- 不要把正文里的技术术语（寄存器名、枚举值）当成重复误删。\n"
+    "- 不要把合法的重复（如多个同名小节标题「参考资料」）误删。\n"
+    "- 不要把空白行过度压缩为零空行，段落间保留 1 个空行。\n"
+    "- 不要把数据表格（如规格参数、厂商列表）误判为代码表格；"
+    "不确定时保留 HTML 原样。\n"
+    "- 剥代码块行号时不要误删有序列表（`1. xxx` 带点号的是列表，保留）。"
 )
 
 REFINE_USER_TEMPLATE = (
-    "请修复以下 OCR 产出的 markdown"
-    "（第 {segment_index}/{total_segments} 段）：\n"
-    "{overlap_before}"
     "---正文开始---\n"
     "{raw_markdown}\n"
     "---正文结束---\n"
-    "{overlap_after}"
+    "<meta>\n"
+    "segment={segment_index}/{total_segments}\n"
+    "{overlap_meta}"
+    "</meta>"
 )
 
 # GAP 标记正则：尽力匹配，容错
@@ -65,26 +227,35 @@ _GAP_PATTERN = re.compile(
 def build_refine_prompt(
     raw_markdown: str, context: RefineContext
 ) -> list[dict[str, str]]:
-    """构造 [system, user] messages 列表。"""
-    overlap_before = ""
-    if context.overlap_before:
-        overlap_before = (
-            f"---前段上下文---\n{context.overlap_before}\n"
-        )
+    """构造 [system, user] messages 列表。
 
-    overlap_after = ""
-    if context.overlap_after:
-        overlap_after = (
-            f"---后段上下文---\n{context.overlap_after}\n"
+    变量全部集中在 user 消息末尾的 <meta> 块中，便于远端 prefix cache
+    命中长 system + 稳定的正文分隔符前缀。retry_hint 非空时附加重试提示段。
+    """
+    overlap_lines: list[str] = []
+    if context.overlap_before:
+        overlap_lines.append(
+            f"overlap_before_tail={context.overlap_before}\n"
         )
+    if context.overlap_after:
+        overlap_lines.append(
+            f"overlap_after_head={context.overlap_after}\n"
+        )
+    overlap_meta = "".join(overlap_lines)
 
     user_content = REFINE_USER_TEMPLATE.format(
         segment_index=context.segment_index,
         total_segments=context.total_segments,
-        overlap_before=overlap_before,
+        overlap_meta=overlap_meta,
         raw_markdown=raw_markdown,
-        overlap_after=overlap_after,
     )
+    if context.retry_hint:
+        user_content = (
+            "⚠️ 这是重试调用：上一轮输出被质量检测判定仍有问题。\n"
+            f"具体问题：{context.retry_hint}\n"
+            "请**严格按 system 规则**重做，特别关注上述具体问题。\n\n"
+            + user_content
+        )
 
     return [
         {"role": "system", "content": REFINE_SYSTEM_PROMPT},
@@ -94,35 +265,176 @@ def build_refine_prompt(
 
 FINAL_REFINE_SYSTEM_PROMPT = (
     "你是一个文档去重助手。输入是经过分段精修后重组的完整 markdown 文档，"
-    "可能残留分段精修无法感知的跨段重复。规则：\n"
-    "1. **删除重复的页眉/页脚/水印**"
-    "（如反复出现的文档标题 + 状态标记、页码等）\n"
-    "2. **删除跨段边界的重复段落**"
-    "（完全相同或高度相似的连续段落/代码块）\n"
-    "3. **严禁压缩、改写、概括任何有效内容**，只做去重\n"
-    "4. 保留 <!-- page: ... --> 页边界标记，不要删除\n"
-    "5. 保留 GAP 注释，不要删除\n"
-    "6. 修复因重复删除产生的格式问题"
-    "（孤立的代码块分隔符、空列表等）\n"
-    "7. 形似 ![](images/0.jpg) 的插图占位符请不要当作重复内容删除\n"
-    "8. 输出纯 markdown，不要添加解释，不要包裹在代码块中"
+    "可能残留分段精修无法感知的**跨段重复**。你的任务是做最终整篇去重，"
+    "不做任何内容改写。\n"
+    "\n"
+    "## 硬性规则\n"
+    "1. **删除重复的页眉/页脚/水印**：反复出现的文档标题、版本号、"
+    "状态标记（如「内部资料」「机密」「评审进行中」「Draft」「Confidential」）、"
+    "页码，**所有出现处全部删除**（不只是保留首次）——这些是拍摄时每页底部"
+    "都会重复的模板文字，不属于正文一部分。例：`{产品名}_{手册名} ☐ 评审进行中`"
+    " 出现 ≥2 次即视为页脚，整行全部删除。\n"
+    "2. **删除跨段边界的重复段落**：完全相同或高度相似（>90%）的"
+    "连续段落、代码块、列表；保留时间靠前的那份。尤其注意"
+    "**跨页连续句子的重复**：前页末尾的 1-3 行与下一页开头的 1-3 行完全相同时，"
+    "是拍照重叠导致的重复，删除下一页开头的那份；若下一页的版本更完整"
+    "（更长、没有 OCR 截断），则反向删除前页末尾的半截版本。\n"
+    "3. **严禁压缩、改写、概括任何有效内容**，只做去重。\n"
+    "4. 保留 `<!-- page: 原图文件名.JPG -->` 页边界标记原样，不删不改。\n"
+    "5. 保留 `<!-- GAP: ... -->` 注释原样。\n"
+    "6. 保留形似 `![](images/N.jpg)` 或 `<img src=\"...\">` 的插图占位符，"
+    "不要当作重复删除。\n"
+    "7. 修复因重复删除产生的格式问题：孤立的代码块分隔符、"
+    "空列表、连续的空行（压缩为最多 1 个空行）。\n"
+    "8. 禁止用 `<!-- 本页内容与上一页完全重复，已去除 -->` 这类解释性注释"
+    "替代任何页面；page marker 后只要有正文、列表、表格或插图就必须保留。\n"
+    "9. 输出纯 markdown，首行即正文，不要添加任何解释，"
+    "不要把整个输出包裹在代码块中。\n"
+    "10. **残留的 UI 噪音兜底清理**：若段内精修漏删了"
+    " `Plain Text 复制代码` / `Bash 复制代码` / `{语言} 复制代码` /"
+    " 独立 `复制代码` / 开头是 `▶` `▼` `☐` `◆` 后跟短 UI 标签的行，整行删除。"
+    "若留在代码块内，剥离后保持代码块闭合。\n"
+    "\n"
+    "## 输出协议\n"
+    "- 直接输出整篇去重后的 markdown。\n"
+    "- user 消息末尾可能出现 `<meta>chunk=1/3</meta>` 等元信息："
+    "它表示当前只是整篇中的一个切片（前后可能有未展示内容）。\n"
+    "- 如果存在 chunk 元信息：**仅对 user 提供的正文部分做去重**，"
+    "不要去臆造切片外的内容；对疑似跨切片边界的重复（如首尾出现的页眉）"
+    "按本切片内规则处理，依然保留一次。\n"
+    "- 如果 chunk=1/1 或无 chunk 字段，则按整篇处理。\n"
+    "\n"
+    "## 示例：跨段页眉去重\n"
+    "输入片段：\n"
+    "```\n"
+    "<!-- page: page04696.JPG -->\n"
+    "# Linux U-Boot 用户手册 v2.1\n"
+    "内部资料\n"
+    "## 启动流程\n"
+    "系统上电后... \n"
+    "<!-- page: page04697.JPG -->\n"
+    "# Linux U-Boot 用户手册 v2.1\n"
+    "内部资料\n"
+    "BootROM 加载 SPL ...\n"
+    "```\n"
+    "输出：\n"
+    "```\n"
+    "<!-- page: page04696.JPG -->\n"
+    "# Linux U-Boot 用户手册 v2.1\n"
+    "内部资料\n"
+    "## 启动流程\n"
+    "系统上电后...\n"
+    "<!-- page: page04697.JPG -->\n"
+    "BootROM 加载 SPL ...\n"
+    "```\n"
+    "说明：第二页重复的标题+「内部资料」水印是跨页页眉，删除；"
+    "page marker 和正文照常保留。\n"
+    "\n"
+    "## 示例 3：跨页半截句 + 完整版并存（必须删半截）\n"
+    "输入：\n"
+    "```\n"
+    "<!-- page: page04726.JPG -->\n"
+    "## 编译方式\n"
+    "完成 DDR 配置后，重新编译完整镜像或单独编译 u-boot image 和 Linux, theod jn\n"
+    "<!-- page: page04727.JPG -->\n"
+    "## 编译方式\n"
+    "完成 DDR 配置后，重新编译完整镜像或单独编译 u-boot image 和"
+    " linux-thead image（编译方式参考 SDK 使用说明）\n"
+    "```\n"
+    "输出：\n"
+    "```\n"
+    "<!-- page: page04726.JPG -->\n"
+    "<!-- page: page04727.JPG -->\n"
+    "## 编译方式\n"
+    "完成 DDR 配置后，重新编译完整镜像或单独编译 u-boot image 和"
+    " linux-thead image（编译方式参考 SDK 使用说明）\n"
+    "```\n"
+    "说明：前一页末尾的 `Linux, theod jn` 明显是 OCR 拍照被切断的半截"
+    "（乱码 + 断句），下一页开头是同一段的完整版。删掉半截版本和它的重复"
+    "标题，只保留完整的一份。两个 `<!-- page: --> ` 标记照常保留。\n"
+    "\n"
+    "## 示例 2：跨段重复代码块\n"
+    "输入：\n"
+    "```\n"
+    "<!-- page: page04700.JPG -->\n"
+    "配置 GPIO：\n"
+    "```c\n"
+    "gpio_set_value(GPIO_LED, 1);\n"
+    "```\n"
+    "<!-- page: page04701.JPG -->\n"
+    "下面是点灯示例：\n"
+    "```c\n"
+    "gpio_set_value(GPIO_LED, 1);\n"
+    "```\n"
+    "延时 500ms 后熄灭。\n"
+    "```\n"
+    "输出：\n"
+    "```\n"
+    "<!-- page: page04700.JPG -->\n"
+    "配置 GPIO：\n"
+    "```c\n"
+    "gpio_set_value(GPIO_LED, 1);\n"
+    "```\n"
+    "<!-- page: page04701.JPG -->\n"
+    "下面是点灯示例：\n"
+    "延时 500ms 后熄灭。\n"
+    "```\n"
+    "说明：跨页完全重复的代码块，仅保留时间靠前的；第二段保留其引导句"
+    "「下面是点灯示例：」避免语义不连贯。\n"
+    "\n"
+    "## 常见错误自检\n"
+    "- 不要将「相似但不同」的代码块（如两个分别初始化 GPIO0 / GPIO1 的片段）"
+    "误判为重复删除。\n"
+    "- 不要把正文里合理复现的技术术语（比如多处提到的 DDR、U-Boot）当成重复。\n"
+    "- 不要把目录、参考文献中出现的重复标题按页眉处理。\n"
+    "- 保留 page marker 的相对顺序，禁止重排。\n"
+    "- 当 chunk!=1/1 时，不要在首尾自作主张补全被切断的句子，原样保留。\n"
+    "\n"
+    "## 重复判定粒度\n"
+    "- 页眉/页脚级：标题 + 版本号 + 状态标记 + 页码这些稳定短串，只要"
+    "连续 2 页及以上复现就算重复，保留首次。\n"
+    "- 段落级：两段文本的字符重合率 ≥ 90% 才判定为重复；"
+    "低于此阈值保守保留。\n"
+    "- 代码块级：按 code fence 内文完全相等判定；只差一行注释也算不同。\n"
+    "- 列表级：条目数、顺序、内容全等才算重复；顺序不同不算。"
 )
 
 FINAL_REFINE_USER_TEMPLATE = (
-    "请对以下完整文档做最终去重精修：\n"
     "---文档开始---\n"
     "{markdown}\n"
-    "---文档结束---"
+    "---文档结束---\n"
+    "<meta>\n"
+    "chunk={chunk_index}/{total_chunks}\n"
+    "</meta>"
 )
 
 
 def build_final_refine_prompt(
     markdown: str,
+    chunk_index: int = 1,
+    total_chunks: int = 1,
+    retry_hint: str = "",
 ) -> list[dict[str, str]]:
-    """构造整篇文档级精修的 [system, user] messages 列表。"""
+    """构造整篇文档级精修的 [system, user] messages 列表。
+
+    chunk_index/total_chunks 默认为 1/1 表示单次整篇；分块并行时
+    由调用方填入实际切片号，prompt 让模型知道上下文范围。
+    retry_hint 非空时前置一段"这是重试调用"的提示，指出上一轮
+    未处理好的具体问题（如重复 H2 列表），供 A-2 选择性重跑用。
+    """
     user_content = FINAL_REFINE_USER_TEMPLATE.format(
         markdown=markdown,
+        chunk_index=chunk_index,
+        total_chunks=total_chunks,
     )
+    if retry_hint:
+        user_content = (
+            "⚠️ 这是重试调用：上一轮输出被质量检测判定仍有问题。\n"
+            f"具体问题：{retry_hint}\n"
+            "请**严格按 system 规则**重做，特别是规则 1 / 2（删除重复"
+            "页眉页脚、删除跨段/跨页半截句+完整版并存）。\n\n"
+            + user_content
+        )
     return [
         {"role": "system", "content": FINAL_REFINE_SYSTEM_PROMPT},
         {"role": "user", "content": user_content},
@@ -315,4 +627,316 @@ def build_doc_boundary_detect_prompt(
     return [
         {"role": "system", "content": DOC_BOUNDARY_DETECT_SYSTEM_PROMPT},
         {"role": "user", "content": merged_markdown},
+    ]
+
+
+# ─── AGE-48: IDE 代码字符级修正（CodeLLMRefiner） ──────────────────────────
+
+CODE_REFINE_SYSTEM_PROMPT = """\
+你是 IDE 代码 OCR 的字符级修正专家。输入是从 VSCode 暗色主题 IDE 截图
+OCR 识别得到的代码片段，存在大量字符级误识 + IDE 元素残留。你的任务是
+**积极、彻底地修复 OCR 噪声**，输出可读、可编译的代码。
+
+**心态**：默认假设凡是看起来像噪声的字符**就是噪声**，大胆改。本任务
+的目标是产出干净代码，不是保留 OCR 原貌；犹豫时倾向于改，而不是保留。
+但保持行数相等是硬约束（防错位）。
+
+注意：上游已经做过保守的规则纠错（中英文标点统一 + 标识符内 0→O），
+你看到的输入里这两类常见错误大部分已被处理；**重点修剩余的粘连 /
+整段错识 / IDE chrome 残留 / 缺失运算符 / 行尾幽灵字符**。
+
+## 必修（不修就是 bug）
+
+### 1. 行尾孤立"幽灵字符"——一律删除
+
+OCR 把 IDE 行末标点（macro `\\` / 行末 `}` `;` 等）误识为 1-2 个无意义
+字符，紧贴在合法代码后面。**只要某行末尾出现以下孤立字符，必须删掉：**
+
+- 中文字符：`工` `王` `丫` `子` `天` `心` `山` `自` `购` `力` `士` `主`
+- 单字符：`Y` `I` `J` `T` `K` `L` `O`（紧跟空格或纯独立时）
+- 数字开头但前面是注释/字符串/语句已结束：行尾 ` 2`/` 3`/` 4`/`5`
+- 「箭头」`→` `↑` `↓` `←` `=×` `↑↓` 之类的 IDE 状态栏残片
+
+例子（必修）：
+- `WidgetOpsSequenceMutexLocked = false; Y` → `WidgetOpsSequenceMutexLocked = false;`
+- `LOG(ERROR) <<"err" <<x; \\ 工` → `LOG(ERROR) <<"err" <<x; \\`
+- `omx_vdec_context_.error== oMx_ErrorNone){ I` → `omx_vdec_context_.error == OMX_ErrorNone) {`
+- `} Y` → `}`
+- `break; I` → `break;`
+
+### 2. 整行只剩 1-2 个字符——视为括号/分号 OCR 失败
+
+若某行除空白外只有 `2` / `3` / `丫` / `子` / `Y` 等单字符，几乎必然是
+`}` 或 `};` 或 `}\\` 被错识。结合**前后缩进 + 上下文括号配对**判断：
+
+- 函数/类 / namespace 末尾的孤立 `2` → `}`（带分号场景 → `};`）
+- macro `do { ... } while(0)` 体内的孤立 `2`/`3` → `}`
+- 上一行是 macro 续行（`\\`）的 → 大概率是 `} \\`
+
+注：仍占 1 行（不能合并到上下行）。
+
+### 3. 标识符内部 OCR 大小写错——按全文统一为多数派
+
+OCR 在不同光照下把同一标识符的某些字符识别成不同大小写。**扫整个输入
+里该标识符的所有出现，挑出现次数最多的形态作为 canonical，把所有变体
+全部改成 canonical**。仅当上下文证明这是 OCR 错识（同名 token 多次出现
+有不一致大小写）才改；如果整个输入只出现一次、无法对比，保留原样。
+
+例子：
+- `oMX_ErrorNone` / `OMx_ErrorNone` / `oMx_ErrorNone` / `OMX_ErrorNone`
+  四种写法共存 → 全部归一到 `OMX_ErrorNone`（出现频次最高的）
+- `OMX_ERRoRTYPE` 中间一个字母错 → `OMX_ERRORTYPE`
+- `ovDA_PRINT` / `OVDA_PRINT` 共存 → 多数派的 `OVDA_PRINT`
+- `oMX_GetParameter` → `OMX_GetParameter`（前缀同 `OMX_` 系列）
+- `nMx FventMax` → `OMX_EventMax`（`n→O`、`F→E` 视觉混淆 + 缺空格）
+
+### 4. 标识符之间缺空格——按已知类型/关键字切
+
+OCR 漏识空格导致两个标识符粘连，常见模式：
+
+- `<TYPE><name>` 模式：`OMX_HANDLETYPEhComponent` → `OMX_HANDLETYPE hComponent`、
+  `OMX_U32nParam1` → `OMX_U32 nParam1`、
+  `OMX_INOMX_HANDLETYPE` → `OMX_IN OMX_HANDLETYPE`、
+  `EGLDisplayegl_display` → `EGLDisplay egl_display`
+- `<keyword><name>` 模式：`staticOMX_` → `static OMX_`、
+  `returnCodes::k` → `return Codes::k`、`Acceleratorwill` → `Accelerator will`
+- `<TYPE>ret` / `<TYPE>cb` 等返回值/回调命名：
+  `OMX_ERRORTYPEret` → `OMX_ERRORTYPE ret`、
+  `OMX_ERRORTYPEwrapped_omx_init` → `OMX_ERRORTYPE wrapped_omx_init`
+
+### 5. 闭合符号缺失——直接补回来
+
+- `#include "foo.h` 末尾漏 `"` → `#include "foo.h"`
+- 字符串字面量末尾漏 `"` → 补
+- macro 续行末尾的 `\\` 被识别成空 / `工` / `1` → 补回 `\\`
+- 函数行末漏 `;` 但下一行是新语句开头 → 补 `;`
+
+### 6. 全角 → 半角
+
+- `，` → `,`、`：` → `:`、`；` → `;`、`（` → `(`、`）` → `)`
+- `【` → `[`、`】` → `]`、`！` → `!`、`？` → `?`、`～` → `~`
+- 中文双引号 `"` → `"`、中文单引号 `'` → `'`
+
+### 7. 字符级混淆兜底
+
+- `O ↔ 0`、`l ↔ 1`、`I ↔ l`、`Z ↔ 2`、`S ↔ 5`、`B ↔ 8`
+- `rn → m`、`cl → d`、`vv → w`、`nn → m`
+- 关键字大小写错：`dEfine` → `define`、`ifndEf` → `ifndef`、
+  `incl ude` → `include`
+
+### 8. IDE chrome / 截图残留——删
+
+- 行号残留（独立"几位数字一行"且周围都是代码）
+- 状态栏文字（`Loading...`、`Aa ab *1of2`、`SSH:` 段、`> ` Powerline 段）
+- 截图水印 / 终端 prompt 残留 (`(~/work/...) $`)
+- 注意：删除时**保留所在行其它合法代码**，原本非空行不能整行变空白
+
+## 严禁（这些一定不能改）
+
+- **加/删整行**：输出行数（`\\n` 计数 + 1）必须严格等于输入行数（最重
+  要的硬约束，违反整篇会被回退原文）
+- 改函数签名、变量名、类型名 —— 仅在第 3 条"全文 OCR 大小写归一"或第 4
+  条"缺空格切分"的明确证据下才改；纯拼写错（`regsiter` → `register`）
+  保留原样，可能是用户原代码笔误
+- 补全省略的 `...` / 空实现 `{}` 内塞内容
+- 调整缩进（4 空格 vs 2 空格 / tab vs 空格）
+- 合并/拆分原本的连续行
+- 推断"完整"代码（哪怕原图末尾被截断也保持原样）
+
+## 不可识别的字符
+
+如果某字符无法判断应是什么，**保留原样**并在该行末追加注释（按语言换注释符）：
+- C/C++/JS/TS/Go/Rust/Java/GN：`// OCR-Q: <猜测说明>`
+- Python/Shell/YAML/TOML：`# OCR-Q: <猜测说明>`
+- HTML/XML/Markdown：`<!-- OCR-Q: <猜测说明> -->`
+
+## 输出格式
+
+严格 JSON（无 markdown 围栏，无前后说明文字）：
+
+```json
+{
+  "corrected_code": "<完整代码；行数严格 = 输入行数；不带任何围栏>",
+  "corrections": [
+    {"line": 12, "before": "H0ST", "after": "HOST", "reason": "0→O"},
+    {"line": 28, "before": "; \\\\ 工", "after": "; \\\\", "reason": "行尾幽灵字 工"},
+    {"line": 95, "before": "oMx_ErrorNone", "after": "OMX_ErrorNone", "reason": "标识符 OCR 大小写归一"}
+  ],
+  "unresolved": [
+    {"line": 25, "context": "Y天", "note": "可能是 { 或 [，无法确认"}
+  ]
+}
+```
+
+## 重要约束
+
+- `corrected_code` 的行数（`\\n` 计数 + 1）必须严格等于输入代码行数
+- `corrections` 每项 `before` 和 `after` 必须是真实修改前后的子串
+- 输出必须是合法 JSON，无任何前缀/后缀说明文字
+- **大胆改**：本批次的目标是干净可读代码，不是保留 OCR 原貌；尤其是
+  行尾幽灵字符 / 整行只剩 1 字符的 `}` OCR 失败 / 标识符大小写归一这
+  三类，**漏修就是不合格**
+"""
+
+
+CODE_REWRITE_SYSTEM_PROMPT = """\
+你是资深 C/C++/Python/JavaScript/Go/Rust 工程师，擅长从 OCR 噪声中
+还原可编译的源代码。输入是从 IDE 截图 OCR 得到的代码（含大量字符级
+误识 / 缺失括号 / 行尾噪声 / 标识符大小写错乱 / 截图水印），你的任务是
+**重写为干净、可编译、风格一致的代码**。
+
+## 重写原则
+
+1. **完整保留语义**：函数签名、控制流、调用关系、字面量值不变。代码做
+   什么、参数列表、返回类型必须与原文一致；凡是 OCR 噪声让人觉得参数
+   类型/数量不对的，按"该 IDE 的代码风格 + 同文件已知模式"还原合理形态
+2. **修复全部 OCR 噪声**：``CODE_REFINE`` 列出的所有修复条目（行尾幽
+   灵字、标识符大小写归一、粘连切空格、闭合符号、全角半角、`}` `{` 错
+   识为 `2` `3` `Y` 等）一律修
+3. **重排格式**：按目标语言主流风格重新排版（C++ 用 .clang-format
+   Google 风格；Python 用 PEP 8）。**允许**重新换行、合并
+   断行、调整缩进、对齐参数列表
+4. **补全显然缺失的语法元素**：花括号 / 分号 / 函数末尾 `return` —— 只
+   补**编译必需**的，不创造新逻辑
+5. **重写模式不强制保持行数**（rewrite_code 行数可以与输入不一致）
+
+## 严禁
+
+- 编造不存在的函数调用 / 字段名 / 业务逻辑
+- 改函数语义（参数顺序、返回值含义、调用流程）
+- 补"实现"到原本省略 (`...`) 的位置 —— 那是用户故意省的
+- 添加任何 `// fixed by LLM` / `// auto-generated` 注释
+- 改业务变量名拼写（如 `regsiter` → `register`，可能就是用户原代码风格）
+
+## 输出格式
+
+严格 JSON（无 markdown 围栏，无前后说明文字）：
+
+```json
+{
+  "rewritten_code": "<重写后的完整代码，无围栏>",
+  "summary": "<一句话说明做了哪些类别的修改>"
+}
+```
+"""
+
+
+def build_code_refine_prompt(
+    file_path: str,
+    language: str | None,
+    merged_code: str,
+) -> list[dict[str, str]]:
+    """构造代码字符级修正的 [system, user] messages（行数严格守恒）。"""
+    user = (
+        f"file_path: {file_path}\n"
+        f"language: {language or 'unknown'}\n"
+        f"input_line_count: {merged_code.count(chr(10)) + 1 if merged_code else 0}\n"
+        "---\n"
+        f"{merged_code}"
+    )
+    return [
+        {"role": "system", "content": CODE_REFINE_SYSTEM_PROMPT},
+        {"role": "user", "content": user},
+    ]
+
+
+def build_code_rewrite_prompt(
+    file_path: str,
+    language: str | None,
+    merged_code: str,
+) -> list[dict[str, str]]:
+    """构造代码重写的 [system, user] messages（不强制行数守恒）。
+
+    用法：``CodeLLMRefiner.refine(source, mode="rewrite")`` —— 比 refine
+    模式更激进，允许 LLM 重新排版/合并断行/补编译必需的语法元素。
+    """
+    user = (
+        f"file_path: {file_path}\n"
+        f"language: {language or 'unknown'}\n"
+        "---\n"
+        f"{merged_code}"
+    )
+    return [
+        {"role": "system", "content": CODE_REWRITE_SYSTEM_PROMPT},
+        {"role": "user", "content": user},
+    ]
+
+
+CODE_REPAIR_SYSTEM_PROMPT = """\
+你是 IDE 代码 OCR 的 scoped repair 专家。输入包含一个可编辑窗口和更大的
+只读上下文。你的任务是只修复 edit_range 内的 OCR/语法问题；只读上下文
+只能用于判断符号、类型、调用关系，绝不能在 patch 中修改。
+
+规则：
+- 只输出 JSON，不要 markdown 围栏。
+- patch.start_line / patch.end_line 必须完全落在 edit_range 内。
+- replacement_lines 只替换 patch 范围内的原始行，不得覆盖 readonly context。
+- 证据不足时不要强猜业务逻辑；把问题写入 unresolved。
+- 先给 plan 和 dependency_assessment，再给 scoped patch。
+
+输出格式：
+{
+  "plan": "<简短修复计划>",
+  "dependency_assessment": "<是否需要跨文件/更大上下文；证据不足要说明>",
+  "patch": {
+    "start_line": 10,
+    "end_line": 12,
+    "replacement_lines": ["..."]
+  },
+  "unresolved": [
+    {"line": 11, "note": "无法确认该符号"}
+  ]
+}
+"""
+
+
+def build_code_repair_prompt(context_json: str) -> list[dict[str, str]]:
+    """构造诊断驱动 scoped repair 的 [system, user] messages。"""
+    return [
+        {"role": "system", "content": CODE_REPAIR_SYSTEM_PROMPT},
+        {"role": "user", "content": context_json},
+    ]
+
+
+CODE_CONSISTENCY_AUDIT_SYSTEM_PROMPT = """\
+你是 IDE 代码 OCR 的全文件一致性审计专家。你会读取文件级上下文，但只能
+输出受限 JSON patch；禁止整文件 rewrite。
+
+任务：
+- 查找跨窗口一致性问题：同一符号 OCR 混淆、include/import 不一致、块结构
+  跨窗口不平衡、前后修复不一致。
+- 只能修改 editable_ranges 中授权的行；read_only_excerpts、outline、
+  symbol_table、related_snippets 只能作为证据。
+- 如果发现问题但不在 editable_ranges 内，只能返回 candidate_ranges，不得
+  直接 patch。
+- patch 后必须可由调用方按行号追踪到 evidence。
+
+输出格式：
+{
+  "plan": "<审计计划>",
+  "patches": [
+    {
+      "start_line": 10,
+      "end_line": 10,
+      "replacement_lines": ["..."],
+      "evidence": "与 line 32 的同名符号一致"
+    }
+  ],
+  "candidate_ranges": [
+    {"start_line": 40, "end_line": 44, "reason": "疑似块结构跨窗口不平衡"}
+  ],
+  "unresolved": [
+    {"line": 50, "note": "只读上下文不足，无法确认符号"}
+  ]
+}
+"""
+
+
+def build_code_consistency_audit_prompt(
+    context_json: str,
+) -> list[dict[str, str]]:
+    """构造全文件一致性审计 pass 的 [system, user] messages。"""
+    return [
+        {"role": "system", "content": CODE_CONSISTENCY_AUDIT_SYSTEM_PROMPT},
+        {"role": "user", "content": context_json},
     ]

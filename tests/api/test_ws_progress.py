@@ -96,6 +96,10 @@ class TestTaskProgressWebSocket:
                 "render",
             }
 
+            # 首帧应带 i18n key，供前端按语言渲染（2026-04-23 新增字段）
+            assert msg1.get("message_key") == "progress.waiting"
+            assert isinstance(msg1.get("message_params"), dict)
+
             msg2 = ws.receive_json()
             assert msg2["stage"] in {
                 "ocr",
@@ -107,6 +111,10 @@ class TestTaskProgressWebSocket:
                 "render",
             }
             assert msg2.get("message") != "等待开始"
+            # 后续帧也应带 message_key（来自 pipeline report_fn 的结构化推送）
+            # 注意：init 阶段 engine_manager 的动态 msg 无 key，允许空串
+            key = msg2.get("message_key")
+            assert isinstance(key, str)  # 可空（init 动态文案）或具体 progress.*
 
     def test_ws_progress_two_clients_receive_followup(
         self,

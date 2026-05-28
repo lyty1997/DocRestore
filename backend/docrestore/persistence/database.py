@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,13 +25,18 @@ from pathlib import Path
 
 import aiosqlite
 
-from docrestore.pipeline.config import LLMConfig, OCRConfig, PIIConfig
+from docrestore.pipeline.config import (
+    CodeRestoreConfig,
+    LLMConfig,
+    OCRConfig,
+    PIIConfig,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # ── 建表 SQL ──────────────────────────────────────────────
-# llm/ocr/pii 列存完整 Config JSON 快照。
+# llm/ocr/pii/code 列存完整 Config JSON 快照。
 
 _CREATE_TASKS = """\
 CREATE TABLE IF NOT EXISTS tasks (
@@ -41,6 +47,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     llm          TEXT,
     ocr          TEXT,
     pii          TEXT,
+    code         TEXT,
     error        TEXT,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
@@ -59,7 +66,8 @@ CREATE TABLE IF NOT EXISTS task_results (
     task_id     TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
     output_path TEXT NOT NULL,
     doc_title   TEXT NOT NULL DEFAULT '',
-    doc_dir     TEXT NOT NULL DEFAULT ''
+    doc_dir     TEXT NOT NULL DEFAULT '',
+    error       TEXT NOT NULL DEFAULT ''
 )"""
 
 _CREATE_RESULTS_IDX = (
@@ -78,6 +86,7 @@ class TaskRow:
     llm: LLMConfig | None
     ocr: OCRConfig | None
     pii: PIIConfig | None
+    code: CodeRestoreConfig | None
     error: str | None
     created_at: str
     updated_at: str
@@ -91,6 +100,7 @@ class ResultRow:
     output_path: str
     doc_title: str
     doc_dir: str
+    error: str
 
 
 @dataclass
@@ -139,8 +149,11 @@ class TaskDatabase:
         await self._db.execute(_CREATE_RESULTS)
         await self._db.execute(_CREATE_RESULTS_IDX)
 
-        for col in ("llm", "ocr", "pii"):
+        for col in ("llm", "ocr", "pii", "code"):
             await self._migrate_add_column("tasks", col, "TEXT")
+        await self._migrate_add_column(
+            "task_results", "error", "TEXT NOT NULL DEFAULT ''",
+        )
 
         await self._db.commit()
 
@@ -177,18 +190,19 @@ class TaskDatabase:
         llm: LLMConfig | None = None,
         ocr: OCRConfig | None = None,
         pii: PIIConfig | None = None,
+        code: CodeRestoreConfig | None = None,
         created_at: str | None = None,
     ) -> None:
-        """插入新任务。llm/ocr/pii 为完整 Config 快照。"""
+        """插入新任务。llm/ocr/pii/code 为完整 Config 快照。"""
         db = self._get_db()
         now = created_at or datetime.now().isoformat()
         await db.execute(
             """\
             INSERT INTO tasks
                 (task_id, status, image_dir, output_dir,
-                 llm, ocr, pii,
+                 llm, ocr, pii, code,
                  created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task_id,
                 status,
@@ -197,6 +211,7 @@ class TaskDatabase:
                 llm.model_dump_json() if llm is not None else None,
                 ocr.model_dump_json() if ocr is not None else None,
                 pii.model_dump_json() if pii is not None else None,
+                code.model_dump_json() if code is not None else None,
                 now,
                 now,
             ),
@@ -221,19 +236,31 @@ class TaskDatabase:
     async def insert_results(
         self,
         task_id: str,
-        results: list[tuple[str, str, str]],
+        results: Sequence[
+            tuple[str, str, str] | tuple[str, str, str, str]
+        ],
     ) -> None:
         """批量插入任务结果。
 
         参数:
-            results: [(output_path, doc_title, doc_dir), ...]
+            results: [(output_path, doc_title, doc_dir, error), ...]
+                兼容旧调用方的三元组，缺省 error 视为空串。
         """
         db = self._get_db()
+        normalized: list[tuple[str, str, str, str]] = []
+        for row in results:
+            if len(row) == 3:
+                output_path, doc_title, doc_dir = row
+                normalized.append((output_path, doc_title, doc_dir, ""))
+            else:
+                output_path, doc_title, doc_dir, error = row
+                normalized.append((output_path, doc_title, doc_dir, error))
         await db.executemany(
             """\
-            INSERT INTO task_results (task_id, output_path, doc_title, doc_dir)
-            VALUES (?, ?, ?, ?)""",
-            [(task_id, *r) for r in results],
+            INSERT INTO task_results
+                (task_id, output_path, doc_title, doc_dir, error)
+            VALUES (?, ?, ?, ?, ?)""",
+            [(task_id, *r) for r in normalized],
         )
         await db.commit()
 
@@ -254,7 +281,8 @@ class TaskDatabase:
         cursor = await db.execute(
             """\
             SELECT task_id, status, image_dir, output_dir,
-                   llm, ocr, pii, error, created_at, updated_at
+                   llm, ocr, pii, code,
+                   error, created_at, updated_at
             FROM tasks WHERE task_id=?""",
             (task_id,),
         )
@@ -268,7 +296,7 @@ class TaskDatabase:
         db = self._get_db()
         cursor = await db.execute(
             """\
-            SELECT task_id, output_path, doc_title, doc_dir
+            SELECT task_id, output_path, doc_title, doc_dir, error
             FROM task_results WHERE task_id=?
             ORDER BY id""",
             (task_id,),
@@ -280,6 +308,7 @@ class TaskDatabase:
                 output_path=r[1],
                 doc_title=r[2],
                 doc_dir=r[3],
+                error=r[4] or "",
             )
             for r in rows
         ]
@@ -371,6 +400,7 @@ class TaskDatabase:
         llm_raw = row[4]
         ocr_raw = row[5]
         pii_raw = row[6]
+        code_raw = row[7]
         return TaskRow(
             task_id=row[0],
             status=row[1],
@@ -379,7 +409,11 @@ class TaskDatabase:
             llm=LLMConfig.model_validate_json(llm_raw) if llm_raw else None,
             ocr=OCRConfig.model_validate_json(ocr_raw) if ocr_raw else None,
             pii=PIIConfig.model_validate_json(pii_raw) if pii_raw else None,
-            error=row[7],
-            created_at=row[8],
-            updated_at=row[9],
+            code=(
+                CodeRestoreConfig.model_validate_json(code_raw)
+                if code_raw else None
+            ),
+            error=row[8],
+            created_at=row[9],
+            updated_at=row[10],
         )

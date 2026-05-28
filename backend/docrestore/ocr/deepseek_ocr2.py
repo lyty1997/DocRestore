@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import re
@@ -109,8 +108,12 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
     def _build_subprocess_env(self) -> dict[str, str]:
         env = {**os.environ}
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-        env["CUDA_VISIBLE_DEVICES"] = self._config.gpu_id
-        logger.info("DeepSeek worker GPU: %s", self._config.gpu_id)
+        # gpu_id 通常由 engine_manager.ensure() 落地；pipeline 直接调 create_engine
+        # 时可能仍是 None，此处兜底调 pick_best_gpu。
+        from docrestore.ocr.gpu_detect import pick_best_gpu
+        gpu_id = self._config.gpu_id or pick_best_gpu() or "0"
+        env["CUDA_VISIBLE_DEVICES"] = gpu_id
+        logger.info("DeepSeek worker GPU: %s", gpu_id)
         return env
 
     def _start_new_session(self) -> bool:
@@ -162,12 +165,19 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
         stop_event = asyncio.Event()
         stderr_task = asyncio.create_task(
             self._stream_stderr_progress(stop_event, on_progress),
+            name="deepseek-stderr-progress",
         )
         try:
             resp = await self._send_command(init_cmd)
         finally:
+            # 先 set 让 drain 自然退出；再 cancel 兜底（drain 可能卡在
+            # wait_for readline 的 0.5s 间隙内，cancel 立即打断）；最后
+            # gather 等它完全退出，避免 initialize 被 cancel 时 stderr
+            # 任务残留，worker pipe buffer 继续堆积。
             stop_event.set()
-            await stderr_task
+            stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await stderr_task
         return resp
 
     async def _terminate_process(self) -> None:
@@ -189,36 +199,9 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
                     os.killpg(pid, signal.SIGKILL)
                 await self._process.wait()
 
-    async def _read_response(
-        self,
-        raw: bytes,
-        stdout: asyncio.StreamReader,
-        read_timeout: int,
-    ) -> dict[str, object]:
-        """跳过 worker stdout 中混入的 vLLM/transformers 日志行。"""
-        buffered = raw
-        while True:
-            text = buffered.decode("utf-8").strip()
-            if text:
-                try:
-                    result: dict[str, object] = json.loads(text)
-                    return result
-                except json.JSONDecodeError:
-                    logger.debug(
-                        "跳过 worker stdout 非 JSON 行: %s", text[:200],
-                    )
-            try:
-                buffered = await asyncio.wait_for(
-                    stdout.readline(), timeout=read_timeout,
-                )
-            except TimeoutError:
-                msg = f"{self.engine_name} worker 响应超时({read_timeout}s)"
-                raise RuntimeError(msg) from None
-            if not buffered:
-                msg = (
-                    f"{self.engine_name} worker 在等待 JSON 响应时退出"
-                )
-                raise RuntimeError(msg)
+    # _read_response：跳过 worker stdout 混入的 vLLM/transformers 日志，
+    # 已上提到 ``base.WorkerBackedOCREngine._read_response``，DeepSeek 与
+    # PaddleOCR 共用同一套兜底（2026-04-27）。
 
     # ── OCR 主流程 ────────────────────────────────────────
 
@@ -226,7 +209,7 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
         self, image_path: Path, output_dir: Path
     ) -> PageOCR:
         """单张 OCR，结果写入 output_dir/{stem}_OCR/"""
-        await self._recover_desync_if_needed()
+        await self._resync_if_needed()
 
         # 增量OCR：检查已有结果
         ocr_dir = output_dir / f"{image_path.stem}_OCR"
@@ -264,7 +247,7 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
         - 已有 result.mmd 的图跳过 worker，直接从磁盘加载。
         - OOM 时按 batch_size 对半降级重试，单图仍 OOM 才抛 RuntimeError。
         """
-        await self._recover_desync_if_needed()
+        await self._resync_if_needed()
 
         batch_size = max(1, self._config.ocr_batch_size)
         if batch_size < 2:
@@ -390,7 +373,7 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
 
     async def reocr_page(self, image_path: Path) -> str:
         """对整页图片重新 OCR，返回清洗后的 markdown（gap fill 用）。"""
-        await self._recover_desync_if_needed()
+        await self._resync_if_needed()
 
         resp = await self._send_command({
             "cmd": "reocr_page",

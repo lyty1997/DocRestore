@@ -31,14 +31,31 @@ from docrestore.ocr.base import OCR_RESULT_FILENAME
 logger = logging.getLogger(__name__)
 
 
+#: 网页代码框 UI 噪音模式。单行独占（首尾无其他字符）才匹配，防误伤正文。
+#: 原图是飞书/Confluence 风格在线文档的拍照，代码框顶部的「语言标签 +
+#: 复制按钮」会被 OCR 识别成 `Plain Text 复制代码` / `Bash 复制代码` 这种文本；
+#: 还有前缀可能带 ▶/▼/☐ 等视觉符号。这些全是噪音，整行删除。
+#: 导出给 markdown_polish 在 final_refine 之后兜底再扫一遍（LLM 偶有漏）。
+UI_NOISE_LINE_RE = _UI_NOISE_LINE_RE = re.compile(
+    r"^\s*(?:[▶▼☐◆✦◇□■●○▪▫]\s*)?"
+    r"(?:"
+    r"(?:Plain\s+Text|Bash|Shell|Python|Java|JavaScript|TypeScript|"
+    r"C\+\+|C#|Go|Rust|Ruby|PHP|SQL|JSON|YAML|XML|HTML|CSS|Markdown|"
+    r"Dockerfile|Makefile|Kotlin|Swift|C)\s*复制代码"
+    r"|复制代码"
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+
 class OCRCleaner:
     """OCR 输出清洗器"""
 
     async def clean(self, page: PageOCR) -> PageOCR:
         """读取 OCR 结果文件并清洗，填充 cleaned_text。
 
-        步骤：remove_repetitions → remove_garbage → normalize_whitespace
-        返回同一个 PageOCR 对象。
+        步骤：remove_ui_noise → remove_repetitions → remove_garbage →
+        normalize_whitespace。返回同一个 PageOCR 对象。
         """
         if page.output_dir is not None:
             mmd_path = page.output_dir / OCR_RESULT_FILENAME
@@ -60,11 +77,33 @@ class OCRCleaner:
         else:
             text = page.raw_text
 
+        text = self.remove_ui_noise(text)
         text = self.remove_repetitions(text)
         text = self.remove_garbage(text)
         text = self.normalize_whitespace(text)
         page.cleaned_text = text
         return page
+
+    def remove_ui_noise(self, text: str) -> str:
+        """移除拍照网页文档产生的稳定字面 UI 噪音行。
+
+        目前覆盖：
+          - 代码框顶部的「{语言标签} 复制代码」行（约 20 种常见语言）
+          - 独立的「复制代码」一行
+          - 行首以 ▶/▼/☐/◆/✦ 等视觉符号开头的上述模式
+
+        只按整行匹配，不会误伤含这些词的正文。
+        """
+        kept: list[str] = []
+        removed = 0
+        for line in text.splitlines():
+            if _UI_NOISE_LINE_RE.match(line):
+                removed += 1
+                continue
+            kept.append(line)
+        if removed:
+            logger.debug("UI 噪音清理: 移除 %d 行", removed)
+        return "\n".join(kept)
 
     def remove_repetitions(
         self, text: str, threshold: float = 0.9

@@ -21,14 +21,19 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import contextlib
 import logging
 import os
 import re
 import signal
+import sys
+import time
 from collections.abc import Callable
+from types import FrameType
 
-from docrestore.ocr.base import OCREngine
+from docrestore.ocr.base import OCREngine, _drain_stream_to_logger
+from docrestore.ocr.gpu_detect import list_gpus, pick_best_gpu
 from docrestore.ocr.router import _parse_model, create_engine
 from docrestore.pipeline.config import OCRConfig
 
@@ -36,6 +41,229 @@ logger = logging.getLogger(__name__)
 
 # 进度回调：message → 前端展示
 ProgressFn = Callable[[str], None]
+
+
+# ─────────────────────────────────────────────────────────────
+# 进程级兜底清理（atexit / signal / PDEATHSIG / 启动扫描）
+# ─────────────────────────────────────────────────────────────
+# ppocr-server 是独立 session leader（start_new_session=True），
+# vLLM EngineCore 是它的子进程，属于同一进程组。只要 killpg 到整个
+# 进程组，vLLM 就会被带走。
+#
+# 清理路径分四层，依次覆盖不同退出场景：
+#   A. atexit —— uvicorn force-quit / sys.exit 等 Python 主线程结束
+#   B. PDEATHSIG(SIGKILL) —— docrestore 被 kill -9（内核自动杀 ppocr-server）
+#   C. SIGHUP handler —— 终端关闭 / SSH 断开
+#   D. startup scan —— 上次遗留（kill -9 之后 vLLM 孤儿）清理
+# 最残存的盲区仅有：docrestore 被 SIGKILL 导致 PDEATHSIG 生效但 vLLM
+# 作为 ppocr-server 子进程未继承 PDEATHSIG —— 靠 D 下次启动时兜底。
+
+_atexit_callbacks: dict[int, Callable[[], None]] = {}
+_tracked_pgids: set[int] = set()
+_signal_handlers_installed = False
+_original_sighup_handler: (
+    Callable[[int, FrameType | None], None] | int | None
+) = None
+
+
+def _kill_pgid_sync(pgid: int, grace_seconds: float = 3.0) -> None:
+    """同步清理进程组：SIGTERM → 最长 grace_seconds → SIGKILL。
+
+    用于 atexit / signal handler 等同步上下文（不能 await）。
+    所有 OSError 静默吞掉，因为进程退出路径上 logging 可能已失效。
+    """
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, OSError):
+        return
+
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)  # 探测进程组是否还存活
+        except (ProcessLookupError, OSError):
+            return
+        time.sleep(0.1)
+
+    with contextlib.suppress(ProcessLookupError, OSError):
+        os.killpg(pgid, signal.SIGKILL)
+
+
+def _prctl_set_pdeathsig() -> None:
+    """preexec_fn：设置 PR_SET_PDEATHSIG=SIGKILL。
+
+    fork 之后 exec 之前运行于子进程。Linux only；其他平台或 libc 加载
+    失败都静默跳过，绝不阻止子进程启动（失败也不影响主流程，仅失去
+    kill -9 兜底能力）。
+    """
+    if sys.platform != "linux":
+        return
+    try:
+        import ctypes
+        pr_set_pdeathsig = 1
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(pr_set_pdeathsig, signal.SIGKILL, 0, 0, 0)
+    except Exception:  # noqa: BLE001, S110 — fork 后 logging 可能死锁，只能静默
+        pass
+
+
+def _sighup_handler(
+    signum: int, frame: FrameType | None,
+) -> None:
+    """SIGHUP handler：同步清理 pgid 后转发 SIGTERM 让 uvicorn 正常关闭。"""
+    del signum, frame
+    for pgid in list(_tracked_pgids):
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.killpg(pgid, signal.SIGTERM)
+    with contextlib.suppress(ProcessLookupError, OSError):
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
+def _install_signal_handlers() -> None:
+    """安装进程级 SIGHUP handler（幂等）。
+
+    SIGINT/SIGTERM 由 uvicorn 自己处理（走 lifespan shutdown + atexit 兜底），
+    我们只接管 uvicorn 不管的 SIGHUP（终端关闭 / SSH 断开）。
+    """
+    global _signal_handlers_installed, _original_sighup_handler
+    if _signal_handlers_installed:
+        return
+    _signal_handlers_installed = True
+
+    try:
+        _original_sighup_handler = signal.signal(
+            signal.SIGHUP, _sighup_handler,
+        )
+    except (OSError, ValueError):
+        # Windows 或非主线程：signal.signal 不可用
+        logger.debug("SIGHUP handler 安装失败", exc_info=True)
+
+
+def _track_pgid(pgid: int) -> None:
+    """注册 pgid 到 atexit + signal 双重清理（幂等）。"""
+    if pgid in _atexit_callbacks:
+        return
+    _tracked_pgids.add(pgid)
+
+    def _cleanup() -> None:
+        _kill_pgid_sync(pgid)
+
+    atexit.register(_cleanup)
+    _atexit_callbacks[pgid] = _cleanup
+    _install_signal_handlers()
+
+
+def _untrack_pgid(pgid: int) -> None:
+    """从进程级清理机制中移除 pgid（正常 shutdown 时调用）。"""
+    _tracked_pgids.discard(pgid)
+    cb = _atexit_callbacks.pop(pgid, None)
+    if cb is not None:
+        atexit.unregister(cb)
+
+
+def cleanup_stale_ppocr_servers() -> list[int]:
+    """启动时扫描并清理残留的 paddleocr genai_server 进程。
+
+    Linux only。遍历 /proc 找两类残留：
+    1. cmdline 含 `paddleocr` + `genai_server` 的 ppocr-server 本体
+    2. cmdline 为 `VLLM::EngineCore` 且 ppid==1 的孤儿（vLLM fork 后重写
+       cmdline，父进程 ppocr-server 被 PDEATHSIG 杀掉后它会被 init 接管，
+       独占 GPU 显存却不含 paddleocr 关键字 —— 需要单独识别）
+
+    两类命中统一按 pgid 去重后批量 killpg。返回被清理的 pgid 列表。
+    """
+    if sys.platform != "linux":
+        return []
+
+    try:
+        proc_entries = os.listdir("/proc")
+    except OSError:
+        return []
+
+    stale_pgids: set[int] = set()
+    for entry in proc_entries:
+        if not entry.isdigit():
+            continue
+        pgid = _extract_paddleocr_pgid(entry)
+        if pgid is not None:
+            stale_pgids.add(pgid)
+
+    cleaned: list[int] = []
+    for pgid in stale_pgids:
+        logger.warning(
+            "发现残留的 paddleocr genai_server 进程组 pgid=%d，清理中...",
+            pgid,
+        )
+        _kill_pgid_sync(pgid)
+        cleaned.append(pgid)
+
+    return cleaned
+
+
+def _read_proc_stat_fields(pid_str: str) -> list[str] | None:
+    """读 /proc/{pid}/stat，按最后一个 ')' 切分后返回剩余字段。
+
+    格式：pid (comm) state ppid pgid sid ...  —— comm 可能含空格/括号。
+    返回字段：[state, ppid, pgid, sid, ...]，失败返回 None。
+    """
+    try:
+        with open(f"/proc/{pid_str}/stat", encoding="utf-8") as f:
+            stat = f.read()
+    except OSError:
+        return None
+    try:
+        rparen = stat.rindex(")")
+    except ValueError:
+        return None
+    return stat[rparen + 2:].split()
+
+
+def _extract_paddleocr_pgid(pid_str: str) -> int | None:
+    """识别残留进程并返回 pgid。
+
+    命中条件（满足任一即可）：
+    - cmdline 含 `paddleocr` + `genai_server`（ppocr-server 本体）
+    - cmdline 为 `VLLM::EngineCore` 且 ppid==1（孤儿 EngineCore）
+    """
+    try:
+        with open(f"/proc/{pid_str}/cmdline", "rb") as f:
+            cmdline = f.read().replace(b"\x00", b" ").decode(
+                "utf-8", errors="replace",
+            ).strip()
+    except OSError:
+        return None
+
+    is_ppocr = "paddleocr" in cmdline and "genai_server" in cmdline
+    is_vllm_engine = "VLLM::EngineCore" in cmdline
+
+    if not (is_ppocr or is_vllm_engine):
+        return None
+
+    fields = _read_proc_stat_fields(pid_str)
+    if fields is None or len(fields) < 3:
+        return None
+    try:
+        ppid = int(fields[1])
+        pgid = int(fields[2])
+    except ValueError:
+        return None
+
+    # 孤儿 EngineCore 必须 ppid==1 才算残留，否则可能是别家活着的 vLLM
+    if is_vllm_engine and not is_ppocr and ppid != 1:
+        return None
+
+    return pgid
+
+
+def _lookup_gpu_name(index: str) -> str:
+    """按物理索引从探测缓存里查 GPU 型号；找不到返回空串。"""
+    try:
+        for g in list_gpus():
+            if g.index == index:
+                return g.name
+    except Exception:  # noqa: BLE001 — 探测失败不影响主流程
+        logger.debug("查询 GPU 型号失败", exc_info=True)
+    return ""
 
 
 class EngineManager:
@@ -51,7 +279,14 @@ class EngineManager:
         self._engine: OCREngine | None = None
         self._current_model: str = ""
         self._current_gpu: str = ""
+        self._current_gpu_name: str = ""
+        # paddle_pipeline 也是匹配维度：vl ↔ basic 切换需重启 worker
+        # （vl 需要 ppocr-server / basic 直接本地推理，行为完全不同；且
+        # basic 输出 text_lines 给 AGE-8 代码模式，vl 不输出）
+        self._current_pipeline: str = ""
         self._ppocr_server_proc: asyncio.subprocess.Process | None = None
+        # ppocr-server 的 stdout/stderr drain task（防 pipe buffer 写满）
+        self._ppocr_drain_tasks: list[asyncio.Task[None]] = []
         self._switch_lock = asyncio.Lock()
 
     @property
@@ -63,6 +298,11 @@ class EngineManager:
     def current_gpu(self) -> str:
         """当前活跃的 GPU ID。"""
         return self._current_gpu
+
+    @property
+    def current_gpu_name(self) -> str:
+        """当前 GPU 的型号字符串（如 "NVIDIA RTX 4070 SUPER"），未就绪时返回空串。"""
+        return self._current_gpu_name
 
     @property
     def is_ready(self) -> bool:
@@ -94,8 +334,18 @@ class EngineManager:
         5. 创建 + initialize 新引擎
         """
         config = ocr or self._default_config
+        # gpu_id=None 表示 "自动"：此处落地为具体物理索引，后续 _is_matched /
+        # _start_ppocr_server / env 组装全部基于字符串，避免再判 None。
+        # 用 model_copy 而非原地修改，防止污染调用方传入的 config。
+        if config.gpu_id is None:
+            resolved_gpu = pick_best_gpu() or "0"
+            config = config.model_copy(update={"gpu_id": resolved_gpu})
+            logger.info("gpu_id 未指定，自动选择 GPU %s", resolved_gpu)
         target_model = config.model
         target_gpu = config.gpu_id
+        if target_gpu is None:
+            # 逻辑上已被上面的 model_copy 落地过，这里留个防御分支便于日后重构。
+            target_gpu = "0"
         logger.debug(
             "ensure() model=%s, gpu=%s (override=%s)",
             target_model, target_gpu, ocr is not None,
@@ -105,16 +355,18 @@ class EngineManager:
             if on_progress is not None:
                 on_progress(msg)
 
+        target_pipeline = config.paddle_pipeline
+
         # 快速路径：引擎已匹配
-        if self._is_matched(target_model, target_gpu):
+        if self._is_matched(target_model, target_gpu, target_pipeline):
             return self._engine  # type: ignore[return-value]
 
         async with self._switch_lock:
             # 双重检查（另一个协程可能刚完成切换）
-            if self._is_matched(target_model, target_gpu):
+            if self._is_matched(target_model, target_gpu, target_pipeline):
                 return self._engine  # type: ignore[return-value]
 
-            self._log_switch_reason(target_model, target_gpu)
+            self._log_switch_reason(target_model, target_gpu, target_pipeline)
 
             # 获取 gpu_lock，等待当前 OCR 操作完成后再切换
             async with self._gpu_lock:
@@ -125,8 +377,12 @@ class EngineManager:
 
                     provider, _ = _parse_model(target_model)
 
-                    # PaddleOCR 需要先启动 ppocr-server
-                    if provider == "paddle-ocr":
+                    # PaddleOCR-VL 需要 ppocr-server（vllm 推理）；
+                    # basic pipeline (PP-OCRv5) 纯本地，跳过 server 启动节省 GPU。
+                    if (
+                        provider == "paddle-ocr"
+                        and config.paddle_pipeline == "vl"
+                    ):
                         _progress("正在启动 OCR 推理服务...")
                         await self._start_ppocr_server(config, _progress)
 
@@ -137,6 +393,8 @@ class EngineManager:
                     await engine.initialize(on_progress=on_progress)
                     self._current_model = target_model
                     self._current_gpu = target_gpu
+                    self._current_gpu_name = _lookup_gpu_name(target_gpu)
+                    self._current_pipeline = target_pipeline
                 except BaseException:
                     # 任何异常（含 CancelledError）都清理半成品状态
                     logger.info("引擎切换失败，清理资源...")
@@ -153,18 +411,26 @@ class EngineManager:
             await self._shutdown_current()
         logger.info("EngineManager 已关闭")
 
-    def _is_matched(self, target_model: str, target_gpu: str) -> bool:
-        """当前引擎的 model + gpu 是否匹配目标。"""
+    def _is_matched(
+        self, target_model: str, target_gpu: str, target_pipeline: str,
+    ) -> bool:
+        """当前引擎的 model + gpu + pipeline 是否匹配目标。
+
+        ``paddle_pipeline`` 是关键维度：vl 需要 ppocr-server 推理输出
+        ``raw_text``；basic 纯本地推理输出 ``text_lines`` 给 AGE-8 代码
+        模式。两者行为完全不同，不能共享 worker。
+        """
         return (
             self._engine is not None
             and self._current_model == target_model
             and self._current_gpu == target_gpu
+            and self._current_pipeline == target_pipeline
         )
 
     def _log_switch_reason(
-        self, target_model: str, target_gpu: str,
+        self, target_model: str, target_gpu: str, target_pipeline: str,
     ) -> None:
-        """记录引擎切换原因（模型变化 / GPU 变化）。"""
+        """记录引擎切换原因（模型 / GPU / pipeline 变化）。"""
         parts: list[str] = []
         if self._current_model != target_model:
             parts.append(
@@ -174,20 +440,35 @@ class EngineManager:
             parts.append(
                 f"GPU {self._current_gpu or '(无)'} → {target_gpu}"
             )
+        if self._current_pipeline != target_pipeline:
+            parts.append(
+                f"pipeline {self._current_pipeline or '(无)'} → {target_pipeline}"
+            )
         logger.info("切换 OCR 引擎: %s", ", ".join(parts))
 
     async def _shutdown_current(self) -> None:
-        """关闭当前引擎和 ppocr-server。"""
-        if self._engine is not None:
-            try:
-                await self._engine.shutdown()
-            except Exception:
-                logger.warning("引擎 shutdown 异常", exc_info=True)
-            self._engine = None
+        """关闭当前引擎和 ppocr-server。
 
-        await self._stop_ppocr_server()
-        self._current_model = ""
-        self._current_gpu = ""
+        try/finally 保证 _stop_ppocr_server 无论 engine.shutdown 成功/失败/
+        被 cancel 都会被调用 — ppocr-server 是独立 session leader，
+        不清理会遗留孤儿进程（含 vLLM EngineCore 子进程）。
+        """
+        try:
+            if self._engine is not None:
+                try:
+                    await self._engine.shutdown()
+                except Exception:
+                    logger.warning("引擎 shutdown 异常", exc_info=True)
+                finally:
+                    self._engine = None
+        finally:
+            try:
+                await self._stop_ppocr_server()
+            finally:
+                self._current_model = ""
+                self._current_gpu = ""
+                self._current_gpu_name = ""
+                self._current_pipeline = ""
 
     async def _start_ppocr_server(
         self,
@@ -214,7 +495,8 @@ class EngineManager:
             return
 
         port = config.paddle_server_port
-        gpu_id = config.gpu_id
+        # config.gpu_id 通常由 ensure() 入口落地；直接调用时兜底自动探测
+        gpu_id = config.gpu_id or pick_best_gpu() or "0"
         model_name = config.paddle_server_model_name
         backend_config_path = config.paddle_server_backend_config
 
@@ -245,7 +527,10 @@ class EngineManager:
             stderr=asyncio.subprocess.PIPE,
             env=env,
             start_new_session=True,  # 独立进程组，方便 killpg 清理子进程
+            preexec_fn=_prctl_set_pdeathsig,  # 父进程死则子进程被内核 SIGKILL
         )
+        # start_new_session=True 保证 pid == pgid，登记到进程级兜底清理。
+        _track_pgid(self._ppocr_server_proc.pid)
 
         # 等待 server 就绪，超时/异常/取消时清理进程
         timeout = config.paddle_server_startup_timeout
@@ -278,6 +563,30 @@ class EngineManager:
 
         logger.info("ppocr-server 已就绪 (port=%d)", port)
 
+        # server ready 之后挂起 stdout/stderr drain：否则日志累积把 64KB pipe
+        # buffer 写满，server 内任何 logging 阻塞在 pipe_write → HTTP 响应
+        # 全部卡死 → worker OCR 300s 超时循环。_wait_server_ready 期间由
+        # _collect_stderr_progress 读 stderr 提取启动进度，此时已结束，不冲突。
+        proc = self._ppocr_server_proc
+        if proc.stdout is not None:
+            self._ppocr_drain_tasks.append(
+                asyncio.create_task(
+                    _drain_stream_to_logger(
+                        proc.stdout, "[ppocr-server stdout]",
+                    ),
+                    name="ppocr-server-stdout-drain",
+                ),
+            )
+        if proc.stderr is not None:
+            self._ppocr_drain_tasks.append(
+                asyncio.create_task(
+                    _drain_stream_to_logger(
+                        proc.stderr, "[ppocr-server stderr]",
+                    ),
+                    name="ppocr-server-stderr-drain",
+                ),
+            )
+
     async def _stop_ppocr_server(self) -> None:
         """关闭 ppocr-server 整个进程组（含 vLLM EngineCore 子进程）。
 
@@ -289,25 +598,44 @@ class EngineManager:
             return
 
         pid = self._ppocr_server_proc.pid
+        # 正常路径清理走起：先从兜底名单移除，避免 atexit 重复 kill
+        _untrack_pgid(pid)
         logger.info("关闭 ppocr-server 进程组 (pid=%s)...", pid)
+
         try:
-            # 向整个进程组发送 SIGTERM
-            os.killpg(pid, signal.SIGTERM)
-            await asyncio.wait_for(
-                self._ppocr_server_proc.wait(),
-                timeout=self._default_config.paddle_server_shutdown_timeout,
-            )
-        except TimeoutError:
-            # vLLM 加载阶段可能不响应 SIGTERM，升级到 SIGKILL
-            logger.info("ppocr-server 进程组未响应 SIGTERM，发送 SIGKILL")
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(pid, signal.SIGKILL)
-            await self._ppocr_server_proc.wait()
-        except ProcessLookupError:
-            logger.debug("ppocr-server 进程组已退出")
-        except OSError:
-            logger.debug("关闭 ppocr-server 进程组异常", exc_info=True)
+            # 进程杀掉 → stdout/stderr EOF → drain 自然退出。这里先 cancel
+            # 再 gather 是兜底，避免 drain 卡在 readline 间隙无法退出。
+            for task in self._ppocr_drain_tasks:
+                task.cancel()
+            if self._ppocr_drain_tasks:
+                await asyncio.gather(
+                    *self._ppocr_drain_tasks, return_exceptions=True,
+                )
+            try:
+                # 向整个进程组发送 SIGTERM
+                os.killpg(pid, signal.SIGTERM)
+                await asyncio.wait_for(
+                    self._ppocr_server_proc.wait(),
+                    timeout=(
+                        self._default_config.paddle_server_shutdown_timeout
+                    ),
+                )
+            except TimeoutError:
+                # vLLM 加载阶段可能不响应 SIGTERM，升级到 SIGKILL
+                logger.info(
+                    "ppocr-server 进程组未响应 SIGTERM，发送 SIGKILL",
+                )
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(pid, signal.SIGKILL)
+                await self._ppocr_server_proc.wait()
+            except ProcessLookupError:
+                logger.debug("ppocr-server 进程组已退出")
+            except OSError:
+                logger.debug("关闭 ppocr-server 进程组异常", exc_info=True)
         finally:
+            # drain tasks 和 proc 句柄无论上面哪条路径失败都必须清空，
+            # 否则下次启动又会看到残留任务 / 句柄导致状态错乱。
+            self._ppocr_drain_tasks = []
             self._ppocr_server_proc = None
 
         logger.info("ppocr-server 进程组已关闭")

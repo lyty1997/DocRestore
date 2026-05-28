@@ -12,9 +12,15 @@ import {
 } from "../../api/client";
 import {
   TaskProgressSchema,
-  type TaskProgress,
   type TaskResultResponse,
 } from "../../api/schemas";
+import { fromUnknown, type LocalizedError } from "../../i18n";
+import {
+  mergeProgressFrame,
+  type ProgressBuckets,
+} from "./progressPhase";
+export type { LlmUnavailableWarning } from "./useTaskProgress";
+import type { LlmUnavailableWarning } from "./useTaskProgress";
 
 /** 页面状态 */
 type TaskStatus = "idle" | "pending" | "processing" | "completed" | "failed";
@@ -28,8 +34,17 @@ interface UseTaskRunnerReturn {
   taskId: string | undefined;
   /** 页面状态 */
   status: TaskStatus;
-  /** 最新进度 */
-  progress: TaskProgress | undefined;
+  /**
+   * 按 (subtask, phase) 双层分轨的最新进度帧：
+   * - 外层 key "" 为任务级/单目录主进度，其它 key 为 process_tree 并行的子目录
+   * - 内层 key ∈ {ocr, llm}：流式 Pipeline 并发的 OCR 与 LLM 精修两条轨
+   */
+  progresses: ProgressBuckets;
+  /**
+   * LLM 熔断器 OPEN 事件通知（stage="llm_unavailable" 帧）。
+   * 同一 task 内只保留最新一条，UI 按时间戳判新旧。undefined 表示从未触发。
+   */
+  llmUnavailable: LlmUnavailableWarning | undefined;
   /** 完成后的 markdown 结果（第一篇，向下兼容） */
   resultMarkdown: string | undefined;
   /** 全部文档结果 */
@@ -37,7 +52,7 @@ interface UseTaskRunnerReturn {
   /** 结构化结果（第一篇，向下兼容） */
   taskResult: TaskResultResponse | undefined;
   /** 错误信息 */
-  error: string | undefined;
+  error: LocalizedError | undefined;
   /** WS 连接状态 */
   wsState: WsState;
   /** 是否在轮询 */
@@ -58,6 +73,7 @@ interface UseTaskRunnerReturn {
         | undefined;
     },
     ocr?: { model?: string | undefined; gpu_id?: string | undefined },
+    code?: { enable: boolean },
   ) => void;
   /** 重置到 idle */
   reset: () => void;
@@ -72,13 +88,16 @@ const WS_CONNECT_TIMEOUT = 5000;
 export function useTaskRunner(): UseTaskRunnerReturn {
   const [taskId, setTaskId] = useState<string | undefined>();
   const [status, setStatus] = useState<TaskStatus>("idle");
-  const [progress, setProgress] = useState<TaskProgress | undefined>();
+  const [progresses, setProgresses] = useState<ProgressBuckets>({});
+  const [llmUnavailable, setLlmUnavailable] = useState<
+    LlmUnavailableWarning | undefined
+  >();
   const [resultMarkdown, setResultMarkdown] = useState<string | undefined>();
   const [allResults, setAllResults] = useState<TaskResultResponse[]>([]);
   const [taskResult, setTaskResult] = useState<
     TaskResultResponse | undefined
   >();
-  const [error, setError] = useState<string | undefined>();
+  const [error, setError] = useState<LocalizedError | undefined>();
   const [wsState, setWsState] = useState<WsState>("closed");
   const [pollingEnabled, setPollingEnabled] = useState(false);
 
@@ -140,7 +159,11 @@ export function useTaskRunner(): UseTaskRunnerReturn {
       if (!isMountedRef.current) return;
 
       if (resp.progress) {
-        setProgress(resp.progress);
+        const frame = resp.progress;
+        setProgresses((prev) => mergeProgressFrame(prev, frame));
+        if (frame.stage === "llm_unavailable") {
+          captureLlmUnavailable(frame, setLlmUnavailable);
+        }
       }
 
       switch (resp.status) {
@@ -153,7 +176,15 @@ export function useTaskRunner(): UseTaskRunnerReturn {
         }
         case "failed": {
           setStatus("failed");
-          setError(resp.error ?? "任务失败");
+          setError(
+            resp.error
+              ? {
+                  key: "errors.task.runFailedWithReason",
+                  params: { reason: resp.error },
+                  fallback: `任务失败：${resp.error}`,
+                }
+              : { key: "errors.task.runFailed", fallback: "任务失败" },
+          );
           cleanup();
           setPollingEnabled(false);
           break;
@@ -226,7 +257,10 @@ export function useTaskRunner(): UseTaskRunnerReturn {
               ? (JSON.parse(event.data) as unknown)
               : event.data;
           const parsed = TaskProgressSchema.parse(data);
-          setProgress(parsed);
+          setProgresses((prev) => mergeProgressFrame(prev, parsed));
+          if (parsed.stage === "llm_unavailable") {
+            captureLlmUnavailable(parsed, setLlmUnavailable);
+          }
           setStatus("processing");
         } catch {
           // schema 校验失败，降级到轮询
@@ -256,7 +290,15 @@ export function useTaskRunner(): UseTaskRunnerReturn {
               }
               case "failed": {
                 setStatus("failed");
-                setError(resp.error ?? "任务失败");
+                setError(
+            resp.error
+              ? {
+                  key: "errors.task.runFailedWithReason",
+                  params: { reason: resp.error },
+                  fallback: `任务失败：${resp.error}`,
+                }
+              : { key: "errors.task.runFailed", fallback: "任务失败" },
+          );
                 cleanup();
                 break;
               }
@@ -299,11 +341,13 @@ export function useTaskRunner(): UseTaskRunnerReturn {
           | undefined;
       },
       ocr?: { model?: string | undefined; gpu_id?: string | undefined },
+      code?: { enable: boolean },
     ) => {
       // 重置状态
       cleanup();
       setStatus("pending");
-      setProgress(undefined);
+      setProgresses({});
+      setLlmUnavailable(undefined);
       setResultMarkdown(undefined);
       setAllResults([]);
       setTaskResult(undefined);
@@ -319,6 +363,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
             llm,
             pii,
             ocr,
+            code,
           });
           if (!isMountedRef.current) return;
           setTaskId(resp.task_id);
@@ -327,9 +372,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
         } catch (error_: unknown) {
           if (!isMountedRef.current) return;
           setStatus("failed");
-          setError(
-            error_ instanceof Error ? error_.message : "创建任务失败",
-          );
+          setError(fromUnknown(error_, "errors.task.createFailed"));
         }
       })();
     },
@@ -341,7 +384,8 @@ export function useTaskRunner(): UseTaskRunnerReturn {
     cleanup();
     setTaskId(undefined);
     setStatus("idle");
-    setProgress(undefined);
+    setProgresses({});
+    setLlmUnavailable(undefined);
     setResultMarkdown(undefined);
     setAllResults([]);
     setTaskResult(undefined);
@@ -353,7 +397,8 @@ export function useTaskRunner(): UseTaskRunnerReturn {
   return {
     taskId,
     status,
-    progress,
+    progresses,
+    llmUnavailable,
     resultMarkdown,
     allResults,
     taskResult,
@@ -363,4 +408,21 @@ export function useTaskRunner(): UseTaskRunnerReturn {
     startTask,
     reset,
   };
+}
+
+/** 从进度帧抽取 LLM 熔断告警；state setter 幂等写入最新一条。 */
+function captureLlmUnavailable(
+  frame: {
+    message: string;
+    message_key: string;
+    message_params: Readonly<Record<string, string>>;
+  },
+  setter: (w: LlmUnavailableWarning) => void,
+): void {
+  setter({
+    timestamp: Date.now(),
+    message: frame.message,
+    messageKey: frame.message_key,
+    messageParams: { ...frame.message_params },
+  });
 }

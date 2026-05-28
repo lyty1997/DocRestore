@@ -23,6 +23,7 @@ DocRestore 将连续拍摄的文档照片还原为格式化的 Markdown 文档�
 核心挑战：
 - 相邻照片存在重叠，OCR 输出会包含重复/循环内容，需要算法级去重并拼接为连续正文
 - 需要尽可能保持原文档结构（标题、列表、表格、代码块、插图引用）
+- 代码模式需要从 IDE 屏幕照片恢复源文件，保留来源页、行号范围和诊断信息，便于人工审查
 - OCR 模型常驻 GPU，支持连续处理多张照片；LLM 精修可配置云端/本地提供方
 
 ## 2. 系统架构
@@ -75,6 +76,11 @@ DocRestore 将连续拍摄的文档照片还原为格式化的 Markdown 文档�
     → ⑤ 分段 → ⑥ LLM 精修 → ⑦ 重组
     → ⑧ 多文档边界检测(可选) → [每个子文档分别进入以下流程]
     → ⑨ 缺口补充(可选) → ⑩ 整篇精修(可选) → ⑪ 输出
+
+代码模式分支：
+① OCR text_lines → ② IDE 布局/行号列识别 → ③ 代码栏组装
+    → ④ 跨页按路径/文件名分组为 SourceFile → ⑤ LLM 字符级精修/修复
+    → ⑥ 轻量诊断 → ⑦ 输出 files/、files-index.json 和兼容 Markdown
 ```
 
 详细说明：
@@ -89,6 +95,7 @@ DocRestore 将连续拍摄的文档照片还原为格式化的 Markdown 文档�
 - ⑨ 缺口补充（可选）：`OCREngine.reocr_page()` re-OCR + `LLMRefiner.fill_gap()`，带 GPU 锁与单 gap 异常降级
 - ⑩ 整篇精修（可选）：全文最终精修，再次 `parse_gaps()`
 - ⑪ 输出：`Renderer` 汇总插图复制/重命名，按 `doc_dir` 写入（单文档根目录 / 多文档子目录）
+- 代码模式输出：`render_code_files()` 写出 `output_dir/files/**`、`files-index.json` 和 `document.md`；`files-index.json` 是前端 CodeViewer 的文件列表、来源页、质量 flags 与诊断事实源
 
 ## 4. 目录结构
 
@@ -98,11 +105,11 @@ docrestore/
 │   ├── api/              # FastAPI 应用与路由（REST + WebSocket + 文件上传）
 │   ├── pipeline/         # Pipeline 编排与调度
 │   ├── ocr/              # OCR 引擎（子进程 worker + EngineManager 按需切换）
-│   ├── processing/       # 清洗与去重
+│   ├── processing/       # 清洗、去重、IDE 布局、代码组装与诊断
 │   ├── privacy/          # PII 脱敏
-│   ├── llm/              # LLM 精修（云端/本地）
+│   ├── llm/              # LLM 精修（云端/本地）与代码精修/修复
 │   ├── persistence/      # SQLite 任务持久化
-│   ├── output/           # Markdown 渲染输出
+│   ├── output/           # Markdown 渲染与代码模式文件输出
 │   ├── utils/            # 工具函数
 │   └── models.py         # 数据模型
 ├── frontend/             # React 19 + TypeScript + Vite 前端
@@ -129,6 +136,7 @@ docrestore/
 - 相邻段保留 overlap 提供上下文（拼入 `Segment.text`，由 LLM 精修时去重）
 - 支持云端（litellm）和本地（OpenAI 兼容 API：vLLM / ollama / llama.cpp）两种 provider
 - 截断双层检测：模型 `finish_reason` + 输出/输入行数比启发式阈值（`LLMConfig.truncation_*`）
+- 代码 refine 模式对大 SourceFile 按行数/字符数自动切块，单个 chunk 失败只回退该 chunk；rewrite 模式不自动切块
 
 ### 5.4 多文档边界检测
 - 由独立 LLM 调用 `detect_doc_boundaries()` 完成（不与分段精修耦合）
@@ -140,7 +148,7 @@ docrestore/
 - GPU 串行（`asyncio.Lock` 保护 OCR 调用 + 引擎切换）
 - `EngineManager.switch_lock` 防止并发切换，等待当前 OCR 操作释放 `gpu_lock` 后再切换引擎
 - 无组级并发（单任务独占 GPU）；任务级并发由 TaskManager 控制
-- 流式并行 Pipeline 设计文档见 `docs/backend/references/streaming-pipeline.md`（待实施）
+- 流式并行 Pipeline 设计记录见 `docs/zh/backend/references/streaming-pipeline.md`；实施状态以 `pipeline/` 当前代码和 `backend/pipeline.md` 为准
 
 ## 6. 扩展性设计
 
@@ -149,11 +157,18 @@ docrestore/
 - LLM 精修：实现 `LLMRefiner` Protocol
 - PII 脱敏：实现 `PIIRedactor` 接口
 
-### 6.2 未来扩展方向
-- IDE 代码照片 → 源文件
+### 6.2 代码模式的 OCR 契约
+- 代码模式不绑定具体 OCR provider，不应在 API 或配置层强制切换到 PaddleOCR。
+- 代码模式只依赖抽象产物 `PageOCR.text_lines`：任意 OCR 引擎只要填充行级
+  `bbox/text/score`，即可接入 IDE 布局分析链路。
+- 当前 OCR 引擎未提供 `text_lines` 时，代码模式应明确失败并提示能力缺失，
+  而不是静默跳过页面或退化为文档模式。
+
+### 6.3 当前边界与未来扩展
+- 代码模式已支持 IDE 代码照片 → 源文件、来源图片联动、轻量诊断和单文件编辑保存；仍可继续增强函数级切块、项目级依赖图和成熟代码编辑器组件
 - PDF 输入支持
-- 流式并行 Pipeline 实施（AGE-16，设计已完成）
-- 前端多文档结果展示（AGE-33）
+- 流式并行 Pipeline 实施（历史设计见 references，当前状态以 `pipeline/` 代码为准）
+- 前端多文档结果展示已落地基础导航；后续可补真实 fixture 的端到端视觉验证
 
 ## 7. 相关文档
 

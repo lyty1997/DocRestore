@@ -1,0 +1,633 @@
+# Copyright 2026 @lyty1997
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+"""跨张文件归类（AGE-8 Phase 2.3）
+
+把"N 张图 × M 栏 = N×M 个 PageColumn"按文件路径聚到同一 source file，
+同源文件内按行号排序拼接（重叠去重）。
+
+**核心算法**：
+  1. 跨张 path/filename canonical 标准化：
+     - fuzzy filename 用 ``lower()`` 容忍 OCR 大小写错识（BUILD/BUiLD/BUlLD）
+     - dir 用 "去 / 后" 后缀兼容判定，把 ``core/widget`` 与 ``app/core/widget``
+       识别为同 dir（短的是长的后缀，单图无 peer 时缺前缀场景由此兜底）
+     - 同组内 canonical filename = 字符长度+频次最大；canonical dir = 段数最多
+  2. 按 (canonical_dir, canonical_filename) 二级分组
+  3. 同文件内按行号排序，line_no 重复取首次（多张图重叠区域去重）
+  4. 行号 gap（OCR 漏识 / 拍照漏页）→ flag ``code.line_gap`` + 占位
+
+**约束**（用户决策 #3）：
+  同图不同栏 ≠ 同文件 → 跨栏只通过 (path, filename) 配对，不靠"内容相邻"
+
+**输入约定**：caller 把每张图每栏组装成 PageColumn 传入。
+"""
+
+from __future__ import annotations
+
+import logging
+from collections import Counter
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from docrestore.processing.code_assembly import CodeColumn
+    from docrestore.processing.ide_meta_extract import IDEMeta, PathCandidate
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PageColumn:
+    """跨张归类的输入：一张图的一栏"""
+
+    page_stem: str
+    column_index: int
+    meta: IDEMeta
+    column: CodeColumn
+
+
+@dataclass
+class CodeSegment:
+    """分组前的最小可审计代码来源单元。"""
+
+    page_stem: str
+    column_index: int
+    bbox: tuple[int, int, int, int]
+    line_no_range: tuple[int, int]
+    path_candidates: list[PathCandidate]
+    selected_path: str | None
+    selected_path_confidence: float
+    language: str | None
+    flags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SourceFile:
+    """跨张聚合后的源文件"""
+
+    path: str                 # canonical path（dir/filename 或仅 filename）
+    filename: str
+    language: str | None
+    pages: list[PageColumn]   # 来源（按行号顺序）
+    merged_text: str          # 拼接后代码
+    line_count: int
+    line_no_range: tuple[int, int]
+    flags: list[str] = field(default_factory=list)
+
+
+def segment_from_page_column(page: PageColumn) -> CodeSegment:
+    """把现有 PageColumn 转成 AGE-62 CodeSegment 审计模型。"""
+    return CodeSegment(
+        page_stem=page.page_stem,
+        column_index=page.column_index,
+        bbox=page.column.bbox,
+        line_no_range=(
+            _column_line_no_start(page.column),
+            _column_line_no_end(page.column),
+        ),
+        path_candidates=list(page.meta.path_candidates),
+        selected_path=page.meta.path,
+        selected_path_confidence=page.meta.path_confidence,
+        language=page.meta.language,
+        flags=[
+            *page.meta.flags,
+            *page.column.flags,
+        ],
+    )
+
+
+def group_into_files(page_columns: list[PageColumn]) -> list[SourceFile]:
+    """跨张归类入口
+
+    返回的 SourceFile 列表按 path 字典序排序，便于稳定输出。
+    """
+    if not page_columns:
+        return []
+
+    # 1. fuzzy filename 一级聚类
+    by_filename: dict[str, list[PageColumn]] = {}
+    no_filename: list[PageColumn] = []
+    for pc in page_columns:
+        if not pc.meta.filename:
+            no_filename.append(pc)
+            continue
+        key = _fuzzy_filename_key(pc.meta.filename)
+        by_filename.setdefault(key, []).append(pc)
+
+    # 2. 每个 filename 组内按 dir 兼容性二级聚类
+    files: list[SourceFile] = []
+    for group in by_filename.values():
+        for sub_group in _split_by_compatible_dir(group):
+            # 决策 #3 硬约束：同 page_stem 不同 column_index 必须拆开
+            # （AGE-45 偶发把同图两栏识别为同 file，这里兜底拒绝合并）
+            for one_page_group in _enforce_one_page_one_file(sub_group):
+                files.append(_build_source_file(one_page_group))
+
+    # 3. 处理 filename 缺失的（quality 信号 + 单独成组）
+    for pc in no_filename:
+        files.append(_build_source_file(
+            [pc], extra_flags=["code.grouping.no_filename"],
+        ))
+
+    # 4. 同 dir 下 filename 极相似（OCR 字符噪声 / 截断）→ 小组并入大组
+    files = _merge_near_duplicate_filenames(files)
+
+    # 5. path 去重：决策 #3 拆出来的多个 sub_group 可能 canonical_path 相同
+    # （都是 status.h），加 :col<i> 后缀避免 AGE-47 写文件时覆盖
+    _disambiguate_duplicate_paths(files)
+
+    files.sort(key=lambda f: f.path)
+    return files
+
+
+#: 小组并入大组时，小组 page 数占两组之和的最大比例。超过此比例视为
+#: "两份真实不同的文件"，不合并。0.1 = 10% —— 经验值，page06873 typo
+#: 案例里 typo 组占 1/(1+255)=0.39%，远低于阈值。
+_NEAR_DUP_MAX_RATIO = 0.10
+
+#: filename 编辑距离阈值（≤ 视为同一份文件）。OCR 单字符多/少识/
+#: 误识在阈值内，全新文件名一般差距 > 2。
+_NEAR_DUP_MAX_EDIT_DISTANCE = 2
+
+
+def _merge_near_duplicate_filenames(  # noqa: C901 — 同步保护多条件 + 合并分支
+    files: list[SourceFile],
+) -> list[SourceFile]:
+    """同 dir 下 filename 仅差 1-2 字符（OCR 噪声）或一方是另一方后缀
+    （前缀截断）→ 小组并入大组（保留大组的 canonical 名称）。
+
+    保护：
+      - 必须同扩展名（``.cc`` 与 ``.h`` 永不合）
+      - 必须 dir 兼容（``_compact_dir`` 等价或互为后缀）
+      - 小组占比 ≤ ``_NEAR_DUP_MAX_RATIO``，否则视为真实独立文件
+    """
+    if len(files) < 2:
+        return files
+
+    # 按 (canonical_dir_compact, ext) 分桶：同桶内才尝试合并
+    buckets: dict[tuple[str, str], list[int]] = {}
+    for i, src in enumerate(files):
+        ext = src.filename.rsplit(".", 1)[-1].lower() if "." in src.filename else ""
+        dir_compact = (
+            src.path.rsplit("/", 1)[0].replace("/", "")
+            if "/" in src.path else ""
+        )
+        buckets.setdefault((dir_compact, ext), []).append(i)
+
+    merged_into: dict[int, int] = {}  # small_idx -> big_idx
+    for indices in buckets.values():
+        if len(indices) < 2:
+            continue
+        # 大组优先（page 数多）
+        sorted_idx = sorted(indices, key=lambda i: -len(files[i].pages))
+        for k, big_idx in enumerate(sorted_idx):
+            big = files[big_idx]
+            if big_idx in merged_into:
+                continue
+            for small_idx in sorted_idx[k + 1:]:
+                if small_idx in merged_into:
+                    continue
+                small = files[small_idx]
+                if not _is_near_duplicate(big, small):
+                    continue
+                ratio = len(small.pages) / max(
+                    1, len(big.pages) + len(small.pages),
+                )
+                if ratio > _NEAR_DUP_MAX_RATIO:
+                    continue
+                merged_into[small_idx] = big_idx
+
+    if not merged_into:
+        return files
+
+    # 把 merged-in 的 pages 加到 big，重新构建 SourceFile
+    for small_idx, big_idx in merged_into.items():
+        big = files[big_idx]
+        small = files[small_idx]
+        big.pages.extend(small.pages)
+        if "code.grouping.merged_near_duplicate" not in big.flags:
+            big.flags.append("code.grouping.merged_near_duplicate")
+        logger.debug(
+            "near-dup merge: %r ← %r (%d pages)",
+            big.filename, small.filename, len(small.pages),
+        )
+
+    # 重建合并后的 SourceFile（重新合 text、行号 gap、flags）
+    rebuilt: list[SourceFile] = []
+    for i, src in enumerate(files):
+        if i in merged_into:
+            continue
+        if any(small_big[1] == i for small_big in merged_into.items()):
+            # 大组：用最新 pages 重建
+            rebuilt.append(_rebuild_source_file(src))
+        else:
+            rebuilt.append(src)
+    return rebuilt
+
+
+def _is_near_duplicate(big: SourceFile, small: SourceFile) -> bool:
+    """两个 SourceFile 是否近重复：filename 编辑距离 ≤ 2 或一方是另一方后缀。"""
+    big_name = big.filename.lower()
+    small_name = small.filename.lower()
+    if big_name == small_name:
+        return True
+    # suffix 关系：``_decode_accelerator.cc`` 是 ``widget_video_decode_
+    # accelerator.cc`` 的真后缀（小组的 stem 长度 < 大组的 stem 长度）
+    if (
+        len(small_name) < len(big_name)
+        and big_name.endswith(small_name)
+    ):
+        return True
+    # 编辑距离 ≤ 2：page06873 ``acceleratorr.cc`` vs ``accelerator.cc``
+    if abs(len(big_name) - len(small_name)) <= _NEAR_DUP_MAX_EDIT_DISTANCE:
+        return _edit_distance_within(
+            big_name, small_name, _NEAR_DUP_MAX_EDIT_DISTANCE,
+        )
+    return False
+
+
+def _edit_distance_within(a: str, b: str, threshold: int) -> bool:
+    """Levenshtein 距离是否 ≤ threshold（早停优化）。"""
+    if abs(len(a) - len(b)) > threshold:
+        return False
+    if len(a) > len(b):
+        a, b = b, a
+    prev = list(range(len(a) + 1))
+    for j, cb in enumerate(b, 1):
+        curr = [j] + [0] * len(a)
+        row_min = curr[0]
+        for i, ca in enumerate(a, 1):
+            curr[i] = (
+                prev[i - 1] if ca == cb
+                else 1 + min(prev[i - 1], prev[i], curr[i - 1])
+            )
+            row_min = min(row_min, curr[i])
+        if row_min > threshold:
+            return False
+        prev = curr
+    return prev[-1] <= threshold
+
+
+def _rebuild_source_file(merged: SourceFile) -> SourceFile:
+    """合并后用 merged.pages 重新计算 merged_text / line_no_range / flags。"""
+    pages = merged.pages
+    merged_text, line_no_range, gap_flags = _merge_columns_by_line_no(
+        pages, language=merged.language,
+    )
+    flags = [f for f in merged.flags if not f.startswith(
+        ("code.grouping.missing_line_nos=", "code.grouping.large_gap_collapsed"),
+    )]
+    flags.extend(gap_flags)
+    sorted_pages = sorted(
+        pages, key=lambda pc: _column_line_no_start(pc.column),
+    )
+    line_count = merged_text.count("\n") + 1 if merged_text else 0
+    return SourceFile(
+        path=merged.path,
+        filename=merged.filename,
+        language=merged.language,
+        pages=sorted_pages,
+        merged_text=merged_text,
+        line_count=line_count,
+        line_no_range=line_no_range,
+        flags=flags,
+    )
+
+
+def _disambiguate_duplicate_paths(files: list[SourceFile]) -> None:
+    """同 path 多 SourceFile 时加唯一后缀（in-place）。
+
+    后缀以最小列号为基（``__col<idx>``），但仅列号不保证唯一——多个同 path
+    文件的最小列号可能相同，会再次撞名被渲染层覆盖丢文件。故对已用路径递增序号
+    直到全局唯一（B4 H3）。
+    """
+    used: set[str] = set()
+    for src in files:
+        if src.path not in used:
+            used.add(src.path)
+            continue
+        col_indices = sorted({pc.column_index for pc in src.pages})
+        base_suffix = f"__col{col_indices[0]}" if col_indices else "__dup"
+        new_path, new_filename = _path_with_suffix(
+            src.path, src.filename, base_suffix,
+        )
+        n = 1
+        while new_path in used:
+            n += 1
+            new_path, new_filename = _path_with_suffix(
+                src.path, src.filename, f"{base_suffix}_{n}",
+            )
+        used.add(new_path)
+        src.path = new_path
+        src.filename = new_filename
+        src.flags.append("code.grouping.disambiguated_by_column")
+
+
+def _path_with_suffix(
+    path: str, filename: str, suffix: str,
+) -> tuple[str, str]:
+    """把后缀插到扩展名前：``foo.cc`` → ``foo<suffix>.cc``，并同步 path。"""
+    if "." in filename:
+        base, ext = filename.rsplit(".", 1)
+        new_filename = f"{base}{suffix}.{ext}"
+    else:
+        new_filename = f"{filename}{suffix}"
+    if "/" in path:
+        head = path.rsplit("/", 1)[0]
+        new_path = f"{head}/{new_filename}"
+    else:
+        new_path = new_filename
+    return new_path, new_filename
+
+
+def _fuzzy_filename_key(name: str) -> str:
+    """OCR 视觉混淆容错的 filename 归一 key
+
+    把 ``I/l/1/|`` 都映射到同字符、``O/0`` 映射到同字符，让
+    ``BUILD.gn`` / ``BUiLD.gn`` / ``BUlLD.gn`` / ``BUlLD.gn`` 等 OCR 字符
+    级噪声变体落在同一桶里。
+    """
+    s = name.lower()
+    for ch in ("i", "l", "1", "|"):
+        s = s.replace(ch, "*")
+    for ch in ("o", "0"):
+        s = s.replace(ch, "@")
+    return s
+
+
+def _enforce_one_page_one_file(
+    group: list[PageColumn],
+) -> list[list[PageColumn]]:
+    """决策 #3 硬约束：同 page_stem 多个 column_index 必须分组
+
+    一张图同 file 不可能出现两次（IDE 不允许同 file 在两个 split editor 栏），
+    若 AGE-45 错识致同 page 多 column 进同组 → 这里强制按 column_index 拆。
+
+    返回 ``max(per_page_count)`` 个子组：
+      - sub_group[0]：每张图的 column_index 最小那个
+      - sub_group[1]：每张图的 column_index 第二小（如有）
+      - ...
+    """
+    by_page: dict[str, list[PageColumn]] = {}
+    for pc in group:
+        by_page.setdefault(pc.page_stem, []).append(pc)
+
+    if all(len(cols) == 1 for cols in by_page.values()):
+        return [group]
+
+    max_cols = max(len(cols) for cols in by_page.values())
+    sub_groups: list[list[PageColumn]] = [[] for _ in range(max_cols)]
+    for cols in by_page.values():
+        for slot, pc in enumerate(sorted(cols, key=lambda c: c.column_index)):
+            sub_groups[slot].append(pc)
+    return [g for g in sub_groups if g]
+
+
+def _split_by_compatible_dir(
+    group: list[PageColumn],
+) -> list[list[PageColumn]]:
+    """同 filename 内，按 dir 兼容性细分子组
+
+    兼容性：``dir1.replace('/', '') == dir2.replace('/', '')``（OCR 漏分隔
+    符）或 一方是另一方的后缀（如 ``core/widget`` ⊆ ``app/core/widget``）。
+    """
+    if len(group) <= 1:
+        return [group]
+
+    compacts = [_compact_dir(pc.meta.path) for pc in group]
+    sub_groups: list[set[int]] = []
+    for i, c1 in enumerate(compacts):
+        placed = False
+        # 单连接（与子组内任一成员兼容即可并入）：兼容关系非传递且空目录与
+        # 任意目录兼容，理论上单张 path=filename（无 dir）的 PC 可把 ``a/x``
+        # 与 ``b/x`` 两个不同目录桥接到一组。但实测主导回归是 OCR 把分隔符
+        # ``/`` 误识为 ``7`` 等噪声把同源 dir 拆成多变体——若改全连接堵桥接，
+        # ``media/gpu/openmax`` 与 ``media7gpu7openmax`` 的同名文件就会被
+        # 拆 7 个孤立桶丢给下游 audit/repair 触发截断 + 编译失败，损害远大于
+        # 边缘的 a/x↔b/x 误并风险。保持单连接，让空 dir 桥接吸收 OCR 噪声。
+        for sg in sub_groups:
+            if any(_dirs_compatible(c1, compacts[j]) for j in sg):
+                sg.add(i)
+                placed = True
+                break
+        if not placed:
+            sub_groups.append({i})
+    return [[group[i] for i in sg] for sg in sub_groups]
+
+
+def _compact_dir(path: str | None) -> str:
+    """从 ``app/core/widget/foo.cc`` 提 ``appcorewidget``（去 / 大小写不变）"""
+    if not path or "/" not in path:
+        return ""
+    return path.rsplit("/", 1)[0].replace("/", "")
+
+
+def _dirs_compatible(c1: str, c2: str) -> bool:
+    """两个 compact dir 是否兼容：相等 / 一方是另一方后缀 / 任一方为空"""
+    if c1 == c2:
+        return True
+    if not c1 or not c2:
+        return True
+    return c1.endswith(c2) or c2.endswith(c1)
+
+
+def _build_source_file(
+    group: list[PageColumn],
+    *,
+    extra_flags: list[str] | None = None,
+) -> SourceFile:
+    """从同文件多 PageColumn 构造 SourceFile"""
+    # canonical filename：优先选路径置信度高 + 出现频次高的版本。不能只按
+    # 长度选，否则低置信 OCR typo（如多识一个后缀字符）会覆盖高置信路径。
+    filenames = [pc.meta.filename for pc in group if pc.meta.filename]
+    canonical_filename = (
+        max(
+            filenames,
+            key=lambda f: (
+                _filename_confidence_sum(group, f),
+                filenames.count(f),
+                len(f),
+            ),
+        )
+        if filenames
+        else "_unknown"
+    )
+
+    # canonical dir：优先选置信度高 + 频次高 + 段数更多的版本。
+    dirs = [
+        pc.meta.path.rsplit("/", 1)[0]
+        for pc in group
+        if pc.meta.path and "/" in pc.meta.path
+    ]
+    canonical_dir: str | None = None
+    if dirs:
+        dir_counter = Counter(dirs)
+        canonical_dir = max(
+            dirs,
+            key=lambda d: (
+                _dir_confidence_sum(group, d),
+                dir_counter[d],
+                d.count("/"),
+            ),
+        )
+    canonical_path = (
+        f"{canonical_dir}/{canonical_filename}"
+        if canonical_dir else canonical_filename
+    )
+
+    # canonical language：第一个非空
+    language: str | None = None
+    for pc in group:
+        if pc.meta.language:
+            language = pc.meta.language
+            break
+
+    # 按行号合并代码（language 用于决定大 gap 占位注释前缀）
+    merged_text, line_no_range, gap_flags = _merge_columns_by_line_no(
+        group, language=language,
+    )
+
+    flags: list[str] = list(extra_flags or [])
+    flags.extend(gap_flags)
+    if len(group) > 1:
+        flags.append(f"code.grouping.merged_pages={len(group)}")
+        if any(_path_confidence(pc) < 0.6 for pc in group):
+            flags.append("code.grouping.low_confidence_path_merged")
+
+    # pages 按 line_no_range 起点排序
+    sorted_pages = sorted(
+        group,
+        key=lambda pc: _column_line_no_start(pc.column),
+    )
+    line_count = (
+        merged_text.count("\n") + 1 if merged_text else 0
+    )
+
+    return SourceFile(
+        path=canonical_path,
+        filename=canonical_filename,
+        language=language,
+        pages=sorted_pages,
+        merged_text=merged_text,
+        line_count=line_count,
+        line_no_range=line_no_range,
+        flags=flags,
+    )
+
+
+def _path_confidence(pc: PageColumn) -> float:
+    """PageColumn 当前路径的置信度，旧 fixture 缺字段时按中等可信处理。"""
+    confidence = getattr(pc.meta, "path_confidence", 0.0)
+    return float(confidence) if confidence > 0 else 0.65
+
+
+def _filename_confidence_sum(group: list[PageColumn], filename: str) -> float:
+    """同 filename 在组内的路径置信度总和。"""
+    return sum(
+        _path_confidence(pc)
+        for pc in group
+        if pc.meta.filename == filename
+    )
+
+
+def _dir_confidence_sum(group: list[PageColumn], directory: str) -> float:
+    """同 directory 在组内的路径置信度总和。"""
+    total = 0.0
+    for pc in group:
+        if not pc.meta.path or "/" not in pc.meta.path:
+            continue
+        if pc.meta.path.rsplit("/", 1)[0] == directory:
+            total += _path_confidence(pc)
+    return total
+
+
+def _column_line_no_start(column: CodeColumn) -> int:
+    """CodeColumn 的起始行号（用于多张图排序）"""
+    if not column.lines:
+        return 0
+    return min(line.line_no for line in column.lines)
+
+
+def _column_line_no_end(column: CodeColumn) -> int:
+    """CodeColumn 的结束行号。"""
+    if not column.lines:
+        return 0
+    return max(line.line_no for line in column.lines)
+
+
+#: 单次行号 gap 超过此阈值 → 不再批量塞空行，改插单行注释占位。
+#: page06953/07002 错归案例里，错归 + 行号大跳跃产生过 587 个连续空行
+#: 把文件膨胀到肉眼不可读。50 行是经验值：50 行内的 gap 多是 OCR 漏识
+#: 或代码折叠，仍当作空白；超过就明显是结构性错误（错归 / 漏页），
+#: 用注释明确标注，避免污染。
+_GAP_FILL_THRESHOLD = 50
+
+#: 大 gap 注释占位的语言适配。除"#"系语言外，统一用 // —— C/C++/Java/
+#: JS/TS/Rust/Go/Swift/Kotlin/Scala/Dart/Groovy 等大多数曲线语言都接受。
+#: 未识别语言（language=None）走 //。
+_HASH_COMMENT_LANGUAGES: frozenset[str] = frozenset({
+    "python", "shell", "ruby", "yaml", "toml", "perl", "r",
+    "makefile", "dockerfile", "gn",
+})
+
+
+def _format_gap_marker(missing_count: int, language: str | None) -> str:
+    """大 gap 占位注释，按语言选 # 或 // 前缀"""
+    prefix = "# " if language in _HASH_COMMENT_LANGUAGES else "// "
+    return f"{prefix}... ({missing_count} lines missing, see flags) ..."
+
+
+def _merge_columns_by_line_no(
+    group: list[PageColumn],
+    *,
+    language: str | None = None,
+) -> tuple[str, tuple[int, int], list[str]]:
+    """按 line_no 合并多个 column，重复 line 取首次出现。
+
+    行号 gap 处理：小 gap（≤ ``_GAP_FILL_THRESHOLD``）填空行；大 gap
+    改用单行注释占位避免空白行雪崩。``language`` 控制注释前缀。
+    """
+    by_line_no: dict[int, str] = {}  # line_no -> 渲染后行（含缩进）
+    for pc in group:
+        for line in pc.column.lines:
+            if line.line_no in by_line_no:
+                continue  # 重叠：保留首次（先到的图）
+            rendered = " " * line.indent + line.text
+            by_line_no[line.line_no] = rendered
+    if not by_line_no:
+        return "", (0, 0), []
+
+    sorted_nos = sorted(by_line_no)
+    lo, hi = sorted_nos[0], sorted_nos[-1]
+
+    # 检测行号 gap（OCR 漏识或拍照漏页）
+    flags: list[str] = []
+    expected = set(range(lo, hi + 1))
+    actual = set(sorted_nos)
+    missing = sorted(expected - actual)
+    if missing:
+        flags.append(f"code.grouping.missing_line_nos={len(missing)}")
+
+    parts: list[str] = []
+    prev_no = lo - 1
+    saw_large_gap = False
+    for no in sorted_nos:
+        gap = no - prev_no - 1
+        if gap > 0:
+            if gap > _GAP_FILL_THRESHOLD:
+                # 大 gap：单行占位注释，避免肉眼不可读
+                parts.append(_format_gap_marker(gap, language))
+                saw_large_gap = True
+            else:
+                # 小 gap：保持空行兼容已有人工补全工作流
+                parts.extend([""] * gap)
+        parts.append(by_line_no[no])
+        prev_no = no
+    if saw_large_gap:
+        flags.append("code.grouping.large_gap_collapsed")
+    return "\n".join(parts), (lo, hi), flags

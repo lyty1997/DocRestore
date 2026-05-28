@@ -12,7 +12,14 @@ export const ProgressResponseSchema = z.object({
   current: z.number(),
   total: z.number(),
   percent: z.number(),
+  /** 服务端拼好的中文消息，i18n 无 key 时 fallback 展示 */
   message: z.string(),
+  /** 子目录标识（process_tree 并行时每一路的 rel path，空=主进度） */
+  subtask: z.string().default(""),
+  /** i18n 入口 key，如 "progress.refineStream"；空=无结构化文案 */
+  message_key: z.string().default(""),
+  /** i18n 插值参数（值统一 str） */
+  message_params: z.record(z.string(), z.string()).default({}),
 });
 export type ProgressResponse = z.infer<typeof ProgressResponseSchema>;
 
@@ -39,6 +46,12 @@ export const TaskResultResponseSchema = z.object({
   markdown: z.string(),
   doc_title: z.string().optional(),
   doc_dir: z.string().optional(),
+  /**
+   * 子文档级错误（2026-04-21 引入）。非空表示此子文档处理失败，
+   * markdown 可能为空，前端应显示 error 而非渲染 markdown。
+   * 后端老版本无此字段时默认为空字符串。
+   */
+  error: z.string().default(""),
 });
 export type TaskResultResponse = z.infer<typeof TaskResultResponseSchema>;
 
@@ -83,6 +96,15 @@ export const ActionResponseSchema = z.object({
   message: z.string().optional(),
 });
 export type ActionResponse = z.infer<typeof ActionResponseSchema>;
+
+/** 批量清理任务响应 */
+export const TaskCleanupResponseSchema = z.object({
+  deleted: z.number().default(0),
+  failed: z.number().default(0),
+  deleted_ids: z.array(z.string()).default([]),
+  errors: z.array(z.string()).default([]),
+});
+export type TaskCleanupResponse = z.infer<typeof TaskCleanupResponseSchema>;
 
 /** WS 推送的进度消息（与 TaskProgress 一致） */
 export const TaskProgressSchema = ProgressResponseSchema;
@@ -170,10 +192,29 @@ export type UploadCompleteResponse = z.infer<typeof UploadCompleteResponseSchema
 export const OcrStatusResponseSchema = z.object({
   current_model: z.string(),
   current_gpu: z.string(),
+  /** 后端 2026-04-21 起新增字段；旧后端缺字段时 z.string().default 回退为 "" */
+  current_gpu_name: z.string().default(""),
   is_ready: z.boolean(),
   is_switching: z.boolean(),
 });
 export type OcrStatusResponse = z.infer<typeof OcrStatusResponseSchema>;
+
+/** 单张 GPU 的元信息（GET /gpus 响应元素） */
+export const GpuInfoSchema = z.object({
+  index: z.string(),
+  name: z.string(),
+  memory_total_mb: z.number(),
+  memory_free_mb: z.number().nullable().optional(),
+  compute_capability: z.string().nullable().optional(),
+});
+export type GpuInfo = z.infer<typeof GpuInfoSchema>;
+
+/** GET /gpus 响应：GPU 列表 + 推荐索引 */
+export const GpuListResponseSchema = z.object({
+  gpus: z.array(GpuInfoSchema),
+  recommended: z.string().nullable().optional(),
+});
+export type GpuListResponse = z.infer<typeof GpuListResponseSchema>;
 
 /** OCR 引擎预热响应 */
 export const OcrWarmupResponseSchema = z.object({
@@ -181,3 +222,68 @@ export const OcrWarmupResponseSchema = z.object({
   message: z.string(),
 });
 export type OcrWarmupResponse = z.infer<typeof OcrWarmupResponseSchema>;
+
+/** 代码模式 files-index 单条记录 */
+export const SourcePageRangeSchema = z.object({
+  page: z.string(),
+  start_line: z.number(),
+  end_line: z.number(),
+});
+export type SourcePageRange = z.infer<typeof SourcePageRangeSchema>;
+
+export const CodeDiagnosticItemSchema = z.object({
+  line: z.number(),
+  column: z.number().default(0),
+  severity: z.string().default("error"),
+  category: z.string().default("syntax"),
+  code: z.string().default(""),
+  message: z.string().default(""),
+  source: z.string().default(""),
+});
+export type CodeDiagnosticItem = z.infer<typeof CodeDiagnosticItemSchema>;
+
+export const CodeDiagnosticSchema = z.object({
+  path: z.string().optional(),
+  language: z.string().optional(),
+  status: z.string(),
+  category: z.string(),
+  summary: z.string().default(""),
+  failing_lines: z.array(z.number()).default([]),
+  syntax_errors: z.number().default(0),
+  semantic_errors: z.number().default(0),
+  dependency_errors: z.number().default(0),
+  items: z.array(CodeDiagnosticItemSchema).default([]),
+  tool: z.string().default(""),
+  duration_ms: z.number().default(0),
+});
+export type CodeDiagnostic = z.infer<typeof CodeDiagnosticSchema>;
+
+export const DiagnoseCodeFileResponseSchema = CodeDiagnosticSchema;
+export type DiagnoseCodeFileResponse = z.infer<
+  typeof DiagnoseCodeFileResponseSchema
+>;
+
+export const FilesIndexEntrySchema = z.object({
+  path: z.string(),
+  filename: z.string(),
+  language: z.string().nullable().optional(),
+  source_pages: z.array(z.string()).default([]),
+  source_page_ranges: z.array(SourcePageRangeSchema).default([]),
+  line_count: z.number().default(0),
+  line_no_range: z.array(z.number()).default([]),
+  flags: z.array(z.string()).default([]),
+  /** 由 scripts/age8_compile_check.py 写入；可缺省 */
+  compile_status: z
+    .enum(["passed", "failed", "skipped"])
+    .nullable()
+    .optional(),
+  compile_error: z.string().nullable().optional(),
+  compile_skip_reason: z.string().nullable().optional(),
+  compile_failing_lines: z.array(z.number()).nullable().optional(),
+  diagnostic: CodeDiagnosticSchema.optional(),
+});
+export type FilesIndexEntry = z.infer<typeof FilesIndexEntrySchema>;
+
+/** files-index.json 整个数组 */
+export const FilesIndexSchema = z.array(FilesIndexEntrySchema);
+export type FilesIndex = z.infer<typeof FilesIndexSchema>;

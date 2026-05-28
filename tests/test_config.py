@@ -183,7 +183,11 @@ class TestLLMConfigExtra:
         assert cfg.enable_gap_fill is False
 
     def test_timeout_default(self) -> None:
-        assert LLMConfig().timeout == 600
+        # 2026-04-23：默认 base timeout 从 600 → 60s，配合 timeout_per_1k_chars_s
+        # 线性放大 + timeout_max_s=180 封顶。旧 600s 默认会让服务端挂起拖死子目录。
+        assert LLMConfig().timeout == 60
+        assert LLMConfig().timeout_per_1k_chars_s == 3.0
+        assert LLMConfig().timeout_max_s == 180
 
     def test_segment_overlap_lines_override(self) -> None:
         cfg = LLMConfig(segment_overlap_lines=10)
@@ -226,7 +230,11 @@ class TestOCRConfigExtra:
         assert cfg.column_filter_min_sidebar == 10
 
     def test_gpu_id_default(self) -> None:
-        assert OCRConfig().gpu_id == "1"
+        # 默认 None → engine_manager 启动时调 gpu_detect.pick_best_gpu 自动选卡
+        assert OCRConfig().gpu_id is None
+
+    def test_gpu_id_explicit(self) -> None:
+        assert OCRConfig(gpu_id="0").gpu_id == "0"
 
     def test_paddle_server_url_default_empty(self) -> None:
         assert OCRConfig().paddle_server_url == ""

@@ -37,8 +37,10 @@ from pathlib import Path
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
 
-def _send(data: dict[str, object]) -> None:
-    """向 stdout 写一行 JSON。"""
+def _send(data: dict[str, object], *, seq: object = None) -> None:
+    """向 stdout 写一行 JSON；seq 非空时注入 `seq` 字段以便主进程对齐响应。"""
+    if seq is not None and "seq" not in data:
+        data = {**data, "seq": seq}
     sys.stdout.write(json.dumps(data, ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
@@ -64,15 +66,38 @@ class Worker:
         self,
         server_url: str = "",
         server_model_name: str = "",
+        pipeline: str = "vl",
     ) -> dict[str, object]:
-        """初始化 PaddleOCRVL pipeline。
+        """初始化 PaddleOCR pipeline。
 
         Args:
-            server_url: vllm-server URL（非空时启用 server 模式）
-            server_model_name: server 端模型名称
+            server_url: vllm-server URL（vl pipeline 启用 server 模式）
+            server_model_name: server 端模型名称（vl 用）
+            pipeline: ``vl``（PaddleOCR-VL，文档默认）或 ``basic``
+                （PP-OCRv5 行级 bbox，IDE 代码场景）
         """
         try:
-            from paddleocr import PaddleOCRVL  # type: ignore[import-not-found]
+            self._pipeline_kind = pipeline
+            if pipeline == "basic":
+                # PP-OCRv5 基础 pipeline：DBNet text_det + CRNN text_rec
+                # 输出行级 rec_boxes + texts + scores（填充 PageOCR.text_lines）
+                # 不需要 vllm-server。参数借鉴 MinerU 的调优值。
+                from paddleocr import PaddleOCR
+
+                self._pipeline = PaddleOCR(
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False,
+                    use_textline_orientation=False,
+                    text_det_box_thresh=0.3,
+                    text_det_unclip_ratio=1.8,
+                )
+                print(
+                    "PaddleOCR(basic) 初始化完成",
+                    file=sys.stderr,
+                )
+                return {"ok": True}
+
+            from paddleocr import PaddleOCRVL
 
             if server_url:
                 self._pipeline = PaddleOCRVL(
@@ -123,21 +148,27 @@ class Worker:
         ocr_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            # PaddleOCRVL.predict() 返回结果迭代器
+            pipeline_kind = getattr(self, "_pipeline_kind", "vl")
+
+            # PaddleOCR(VL).predict() 返回结果迭代器
             output = self._pipeline.predict(str(img_path))
 
             raw_text = ""
             coordinates: list[dict[str, object]] = []
+            text_lines: list[dict[str, object]] = []
 
             for res in output:
-                # save_to_markdown 会生成 {save_path}/{stem}.md + {save_path}/imgs/
-                res.save_to_markdown(save_path=str(ocr_dir))
+                if pipeline_kind == "basic":
+                    # PP-OCRv5 行级输出：res.json 含 rec_boxes + rec_texts +
+                    # rec_scores 一一对应。无 markdown，写空 raw_text 由主进程
+                    # 自行处理。
+                    text_lines = self._extract_text_lines(res)
+                    continue
 
-                # 提取文本
+                # vl 分支：写 markdown + 提取 layout 块级 coords（保留旧路径）
+                res.save_to_markdown(save_path=str(ocr_dir))
                 if hasattr(res, "text"):
                     raw_text = str(res.text)
-
-                # 从 res.json 提取坐标
                 if hasattr(res, "json"):
                     try:
                         json_data = res.json
@@ -150,16 +181,38 @@ class Worker:
                     except Exception as e:
                         print(f"坐标提取失败: {e}", file=sys.stderr)
 
-            # 整理输出文件（过滤小图标）
-            md_path, image_count = self._reorganize_output(
-                ocr_dir, stem, min_image_size
-            )
-
-            # 读取 markdown 内容
-            if md_path.exists():
-                markdown_content = md_path.read_text(encoding="utf-8")
-            else:
+            # vl: 整理 markdown + 图片；basic: 跳过（无 markdown 产物）
+            if pipeline_kind == "basic":
+                # 与 vl 分支统一用 "result.mmd"：paddle_ocr.py 的 OCR 缓存
+                # 检查 (`if result_mmd.exists()`) 和 cleaner 的读取路径都靠
+                # 这个固定文件名。曾经误写成 `{stem}.md` 导致 cache 永远 miss
+                # + cleaner 刷 "result.mmd 不存在，回退使用 raw_text" 警告。
+                md_path = ocr_dir / "result.mmd"
+                image_count = 0
+                # basic 模式 raw_text 用 lines 的 text 顺序拼接，给 OCR cache /
+                # 旧路径兼容（PageOCR.raw_text 仍非空）
+                raw_text = "\n".join(
+                    str(ln.get("text", "")) for ln in text_lines
+                )
+                md_path.write_text(raw_text, encoding="utf-8")
+                # 同时把行级数据 dump 出来供缓存命中时重建 PageOCR.text_lines
+                lines_path = ocr_dir / "text_lines.jsonl"
+                lines_path.write_text(
+                    "\n".join(
+                        json.dumps(ln, ensure_ascii=False)
+                        for ln in text_lines
+                    ),
+                    encoding="utf-8",
+                )
                 markdown_content = raw_text
+            else:
+                md_path, image_count = self._reorganize_output(
+                    ocr_dir, stem, min_image_size,
+                )
+                markdown_content = (
+                    md_path.read_text(encoding="utf-8")
+                    if md_path.exists() else raw_text
+                )
 
             # 获取图片尺寸
             image_size = self._get_image_size(img_path)
@@ -174,6 +227,7 @@ class Worker:
                 "image_count": image_count,
                 "ocr_dir": str(ocr_dir),
                 "coordinates": coordinates,
+                "text_lines": text_lines,
             }
         except Exception as exc:
             print(
@@ -240,6 +294,52 @@ class Worker:
             })
 
         return coordinates
+
+    @staticmethod
+    def _extract_text_lines(res: object) -> list[dict[str, object]]:
+        """从 PP-OCRv5 basic 结果对象提取行级 (bbox, text, score)。
+
+        ``res.json`` 结构：``{"res": {"rec_boxes": [[x1,y1,x2,y2], ...],
+        "rec_texts": [...], "rec_scores": [...]}}``。
+        """
+        out: list[dict[str, object]] = []
+        try:
+            data = res.json  # type: ignore[attr-defined]
+        except Exception:
+            return out
+        if not isinstance(data, dict):
+            return out
+        inner = data.get("res", data)
+        if not isinstance(inner, dict):
+            return out
+        rec_boxes = inner.get("rec_boxes") or []
+        rec_texts = inner.get("rec_texts") or []
+        rec_scores = inner.get("rec_scores") or []
+        if not isinstance(rec_boxes, list):
+            return out
+        for i, box in enumerate(rec_boxes):
+            if not isinstance(box, (list, tuple)) or len(box) < 4:
+                continue
+            try:
+                x1, y1, x2, y2 = (int(v) for v in box[:4])
+            except (TypeError, ValueError):
+                continue
+            text = (
+                str(rec_texts[i])
+                if i < len(rec_texts) and rec_texts[i] is not None
+                else ""
+            )
+            score = (
+                float(rec_scores[i])
+                if i < len(rec_scores) and rec_scores[i] is not None
+                else 0.0
+            )
+            out.append({
+                "bbox": [x1, y1, x2, y2],
+                "text": text,
+                "score": score,
+            })
+        return out
 
     @staticmethod
     def _extract_coordinates(
@@ -494,6 +594,7 @@ def main() -> None:
             break
 
         cmd = request.get("cmd", "")
+        seq = request.get("seq")
 
         if cmd == "initialize":
             _send(worker.handle_initialize(
@@ -501,7 +602,8 @@ def main() -> None:
                 server_model_name=str(
                     request.get("server_model_name", "")
                 ),
-            ))
+                pipeline=str(request.get("pipeline", "vl")),
+            ), seq=seq)
         elif cmd == "ocr":
             min_img_raw = request.get("min_image_size", 0)
             min_img = (
@@ -514,17 +616,19 @@ def main() -> None:
                     str(request.get("image_path", "")),
                     str(request.get("output_dir", "")),
                     min_image_size=min_img,
-                )
+                ),
+                seq=seq,
             )
         elif cmd == "shutdown":
-            _send(worker.handle_shutdown())
+            _send(worker.handle_shutdown(), seq=seq)
             break
         else:
             _send(
                 {
                     "ok": False,
                     "error": f"未知命令: {cmd}",
-                }
+                },
+                seq=seq,
             )
 
 

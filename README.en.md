@@ -41,9 +41,47 @@ Four conda environments, each with a dedicated role (see [docs/en/deployment.md]
 ```bash
 # Start everything (backend + frontend)
 bash scripts/start.sh all
+
+# Show full help
+bash scripts/start.sh --help
 ```
 
 Visit the frontend at http://localhost:5173 (backend API at http://0.0.0.0:8000/api/v1).
+
+### Modes
+
+| Mode | Description |
+|------|-------------|
+| `all` (default) | Start backend + frontend; the frontend is launched after the backend lifespan is ready |
+| `backend` | Backend only (uvicorn + `docrestore.api.app`) |
+| `frontend` | Frontend only (Vite dev server) |
+| `ppocr-server` | PaddleOCR `genai_server` only (vLLM backend, standalone process) |
+| `-h` / `--help` | Show help |
+
+### Environment Variables
+
+Export before the command to override defaults:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BACKEND_HOST` | `0.0.0.0` | Backend bind address |
+| `BACKEND_PORT` | `8000` | Backend port |
+| `FRONTEND_PORT` | `5173` | Vite dev server port |
+| `PPOCR_GPU_ID` | empty | Pin GPU id; if empty, `CUDA_VISIBLE_DEVICES` is left unset and vLLM enumerates all GPUs while `gpu_detect.pick_best_gpu` picks the one with most free VRAM |
+| `PPOCR_PORT` | `8119` | PaddleOCR `genai_server` port |
+| `PPOCR_MODEL` | `PaddleOCR-VL-1.5-0.9B` | PaddleOCR model name |
+
+Examples:
+
+```bash
+BACKEND_PORT=8080 bash scripts/start.sh backend       # backend on 8080
+PPOCR_GPU_ID=1 bash scripts/start.sh ppocr-server     # pin OCR server to GPU 1
+FRONTEND_PORT=3000 bash scripts/start.sh frontend     # frontend on 3000
+```
+
+### Shutdown
+
+`Ctrl+C` triggers a graceful shutdown: SIGTERM → wait up to 20s for the lifespan to finish OCR / vLLM cleanup → SIGKILL fallback. Press `Ctrl+C` twice to force-kill all child processes immediately.
 
 OCR engines are managed on demand by `EngineManager`: after the user selects an engine and submits a task in the frontend, the backend automatically starts the corresponding worker (including ppocr-server). When switching engines, the old engine's GPU resources are released automatically.
 
@@ -51,15 +89,47 @@ OCR engines are managed on demand by `EngineManager`: after the user selects an 
 
 ## Configuration
 
-Create a `.env` file in the project root to configure the LLM API Key:
+### LLM Integration
+
+LLM refinement runs through [litellm](https://docs.litellm.ai/) and supports two providers: **cloud** and **local**.
+
+#### Mode A: Cloud (default)
+
+Targets any OpenAI-compatible service such as OpenAI / GLM / Claude / Gemini / proxy gateways. Create a `.env` in the project root:
 
 ```bash
+# Pick whichever fits your model (litellm picks the right key by model name)
+OPENAI_API_KEY=sk-xxx
+GLM_API_KEY=sk-xxx
 GEMINI_API_KEY=sk-xxx
-# Or OPENAI_API_KEY / GLM_API_KEY
-# You can also point to a proxy: OPENAI_API_BASE=https://your-proxy/v1
+
+# When routing through a proxy, set the base too
+OPENAI_API_BASE=https://your-proxy/v1
 ```
 
-Runtime configuration is controlled via `PipelineConfig` (`backend/docrestore/pipeline/config.py`, pydantic BaseModel):
+Cloud mode also issues an extra LLM call for PII entity detection (person/org names) on top of regex redaction.
+
+#### Mode B: Local (data never leaves the machine)
+
+Hook up any OpenAI-compatible local server, for example:
+
+| Backend | Sample command | api_base |
+|---------|---------------|----------|
+| ollama | `ollama serve` + `ollama pull qwen2.5:14b` | `http://localhost:11434/v1` |
+| vLLM | `vllm serve Qwen/Qwen2.5-14B-Instruct --port 8001` | `http://localhost:8001/v1` |
+| llama.cpp | `llama-server -m model.gguf --port 8080` | `http://localhost:8080/v1` |
+
+No `.env` API key is required (leave empty or set anything). In local mode the LLM-based PII entity detection is skipped, only regex redaction runs, and **no data is sent to any external service**.
+
+#### Where to set the provider
+
+- **Frontend UI**: Task form → expand "LLM Refinement Settings" → "Provider" radio (Cloud API / Local Service); the same panel hosts `Model Name` / `API Base URL` / `API Key`, with an optional "Remember config" checkbox that persists to localStorage
+- **REST API**: pass it under the `llm` field in the request body (see examples below)
+- **Config file**: tweak the defaults in `backend/docrestore/pipeline/config.py::LLMConfig`, or inject via yaml
+
+### Other Runtime Settings
+
+Controlled via `PipelineConfig` (`backend/docrestore/pipeline/config.py`, pydantic BaseModel):
 
 - `OCRConfig` -- Engine selection, GPU ID, image preprocessing, sidebar filtering
 - `DedupConfig` -- Line-level fuzzy matching threshold, overlap context lines
@@ -93,14 +163,43 @@ python scripts/run_e2e.py \
 See [docs/en/backend/api.md](docs/en/backend/api.md) for the full API contract. Examples:
 
 ```bash
-# Create a task
+# Minimal create-task (uses LLM defaults from .env / yaml)
 curl -X POST http://localhost:8000/api/v1/tasks \
   -H "Content-Type: application/json" \
   -d '{"image_dir": "/path/to/images", "output_dir": "/path/to/output"}'
 
+# Pin a cloud LLM
+curl -X POST http://localhost:8000/api/v1/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image_dir": "/path/to/images",
+    "output_dir": "/path/to/output",
+    "llm": {
+      "provider": "cloud",
+      "model": "openai/gpt-4o-mini",
+      "api_base": "https://your-proxy/v1",
+      "api_key": "sk-xxx"
+    }
+  }'
+
+# Switch to a local LLM (ollama example: API key may be omitted)
+curl -X POST http://localhost:8000/api/v1/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image_dir": "/path/to/images",
+    "output_dir": "/path/to/output",
+    "llm": {
+      "provider": "local",
+      "model": "openai/qwen2.5:14b",
+      "api_base": "http://localhost:11434/v1"
+    }
+  }'
+
 # Download zip results
 curl -O http://localhost:8000/api/v1/tasks/{task_id}/download
 ```
+
+> Keep the `openai/` prefix in `model`: local services all speak the OpenAI schema, and the prefix prevents litellm from raising `LLM Provider NOT provided`. The backend's `_normalize_model_id` also adds it automatically when `api_base` is non-empty.
 
 ## Output Structure
 

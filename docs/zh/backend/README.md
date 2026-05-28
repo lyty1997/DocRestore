@@ -25,7 +25,9 @@ backend/docrestore/
 │   ├── config.py          # PipelineConfig（pydantic BaseModel）
 │   ├── pipeline.py        # Pipeline 编排
 │   ├── task_manager.py    # 任务生命周期（含 SQLite 持久化）
-│   └── scheduler.py       # 全局调度器（GPU Lock）
+│   ├── scheduler.py       # 全局调度器（GPU Lock）
+│   ├── quality_report.py  # 代码模式/普通模式质量报告
+│   └── profiler.py        # Pipeline 埋点
 ├── ocr/
 │   ├── base.py            # OCREngine Protocol + WorkerBackedOCREngine
 │   ├── deepseek_ocr2.py   # DeepSeek-OCR-2 实现
@@ -38,11 +40,18 @@ backend/docrestore/
 ├── processing/
 │   ├── cleaner.py         # OCR 输出清洗
 │   ├── dedup.py           # 相邻页去重合并
-│   └── segmenter.py       # 文档分段器
+│   ├── segmenter.py       # 文档分段器
+│   ├── ide_layout.py      # IDE 截图布局/代码栏识别
+│   ├── code_assembly.py   # 代码栏行号锚点与文本组装
+│   ├── code_file_grouping.py # 跨页 SourceFile 分组
+│   ├── code_context.py    # 参考源码片段检索
+│   └── code_diagnostics.py # 多语言轻量诊断
 ├── llm/
 │   ├── base.py            # LLMRefiner Protocol + BaseLLMRefiner
 │   ├── cloud.py           # CloudLLMRefiner（litellm + PII 实体检测）
 │   ├── local.py           # LocalLLMRefiner（OpenAI 兼容本地服务）
+│   ├── code_refine.py     # 代码字符级精修/rewrite
+│   ├── code_repair.py     # 诊断驱动 scoped repair
 │   └── prompts.py         # prompt 模板
 ├── privacy/
 │   ├── patterns.py        # 结构化 PII 正则
@@ -50,7 +59,8 @@ backend/docrestore/
 ├── persistence/
 │   └── database.py        # TaskDatabase（SQLite 任务持久化）
 ├── output/
-│   └── renderer.py        # Markdown 渲染输出
+│   ├── renderer.py        # Markdown 渲染输出
+│   └── code_renderer.py   # 代码模式 files/ 与 files-index.json 输出
 ├── utils/
 │   └── paths.py           # 路径工具
 └── api/
@@ -67,7 +77,7 @@ backend/docrestore/
 |---|---|---|
 | 数据模型与配置 | [data-models.md](data-models.md) | `PageOCR`, `MergedDocument`, `PipelineResult`, `PipelineConfig` |
 | OCR 层 | [ocr.md](ocr.md) | `OCREngine.ocr()`, `OCREngine.ocr_batch()`, `EngineManager` |
-| 处理层 | [processing.md](processing.md) | `OCRCleaner.clean()`, `PageDeduplicator.merge_all_pages()` |
+| 处理层 | [processing.md](processing.md) | `OCRCleaner.clean()`, `PageDeduplicator.merge_all_pages()`, `group_into_files()`, `CodeDiagnosticRunner` |
 | LLM 精修层 | [llm.md](llm.md) | `LLMRefiner.refine()`, `fill_gap()`, `final_refine()` |
 | PII 脱敏 | [privacy.md](privacy.md) | `PIIRedactor.redact_for_cloud()` |
 | Pipeline 编排 | [pipeline.md](pipeline.md) | `Pipeline.process_many()`, `TaskManager` |
@@ -89,9 +99,11 @@ api/app.py
                     → ocr/paddle_ocr.py
                 → processing/cleaner.py
                 → processing/dedup.py
-                → llm/cloud.py / llm/local.py
+                → processing/ide_layout.py / code_assembly.py / code_file_grouping.py
+                → processing/code_diagnostics.py
+                → llm/cloud.py / llm/local.py / code_refine.py / code_repair.py
                 → privacy/redactor.py
-                → output/renderer.py
+                → output/renderer.py / code_renderer.py
         → models.py (所有模块共享)
 ```
 
@@ -129,6 +141,8 @@ api/app.py
     │
     → PipelineResult
 ```
+
+代码模式启用 `PipelineConfig.code.enable` 后，普通文档分段/Markdown 输出会切换为 IDE 专用链路：`PageOCR.text_lines` → IDE 布局 → 代码栏组装 → 跨页按路径分组 → 代码 LLM 精修/修复 → 诊断 → `files/` + `files-index.json` + 兼容 `document.md`。
 
 ## 5. 编程接口
 

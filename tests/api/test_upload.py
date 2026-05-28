@@ -237,3 +237,124 @@ class TestUpload:
         for f in session.upload_dir.rglob("*"):
             if f.is_file():
                 assert str(f).startswith(str(session.upload_dir))
+
+
+class TestCleanupExpiredSessions:
+    """cleanup_expired_sessions 行为：TTL + 引用保护。
+
+    回归测试对应 2026-04-23 的 bug：task.image_dir 复用 upload_dir，
+    1h 后 cleanup_expired_sessions 把目录整个 rmtree，导致前端"原图预览"
+    变烂图。修复后引用中的 upload_dir 必须被跳过。
+    """
+
+    @pytest.mark.asyncio
+    async def test_expired_session_without_reference_is_removed(
+        self,
+    ) -> None:
+        """无引用的过期 session：rmtree + 从 _sessions 弹出。"""
+        import tempfile
+        from datetime import datetime, timedelta
+        from pathlib import Path
+
+        from docrestore.api.upload import (
+            UploadSession,
+            _SESSION_TTL_SECONDS,
+            cleanup_expired_sessions,
+        )
+
+        sid = "upl_orphan"
+        upload_dir = Path(tempfile.mkdtemp(prefix="docrestore_test_"))
+        (upload_dir / "a.jpg").write_bytes(b"x")
+        _sessions[sid] = UploadSession(
+            session_id=sid,
+            upload_dir=upload_dir,
+            created_at=datetime.now() - timedelta(
+                seconds=_SESSION_TTL_SECONDS + 10,
+            ),
+        )
+
+        await cleanup_expired_sessions()  # provider=None，退回纯 TTL
+
+        assert sid not in _sessions
+        assert not upload_dir.exists()  # noqa: ASYNC240
+
+    @pytest.mark.asyncio
+    async def test_expired_session_with_reference_is_preserved(
+        self,
+    ) -> None:
+        """被任务引用的过期 session：保留目录 + 保留 _sessions 条目。
+
+        关键场景：task.image_dir = upload_dir，用户在 1h+ 后仍预览原图，
+        cleanup 必须跳过。
+        """
+        import tempfile
+        from datetime import datetime, timedelta
+        from pathlib import Path
+
+        from docrestore.api.upload import (
+            UploadSession,
+            _SESSION_TTL_SECONDS,
+            cleanup_expired_sessions,
+        )
+
+        sid = "upl_referenced"
+        upload_dir = Path(tempfile.mkdtemp(prefix="docrestore_test_"))
+        (upload_dir / "a.jpg").write_bytes(b"x")
+        _sessions[sid] = UploadSession(
+            session_id=sid,
+            upload_dir=upload_dir,
+            created_at=datetime.now() - timedelta(
+                seconds=_SESSION_TTL_SECONDS + 10,
+            ),
+        )
+
+        async def referenced() -> set[str]:
+            return {str(upload_dir)}
+
+        await cleanup_expired_sessions(referenced)
+
+        assert sid in _sessions, "被引用的 session 不应从内存弹出"
+        assert upload_dir.exists(), (  # noqa: ASYNC240
+            "被引用的 upload_dir 不应被 rmtree"
+        )
+        assert (upload_dir / "a.jpg").exists()  # noqa: ASYNC240
+
+        # 清理测试副作用
+        import shutil
+        _sessions.pop(sid, None)
+        shutil.rmtree(upload_dir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_provider_exception_defers_cleanup(self) -> None:
+        """provider 抛异常时保守跳过本轮，不误删已引用目录。"""
+        import tempfile
+        from datetime import datetime, timedelta
+        from pathlib import Path
+
+        from docrestore.api.upload import (
+            UploadSession,
+            _SESSION_TTL_SECONDS,
+            cleanup_expired_sessions,
+        )
+
+        sid = "upl_probe_fail"
+        upload_dir = Path(tempfile.mkdtemp(prefix="docrestore_test_"))
+        _sessions[sid] = UploadSession(
+            session_id=sid,
+            upload_dir=upload_dir,
+            created_at=datetime.now() - timedelta(
+                seconds=_SESSION_TTL_SECONDS + 10,
+            ),
+        )
+
+        async def broken() -> set[str]:
+            raise RuntimeError("DB unavailable")
+
+        await cleanup_expired_sessions(broken)
+
+        assert sid in _sessions
+        assert upload_dir.exists()  # noqa: ASYNC240
+
+        import shutil
+        _sessions.pop(sid, None)
+        shutil.rmtree(upload_dir, ignore_errors=True)
