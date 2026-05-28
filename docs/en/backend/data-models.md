@@ -44,27 +44,42 @@ class Region:
     cropped_path: Path | None = None   # 裁剪后保存路径（OCR 阶段填充）
 ```
 
-### 3.2 PageOCR
+### 3.2 TextLine
+
+```python
+@dataclass
+class TextLine:
+    """Single recognized line (OCR engine-provided line-level bbox + text)"""
+    bbox: tuple[int, int, int, int]  # (x1, y1, x2, y2) pixel coords
+    text: str
+    score: float
+```
+
+**Purpose**: The abstract artifact consumed by code mode, decoupled from any specific OCR provider. Any engine plugs into the IDE layout analysis chain by populating `PageOCR.text_lines` (see `processing/ide_layout.py`, `processing/code_assembly.py`).
+
+### 3.3 PageOCR
 
 ```python
 @dataclass
 class PageOCR:
-    """单张照片的 OCR 结果"""
-    image_path: Path                   # 原始照片路径
-    image_size: tuple[int, int]        # 原图尺寸 (width, height)
-    raw_text: str                      # OCR 原始输出（含 grounding 标签）
-    cleaned_text: str = ""             # 清洗后的纯文本（cleaner 填充）
+    """OCR result for a single photograph"""
+    image_path: Path                   # Original image path
+    image_size: tuple[int, int]        # Original image size (width, height)
+    raw_text: str                      # Raw OCR output (with grounding tags)
+    cleaned_text: str = ""             # Cleaned plain text (populated by the cleaner)
     regions: list[Region] = field(default_factory=list)
-    output_dir: Path | None = None     # 该页输出目录：{output_dir}/{image_stem}_OCR/（OCR 层保证填充，下游可断言非 None）
-    has_eos: bool = True               # 是否正常结束（无 eos 可能是循环输出截断）
+    output_dir: Path | None = None     # Per-page output dir: {output_dir}/{image_stem}_OCR/ (OCR layer guarantees this; downstream may assert non-None)
+    has_eos: bool = True               # Whether the output terminated normally (no eos may indicate a truncated repeating loop)
+    text_lines: list[TextLine] = field(default_factory=list)  # Line-level bbox + text + score; required by code mode, may be empty in doc mode
 ```
 
 **Lifecycle**:
-- Created by the OCR layer, which populates `image_path`, `image_size`, `raw_text`, `regions`, `output_dir`, `has_eos`
+- Created by the OCR layer, which populates `image_path`, `image_size`, `raw_text`, `regions`, `output_dir`, `has_eos`, and (for code mode) `text_lines`
 - The cleaning layer populates `cleaned_text`
 - The dedup layer reads `cleaned_text` for merging
+- Code mode consumes `text_lines` for the IDE layout chain; an OCR engine without line-level output should report a capability error rather than silently degrade
 
-### 3.3 MergeResult
+### 3.4 MergeResult
 
 ```python
 @dataclass
@@ -75,7 +90,7 @@ class MergeResult:
     similarity: float                  # 重叠区域的匹配相似度
 ```
 
-### 3.4 Gap
+### 3.5 Gap
 
 ```python
 @dataclass
@@ -88,7 +103,7 @@ class Gap:
     filled_content: str = ""           # 补充的内容
 ```
 
-### 3.5 MergedDocument
+### 3.6 MergedDocument
 
 ```python
 @dataclass
@@ -99,7 +114,7 @@ class MergedDocument:
     gaps: list[Gap] = field(default_factory=list)         # 检测到的内容缺口
 ```
 
-### 3.6 Segment
+### 3.7 Segment
 
 ```python
 @dataclass
@@ -110,7 +125,7 @@ class Segment:
     end_line: int                      # 在原文中的结束行号
 ```
 
-### 3.7 RefineContext
+### 3.8 RefineContext
 
 ```python
 @dataclass
@@ -122,7 +137,7 @@ class RefineContext:
     overlap_after: str                 # 与后段重叠的上下文（空字符串表示最后一段）
 ```
 
-### 3.8 RefinedResult
+### 3.9 RefinedResult
 
 ```python
 @dataclass
@@ -137,7 +152,7 @@ class RefinedResult:
 1. The LLM returns `finish_reason == "length"` -- flagged directly
 2. Heuristic line-count ratio: if input lines > 20 and output lines are less than 70% of input -- flagged
 
-### 3.9 RedactionRecord
+### 3.10 RedactionRecord
 
 ```python
 @dataclass
@@ -149,7 +164,7 @@ class RedactionRecord:
     count: int                         # 替换次数
 ```
 
-### 3.10 DocBoundary
+### 3.11 DocBoundary
 
 ```python
 @dataclass(frozen=True)
@@ -161,7 +176,7 @@ class DocBoundary:
 
 Produced by `LLMRefiner.detect_doc_boundaries()`; the Pipeline uses these to split the reassembled merged markdown into multiple independent documents. Returns an empty list in single-document scenarios.
 
-### 3.11 PipelineResult
+### 3.12 PipelineResult
 
 ```python
 @dataclass
@@ -179,7 +194,7 @@ class PipelineResult:
 
 In multi-document scenarios, `Pipeline.process_many()` returns `list[PipelineResult]`; each sub-document's output is located under `output_dir/{doc_dir}/`.
 
-### 3.12 TaskProgress
+### 3.13 TaskProgress
 
 ```python
 @dataclass
@@ -194,7 +209,7 @@ class TaskProgress:
 
 The actual `stage` values are determined by each Pipeline phase. Common values: `ocr` / `clean` / `merge` / `pii_redaction` / `refine` / `gap_fill` / `final_refine` / `render`; code mode additionally emits `code_layout` / `code_group` / `code_refine` / `code_render`.
 
-### 3.13 PathCandidate / IDEMeta (Code Mode)
+### 3.14 PathCandidate / IDEMeta (Code Mode)
 
 `processing/ide_meta_extract.py` parses each column's file-path candidates from the IDE title bar / tab / breadcrumb. A single image may yield multiple candidates (different sources, different confidences); Pipeline selects the highest-confidence one as the final path.
 
@@ -224,7 +239,7 @@ class IDEMeta:
     path_confidence: float = 0.0       # confidence of the selected path
 ```
 
-### 3.14 CodeColumn (Code Mode)
+### 3.15 CodeColumn (Code Mode)
 
 `processing/code_assembly.py` assembles a single image's OCR `text_lines` into code columns anchored by line numbers. `CodeLine` is one line (line number + code + indent); `CodeColumn` aggregates all lines for one column in one image.
 
@@ -245,7 +260,7 @@ class CodeColumn:
     lines: list[CodeLine]
 ```
 
-### 3.15 PageColumn (Code Mode)
+### 3.16 PageColumn (Code Mode)
 
 `processing/code_file_grouping.py` packs a `CodeColumn` (one column on one image) together with the matching `IDEMeta` (path candidates for the same column) into a `PageColumn`, the minimum unit consumed by cross-image grouping.
 
@@ -258,7 +273,7 @@ class PageColumn:
     column: CodeColumn                 # Assembled code column
 ```
 
-### 3.16 SourceFile (Code Mode)
+### 3.17 SourceFile (Code Mode)
 
 `group_into_files(all_pcs)` groups `PageColumn`s across images by path / filename, keeping only the first copy on line-number overlap; unresolved gaps are marked via `flags`. `SourceFile` is the unit consumed by code-mode LLM refinement, ocr_postfix, and rendering.
 

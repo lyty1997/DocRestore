@@ -44,7 +44,20 @@ class Region:
     cropped_path: Path | None = None   # 裁剪后保存路径（OCR 阶段填充）
 ```
 
-### 3.2 PageOCR
+### 3.2 TextLine
+
+```python
+@dataclass
+class TextLine:
+    """单行文字识别结果（OCR 引擎提供的行级 bbox + text）"""
+    bbox: tuple[int, int, int, int]  # (x1, y1, x2, y2) 像素坐标
+    text: str
+    score: float
+```
+
+**用途**：代码模式的抽象产物，与具体 OCR provider 解耦。任意 OCR 引擎只要填充 `PageOCR.text_lines`，即可接入 IDE 布局分析链路（见 `processing/ide_layout.py`、`processing/code_assembly.py`）。
+
+### 3.3 PageOCR
 
 ```python
 @dataclass
@@ -57,14 +70,16 @@ class PageOCR:
     regions: list[Region] = field(default_factory=list)
     output_dir: Path | None = None     # 该页输出目录：{output_dir}/{image_stem}_OCR/（OCR 层保证填充，下游可断言非 None）
     has_eos: bool = True               # 是否正常结束（无 eos 可能是循环输出截断）
+    text_lines: list[TextLine] = field(default_factory=list)  # 行级 bbox + text + score；代码模式必填，文档模式可空
 ```
 
 **生命周期**：
-- OCR 层创建，填充 `image_path`、`image_size`、`raw_text`、`regions`、`output_dir`、`has_eos`
+- OCR 层创建，填充 `image_path`、`image_size`、`raw_text`、`regions`、`output_dir`、`has_eos`，以及代码模式所需的 `text_lines`
 - 清洗层填充 `cleaned_text`
 - 去重层读取 `cleaned_text` 进行合并
+- 代码模式从 `text_lines` 进入 IDE 布局识别链路；OCR 引擎若不支持行级输出，应在代码模式下明确报告能力缺失而不是静默退化
 
-### 3.3 MergeResult
+### 3.4 MergeResult
 
 ```python
 @dataclass
@@ -75,7 +90,7 @@ class MergeResult:
     similarity: float                  # 重叠区域的匹配相似度
 ```
 
-### 3.4 Gap
+### 3.5 Gap
 
 ```python
 @dataclass
@@ -88,7 +103,7 @@ class Gap:
     filled_content: str = ""           # 补充的内容
 ```
 
-### 3.5 MergedDocument
+### 3.6 MergedDocument
 
 ```python
 @dataclass
@@ -99,7 +114,7 @@ class MergedDocument:
     gaps: list[Gap] = field(default_factory=list)         # 检测到的内容缺口
 ```
 
-### 3.6 Segment
+### 3.7 Segment
 
 ```python
 @dataclass
@@ -110,7 +125,7 @@ class Segment:
     end_line: int                      # 在原文中的结束行号
 ```
 
-### 3.7 RefineContext
+### 3.8 RefineContext
 
 ```python
 @dataclass
@@ -122,7 +137,7 @@ class RefineContext:
     overlap_after: str                 # 与后段重叠的上下文（空字符串表示最后一段）
 ```
 
-### 3.8 RefinedResult
+### 3.9 RefinedResult
 
 ```python
 @dataclass
@@ -137,7 +152,7 @@ class RefinedResult:
 1. LLM 返回的 `finish_reason == "length"` → 直接标记
 2. 启发式行数比例：输入行数 > 20 且输出行数少于输入的 70% → 标记
 
-### 3.9 RedactionRecord
+### 3.10 RedactionRecord
 
 ```python
 @dataclass
@@ -149,7 +164,7 @@ class RedactionRecord:
     count: int                         # 替换次数
 ```
 
-### 3.10 DocBoundary
+### 3.11 DocBoundary
 
 ```python
 @dataclass(frozen=True)
@@ -161,7 +176,7 @@ class DocBoundary:
 
 由 `LLMRefiner.detect_doc_boundaries()` 产出；Pipeline 据此把 reassemble 后的合并 markdown 拆成多份独立文档。单文档场景下返回空列表。
 
-### 3.11 PipelineResult
+### 3.12 PipelineResult
 
 ```python
 @dataclass
@@ -179,7 +194,7 @@ class PipelineResult:
 
 多文档场景下 `Pipeline.process_many()` 返回 `list[PipelineResult]`；每个子文档的产物位于 `output_dir/{doc_dir}/` 下。
 
-### 3.12 TaskProgress
+### 3.13 TaskProgress
 
 ```python
 @dataclass
@@ -194,7 +209,7 @@ class TaskProgress:
 
 实际使用的 `stage` 取值由 Pipeline 各阶段决定，常见值：`ocr` / `clean` / `merge` / `pii_redaction` / `refine` / `gap_fill` / `final_refine` / `render`；代码模式额外有 `code_layout` / `code_group` / `code_refine` / `code_render`。
 
-### 3.13 PathCandidate / IDEMeta（代码模式）
+### 3.14 PathCandidate / IDEMeta（代码模式）
 
 `processing/ide_meta_extract.py` 从 IDE 顶栏 / tab / breadcrumb 解析每个 column 的文件路径候选。一张图可能给出多个候选（不同来源、不同置信度），Pipeline 选择置信度最高者作为最终路径。
 
@@ -224,7 +239,7 @@ class IDEMeta:
     path_confidence: float = 0.0       # 已选路径的置信度
 ```
 
-### 3.14 CodeColumn（代码模式）
+### 3.15 CodeColumn（代码模式）
 
 `processing/code_assembly.py` 基于行号锚点把一张图的 OCR `text_lines` 组装为代码栏。`CodeLine` 是单行（行号 + 代码 + 缩进），`CodeColumn` 是同一图同一栏的所有 line 汇总。
 
@@ -245,7 +260,7 @@ class CodeColumn:
     lines: list[CodeLine]
 ```
 
-### 3.15 PageColumn（代码模式）
+### 3.16 PageColumn（代码模式）
 
 `processing/code_file_grouping.py` 把 `CodeColumn`（来自单张图单栏）与 `IDEMeta`（同栏文件路径候选）打包成 `PageColumn`，作为跨张归类的最小单元。
 
@@ -258,7 +273,7 @@ class PageColumn:
     column: CodeColumn                 # 代码栏组装结果
 ```
 
-### 3.16 SourceFile（代码模式）
+### 3.17 SourceFile（代码模式）
 
 `group_into_files(all_pcs)` 按 path/filename 跨张归类，行号重叠只保留首份；无法确认的 gap 用 `flags` 标记。`SourceFile` 是代码模式 LLM 精修、ocr_postfix、render 阶段的输入输出单元。
 

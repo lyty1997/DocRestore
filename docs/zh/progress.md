@@ -1,5 +1,26 @@
 # 开发进度
 
+## 2026-05-28 - 全量文档校齐：TextLine / 代码模式 OCR 契约 / 前端代码模式审查 / WYSIWYG 编辑器
+
+通读项目文档与代码后对齐近期改动遗留的几处不一致：
+
+- **zh + en `backend/data-models.md`**：新增 §3.2 `TextLine`（代码模式抽象产物，与 OCR
+  provider 解耦），§3.3 `PageOCR` 补 `text_lines` 字段与生命周期"代码模式必填"说明；
+  原 3.3~3.16 顺延为 3.4~3.17，无对外引用断裂。
+- **en `architecture.md` §6**：补 §6.2 "OCR Contract for Code Mode" 与 §6.3
+  "Current Boundaries and Future Extensions"，与 zh 同步；原 "Future Extension
+  Directions" 内容并入 §6.3。
+- **en `README.md` Core capabilities**：补 "Code mode" 一条，与 zh 6 条对齐。
+- **en `frontend/features.md`**：补 §7 "Code Mode Review"（覆盖 files-index /
+  CodeViewer / 编辑态实时诊断 / localStorage 接受记录），并把断裂的 §5.5/§6/§7 改回
+  连续编号 §5~§11，结构与 zh 完全 1:1。
+- **zh + en `frontend/features.md` 组件结构**：在 `TaskResult` 下补
+  `MarkdownWysiwygEditor`，在 `TaskDetail` 下补 `CodeViewer`。
+- **zh + en `frontend/tech-stack.md` §1 核心技术**：新增 "Markdown WYSIWYG 编辑：
+  @tiptap/react 3.22 + StarterKit + extension-image/link/placeholder/table"。
+
+工程量：zh 4 文件 + en 5 文件，无源码改动。无新增 §标号引用，文档内章节号自洽。
+
 ## 2026-05-28 - 代码模式设计文档补全（zh + en）
 
 继前一项清理后，按"先评估、再按缺口补"补全代码模式设计文档。zh 覆盖度（命中行数）：

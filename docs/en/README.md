@@ -21,11 +21,12 @@ limitations under the License.
 DocRestore restores consecutively captured document photos into formatted Markdown documents (with illustrations).
 
 Core capabilities:
-- OCR recognition (DeepSeek-OCR-2 / PaddleOCR)
+- OCR recognition (PaddleOCR / DeepSeek-OCR-2)
 - Adjacent page deduplication and merging
 - LLM refinement (cloud / local)
 - PII redaction (optional)
 - Web interface and REST API
+- Code mode: restore IDE code screenshots to source files, with source-image linkage, lightweight diagnostics, and manual edit/save
 
 ## Documentation Structure
 

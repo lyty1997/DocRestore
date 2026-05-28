@@ -149,11 +149,16 @@ docrestore/
 - LLM refinement: implement the `LLMRefiner` Protocol
 - PII redaction: implement the `PIIRedactor` interface
 
-### 6.2 Future Extension Directions
-- IDE code screenshots -> source files
+### 6.2 OCR Contract for Code Mode
+- Code mode does not bind to a specific OCR provider; the API and config layers must not force a switch to PaddleOCR.
+- Code mode only depends on the abstract artifact `PageOCR.text_lines`: any OCR engine that populates line-level `bbox/text/score` can plug into the IDE layout analysis chain.
+- When the active OCR engine does not provide `text_lines`, code mode must fail explicitly with a capability error rather than silently skip pages or fall back to doc mode.
+
+### 6.3 Current Boundaries and Future Extensions
+- Code mode already supports IDE code photos -> source files, source-image linkage, lightweight diagnostics, and single-file manual edit/save; further enhancements remain possible: function-level chunking, project-level dependency graphs, and a mature code editor component
 - PDF input support
-- Streaming parallel Pipeline implementation (AGE-16, design completed)
-- Frontend multi-document result display (AGE-33)
+- Streaming parallel Pipeline implementation (see `references/` for the historical design; the current state of `pipeline/` is authoritative)
+- Frontend multi-document result display has a basic navigation in place; end-to-end visual verification with real fixtures is still pending
 
 ## 7. Related Documentation
 
