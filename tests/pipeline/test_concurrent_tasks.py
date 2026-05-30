@@ -120,7 +120,7 @@ class TestMultiTaskLLMSemaphore:
             pipeline.set_ocr_engine(
                 _make_mock_ocr_engine({f"{tag}.jpg": f"text {tag}"}),
             )
-            # _refine_segments 走 self._refiner；
+            # 流式精修走 self._refiner；
             # set_refiner 可接受 Pipeline 自产的真 refiner
             pipeline.set_refiner(pipeline._create_refiner(cfg.llm))
             img_dir = _build_image_dir(tmp_path / tag, [f"{tag}.jpg"])

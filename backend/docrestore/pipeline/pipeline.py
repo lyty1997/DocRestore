@@ -62,21 +62,17 @@ from docrestore.llm.prompts import (
     extract_first_heading,
     parse_gaps,
 )
-from docrestore.processing.segmenter import (
-    DocumentSegmenter,
-    StreamSegmentExtractor,
-)
+from docrestore.processing.segmenter import StreamSegmentExtractor
 from docrestore.models import (
     Gap,
     MergedDocument,
     PageOCR,
     PipelineResult,
-    RedactionRecord,
     RefineContext,
     RefinedResult,
     TaskProgress,
 )
-from docrestore.ocr.base import OCREngine, WorkerBackedOCREngine
+from docrestore.ocr.base import OCREngine
 from docrestore.ocr.engine_manager import EngineManager
 from docrestore.output.renderer import Renderer
 from docrestore.pipeline.config import (
@@ -355,15 +351,6 @@ def _count_images(d: Path) -> int:
         )
     except OSError:
         return 0
-
-
-def _sort_leaves_lpt(leaves: list[Path]) -> list[Path]:
-    """按页数降序排序子目录（Longest Processing Time first）。
-
-    页数相同时按目录名稳定排序，保证可重复。OCR 阶段 gpu_lock 串行时，
-    最长子目录先 OCR，让后续目录的 OCR 与它的 LLM 阶段重叠，压缩关键路径。
-    """
-    return sorted(leaves, key=lambda p: (-_count_images(p), str(p)))
 
 
 def find_image_dirs(root: Path) -> list[Path]:
@@ -1716,226 +1703,6 @@ class Pipeline:
             org_names=tuple(org_names),
         )
 
-    async def _ocr_and_clean(
-        self,
-        images: list[Path],
-        output_dir: Path,
-        gpu_lock: asyncio.Lock | None,
-        report_fn: ReportFn,
-        ocr: OCRConfig | None = None,
-    ) -> list[PageOCR]:
-        """OCR（支持 batch 并发）→ 清洗，返回 PageOCR 列表。
-
-        - ocr_batch_size >= 2 且引擎支持 `ocr_batch` → 一次性提交所有图，
-          引擎内部按 batch_size 分块并发，vLLM 做 continuous batching。
-        - 否则回退到逐张 ocr()（保留旧路径）。
-        gpu_lock 覆盖整个 ocr_batch 调用或每次单图调用。
-        """
-        # 通过 EngineManager 获取正确引擎（按需切换）
-        if self._engine_manager is not None:
-            # 引擎初始化进度 → 通过 report_fn 推送到前端（stage="init"）
-            def _init_progress(msg: str) -> None:
-                report_fn("init", 0, 0, msg)
-
-            engine = await self._engine_manager.ensure(
-                ocr, on_progress=_init_progress,
-            )
-        elif self._ocr_engine is not None:
-            engine = self._ocr_engine  # 兼容测试注入
-        else:
-            msg = "OCR 引擎未初始化"
-            raise RuntimeError(msg)
-
-        ocr_cfg = ocr or self._config.ocr
-        batch_size = max(1, ocr_cfg.ocr_batch_size)
-        pages = await self._run_ocr(
-            engine, images, output_dir,
-            gpu_lock, report_fn, batch_size,
-        )
-
-        # 清洗 + 落盘 debug（纯 CPU/IO，与 GPU 无关，顺序处理即可）
-        profiler = current_profiler()
-        cleaner = OCRCleaner()
-        for page in pages:
-            with profiler.stage(
-                "cleaner.page", stem=page.image_path.stem,
-            ):
-                await cleaner.clean(page)
-            await self._save_debug(
-                output_dir,
-                f"{page.image_path.stem}_cleaned.md",
-                page.cleaned_text,
-            )
-
-        return pages
-
-    async def _run_ocr(
-        self,
-        engine: OCREngine,
-        images: list[Path],
-        output_dir: Path,
-        gpu_lock: asyncio.Lock | None,
-        report_fn: ReportFn,
-        batch_size: int,
-    ) -> list[PageOCR]:
-        """OCR 调度：batch_size>=2 走 ocr_batch，否则逐张 ocr。"""
-        profiler = current_profiler()
-        total = len(images)
-
-        def _on_batch_progress(done: int, tot: int) -> None:
-            report_fn(
-                "ocr", done, tot, f"OCR {done}/{tot}...",
-                message_key="progress.ocrPage",
-                message_params={
-                    "current": str(done),
-                    "total": str(tot),
-                },
-            )
-
-        # 只有 WorkerBackedOCREngine 子类才有真正的 ocr_batch 实现
-        # （避免 AsyncMock 等测试替身让 hasattr/iscoroutinefunction 误判）
-        if batch_size >= 2 and isinstance(engine, WorkerBackedOCREngine):
-            with profiler.stage(
-                "ocr.batch",
-                num_images=total,
-                batch_size=batch_size,
-            ):
-                if gpu_lock is not None:
-                    async with gpu_lock:
-                        return await engine.ocr_batch(
-                            images, output_dir, _on_batch_progress,
-                        )
-                return await engine.ocr_batch(
-                    images, output_dir, _on_batch_progress,
-                )
-
-        # Fallback：逐张 ocr()，保留旧路径
-        pages: list[PageOCR] = []
-        for i, img in enumerate(images):
-            with profiler.stage("ocr.single", stem=img.stem):
-                if gpu_lock is not None:
-                    async with gpu_lock:
-                        page = await engine.ocr(img, output_dir)
-                else:
-                    page = await engine.ocr(img, output_dir)
-            report_fn(
-                "ocr", i + 1, total,
-                f"OCR 第 {i + 1}/{total} 张...",
-                message_key="progress.ocrPage",
-                message_params={
-                    "current": str(i + 1),
-                    "total": str(total),
-                },
-            )
-            pages.append(page)
-        return pages
-
-    async def _refine_segments(
-        self,
-        merged: MergedDocument,
-        output_dir: Path,
-        llm: LLMConfig | None,
-        report_fn: ReportFn,
-    ) -> tuple[list[RefinedResult], list[Gap]]:
-        """分段 LLM 精修，返回 (精修结果列表, gap 列表)。"""
-        if llm is None:
-            llm_cfg = self._config.llm
-            refiner = self._refiner
-        else:
-            llm_cfg = llm
-            refiner = self._create_refiner(llm_cfg)
-
-        profiler = current_profiler()
-        with profiler.stage("llm.segment"):
-            segmenter = DocumentSegmenter(
-                max_chars_per_segment=llm_cfg.max_chars_per_segment,
-                overlap_lines=llm_cfg.segment_overlap_lines,
-            )
-            segments = segmenter.segment(merged.markdown)
-
-        all_gaps: list[Gap] = []
-        refined_results: list[RefinedResult] = []
-
-        for i, seg in enumerate(segments):
-            report_fn(
-                "refine", i + 1, len(segments),
-                f"精修第 {i + 1}/{len(segments)} 段...",
-                message_key="progress.refineSegment",
-                message_params={
-                    "current": str(i + 1),
-                    "total": str(len(segments)),
-                },
-            )
-            await self._save_debug(
-                output_dir, f"segments/{i}_input.md", seg.text
-            )
-
-            with profiler.stage(
-                "llm.refine_segment",
-                index=i + 1,
-                total=len(segments),
-                input_chars=len(seg.text),
-            ):
-                result = await self._refine_one_segment(
-                    refiner, seg.text, i, len(segments),
-                )
-
-            # 截断检测（合并 finish_reason=length 与行数比例启发式）：
-            # 任一判定为 truncated 则直接回退到原文 —— 截断的精修结果
-            # 会丢失后半段内容，比"未精修但信息完整"的原文更危险
-            input_lines = seg.text.count("\n") + 1
-            output_lines = result.markdown.count("\n") + 1
-            heuristic_truncated = (
-                input_lines > llm_cfg.truncation_min_input_lines
-                and output_lines
-                < input_lines * (1 - llm_cfg.truncation_ratio_threshold)
-            )
-            if result.truncated or heuristic_truncated:
-                logger.warning(
-                    "段 %d 疑似截断（输入 %d 行 → 输出 %d 行），回退到原文",
-                    i + 1, input_lines, output_lines,
-                )
-                # gaps 基于截断后内容不可信，清空；保留 truncated 标记用于 warnings
-                result = RefinedResult(
-                    markdown=seg.text,
-                    gaps=[],
-                    truncated=True,
-                )
-
-            refined_results.append(result)
-            all_gaps.extend(result.gaps)
-            await self._save_debug(
-                output_dir, f"segments/{i}_output.md", result.markdown,
-            )
-
-        return refined_results, all_gaps
-
-    @staticmethod
-    async def _refine_one_segment(
-        refiner: LLMRefiner | None,
-        text: str,
-        index: int,
-        total: int,
-    ) -> RefinedResult:
-        """精修单个分段，失败时回退到原文。"""
-        if refiner is None:
-            return RefinedResult(markdown=text)
-        ctx = RefineContext(
-            segment_index=index + 1,
-            total_segments=total,
-            overlap_before="",
-            overlap_after="",
-        )
-        try:
-            return await refiner.refine(text, ctx)
-        except Exception:
-            logger.warning(
-                "段 %d 精修失败，回退到原文",
-                index + 1,
-                exc_info=True,
-            )
-            return RefinedResult(markdown=text)
-
     @staticmethod
     async def _refine_segment_with_cache(
         refiner: LLMRefiner | None,
@@ -3070,61 +2837,3 @@ class Pipeline:
                     f"缺口（{g.after_image} 之后）未能自动补充"
                 )
         return warnings
-
-    async def _redact_pii(
-        self,
-        merged: MergedDocument,
-        llm: LLMConfig | None,
-        pii_config: PIIConfig,
-        output_dir: Path,
-        report_fn: ReportFn,
-    ) -> tuple[
-        MergedDocument,
-        list[RedactionRecord],
-        EntityLexicon | None,
-        bool,
-    ]:
-        """PII 脱敏阶段。
-
-        返回 (脱敏后文档, 脱敏记录, 实体词典, 是否阻断云端)。
-        """
-        report_fn(
-            "pii_redaction", 0, 1, "PII 脱敏...",
-            message_key="progress.piiRedaction",
-        )
-
-        redactor = PIIRedactor(pii_config)
-
-        # LLMRefiner Protocol 统一暴露 detect_pii_entities；
-        # 本地实现返回空列表，云端实现调用 LLM 做真实识别。
-        refiner = self._get_refiner(llm)
-
-        text, records, lexicon = (
-            await redactor.redact_for_cloud(
-                merged.markdown, refiner,
-            )
-        )
-
-        await self._save_debug(
-            output_dir, "after_pii_redaction.md", text,
-        )
-
-        # 判断是否需要阻断云端调用
-        cloud_blocked = False
-        needs_entity = (
-            pii_config.redact_person_name
-            or pii_config.redact_org_name
-        )
-        if (
-            needs_entity
-            and lexicon is None
-            and pii_config.block_cloud_on_detect_failure
-        ):
-            cloud_blocked = True
-
-        new_doc = MergedDocument(
-            markdown=text,
-            images=merged.images,
-            gaps=merged.gaps,
-        )
-        return new_doc, records, lexicon, cloud_blocked
