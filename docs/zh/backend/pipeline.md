@@ -353,21 +353,46 @@ render 流水。实际并发度由底层锁决定：
 
 代码模式强制把 OCR 切到 PaddleOCR `basic` pipeline（PP-OCRv5），因为只有 basic 输出行级 `text_lines`（含 bbox + 文本），代码栏组装依赖该输入；VL pipeline 不产 text_lines，启用代码模式会因无可组装内容而失败。请求级 `ocr` 覆盖经 `_ocr_config_for_code_mode` 统一改写，避免每个调用点重复判断（B4 H5）。
 
-### 10.2 链路（OCR 收齐后顺序执行）
+### 10.2 编排流程图（OCR 生产者 → 代码消费者顺序执行）
+
+与文档模式不同，代码模式的消费者**不流式**：先把 OCR 队列排空，再对收齐的页顺序跑代码链。
+OCR 生产者仍与文档模式共用（`gpu_lock` 串行），只是消费端换成 `_code_pipeline`。
 
 ```
-逐图：analyze_layout → [secondary_column_ocr*] → extract_ide_metas → assemble_columns
-                    → 组装 PageColumn[]
-跨图：group_into_files → SourceFile[]
-后处：clean_code_ocr_text（OCR 字符级保守纠错，行数保持，PII/LLM 之前）
-PII：_redact_code_headers（仅 leading comment block）
-诊断：diagnose_source_files → 预诊断结果
-LLM 精修（每个 SourceFile 独立，串行）：
-  ├─ syntax_dirty       → DiagnosticCodeRepairer.repair → 重诊断 → CodeConsistencyAuditor.audit
-  ├─ 大文件超阈值       → 跳过，标 code.repair.skipped_large_file_no_window
-  └─ 其他               → CodeLLMRefiner.refine（mode=refine|rewrite）
-渲染：render_code_files → output_dir/files/<relative-path> + files-index.json
-质量：detect_code_mode_quality → .quality_report.json
+Pipeline.process_many(code.enable=True) → PipelineResult（markdown=""）
+    │
+    ├─ ① OCR 生产者 _ocr_producer（同文档模式，gpu_lock 串行）→ page_queue
+    │     代码模式经 _ocr_config_for_code_mode 强制 PaddleOCR basic（产 text_lines）
+    │
+    └─ ② 代码消费者 _code_pipeline（排空 page_queue 后顺序执行）
+        │
+        ├─ 1. 排空队列至哨兵；pages_ref 由 producer 填充（为空 → RuntimeError）
+        │
+        ├─ 2. 逐图组装 PageColumn（progress: code_layout）
+        │     for page in pages_ref：
+        │       无 text_lines → 记 missing_line_pages 并跳过
+        │       analyze_layout(text_lines, image_size)
+        │       [rerun_column_ocr*]            # code_cfg.secondary_column_ocr=True 才跑
+        │       extract_ide_metas → [_augment_metas_with_code_context]  # context_root 提供时
+        │       assemble_columns → PageColumn[]
+        │     all_pcs 为空 → RuntimeError（区分“无行级输出” vs “无可组装代码列”）
+        │
+        ├─ 3. group_into_files(all_pcs) → SourceFile[]（progress: code_group）
+        │     3.1 clean_code_ocr_text   OCR 保守纠错（行数保持，PII/LLM 之前）
+        │     3.2 diagnose_source_files 预诊断 → pre_refine_diagnostics_by_path
+        │     3.5 PII _redact_code_headers   仅 leading comment block（regex+lexicon+自定义词）
+        │
+        ├─ 4. LLM 精修（每个 SourceFile 独立串行；catch Exception 回退原文）（progress: code_refine）
+        │     for src in sources：
+        │       ├─ syntax_dirty   → DiagnosticCodeRepairer.repair → 重诊断 → CodeConsistencyAuditor.audit
+        │       ├─ 大文件超阈值   → 跳过，标 code.repair.skipped_large_file_no_window
+        │       └─ 其他           → CodeLLMRefiner.refine（mode=refine|rewrite）
+        │
+        ├─ 5. render_code_files → output_dir/files/<相对路径> + files-index.json + document.md
+        │     detect_code_mode_quality → .quality_report.json（progress: code_render）
+        │
+        └─ PipelineResult(output_path=document.md, markdown="",
+                          warnings=["code_mode: N files, M skipped"])
 ```
 
 `*` 表示 `code_cfg.secondary_column_ocr=True` 时对识别出的 column 裁剪增强后二次 OCR（默认关）。

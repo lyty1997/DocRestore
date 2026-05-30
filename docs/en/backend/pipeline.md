@@ -358,22 +358,47 @@ When `PipelineConfig.code.enable=True`, after launching the OCR producer `_strea
 
 Code mode forces the OCR engine to PaddleOCR's `basic` pipeline (PP-OCRv5), because only `basic` produces line-level `text_lines` (with bbox + text) and code-column assembly depends on that input; the VL pipeline does not emit `text_lines`, so enabling code mode would fail with nothing to assemble. Request-level `ocr` overrides are rewritten through `_ocr_config_for_code_mode` so the check is centralized rather than duplicated at every call site (B4 H5).
 
-### 10.2 Chain (Runs Sequentially After OCR Drains)
+### 10.2 Orchestration Flow Diagram (OCR Producer → Code Consumer, Sequential)
+
+Unlike document mode, the code-mode consumer is **not streaming**: it first drains the OCR
+queue, then runs the code chain over the collected pages sequentially. The OCR producer is
+shared with document mode (serialized by `gpu_lock`); only the consumer is swapped to `_code_pipeline`.
 
 ```
-Per image: analyze_layout → [secondary_column_ocr*] → extract_ide_metas → assemble_columns
-                          → build PageColumn[]
-Cross images: group_into_files → SourceFile[]
-Post-OCR: clean_code_ocr_text (conservative character-level fixes, line-count preserved,
-          before PII / LLM)
-PII: _redact_code_headers (only the leading comment block of each file)
-Diagnose: diagnose_source_files → pre-refine diagnostics
-LLM refine (per SourceFile, sequential):
-  ├─ syntax_dirty       → DiagnosticCodeRepairer.repair → re-diagnose → CodeConsistencyAuditor.audit
-  ├─ Large file > threshold → skipped, flag code.repair.skipped_large_file_no_window
-  └─ Otherwise          → CodeLLMRefiner.refine (mode=refine|rewrite)
-Render: render_code_files → output_dir/files/<relative-path> + files-index.json
-Quality: detect_code_mode_quality → .quality_report.json
+Pipeline.process_many(code.enable=True) → PipelineResult (markdown="")
+    │
+    ├─ ① OCR producer _ocr_producer (same as document mode, gpu_lock serialized) → page_queue
+    │     code mode forces PaddleOCR basic via _ocr_config_for_code_mode (emits text_lines)
+    │
+    └─ ② Code consumer _code_pipeline (runs after page_queue drains)
+        │
+        ├─ 1. Drain queue to sentinel; pages_ref filled by producer (empty → RuntimeError)
+        │
+        ├─ 2. Assemble PageColumn per image (progress: code_layout)
+        │     for page in pages_ref:
+        │       no text_lines → record in missing_line_pages and skip
+        │       analyze_layout(text_lines, image_size)
+        │       [rerun_column_ocr*]            # only when code_cfg.secondary_column_ocr=True
+        │       extract_ide_metas → [_augment_metas_with_code_context]  # when context_root given
+        │       assemble_columns → PageColumn[]
+        │     all_pcs empty → RuntimeError ("no line-level output" vs "no assemblable code column")
+        │
+        ├─ 3. group_into_files(all_pcs) → SourceFile[] (progress: code_group)
+        │     3.1 clean_code_ocr_text   conservative OCR fixes (line-count preserved, before PII/LLM)
+        │     3.2 diagnose_source_files pre-refine diagnostics → pre_refine_diagnostics_by_path
+        │     3.5 PII _redact_code_headers   leading comment block only (regex+lexicon+custom words)
+        │
+        ├─ 4. LLM refine (per SourceFile, sequential; catch Exception → fall back to original) (progress: code_refine)
+        │     for src in sources:
+        │       ├─ syntax_dirty   → DiagnosticCodeRepairer.repair → re-diagnose → CodeConsistencyAuditor.audit
+        │       ├─ large file > threshold → skipped, flag code.repair.skipped_large_file_no_window
+        │       └─ otherwise      → CodeLLMRefiner.refine (mode=refine|rewrite)
+        │
+        ├─ 5. render_code_files → output_dir/files/<relative-path> + files-index.json + document.md
+        │     detect_code_mode_quality → .quality_report.json (progress: code_render)
+        │
+        └─ PipelineResult(output_path=document.md, markdown="",
+                          warnings=["code_mode: N files, M skipped"])
 ```
 
 `*` runs only when `code_cfg.secondary_column_ocr=True` — each detected column is cropped, enhanced, and re-OCR'd (off by default).
