@@ -27,33 +27,12 @@ class TestCodeRestoreConfig:
         assert cfg.secondary_column_ocr_scale == 2
         assert cfg.context_root == ""
 
-    def test_can_enable(self) -> None:
-        cfg = CodeRestoreConfig(enable=True)
-        assert cfg.enable is True
-
-    def test_can_enable_secondary_column_ocr(self) -> None:
-        cfg = CodeRestoreConfig(
-            enable=True,
-            secondary_column_ocr=True,
-            secondary_column_ocr_scale=3,
-        )
-        assert cfg.secondary_column_ocr is True
-        assert cfg.secondary_column_ocr_scale == 3
-
-    def test_can_set_context_root(self) -> None:
-        cfg = CodeRestoreConfig(enable=True, context_root="/repo")
-        assert cfg.context_root == "/repo"
-
 
 class TestPaddlePipelineSwitch:
     def test_default_vl(self) -> None:
         """默认 paddle_pipeline=vl（文档场景）"""
         cfg = OCRConfig()
         assert cfg.paddle_pipeline == "vl"
-
-    def test_can_set_basic(self) -> None:
-        cfg = OCRConfig(paddle_pipeline="basic")
-        assert cfg.paddle_pipeline == "basic"
 
 
 class TestCodeModeOcrDecoupling:

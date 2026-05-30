@@ -16,10 +16,7 @@
 
 from __future__ import annotations
 
-from docrestore.llm.prompts import (
-    PII_DETECT_SYSTEM_PROMPT,
-    build_pii_detect_prompt,
-)
+from docrestore.llm.prompts import build_pii_detect_prompt
 
 
 class TestPIIDetectPrompt:
@@ -31,12 +28,6 @@ class TestPIIDetectPrompt:
         assert len(messages) == 2
         assert messages[0]["role"] == "system"
         assert messages[1]["role"] == "user"
-
-    def test_system_contains_json_format(self) -> None:
-        """system prompt 包含 JSON 格式要求"""
-        assert "JSON" in PII_DETECT_SYSTEM_PROMPT
-        assert "person_names" in PII_DETECT_SYSTEM_PROMPT
-        assert "org_names" in PII_DETECT_SYSTEM_PROMPT
 
     def test_user_contains_input_text(self) -> None:
         """user message 就是待检测文本本身（无包装 / 无截断）。"""
@@ -54,7 +45,3 @@ class TestPIIDetectPrompt:
         # 占位符原样保留
         assert "[手机号]" in messages[1]["content"]
         assert "[邮箱]" in messages[1]["content"]
-
-    def test_system_mentions_ignore_placeholders(self) -> None:
-        """system prompt 提到忽略占位符"""
-        assert "占位符" in PII_DETECT_SYSTEM_PROMPT

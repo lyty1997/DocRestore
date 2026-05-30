@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import time
@@ -37,13 +36,12 @@ from docrestore.llm.circuit_breaker import (
 )
 from docrestore.llm.prompts import (
     GAP_FILL_EMPTY_MARKER,
-    build_doc_boundary_detect_prompt,
     build_final_refine_prompt,
     build_gap_fill_prompt,
     build_refine_prompt,
     parse_gaps,
 )
-from docrestore.models import DocBoundary, Gap, RefineContext, RefinedResult
+from docrestore.models import Gap, RefineContext, RefinedResult
 from docrestore.pipeline.config import LLMConfig
 from docrestore.pipeline.profiler import current_profiler
 
@@ -151,12 +149,6 @@ class LLMRefiner(Protocol):
         retry_hint 非空表示这是 A-2 选择性重跑，会在 prompt 前置一段
         "上一轮未处理好"的提示 + 具体问题描述。
         """
-        ...
-
-    async def detect_doc_boundaries(
-        self, merged_markdown: str,
-    ) -> list[DocBoundary]:
-        """检测合并文本中的文档边界。"""
         ...
 
     async def detect_pii_entities(
@@ -416,42 +408,6 @@ class BaseLLMRefiner:
 
         cleaned_md, gaps = parse_gaps(content)
         return RefinedResult(markdown=cleaned_md, gaps=gaps, truncated=truncated)
-
-    async def detect_doc_boundaries(
-        self, merged_markdown: str,
-    ) -> list[DocBoundary]:
-        """检测合并文本中的文档边界。"""
-        messages = build_doc_boundary_detect_prompt(merged_markdown)
-        kwargs = self._build_kwargs(messages)
-
-        response = await self._call_llm(kwargs)
-        if not response.choices:
-            logger.warning("文档边界检测返回空 choices，假定单文档")
-            return []
-
-        content: str = response.choices[0].message.content or "[]"
-        try:
-            data = json.loads(content.strip())
-            if not isinstance(data, list):
-                logger.warning("文档边界检测返回非数组，假定单文档")
-                return []
-
-            boundaries: list[DocBoundary] = []
-            for item in data:
-                if isinstance(item, dict):
-                    after_page = item.get("after_page", "")
-                    new_title = item.get("new_title", "")
-                    if after_page:
-                        boundaries.append(
-                            DocBoundary(
-                                after_page=str(after_page),
-                                new_title=str(new_title),
-                            )
-                        )
-            return boundaries
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.warning("文档边界检测 JSON 解析失败: %s，假定单文档", e)
-            return []
 
     async def detect_pii_entities(
         self, text: str,

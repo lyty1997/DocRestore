@@ -133,14 +133,6 @@ class RedactionRecord:
     count: int  # 替换次数
 
 
-@dataclass(frozen=True)
-class DocBoundary:
-    """LLM 检测到的文档边界"""
-
-    after_page: str  # 前一篇文档的最后一页文件名
-    new_title: str  # 新文档的标题
-
-
 @dataclass
 class PipelineResult:
     """Pipeline 处理的最终结果"""

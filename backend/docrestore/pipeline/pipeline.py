@@ -60,7 +60,6 @@ from docrestore.processing.markdown_polish import (
 from docrestore.processing.table_dedup import dedup_html_tables
 from docrestore.llm.prompts import (
     extract_first_heading,
-    parse_doc_boundaries,
     parse_gaps,
 )
 from docrestore.processing.segmenter import (
@@ -68,7 +67,6 @@ from docrestore.processing.segmenter import (
     StreamSegmentExtractor,
 )
 from docrestore.models import (
-    DocBoundary,
     Gap,
     MergedDocument,
     PageOCR,
@@ -76,7 +74,6 @@ from docrestore.models import (
     RedactionRecord,
     RefineContext,
     RefinedResult,
-    Region,
     TaskProgress,
 )
 from docrestore.ocr.base import OCREngine, WorkerBackedOCREngine
@@ -102,7 +99,6 @@ from docrestore.pipeline.rate_controller import RateController
 from docrestore.privacy.redactor import EntityLexicon, PIIRedactor
 from docrestore.processing.cleaner import OCRCleaner
 from docrestore.processing.dedup import IncrementalMerger
-from docrestore.utils.paths import sanitize_dirname
 
 
 #: 流式 Pipeline 延迟 PII 实体检测的页面阈值（见 streaming-pipeline §6）。
@@ -2528,177 +2524,6 @@ class Pipeline:
             gaps=merged_doc.gaps,
         )
 
-    def _split_by_doc_boundaries(
-        self,
-        doc: MergedDocument,
-        pages: list[PageOCR],
-    ) -> list[tuple[str, list[str], MergedDocument]]:
-        """按 DOC_BOUNDARY 标记拆分文档。
-
-        返回 list[(title, page_names, sub_document)]。
-        无边界时返回单元素列表（向下兼容单文档场景）。
-        """
-        cleaned_md, boundaries = parse_doc_boundaries(doc.markdown)
-
-        # 收集所有 page marker 的名称和位置
-        page_positions: list[tuple[str, int]] = []
-        for m in _PAGE_MARKER_RE.finditer(cleaned_md):
-            page_positions.append((m.group(1).strip(), m.start()))
-
-        all_page_names = [name for name, _ in page_positions]
-
-        if not boundaries or not page_positions:
-            title = extract_first_heading(cleaned_md)
-            return [(
-                title,
-                [p.image_path.name for p in pages],
-                MergedDocument(
-                    markdown=cleaned_md,
-                    images=doc.images,
-                    gaps=doc.gaps,
-                ),
-            )]
-
-        # 解析有效的切分点
-        split_indices, boundary_titles = self._resolve_split_points(
-            boundaries, page_positions,
-        )
-
-        if not split_indices:
-            title = extract_first_heading(cleaned_md)
-            return [(
-                title,
-                [p.image_path.name for p in pages],
-                MergedDocument(
-                    markdown=cleaned_md,
-                    images=doc.images,
-                    gaps=doc.gaps,
-                ),
-            )]
-
-        return self._build_sub_docs(
-            cleaned_md, doc.images,
-            split_indices, boundary_titles,
-            page_positions, all_page_names,
-        )
-
-    @staticmethod
-    def _resolve_split_points(
-        boundaries: list[DocBoundary],
-        page_positions: list[tuple[str, int]],
-    ) -> tuple[list[int], list[str]]:
-        """将 DOC_BOUNDARY 列表映射为 page_positions 索引。
-
-        返回 (排序后的索引列表, 对应的标题列表)。
-        找不到对应 page marker 的 boundary 忽略并记录 warning。
-        """
-        split_indices: list[int] = []
-        boundary_titles: list[str] = []
-        for b in boundaries:
-            for pi, (pname, _) in enumerate(page_positions):
-                if pname == b.after_page:
-                    split_indices.append(pi)
-                    boundary_titles.append(b.new_title)
-                    break
-            else:
-                logger.warning(
-                    "DOC_BOUNDARY after_page=%s 未找到对应 page marker，忽略",
-                    b.after_page,
-                )
-
-        if not split_indices:
-            return [], []
-
-        # 排序并去重
-        paired = sorted(
-            zip(split_indices, boundary_titles, strict=True),
-            key=lambda x: x[0],
-        )
-        return [p[0] for p in paired], [p[1] for p in paired]
-
-    @staticmethod
-    def _build_sub_docs(
-        cleaned_md: str,
-        all_images: list[Region],
-        split_indices: list[int],
-        boundary_titles: list[str],
-        page_positions: list[tuple[str, int]],
-        all_page_names: list[str],
-    ) -> list[tuple[str, list[str], MergedDocument]]:
-        """根据切分点构造子文档列表。"""
-        # 切分 markdown 文本
-        split_positions: list[int] = []
-        for si in split_indices:
-            if si + 1 < len(page_positions):
-                split_positions.append(page_positions[si + 1][1])
-
-        md_parts: list[str] = []
-        prev = 0
-        for pos in split_positions:
-            md_parts.append(cleaned_md[prev:pos])
-            prev = pos
-        md_parts.append(cleaned_md[prev:])
-
-        # 为每部分分配 page_names
-        page_name_groups: list[list[str]] = []
-        prev_pi = 0
-        for si in split_indices:
-            page_name_groups.append(all_page_names[prev_pi:si + 1])
-            prev_pi = si + 1
-        page_name_groups.append(all_page_names[prev_pi:])
-
-        # 构造标题列表：首篇从 heading 提取，后续从 boundary
-        titles = [extract_first_heading(md_parts[0])]
-        titles.extend(boundary_titles[:len(md_parts) - 1])
-
-        # 图片引用正则
-        img_ref_re = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
-
-        result: list[tuple[str, list[str], MergedDocument]] = []
-        for i, md_part in enumerate(md_parts):
-            refs = set(img_ref_re.findall(md_part))
-            sub_images = [
-                img for img in all_images
-                if img.cropped_path is not None
-                and any(
-                    str(img.cropped_path).endswith(ref)
-                    or ref in str(img.cropped_path)
-                    for ref in refs
-                )
-            ]
-
-            result.append((
-                titles[i] if i < len(titles) else f"文档_{i + 1}",
-                page_name_groups[i] if i < len(page_name_groups) else [],
-                MergedDocument(
-                    markdown=md_part,
-                    images=sub_images,
-                    gaps=[],
-                ),
-            ))
-
-        return result
-
-    @staticmethod
-    def _resolve_sub_output_dir(
-        output_dir: Path,
-        title: str,
-        index: int,
-        total: int,
-    ) -> Path:
-        """确定子文档输出目录。
-
-        单文档(total==1)：返回 output_dir 本身（兼容）。
-        多文档：返回 output_dir / sanitized_title。
-        """
-        if total <= 1:
-            return output_dir
-
-        dirname = sanitize_dirname(title)
-        if not dirname:
-            dirname = f"文档_{index + 1}"
-        return output_dir / dirname
-
     async def _maybe_fill_gaps(
         self,
         doc: MergedDocument,
@@ -3245,62 +3070,6 @@ class Pipeline:
                     f"缺口（{g.after_image} 之后）未能自动补充"
                 )
         return warnings
-
-    async def _detect_doc_boundaries(
-        self,
-        merged: MergedDocument,
-        llm: LLMConfig | None,
-        report_fn: ReportFn,
-    ) -> list[DocBoundary]:
-        """检测文档边界。"""
-        report_fn(
-            "doc_boundary", 0, 1, "检测文档边界...",
-            message_key="progress.docBoundary",
-        )
-        refiner = self._get_refiner(llm)
-        if refiner is None:
-            logger.warning("未配置 LLM refiner，跳过文档边界检测")
-            return []
-        boundaries = await refiner.detect_doc_boundaries(merged.markdown)
-        logger.info("检测到 %d 个文档边界", len(boundaries))
-        return boundaries
-
-    @staticmethod
-    def _insert_doc_boundaries(
-        merged: MergedDocument,
-        boundaries: list[DocBoundary],
-    ) -> MergedDocument:
-        """将文档边界标记插入到markdown中。"""
-        if not boundaries:
-            return merged
-
-        # 找到所有page marker位置
-        page_positions: dict[str, int] = {}
-        for m in _PAGE_MARKER_RE.finditer(merged.markdown):
-            page_name = m.group(1).strip()
-            page_positions[page_name] = m.end()
-
-        # 按位置倒序插入（避免位置偏移）
-        insertions: list[tuple[int, str]] = []
-        for b in boundaries:
-            pos = page_positions.get(b.after_page)
-            if pos is not None:
-                marker = (
-                    f'\n<!-- DOC_BOUNDARY: {{"after_page":"{b.after_page}",'
-                    f'"new_title":"{b.new_title}"}} -->\n'
-                )
-                insertions.append((pos, marker))
-
-        insertions.sort(reverse=True)
-        md = merged.markdown
-        for pos, marker in insertions:
-            md = md[:pos] + marker + md[pos:]
-
-        return MergedDocument(
-            markdown=md,
-            images=merged.images,
-            gaps=merged.gaps,
-        )
 
     async def _redact_pii(
         self,

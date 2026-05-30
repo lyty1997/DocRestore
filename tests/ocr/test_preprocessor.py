@@ -30,6 +30,12 @@ torch = pytest.importorskip(
     "torch",
     reason="torch 未安装（仅 OCR extra 需要）",
 )
+# preprocessor 模块级 import torchvision.transforms，缺它会让本文件收集报错
+# （而非 skip）；这里显式跳过，与上面的 torch 守卫保持一致。
+pytest.importorskip(
+    "torchvision",
+    reason="torchvision 未安装（仅 OCR extra 需要）",
+)
 
 from PIL import Image  # noqa: E402
 

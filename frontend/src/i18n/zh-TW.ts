@@ -132,7 +132,6 @@ export const zhTW: Record<TranslationKey, string> = {
   "progress.gapFill": "補充缺口 {current}/{total}...",
   "progress.finalRefine": "整篇文件級精修...",
   "progress.finalRefineChunks": "整篇文件級精修...（{chunks} 塊並行）",
-  "progress.docBoundary": "偵測文件邊界...",
   "progress.piiRedaction": "PII 脫敏...",
   "progress.render": "渲染輸出...",
   "progress.completed": "處理完成",

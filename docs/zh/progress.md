@@ -1,5 +1,64 @@
 # 开发进度
 
+## 2026-05-29 - 删除 DOC_BOUNDARY 文档聚合死代码 + tests 减熵审计
+
+**背景**：审计 tests/（约 1076 用例）发现一批过时/空转/冗余测试。其中 DOC_BOUNDARY 文档聚合
+那套"保留给下一版"的代码，经核实代码模式用的是独立的 `group_into_files`（页列→源文件）聚合，
+从未复用 DOC_BOUNDARY；用户确认文档模式也不再用 → 保留理由被证伪，整体清除。
+
+**删除范围**（生产零调用，调用方只在测试自我循环）：
+- 后端：`models.py::DocBoundary`；`llm/prompts.py` 4 个符号（`_DOC_BOUNDARY_PATTERN` /
+  `parse_doc_boundaries` / `DOC_BOUNDARY_DETECT_SYSTEM_PROMPT` / `build_doc_boundary_detect_prompt`）；
+  `llm/base.py` 抽象+具体 `detect_doc_boundaries`（连带删 `import json`）；`pipeline.py` 两段死簇
+  （`_split_by_doc_boundaries`/`_resolve_split_points`/`_build_sub_docs`/`_resolve_sub_output_dir`
+  与 `_detect_doc_boundaries`/`_insert_doc_boundaries`，连带删失效 import `Region`/`sanitize_dirname`）。
+- 测试：删 `test_doc_boundary.py`/`test_doc_split.py`/`test_boundary_gap_combo.py` 整文件 +
+  `test_process_tree.py::TestProcessTreeDocTitleDir` + `test_full_chain_mocked.py::TestMultiDocFullChain`；
+  手术编辑 `test_base_semaphore.py`/`test_concurrent_tasks.py`/`test_selective_rerun.py` 去掉
+  `detect_doc_boundaries` 入口/mock/fake 方法。
+- 前端：删 zh-CN/zh-TW/en 三处 `progress.docBoundary` key + 更新 progressPhase.ts 注释。
+
+**保留**（活路径仍用）：`extract_first_heading` / `_HEADING_RE`（pipeline 取文档标题）、`_PAGE_MARKER_RE`。
+
+**验证**：后端 mypy --strict + ruff 全过（mypy 仅剩 ocr torch 类型预存噪声）；前端 `npm run typecheck` 过；
+pytest pipeline+llm+processing 561 passed/67 skipped、api+其余 258 passed/10 skipped；收集 1076→1054 无报错。
+
+**遗留**：见下方"续二"。详见 memory [[test_suite_audit]] / [[doc_boundary_removed]]。
+
+### 续：清理旧集成测试 + 空转测试（同日）
+
+**A. 整删 6 个模块级 skip 的旧集成测试**（绑定旧串行 pipeline 接口，>1 月未改，功能已被单元测试接住）：
+`test_truncation.py` / `test_warnings_e2e.py` / `test_pii_integration.py` / `test_local_provider_e2e.py` /
+`test_process_tree_parallel.py` / `test_full_chain_mocked.py`。删前已 grep 确认无其它文件 import 其 helper/fixture。
+
+**B. 删空转测试**（仅删"断言不验证行为"的，保留装配契约/解耦不变量测试）：
+- `test_prompts.py`：删 2 个纯 prompt 关键词断言（`test_system_prompt_keywords` / `test_preserves_page_markers`）；
+  **保留**结构/meta 位置/prefix 顺序/no-truncation 等装配契约测试（细读后确认非空转，原审计过度标记）。
+- `test_pii_detect_prompt.py`：删 2 个关键词断言，保留 verbatim 透传契约（3 个）。
+- `test_code_restore_config.py`：删 4 个纯 pydantic 赋值回读，保留默认值守卫 + `TestCodeModeOcrDecoupling` 解耦不变量。
+- `test_router.py`：3 个 `assert not None` **强化为 isinstance**（空转→真路由覆盖），非删除。
+
+**验证**：改动文件 35 passed；pipeline+llm+privacy 342 passed/16 skipped；全量收集 1054→1010、无 collection error。
+`test_gap_fill_prompt.py` 细读后全部保留（测输入嵌入 + 条件分支 + fill_gap mock 行为，非空转）。
+
+### 续二：preprocessor 收集报错修复 + 代码模式 e2e 重复核查（同日）
+
+**① 修 `test_preprocessor.py` 收集报错**：`preprocessor.py:27` 模块级 `import torchvision`，缺它会让
+本文件 collection error（而非 skip）。补 `pytest.importorskip("torchvision")`，与已有 `importorskip("torch")`
+一致 → 缺 torchvision 时优雅 skip。
+
+**② 代码模式 e2e"三层重复"核查 → 结论：基本不是真重复**（审计再次过度标记，同 prompt 误标）：
+- `test_code_file_grouping`(单元) / `test_age8_e2e`(处理链验收) / `test_code_mode_e2e`(HTTP API 层) 是健康
+  测试金字塔，各抓不同失败面，**不删**。
+- `test_age8_compile_classify.py` 是 `_classify_errors`（OCR 噪声 vs sysroot 分类启发式）的专属单元测试，
+  `compile_check` 只间接覆盖编排层，两者不重叠，**不删**。
+- **唯一删除**：`test_age8_e2e.py`（217 行/7 用例）——fixture `tests/fixtures/age8-probe-basic` 从未提交 git、
+  自始至终一次没跑过；其产物级断言已被真在跑的 `test_code_mode_e2e.py`（自包含合成 fixture）覆盖。用户确认删除。
+
+**验证**：全量收集 1010→1003、无 collection error；全量 960 passed / 41 skipped。
+**已知预存失败（与本次无关）**：`test_deepseek_engine.py` 3 个 fail——本机缺 DeepSeek vLLM worker venv，
+其 skipif 只挡 torch/GPU 没挡 worker 路径未配（独立 test 卫生问题，文件本次未碰）。
+
 ## 2026-05-29 - 仓库整体减熵：归档老 progress / references 加 STATUS / .gitignore 收尾
 
 通读 backend / frontend / docs / scripts 全量代码与文档后，对疑似 legacy 项逐条核实，多数被

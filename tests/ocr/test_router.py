@@ -52,22 +52,28 @@ class TestCreateEngine:
     """测试引擎创建"""
 
     def test_create_paddle_ocr_engine(self) -> None:
-        """创建 PaddleOCR 引擎"""
+        """paddle-ocr/* → PaddleOCREngine 实例"""
+        from docrestore.ocr.paddle_ocr import PaddleOCREngine
+
         config = OCRConfig(model="paddle-ocr/ppocr-v4")
         engine = create_engine("paddle-ocr/ppocr-v4", config)
-        assert engine is not None
+        assert isinstance(engine, PaddleOCREngine)
 
     def test_create_deepseek_engine(self) -> None:
-        """创建 DeepSeek-OCR-2 引擎"""
+        """deepseek/* → DeepSeekOCR2Engine 实例"""
+        from docrestore.ocr.deepseek_ocr2 import DeepSeekOCR2Engine
+
         config = OCRConfig(model="deepseek/ocr-2")
         engine = create_engine("deepseek/ocr-2", config)
-        assert engine is not None
+        assert isinstance(engine, DeepSeekOCR2Engine)
 
     def test_create_deepseek_with_provider_only(self) -> None:
-        """只指定 deepseek provider，使用默认模型"""
+        """只指定 deepseek provider → 默认模型，仍是 DeepSeekOCR2Engine"""
+        from docrestore.ocr.deepseek_ocr2 import DeepSeekOCR2Engine
+
         config = OCRConfig(model="deepseek")
         engine = create_engine("deepseek", config)
-        assert engine is not None
+        assert isinstance(engine, DeepSeekOCR2Engine)
 
     def test_unsupported_provider(self) -> None:
         """不支持的 provider 抛出异常"""

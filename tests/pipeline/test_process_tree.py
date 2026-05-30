@@ -75,7 +75,7 @@ def _build_pipeline() -> Pipeline:
     mock_engine.shutdown = AsyncMock(return_value=None)
     pipeline.set_ocr_engine(mock_engine)
 
-    # refiner：refine 原样返回，detect_doc_boundaries 返回空（单文档）
+    # refiner：refine 原样返回（单文档）
     mock_refiner = MagicMock()
 
     async def _refine(text: str, _ctx: object) -> object:
@@ -89,7 +89,6 @@ def _build_pipeline() -> Pipeline:
             markdown=md, gaps=[], truncated=False,
         ),
     )
-    mock_refiner.detect_doc_boundaries = AsyncMock(return_value=[])
     mock_refiner.detect_pii_entities = AsyncMock(
         return_value=([], []),
     )
@@ -276,79 +275,3 @@ class TestProcessTreePartialFailure:
         assert by_dir["good1"].markdown != ""
         assert by_dir["good2"].error == ""
         assert by_dir["good2"].markdown != ""
-
-
-@pytest.mark.skip(
-    reason="流式 Pipeline 停用 DOC_BOUNDARY 聚合（streaming-pipeline §10）；"
-    "下一版代码照片还原恢复后再启用",
-)
-class TestProcessTreeDocTitleDir:
-    """多子目录 + 子目录内多文档 → doc_dir 叠加子目录路径 + 标题"""
-
-    @pytest.mark.asyncio
-    async def test_doc_dir_prefix_with_subdir(
-        self, tmp_path: Path,
-    ) -> None:
-        """单子目录下出现两篇文档时，doc_dir = subdir/<title>。"""
-        # 构造一个 refiner 让它返回两个 doc boundary
-        cfg = PipelineConfig(
-            llm=LLMConfig(
-                model="test-model",
-                enable_gap_fill=False,
-                enable_final_refine=False,
-            ),
-            pii=PIIConfig(enable=False),
-        )
-        pipeline = Pipeline(cfg)
-
-        mock_engine = MagicMock()
-
-        async def _ocr(image_path: Path, _out: Path) -> PageOCR:
-            # 每页返回一个标题，让 renderer 能区分
-            return PageOCR(
-                image_path=image_path,
-                image_size=(100, 100),
-                raw_text=f"# 文档 {image_path.stem}\n正文",
-                cleaned_text=f"# 文档 {image_path.stem}\n正文",
-            )
-
-        mock_engine.ocr = AsyncMock(side_effect=_ocr)
-        mock_engine.shutdown = AsyncMock(return_value=None)
-        pipeline.set_ocr_engine(mock_engine)
-
-        mock_refiner = MagicMock()
-        mock_refiner.refine = AsyncMock(
-            side_effect=lambda text, _ctx: MagicMock(
-                markdown=text, gaps=[], truncated=False,
-            ),
-        )
-        mock_refiner.final_refine = AsyncMock(
-            side_effect=lambda md: MagicMock(
-                markdown=md, gaps=[], truncated=False,
-            ),
-        )
-        # 在第一页之后切分为两篇
-        from docrestore.models import DocBoundary
-        mock_refiner.detect_doc_boundaries = AsyncMock(
-            return_value=[
-                DocBoundary(after_page="p1.jpg", new_title="第二篇"),
-            ],
-        )
-        mock_refiner.detect_pii_entities = AsyncMock(
-            return_value=([], []),
-        )
-        mock_refiner.fill_gap = AsyncMock(return_value="")
-        pipeline.set_refiner(mock_refiner)
-
-        root = tmp_path / "root"
-        root.mkdir()
-        _make_image_dir(root, "section", ["p1.jpg", "p2.jpg"])
-
-        output_dir = tmp_path / "out"
-        results = await pipeline.process_tree(root, output_dir)
-
-        # 两个子文档，doc_dir 都以 "section/" 开头
-        assert len(results) == 2
-        for r in results:
-            assert r.doc_dir.startswith("section")
-            assert r.output_path.exists()
