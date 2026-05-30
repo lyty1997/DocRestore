@@ -261,7 +261,11 @@ async def get_breaker(
     async with _registry_lock:
         breaker = _breakers.get(key)
         if breaker is None:
-            breaker = LLMCircuitBreaker(key, config)
+            # 注册表 key 用复合 (model|api_base) 保证不同中转站独立熔断；
+            # 但 breaker 内部 _model 只存纯 model 名，避免熔断告警 / 错误
+            # 消息把 "model|api_base" 当成模型名透传给用户（_subscribe_breaker
+            # 会把它塞进 progress.llmUnavailable 的 message_params["model"]）。
+            breaker = LLMCircuitBreaker(model, config)
             _breakers[key] = breaker
         return breaker
 

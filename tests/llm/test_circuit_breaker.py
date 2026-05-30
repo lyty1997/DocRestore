@@ -325,3 +325,21 @@ class TestRegistry:
         # 不传 api_base 与传空字符串等价
         b3 = await get_breaker("gpt-4o")
         assert b1 is b3
+
+    async def test_breaker_model_is_clean_name_with_api_base(self) -> None:
+        """回归：注册表 key 是复合 model|api_base，但 breaker.model 必须是
+        纯 model 名——否则熔断告警会把 "model|api_base" 当成模型名透传给
+        用户（progress.llmUnavailable 的 message_params["model"]）。
+        """
+        reset_all_breakers()
+        breaker = await get_breaker(
+            "deepseek-chat", "https://api.deepseek.com/v1",
+        )
+        assert breaker.model == "deepseek-chat"
+        assert "|" not in breaker.model
+        # OPEN 时抛出的错误也只带纯 model 名
+        for _ in range(3):
+            await breaker.on_failure()
+        with pytest.raises(LLMCircuitOpenError) as exc_info:
+            await breaker.before_call()
+        assert exc_info.value.model == "deepseek-chat"
