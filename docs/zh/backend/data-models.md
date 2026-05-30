@@ -31,7 +31,7 @@ limitations under the License.
 
 ## 3. 数据对象（models.py）
 
-按数据流顺序排列：OCR 产物 → 合并中间产物 → 合并结果 → LLM 分段/精修 → 脱敏记录 → 多文档边界 → 最终输出 → 进度。
+按数据流顺序排列：OCR 产物 → 合并中间产物 → 合并结果 → LLM 分段/精修 → 脱敏记录 → 最终输出 → 进度。
 
 ### 3.1 Region
 
@@ -164,19 +164,7 @@ class RedactionRecord:
     count: int                         # 替换次数
 ```
 
-### 3.11 DocBoundary
-
-```python
-@dataclass(frozen=True)
-class DocBoundary:
-    """LLM 检测到的文档边界（多文档聚类）"""
-    after_page: str                    # 前一篇文档的最后一页文件名
-    new_title: str                     # 新文档的标题
-```
-
-由 `LLMRefiner.detect_doc_boundaries()` 产出；Pipeline 据此把 reassemble 后的合并 markdown 拆成多份独立文档。单文档场景下返回空列表。
-
-### 3.12 PipelineResult
+### 3.11 PipelineResult
 
 ```python
 @dataclass
@@ -188,13 +176,13 @@ class PipelineResult:
     gaps: list[Gap] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)          # 流程警告信息（截断等）
     redaction_records: list[RedactionRecord] = field(default_factory=list)  # PII 脱敏统计
-    doc_title: str = ""                # 文档标题（多文档场景标识，单文档为 ""）
-    doc_dir: str = ""                  # 相对 task.output_dir 的子目录名（单文档为 ""）
+    doc_title: str = ""                # 文档标题（取首个标题，extract_first_heading）
+    doc_dir: str = ""                  # 相对 task.output_dir 的子目录名（单目录为 ""）
 ```
 
-多文档场景下 `Pipeline.process_many()` 返回 `list[PipelineResult]`；每个子文档的产物位于 `output_dir/{doc_dir}/` 下。
+`process_many()` 返回**单个** `PipelineResult`（一个目录一篇文档）。`process_tree()` 多子目录时每个叶子目录一份、聚合为 `list[PipelineResult]`，各自产物位于 `output_dir/{doc_dir}/` 下。
 
-### 3.13 TaskProgress
+### 3.12 TaskProgress
 
 ```python
 @dataclass
@@ -209,7 +197,7 @@ class TaskProgress:
 
 实际使用的 `stage` 取值由 Pipeline 各阶段决定，常见值：`ocr` / `clean` / `merge` / `pii_redaction` / `refine` / `gap_fill` / `final_refine` / `render`；代码模式额外有 `code_layout` / `code_group` / `code_refine` / `code_render`。
 
-### 3.14 PathCandidate / IDEMeta（代码模式）
+### 3.13 PathCandidate / IDEMeta（代码模式）
 
 `processing/ide_meta_extract.py` 从 IDE 顶栏 / tab / breadcrumb 解析每个 column 的文件路径候选。一张图可能给出多个候选（不同来源、不同置信度），Pipeline 选择置信度最高者作为最终路径。
 
@@ -239,7 +227,7 @@ class IDEMeta:
     path_confidence: float = 0.0       # 已选路径的置信度
 ```
 
-### 3.15 CodeColumn（代码模式）
+### 3.14 CodeColumn（代码模式）
 
 `processing/code_assembly.py` 基于行号锚点把一张图的 OCR `text_lines` 组装为代码栏。`CodeLine` 是单行（行号 + 代码 + 缩进），`CodeColumn` 是同一图同一栏的所有 line 汇总。
 
@@ -260,7 +248,7 @@ class CodeColumn:
     lines: list[CodeLine]
 ```
 
-### 3.16 PageColumn（代码模式）
+### 3.15 PageColumn（代码模式）
 
 `processing/code_file_grouping.py` 把 `CodeColumn`（来自单张图单栏）与 `IDEMeta`（同栏文件路径候选）打包成 `PageColumn`，作为跨张归类的最小单元。
 
@@ -273,7 +261,7 @@ class PageColumn:
     column: CodeColumn                 # 代码栏组装结果
 ```
 
-### 3.17 SourceFile（代码模式）
+### 3.16 SourceFile（代码模式）
 
 `group_into_files(all_pcs)` 按 path/filename 跨张归类，行号重叠只保留首份；无法确认的 gap 用 `flags` 标记。`SourceFile` 是代码模式 LLM 精修、ocr_postfix、render 阶段的输入输出单元。
 

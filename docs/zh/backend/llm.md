@@ -35,7 +35,7 @@ LLM 精修层负责对 OCR 合并去重后的 markdown 进行“格式修复 + �
 
 | 文件 | 职责 |
 |---|---|
-| `llm/base.py` | `LLMRefiner` Protocol + `BaseLLMRefiner` 公共实现（litellm 调用、refine/fill_gap/final_refine/detect_doc_boundaries/detect_pii_entities） |
+| `llm/base.py` | `LLMRefiner` Protocol + `BaseLLMRefiner` 公共实现（litellm 调用、refine/fill_gap/final_refine/detect_pii_entities） |
 | `llm/cloud.py` | `CloudLLMRefiner(BaseLLMRefiner)`（云端实现，覆盖 `detect_pii_entities` 做真实实体检测） |
 | `llm/local.py` | `LocalLLMRefiner(BaseLLMRefiner)`（本地实现，`detect_pii_entities` 继承默认空实现） |
 | `llm/prompts.py` | prompt 模板 + GAP 解析（`parse_gaps()` 等） |
@@ -66,10 +66,6 @@ class LLMRefiner(Protocol):
 
     async def final_refine(self, markdown: str) -> RefinedResult: ...
 
-    async def detect_doc_boundaries(
-        self, merged_markdown: str,
-    ) -> list[DocBoundary]: ...
-
     async def detect_pii_entities(
         self, text: str,
     ) -> tuple[list[str], list[str]]: ...
@@ -80,7 +76,6 @@ class LLMRefiner(Protocol):
 - 输出：`RefinedResult(markdown, gaps, truncated)`
   - `gaps`：从 LLM 输出中解析出的 `Gap` 列表（LLM 通过注释标记表达缺口位置）
   - `truncated`：是否疑似发生了模型输出截断（详见第 6 节）
-- `detect_doc_boundaries()`：对合并后的整篇文本检测多文档边界，返回 `list[DocBoundary]`；JSON 解析失败或返回非数组时降级为 `[]`（单文档）
 - `detect_pii_entities()`：默认空实现（本地场景数据不出本地）；`CloudLLMRefiner` 覆盖为真实 LLM 实体识别
 
 ## 4. 依赖的接口
@@ -102,7 +97,6 @@ LLM 层不依赖 OCR/processing/output 的实现细节，只消费文本并产�
 - 单段精修 `refine()`
 - Gap 补充 `fill_gap()`
 - 整篇精修 `final_refine()`
-- 文档边界检测 `detect_doc_boundaries()`
 - PII 实体检测 `detect_pii_entities()`（默认返回空列表，云端覆盖）
 - 输出截断标记（`finish_reason == "length"` → `truncated=True`）
 
@@ -129,10 +123,6 @@ class BaseLLMRefiner:
     ) -> str: ...
 
     async def final_refine(self, markdown: str) -> RefinedResult: ...
-
-    async def detect_doc_boundaries(
-        self, merged_markdown: str,
-    ) -> list[DocBoundary]: ...
 
     async def detect_pii_entities(
         self, text: str,
@@ -163,7 +153,7 @@ class BaseLLMRefiner:
 
 `LocalLLMRefiner(BaseLLMRefiner)` 为本地 provider 的实现：
 
-- 纯继承基类的 `refine()/fill_gap()/final_refine()/detect_doc_boundaries()`
+- 纯继承基类的 `refine()/fill_gap()/final_refine()`
 - `detect_pii_entities()` 继承基类空实现（本地场景数据不出本地，PII 脱敏仅依赖正则与自定义敏感词即可）
 
 ### 5.4 prompt 模板与 GAP 解析（llm/prompts.py）
@@ -186,11 +176,8 @@ class BaseLLMRefiner:
 - PII 实体检测：
   - `PII_DETECT_SYSTEM_PROMPT`
   - `build_pii_detect_prompt(text)`
-- 多文档边界：
-  - `DOC_BOUNDARY_SYSTEM_PROMPT`
-  - `build_doc_boundary_detect_prompt(merged_markdown)`
-  - `parse_doc_boundaries(llm_response) -> list[DocBoundary]`（JSON 容错）
-  - `extract_first_heading(markdown) -> str`（给无标题子文档兜底命名）
+- 标题提取：
+  - `extract_first_heading(markdown) -> str`（取首个标题作 `PipelineResult.doc_title`）
 
 GAP 标记解析：
 

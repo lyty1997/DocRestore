@@ -32,7 +32,7 @@ Pipeline 是端到端编排层，负责把各处理模块按确定顺序串起�
     `scheduler.llm_semaphore`（由 `LLMConfig.max_concurrent_requests` 构造）限流，
     上限对**所有同时运行的 pipeline** 生效。详见 §9.2。
 
-> 历史变更：早期基于坐标 / 文本特征的聚类已移除。现在多文档识别由 **LLM 文档边界检测**（`LLMRefiner.detect_doc_boundaries()`）接管，见 §10。单文档场景下返回 `list[PipelineResult]` 长度为 1。
+> 历史变更：早期基于坐标 / 文本特征的聚类、以及后来的 LLM 文档边界检测（`DOC_BOUNDARY`）均已移除（见 §9.4 历史说明）。现在「一个叶子目录 = 一篇文档」：`process_many()` 返回单个 `PipelineResult`，`process_tree()` 每个叶子目录一份、聚合为 `list[PipelineResult]`。
 
 ## 2. 文件清单
 
@@ -66,6 +66,7 @@ class Pipeline:
         gpu_lock: asyncio.Lock | None = None,
         pii: PIIConfig | None = None,
         ocr: OCRConfig | None = None,
+        code: CodeRestoreConfig | None = None,
     ) -> list[PipelineResult]: ...
 
     async def process_many(
@@ -77,7 +78,9 @@ class Pipeline:
         gpu_lock: asyncio.Lock | None = None,
         pii: PIIConfig | None = None,
         ocr: OCRConfig | None = None,
-    ) -> list[PipelineResult]: ...
+        code: CodeRestoreConfig | None = None,
+        controller: RateController | None = None,
+    ) -> PipelineResult: ...
 
     async def shutdown(self) -> None: ...
 ```
@@ -85,9 +88,9 @@ class Pipeline:
 **调用约定**：
 
 - 必须先 `initialize()` 再 `process_tree()` / `process_many()`；任务结束后调用 `shutdown()` 释放资源。
-- `process_tree()` 是统一入口：自动识别单/多子目录结构，最终委托给 `process_many()`。多子目录时用 `asyncio.gather` 并行调用（详见 §9.3）。
-- `process_many()` 返回 `list[PipelineResult]`（支持多文档输出）。
-- **多文档处理**：reassemble 之后调用 `refiner.detect_doc_boundaries()`（独立 LLM 调用，返回 `list[DocBoundary]`），按边界拆分为多个子文档。每个子文档独立 gap fill → final refine → render，产物落在 `{output_dir}/{sanitized_title}/document.md`。
+- `process_tree()` 是统一入口：自动识别单/多子目录结构，最终委托给 `process_many()`，返回 `list[PipelineResult]`（每个叶子目录一份，单目录长度为 1）。多子目录时先用最长目录 warmup cold start，再 `asyncio.gather` 并发剩余（详见 §9.3）。
+- `process_many()` **一个目录视为一篇文档**，返回**单个** `PipelineResult`；不做 LLM 文档聚合拆分。内部以「OCR 生产者 + 流式消费者」并发执行（详见 §5）。
+- `controller`：`RateController` 实例。`process_tree` 并行分支会创建一个**共享** controller 传入各 `process_many`，使冷启动采样与自适应段长在子目录间复用；为 `None` 时由 `process_many` 内部临时创建。
 - `gpu_lock`：
   - 若由 `PipelineScheduler` 传入，则可实现**跨任务** OCR/re-OCR 串行；
   - 不传时 Pipeline 将创建默认锁，只能保证**单次调用内**串行。
@@ -161,8 +164,9 @@ Pipeline 是“全知”层，直接依赖所有处理模块：
 | `ocr/engine_manager.py` | `EngineManager`（按需切换引擎，管理 ppocr-server） |
 | `ocr/base.py` | `OCREngine` Protocol |
 | `processing/cleaner.py` | `OCRCleaner` |
-| `processing/dedup.py` | `PageDeduplicator` |
-| `processing/segmenter.py` | `DocumentSegmenter` |
+| `processing/dedup.py` | `IncrementalMerger`（流式逐页增量合并） |
+| `processing/segmenter.py` | `StreamSegmentExtractor`（流式增量切段） |
+| `pipeline/rate_controller.py` | `RateController`（运行时自适应段长 L*，OCR/LLM 速率配速） |
 | `llm/base.py` | `LLMRefiner` Protocol |
 | `llm/cloud.py` | `CloudLLMRefiner`（云端实现：refine/fill_gap/final_refine + PII 实体检测） |
 | `llm/local.py` | `LocalLLMRefiner`（本地实现：refine/fill_gap/final_refine） |
@@ -170,63 +174,57 @@ Pipeline 是“全知”层，直接依赖所有处理模块：
 | `privacy/redactor.py` | `PIIRedactor`（regex 脱敏 +（可选）云端实体检测 + 替换记录） |
 | `output/renderer.py` | `Renderer`（渲染并写入最终 `document.md`） |
 
-## 5. 编排流程图
+## 5. 编排流程图（流式：OCR 生产者 ∥ 流式消费者）
+
+`process_many()`（实现 `_stream_pipeline`）启动两个并发协程，OCR 边产出、LLM 边消费，
+`RateController` 在运行时自适应段长 L*。OCR 串行受 `gpu_lock` 保护，LLM 在引擎做精修时
+GPU 已空出，OCR 可继续推进下一页——这是流式相对批量的核心收益。
 
 ```
-Pipeline.process_many(image_dir, output_dir, on_progress?, gpu_lock?) → list[PipelineResult]
+Pipeline.process_many(image_dir, output_dir, ...) → PipelineResult（单文档）
     │
     ├─ scan_images(image_dir) → list[Path]
+    ├─ controller = controller or RateController(llm)   # process_tree 传入共享实例
+    ├─ page_queue: asyncio.Queue[PageOCR | None]
+    ├─ 订阅熔断器 OPEN 事件 → llm_unavailable 进度帧（finally 里 unsubscribe）
     │
-    ├─ OCR + Clean（GPU Lock 保护）
-    │  engine = await engine_manager.ensure(ocr)  # 按需切换引擎（ocr 为完整 OCRConfig 快照 or None）
-    │  for each image:
-    │    async with gpu_lock:
-    │      page = await engine.ocr(image, output_dir)
-    │    await cleaner.clean(page)
+    ├──┬─ ① OCR 生产者 _ocr_producer（asyncio.Task）
+    │  │    for each image:
+    │  │      async with gpu_lock: page = engine.ocr(image, output_dir)
+    │  │      cleaner.clean(page) → 质量检测 → 可选 redact_regex_only 逐页脱敏
+    │  │      controller.record_ocr(dt, chars); page_queue.put(page)
+    │  │      debug: {stem}_cleaned.md
+    │  │    finally: page_queue.put(None)   # 哨兵，异常路径也必发
+    │  │
+    │  └─ ② 流式消费者 _stream_process
+    │       merger = IncrementalMerger; extractor = StreamSegmentExtractor
+    │       while (page := await page_queue.get()) is not None:
+    │         merger.add_page(page)                       # 逐页增量合并去重
+    │         if pii.enable and merger.page_count >= 5 and 未做过:
+    │           entity_lexicon = _delayed_pii_detect(...)  # 收够页再拿 LLM lexicon
+    │         _try_extract_and_refine(...)                 # 按 controller.target(L*) 切段
+    │           → extractor.try_extract → refiner.refine（LLMCache 命中跳过；失败回退原文）
+    │           → 累积 refined_results / all_gaps；controller.record_llm 反馈配速
+    │       哨兵后：extract_remaining 处理尾段
+    │       debug: merged_raw.md, rate_controller.json
     │
-    ├─ 去重合并
-    │  dedup.merge_all_pages(pages) → MergedDocument
-    │  debug: merged_raw.md
-    │
-    ├─ PII 脱敏（可选，PIIConfig.enable=True）
-    │  PIIRedactor.redact_for_cloud()
-    │    → (MergedDocument, RedactionRecord[], EntityLexicon?, cloud_blocked)
-    │  debug: after_pii.md
-    │
-    ├─ 分段精修（若未被 cloud_blocked）
-    │  segmenter.segment() → list[Segment]
-    │  for seg in segments:
-    │    refiner.refine(seg.text, context) → RefinedResult（失败回退原文）
-    │  截断检测：finish_reason=="length" 或行数比例启发式（阈值见
-    │    LLMConfig.truncation_ratio_threshold / truncation_min_input_lines）→ warnings
-    │
-    ├─ 重组
-    │  _reassemble(refined_results, merged_doc) → MergedDocument
-    │  debug: reassembled.md
-    │
-    ├─ 缺口自动补充（可选，LLMConfig.enable_gap_fill=True）
-    │  for gap in merged_doc.gaps:
-    │    re-OCR（GPU Lock 保护）：reocr_page() → re-OCR 文本
-    │    fill_gap() → 生成补全文本并插入
-    │    re-OCR 缓存 + 单 gap 异常降级
-    │  debug: after_gap_fill.md
-    │
-    ├─ 整篇精修（可选，LLMConfig.enable_final_refine=True）
-    │  final_refine(markdown) → RefinedResult（失败回退原文）
-    │  debug: final_refined.md
-    │
-    ├─ 解析残留 GAP 标记 → Gap 列表
-    │
-    ├─ 输出
-    │  renderer.render(document, output_dir) → document.md
-    │
-    └─ 汇总 warnings → PipelineResult
+    └─ ③ 终结化 _finalize_single_doc（段全部收齐后）
+         reassemble(refined_results) → doc            debug: reassembled.md
+         → gap fill（可选 enable_gap_fill）：re-OCR(gpu_lock)+fill_gap，单 gap 异常降级
+         → final refine（可选 enable_final_refine）：失败回退；重复 H2 触发一次带提示重做
+         → 程序化兜底（0 LLM 成本）：dedup_html_tables / dedup_h2_sections
+                                    / strip_code_block_line_numbers / strip_residual_ui_noise
+         → parse_gaps 收残留 GAP → renderer.render → document.md
+         → 汇总 warnings + extract_first_heading(doc_title) → PipelineResult
 ```
 
 说明：
 
-- **debug 中间产物**：用于定位 OCR/脱敏/精修/补缺阶段的差异，文件名以实现为准（例如 `merged_raw.md`、`after_pii.md` 等）。
-- **截断检测（truncation detection）**：用于识别 LLM 输出被上下文/长度截断的风险，并以 warnings 形式透出；不直接中断流程。阈值细节见 [llm.md §6](llm.md#6-截断检测truncation-detection)。
+- **生产者/消费者解耦**：`page_queue` 作背压通道，`controller.set_queue_depth(qsize)` 反馈给配速器。
+- **PII 流式策略**：OCR 生产阶段逐页 `redact_regex_only` 先行；满 `_PII_DETECT_THRESHOLD`（5）页后异步取一次 `EntityLexicon`，供 gap fill re-OCR 片段复用（详见 [privacy.md](privacy.md)）。
+- **debug 中间产物**：定位各阶段差异，文件名以实现为准（`{stem}_cleaned.md` / `merged_raw.md` / `reassembled.md` / `rate_controller.json` 等）。
+- **截断检测（truncation detection）**：识别 LLM 输出被长度截断的风险，以 warnings 透出，不中断流程。阈值见 [llm.md §6](llm.md#6-截断检测truncation-detection)。
+- **代码模式**：`CodeRestoreConfig.enable=True` 时消费者换成 `_code_pipeline`，不做流式精修（详见 §10）。
 
 ## 6. 编程接口示例
 
@@ -239,20 +237,20 @@ from docrestore.pipeline.pipeline import Pipeline
 pipeline = Pipeline(PipelineConfig())
 await pipeline.initialize()
 
-results = await pipeline.process_many(
+result = await pipeline.process_many(
     image_dir=Path("/path/to/photos"),
     output_dir=Path("/path/to/output"),
 )
-# results: list[PipelineResult]（LLM 聚类可能拆成多份）
-# results[0].output_path          — .md 文件路径
-# results[0].markdown             — markdown 内容
-# results[0].warnings             — 流程警告信息（含截断检测等）
-# results[0].redaction_records    — PII 脱敏统计（若启用）
+# result: PipelineResult（一个目录一篇文档）
+# result.output_path          — .md 文件路径
+# result.markdown             — markdown 内容
+# result.warnings             — 流程警告信息（含截断检测等）
+# result.redaction_records    — PII 脱敏统计（若启用）
 
 await pipeline.shutdown()
 ```
 
-> 多子目录输入请改用 `process_tree()`，它会按叶子目录分别调用 `process_many()` 并聚合结果。
+> 多子目录输入请改用 `process_tree()`，它按叶子目录分别调用 `process_many()` 并把各自的单个 `PipelineResult` 聚合为 `list[PipelineResult]`（每个叶子一份）。
 
 ## 7. `_reassemble()` 拼接算法
 
@@ -263,7 +261,7 @@ _reassemble(refined_results: list[RefinedResult], merged_doc: MergedDocument) �
     3. 用拼接结果替换 merged_doc.markdown，保留 images 和 gaps
 ```
 
-LLM 负责在精修时处理段间重叠的去重，`_reassemble()` 只做简单拼接。
+LLM 负责在精修时处理段间重叠的去重，`_reassemble()` 只做简单拼接。流式版在所有段从队列消费完毕后，于 `_finalize_single_doc()` 内调用本算法（再接 gap fill → final refine → 程序化兜底 → render）。
 
 ## 8. 错误处理策略
 
@@ -312,7 +310,7 @@ LLM 负责在精修时处理段间重叠的去重，`_reassemble()` 只做简单
 - `PipelineScheduler.llm_semaphore` 由 `LLMConfig.max_concurrent_requests`（默认 3）
   构造，跨所有 pipeline 实例共享。
 - `BaseLLMRefiner._call_llm()` 是所有 LLM 调用的统一出口：`refine` / `fill_gap` /
-  `final_refine` / `detect_doc_boundaries` / `detect_pii_entities` 全部经此限流。
+  `final_refine` / `detect_pii_entities` 全部经此限流。
 - 注入路径：`api/app.py` lifespan 创建 Scheduler 后，
   `pipeline.set_llm_semaphore(scheduler.llm_semaphore)` → `Pipeline._create_refiner()`
   构造 `CloudLLMRefiner(cfg, semaphore=self._llm_semaphore)`。
@@ -339,52 +337,23 @@ render 流水。实际并发度由底层锁决定：
 避免"做 LLM 时 GPU 空闲"。任一子目录抛异常即 `asyncio.gather` 整体 fail-fast，
 上层 `TaskManager` 将任务标记 FAILED（与串行语义一致）。
 
-> 测试：`tests/pipeline/test_process_tree_parallel.py` 观察时间轴，断言
-> subdir 2 的 OCR 开始时间早于 subdir 1 的 refine 结束时间。
+> 测试：`tests/pipeline/test_process_tree.py` 覆盖单/多子目录入口与并行分支。
 
 ### 9.4 无组级并发
 
 聚类已移除，所有图片视为同一份文档，因此不存在”组级并发”或”按组分裂任务”的调度逻辑。所有并发策略以”任务级”为边界。
 
-## 10. 多文档处理（LLM 文档聚类）
+> **历史**：曾有「LLM 文档聚类」设计——精修阶段检测 `DOC_BOUNDARY` 标记把合并文本拆成多个子文档。该路径连同 `parse_doc_boundaries` / `detect_doc_boundaries` / `DocBoundary` 等符号已于 2026-05-29 彻底删除（代码模式用独立的 `group_into_files` 聚合，从未复用 DOC_BOUNDARY；文档模式也不再用）。现在「一个叶子目录 = 一篇文档」，`process_many()` 只返回单个 `PipelineResult`。设计反转由来见 [references/streaming-pipeline.md](references/streaming-pipeline.md)。
 
-### 10.1 概述
+## 10. 代码模式编排（`CodeRestoreConfig.enable=True`）
 
-通过 LLM 精修阶段检测文档边界标记 `DOC_BOUNDARY`，自动拆分为多个子文档，每个独立输出。
+`PipelineConfig.code.enable=True` 时，`_stream_pipeline` 在启动 OCR 生产者后按 `code_cfg.enable` 二选一：消费者换成代码模式专用分支 `_code_pipeline`（而非 `_stream_process`），跳过普通模式的流式精修 / 增量合并 / 切段链路。
 
-### 10.2 工作流程
-
-```
-OCR → 清洗 → 去重合并 → PII 脱敏 → 分段精修（检测 DOC_BOUNDARY）
-    → 拆分子文档 → 每个子文档独立：gap fill → final refine → render
-```
-
-### 10.3 文档边界检测
-
-- 分段精修 + reassemble 完成后，Pipeline 调用 `refiner.detect_doc_boundaries(merged_markdown)`
-- LLM 返回 JSON 数组：`[{"after_page": "page12.jpg", "new_title": "第二篇标题"}, ...]`
-- `llm/prompts.py::parse_doc_boundaries()` 做 JSON 容错：解析失败或非数组时降级为 `[]`（单文档）
-- 无标题子文档由 `extract_first_heading()` 兜底命名；目录名通过 `utils/paths.sanitize_dirname()` + `dedupe_dirnames()` 去非法字符并去重
-
-### 10.4 输出结构
-
-- 单文档：`{output_dir}/document.md`
-- 多文档：`{output_dir}/{sanitized_title}/document.md`（`PipelineResult.doc_dir` 记录相对子目录名，`doc_title` 记录原始标题）
-
-### 10.5 API 兼容性
-
-- `Pipeline.process_many()` / `process_tree()` 一律返回 `list[PipelineResult]`
-- `Task.results: list[PipelineResult]`；API `GET /tasks/{id}/results` 返回多文档列表，`GET /tasks/{id}/result` 返回列表首项（兼容）
-
-## 11. 代码模式编排（`CodeRestoreConfig.enable=True`）
-
-`PipelineConfig.code.enable=True` 时，Pipeline 在 OCR 阶段后切到代码模式专用分支 `_code_pipeline`，跳过普通模式的流式精修 / dedup / segmenter 链路。入口分支位于 `Pipeline._stream_and_collect`，按 `code_cfg.enable` 二选一调用 `_code_pipeline` 或 `_stream_process`。
-
-### 11.1 OCR 引擎强制 basic
+### 10.1 OCR 引擎强制 basic
 
 代码模式强制把 OCR 切到 PaddleOCR `basic` pipeline（PP-OCRv5），因为只有 basic 输出行级 `text_lines`（含 bbox + 文本），代码栏组装依赖该输入；VL pipeline 不产 text_lines，启用代码模式会因无可组装内容而失败。请求级 `ocr` 覆盖经 `_ocr_config_for_code_mode` 统一改写，避免每个调用点重复判断（B4 H5）。
 
-### 11.2 链路（OCR 收齐后顺序执行）
+### 10.2 链路（OCR 收齐后顺序执行）
 
 ```
 逐图：analyze_layout → [secondary_column_ocr*] → extract_ide_metas → assemble_columns
@@ -403,7 +372,7 @@ LLM 精修（每个 SourceFile 独立，串行）：
 
 `*` 表示 `code_cfg.secondary_column_ocr=True` 时对识别出的 column 裁剪增强后二次 OCR（默认关）。
 
-### 11.3 错误处理
+### 10.3 错误处理
 
 - **整图无 text_lines**：跳过该页并记入 `missing_line_pages`，列表用于上报；其他页继续。
 - **所有页都无 column**：`raise RuntimeError("代码模式：OCR producer 未产出任何页")`，由上层任务捕获写错误结果。
@@ -411,20 +380,20 @@ LLM 精修（每个 SourceFile 独立，串行）：
 - **PII 失败**（云端实体检测异常）：与普通模式一致，单 SourceFile 降级跳过。
 - **诊断器外部工具缺失**：`CodeDiagnosticRunner` 降级为 `tool_unavailable`，不让任务失败（见 [processing.md §3.5](processing.md)）。
 
-### 11.4 并发与资源
+### 10.4 并发与资源
 
 - OCR producer 与 `_code_pipeline` 通过 `page_queue` 解耦，OCR 受 `gpu_lock` 串行；`_code_pipeline` 在 OCR 队列排空后顺序执行后续阶段。
 - LLM 精修/repair/audit **逐文件串行**，不并发（避免对 LLM provider 同时打多个长上下文请求触发限流；当前 SourceFile 数量通常 ≤ 几十，串行可控）。
 - 阻塞 IO（`diagnose_source_files`、`build_repair_contexts` 的 rglob/read_text）统一用 `asyncio.to_thread` 移出事件循环（B7 C12 / S3）。
 
-### 11.5 输出与兼容
+### 10.5 输出与兼容
 
 `_code_pipeline` 返回 `PipelineResult(output_path=document.md, markdown="")`：
 - `output_path` 指向 `output_dir/document.md`（占位，兼容旧 UI 路由）
 - `markdown` 为空，前端通过 `files-index.json` 单独渲染代码模式审查视图（见 [frontend/features.md §7](../frontend/features.md)）
 - `warnings` 写一条 `code_mode: N files, M skipped` 摘要
 
-## 12. 相关文档
+## 11. 相关文档
 
 - [数据模型](data-models.md)
 - [OCR 层](ocr.md)

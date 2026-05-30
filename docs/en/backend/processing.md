@@ -25,8 +25,8 @@ Post-process OCR output. The plain document mode covers intra-page text cleaning
 | File | Responsibility |
 |---|---|
 | `processing/cleaner.py` | OCR output cleaning (intra-page deduplication, garbled text removal, whitespace normalization) |
-| `processing/dedup.py` | Adjacent-page overlap detection and merging, plus cross-page frequency filtering via `strip_repeated_lines()` |
-| `processing/segmenter.py` | Document segmenter (splits at semantic boundaries with line-level context) |
+| `processing/dedup.py` | Adjacent-page overlap detection and merging: `IncrementalMerger` (streaming per-page incremental) + `PageDeduplicator` (batch reference implementation) |
+| `processing/segmenter.py` | Document segmentation: `StreamSegmentExtractor` (streaming incremental extraction, production path) + `DocumentSegmenter` (batch full split, reference implementation) |
 | `processing/ide_layout.py` | IDE screenshot layout analysis, producing code-region, sidebar, and meta-info candidates |
 | `processing/code_assembly.py` | Assemble OCR `text_lines` into code columns using line-number anchors |
 | `processing/code_column_ocr.py` | Crop / enhance the detected code column and re-run OCR (`secondary_column_ocr`, off by default) |
@@ -60,25 +60,29 @@ class OCRCleaner:
 - Async interface: internal file I/O uses `aiofiles` to read `result.mmd`
 - Based on `result.mmd` (grounding has already been processed inside the OCR engine)
 
-### 3.2 strip_repeated_lines (module function in processing/dedup.py)
+### 3.2 IncrementalMerger / PageDeduplicator (processing/dedup.py)
+
+The streaming production path uses **`IncrementalMerger`**: the consumer calls `add_page(page)` for each
+page it receives to roll the incremental merge forward, internally reusing `merge_two_pages`'
+suffix-prefix anchored deduplication, append-only without rewriting already-merged text.
+`PageDeduplicator.merge_all_pages()` is the equivalent **batch reference implementation**, kept as the
+consistency test baseline for `IncrementalMerger` (`tests/processing/test_incremental_merger.py` asserts
+the two outputs are character-for-character equal).
 
 ```python
-def strip_repeated_lines(pages: list[PageOCR], config: DedupConfig) -> None:
-    """跨页频率过滤：移除在多数页面中重复出现的侧栏噪声行。
+class IncrementalMerger:
+    """流式逐页增量合并去重。"""
 
-    原地修改每页 cleaned_text。仅在总页数 ≥ config.repeated_line_min_pages 时启用；
-    行在多少个不同页面出现达到 threshold_count = max(1, total × repeated_line_threshold)
-    即视为噪声；实际移除时仅移除 ≥ repeated_line_min_block 的连续噪声块（防误删孤立行）。
-    """
-```
+    def __init__(self, config: DedupConfig) -> None: ...
+    def add_page(self, page: PageOCR) -> None: ...   # 逐页喂入
+    def get_markdown(self) -> str: ...               # 当前已合并文本
+    def get_all_images(self) -> list[Region]: ...
+    @property
+    def page_count(self) -> int: ...
 
-`PageDeduplicator.merge_all_pages()` calls this function internally to perform text-level sidebar removal (`enable_column_filter` is primarily for grounding-coordinate-level filtering; the two mechanisms work independently).
 
-### 3.3 PageDeduplicator (processing/dedup.py)
-
-```python
 class PageDeduplicator:
-    """相邻页重叠检测与合并"""
+    """批量相邻页重叠检测与合并（参考实现 / 测试基准）"""
 
     def __init__(self, config: DedupConfig) -> None: ...
 
@@ -118,37 +122,42 @@ class PageDeduplicator:
 - Image references are rewritten from `![](images/N.jpg)` to `![]({stem}_OCR/images/N.jpg)`
 - Overlapping regions are detected and deduplicated (only one copy is kept); no extra markers are inserted
 
-### 3.4 DocumentSegmenter (processing/segmenter.py)
+### 3.3 Document Segmentation (processing/segmenter.py)
 
-When the document is long, Pipeline segments it first and sends each segment to LLM refinement individually. The segmenter does not depend on an LLM; it is pure text processing.
+The streaming production path uses **`StreamSegmentExtractor`**: it cuts one segment at a time from the
+growing markdown (`try_extract`); the segment length `max_chars` is passed in on each call (the
+runtime-adaptive L* from `RateController`), and it only does backward overlap (future text is unknown in
+streaming). `DocumentSegmenter` is the non-streaming full-split variant (splits the entire text at once),
+kept as a reference implementation.
 
-Core behavior of the segmenter:
-
-- **Splitting strategy**: Heading-first splitting (`#`/`##`/`###`, etc.) -> secondary splitting at blank lines if a segment is too long -> merging small fragments to avoid fragmentation.
-- **Context strategy**: To improve cross-segment coherence, the segmenter prepends/appends lines from adjacent segments (`overlap_lines`) **directly into `Segment.text`** (before/after).
-  - This introduces "visible duplication," which the LLM is expected to remove during refinement.
-  - Pipeline's `_reassemble()` phase simply joins each segment's `markdown` with `"\n".join(...)` -- it does not rely on any special markers.
+Their shared splitting logic: heading-first splitting (`#`/`##`/`###`) -> secondary splitting at blank
+lines if too long -> merging small fragments. Overlap is embedded into the segment text as context
+(introducing "visible duplication," removed by the LLM during refinement); Pipeline's `_reassemble()`
+phase only joins each segment's `markdown` with `"\n".join(...)` and does not rely on any special markers.
 
 ```python
-class DocumentSegmenter:
-    def __init__(
-        self,
-        max_chars_per_segment: int = 12000,
-        overlap_lines: int = 5,
-    ) -> None:
+class StreamSegmentExtractor:
+    def __init__(self, overlap_lines: int = 5) -> None: ...
+
+    def try_extract(
+        self, full_text: str, offset: int, max_chars: int,
+    ) -> tuple[str, int] | None:
+        """文本够长则切出一段，返回 (段文本, 新 offset)；不够长返回 None。"""
         ...
 
-    def segment(self, markdown: str) -> list[Segment]:
-        """标题切分 → 空行二次切分 → 合并小块 → 拼入上下文行。"""
+    def extract_remaining(
+        self, full_text: str, offset: int,
+    ) -> tuple[str, int]:
+        """哨兵后处理尾段（剩余全部文本）。"""
         ...
 ```
 
 **Calling conventions**:
-- Input: the complete markdown text after merging and deduplication
-- Output: `list[Segment]`, each containing `text`/`start_line`/`end_line`
-- Context (`overlap_before`/`overlap_after`) is constructed separately by Pipeline in `RefineContext`; `Segment` itself only contains text and line numbers
+- Input: the current merged complete markdown + the last `offset` cut to + this call's segment-length cap
+- Output: `(seg_text, new_offset)` or `None` (insufficient text, wait for more pages)
+- Context (`overlap_before`/`overlap_after`) is constructed separately by Pipeline in `RefineContext`
 
-### 3.5 Code Mode Processing Chain
+### 3.4 Code Mode Processing Chain
 
 When `PipelineConfig.code.enable` is on, Pipeline no longer feeds OCR text into the plain markdown segmenter; instead it consumes `PageOCR.text_lines` through the IDE-specific chain:
 
@@ -161,7 +170,7 @@ When `PipelineConfig.code.enable` is on, Pipeline no longer feeds OCR text into 
 
 `CodeDiagnosticRunner` currently supports standard-library parsing for Python / JSON / TOML / XML / YAML, and external-tool checks for JavaScript / TypeScript / C / C++ / Go / Rust. The diagnoser masks already-located syntax errors in a temporary copy, generates stub headers for missing includes and re-runs to surface subsequent independent errors, and scans the code region for CJK / full-width OCR noise.
 
-### 3.6 Code Mode Design Rationale (v1 → v2 → v3)
+### 3.5 Code Mode Design Rationale (v1 → v2 → v3)
 
 > This section condenses the key design reversal and multi-dataset validation behind IDE code-mode layout detection, so maintainers understand why line-number anchors are used. Detailed per-dataset statistics were retired with the historical design docs and can be retrieved from git history.
 
@@ -232,8 +241,9 @@ PageOCR(raw_text, cleaned_text="")
     ▼ OCRCleaner.clean()  [async]
 PageOCR(raw_text, cleaned_text="cleaned text")
     │
-    ▼ PageDeduplicator.merge_all_pages([page1, page2, ...])
-MergedDocument(markdown="complete merged/deduped text", images=[...], gaps=[])
+    ▼ IncrementalMerger.add_page(page)  per-page feed (streaming production path)
+    ▼ merger.get_markdown()  →  current merged/deduped text
+(batch equivalent: PageDeduplicator.merge_all_pages([...]) → MergedDocument, as test baseline)
     markdown contains:
     - <!-- page: {image_filename} --> page boundary markers
     - ![](page1_OCR/images/0.jpg) rewritten image references

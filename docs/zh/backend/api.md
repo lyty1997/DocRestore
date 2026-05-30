@@ -131,19 +131,19 @@ class DiagnoseCodeFileRequest(BaseModel):
     content: str
 ```
 
-**任务结果（多文档兼容）**：
+**任务结果（多子目录兼容）**：
 
 ```python
 class TaskResultResponse(BaseModel):
     task_id: str
     output_path: str
     markdown: str
-    doc_title: str = ""                    # 多文档标识（单文档为空）
+    doc_title: str = ""                    # 文档标题（取首个标题）
     doc_dir: str = ""                      # 相对 task.output_dir 的子目录名
 
 class TaskResultsResponse(BaseModel):
     task_id: str
-    results: list[TaskResultResponse]      # LLM 文档边界检测可能产生 >1 项
+    results: list[TaskResultResponse]      # process_tree 多子目录可产生 >1 项
 ```
 
 **任务列表（持久化，分页）**：

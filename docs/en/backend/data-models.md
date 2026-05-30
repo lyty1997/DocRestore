@@ -31,7 +31,7 @@ Defines all data structures and configuration items passed between modules, serv
 
 ## 3. Data Objects (models.py)
 
-Listed in data-flow order: OCR output -> merge intermediates -> merge result -> LLM segmentation/refinement -> redaction records -> multi-document boundaries -> final output -> progress.
+Listed in data-flow order: OCR output -> merge intermediates -> merge result -> LLM segmentation/refinement -> redaction records -> final output -> progress.
 
 ### 3.1 Region
 
@@ -164,19 +164,7 @@ class RedactionRecord:
     count: int                         # 替换次数
 ```
 
-### 3.11 DocBoundary
-
-```python
-@dataclass(frozen=True)
-class DocBoundary:
-    """LLM 检测到的文档边界（多文档聚类）"""
-    after_page: str                    # 前一篇文档的最后一页文件名
-    new_title: str                     # 新文档的标题
-```
-
-Produced by `LLMRefiner.detect_doc_boundaries()`; the Pipeline uses these to split the reassembled merged markdown into multiple independent documents. Returns an empty list in single-document scenarios.
-
-### 3.12 PipelineResult
+### 3.11 PipelineResult
 
 ```python
 @dataclass
@@ -188,13 +176,13 @@ class PipelineResult:
     gaps: list[Gap] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)          # 流程警告信息（截断等）
     redaction_records: list[RedactionRecord] = field(default_factory=list)  # PII 脱敏统计
-    doc_title: str = ""                # 文档标题（多文档场景标识，单文档为 ""）
-    doc_dir: str = ""                  # 相对 task.output_dir 的子目录名（单文档为 ""）
+    doc_title: str = ""                # 文档标题（取首个标题，extract_first_heading）
+    doc_dir: str = ""                  # 相对 task.output_dir 的子目录名（单目录为 ""）
 ```
 
-In multi-document scenarios, `Pipeline.process_many()` returns `list[PipelineResult]`; each sub-document's output is located under `output_dir/{doc_dir}/`.
+`process_many()` returns a **single** `PipelineResult` (one directory is one document). For multiple subdirectories, `process_tree()` produces one per leaf directory and aggregates them into a `list[PipelineResult]`, with each output located under `output_dir/{doc_dir}/`.
 
-### 3.13 TaskProgress
+### 3.12 TaskProgress
 
 ```python
 @dataclass
@@ -209,7 +197,7 @@ class TaskProgress:
 
 The actual `stage` values are determined by each Pipeline phase. Common values: `ocr` / `clean` / `merge` / `pii_redaction` / `refine` / `gap_fill` / `final_refine` / `render`; code mode additionally emits `code_layout` / `code_group` / `code_refine` / `code_render`.
 
-### 3.14 PathCandidate / IDEMeta (Code Mode)
+### 3.13 PathCandidate / IDEMeta (Code Mode)
 
 `processing/ide_meta_extract.py` parses each column's file-path candidates from the IDE title bar / tab / breadcrumb. A single image may yield multiple candidates (different sources, different confidences); Pipeline selects the highest-confidence one as the final path.
 
@@ -239,7 +227,7 @@ class IDEMeta:
     path_confidence: float = 0.0       # confidence of the selected path
 ```
 
-### 3.15 CodeColumn (Code Mode)
+### 3.14 CodeColumn (Code Mode)
 
 `processing/code_assembly.py` assembles a single image's OCR `text_lines` into code columns anchored by line numbers. `CodeLine` is one line (line number + code + indent); `CodeColumn` aggregates all lines for one column in one image.
 
@@ -260,7 +248,7 @@ class CodeColumn:
     lines: list[CodeLine]
 ```
 
-### 3.16 PageColumn (Code Mode)
+### 3.15 PageColumn (Code Mode)
 
 `processing/code_file_grouping.py` packs a `CodeColumn` (one column on one image) together with the matching `IDEMeta` (path candidates for the same column) into a `PageColumn`, the minimum unit consumed by cross-image grouping.
 
@@ -273,7 +261,7 @@ class PageColumn:
     column: CodeColumn                 # Assembled code column
 ```
 
-### 3.17 SourceFile (Code Mode)
+### 3.16 SourceFile (Code Mode)
 
 `group_into_files(all_pcs)` groups `PageColumn`s across images by path / filename, keeping only the first copy on line-number overlap; unresolved gaps are marked via `flags`. `SourceFile` is the unit consumed by code-mode LLM refinement, ocr_postfix, and rendering.
 

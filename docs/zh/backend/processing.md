@@ -25,8 +25,8 @@ limitations under the License.
 | 文件 | 职责 |
 |---|---|
 | `processing/cleaner.py` | OCR 输出清洗（页内去重、乱码移除、空行规范化） |
-| `processing/dedup.py` | 相邻页重叠检测与合并，附跨页频率过滤 `strip_repeated_lines()` |
-| `processing/segmenter.py` | 文档分段器（按语义边界切分，附加行级上下文） |
+| `processing/dedup.py` | 相邻页重叠检测与合并：`IncrementalMerger`（流式逐页增量）+ `PageDeduplicator`（批量参考实现） |
+| `processing/segmenter.py` | 文档分段：`StreamSegmentExtractor`（流式增量切段，生产路径）+ `DocumentSegmenter`（批量全切，参考实现） |
 | `processing/ide_layout.py` | IDE 截图布局识别，产出代码区、侧栏和元信息候选 |
 | `processing/code_assembly.py` | 基于行号锚点把 OCR text_lines 组装为代码栏 |
 | `processing/code_column_ocr.py` | 对识别出的代码 column 裁剪增强后二次 OCR（`secondary_column_ocr`，默认关） |
@@ -60,25 +60,27 @@ class OCRCleaner:
 - 异步接口：内部文件 IO 使用 `aiofiles` 读取 `result.mmd`
 - 基于 `result.mmd`（grounding 已在 OCR 引擎内部处理完毕）
 
-### 3.2 strip_repeated_lines（processing/dedup.py 模块函数）
+### 3.2 IncrementalMerger / PageDeduplicator（processing/dedup.py）
+
+流式生产路径用 **`IncrementalMerger`**：消费者每收到一页就 `add_page(page)` 增量滚动合并，
+内部复用 `merge_two_pages` 的 suffix-prefix 锚定去重，append-only 不回改已合并文本。
+`PageDeduplicator.merge_all_pages()` 是等价的**批量参考实现**，保留作 `IncrementalMerger`
+的一致性测试基准（`tests/processing/test_incremental_merger.py` 断言两者输出逐字符相等）。
 
 ```python
-def strip_repeated_lines(pages: list[PageOCR], config: DedupConfig) -> None:
-    """跨页频率过滤：移除在多数页面中重复出现的侧栏噪声行。
+class IncrementalMerger:
+    """流式逐页增量合并去重。"""
 
-    原地修改每页 cleaned_text。仅在总页数 ≥ config.repeated_line_min_pages 时启用；
-    行在多少个不同页面出现达到 threshold_count = max(1, total × repeated_line_threshold)
-    即视为噪声；实际移除时仅移除 ≥ repeated_line_min_block 的连续噪声块（防误删孤立行）。
-    """
-```
+    def __init__(self, config: DedupConfig) -> None: ...
+    def add_page(self, page: PageOCR) -> None: ...   # 逐页喂入
+    def get_markdown(self) -> str: ...               # 当前已合并文本
+    def get_all_images(self) -> list[Region]: ...
+    @property
+    def page_count(self) -> int: ...
 
-`PageDeduplicator.merge_all_pages()` 内部会调用本函数做文本级侧栏去除（`enable_column_filter` 主要用于 grounding 坐标级过滤，两者独立生效）。
 
-### 3.3 PageDeduplicator（processing/dedup.py）
-
-```python
 class PageDeduplicator:
-    """相邻页重叠检测与合并"""
+    """批量相邻页重叠检测与合并（参考实现 / 测试基准）"""
 
     def __init__(self, config: DedupConfig) -> None: ...
 
@@ -118,37 +120,39 @@ class PageDeduplicator:
 - 图片引用从 `![](images/N.jpg)` 重写为 `![]({stem}_OCR/images/N.jpg)`
 - 重叠区域检测后只保留一份，不插入额外标记
 
-### 3.4 DocumentSegmenter（processing/segmenter.py）
+### 3.3 文档分段（processing/segmenter.py）
 
-当文档较长时，Pipeline 会先分段再逐段送入 LLM 精修。分段器不依赖 LLM，纯文本处理。
+流式生产路径用 **`StreamSegmentExtractor`**：从增长中的 markdown 一次切出一段（`try_extract`），
+段长 `max_chars` 每次调用传入（由 `RateController` 运行时自适应 L*），只做 backward overlap
+（流式下未来文本未知）。`DocumentSegmenter` 是非流式的全切变体（一次切完全文），保留作参考实现。
 
-分段器的核心行为：
-
-- **切分策略**：标题优先切分（`#`/`##`/`###` 等） → 过长则在空行处二次切分 → 合并过小片段避免碎片化。
-- **上下文策略**：为提升跨段连贯性，分段器会把相邻段的部分行（`overlap_lines`）作为上下文**直接拼进 `Segment.text`**（前置/后置）。
-  - 这会引入“可见重复”，期望由 LLM 在精修时删除明显重复。
-  - Pipeline 在 `_reassemble()` 阶段仅对各段 `markdown` 做简单 `"\n".join(...)` 重组，不再依赖任何特殊标记。
+两者共同的切分逻辑：标题优先切分（`#`/`##`/`###`） → 过长则空行二次切分 → 合并过小片段。
+overlap 作为上下文拼进段文本（引入“可见重复”，由 LLM 精修时删除）；Pipeline 在 `_reassemble()`
+阶段仅对各段 `markdown` 做 `"\n".join(...)` 重组，不依赖任何特殊标记。
 
 ```python
-class DocumentSegmenter:
-    def __init__(
-        self,
-        max_chars_per_segment: int = 12000,
-        overlap_lines: int = 5,
-    ) -> None:
+class StreamSegmentExtractor:
+    def __init__(self, overlap_lines: int = 5) -> None: ...
+
+    def try_extract(
+        self, full_text: str, offset: int, max_chars: int,
+    ) -> tuple[str, int] | None:
+        """文本够长则切出一段，返回 (段文本, 新 offset)；不够长返回 None。"""
         ...
 
-    def segment(self, markdown: str) -> list[Segment]:
-        """标题切分 → 空行二次切分 → 合并小块 → 拼入上下文行。"""
+    def extract_remaining(
+        self, full_text: str, offset: int,
+    ) -> tuple[str, int]:
+        """哨兵后处理尾段（剩余全部文本）。"""
         ...
 ```
 
 **调用约定**：
-- 输入：合并去重后的完整 markdown 文本
-- 输出：`list[Segment]`，每段含 `text`/`start_line`/`end_line`
-- 上下文（`overlap_before`/`overlap_after`）在 `RefineContext` 中由 Pipeline 单独构造，`Segment` 本身只含文本与行号
+- 输入：当前已合并的完整 markdown + 上次切到的 `offset` + 本次段长上限
+- 输出：`(seg_text, new_offset)` 或 `None`（文本不足，等更多页面）
+- 上下文（`overlap_before`/`overlap_after`）在 `RefineContext` 中由 Pipeline 单独构造
 
-### 3.5 代码模式处理链路
+### 3.4 代码模式处理链路
 
 启用 `PipelineConfig.code.enable` 后，Pipeline 不再把 OCR 文本直接送入普通 Markdown 分段，而是消费 `PageOCR.text_lines` 进入 IDE 专用链路：
 
@@ -161,7 +165,7 @@ class DocumentSegmenter:
 
 `CodeDiagnosticRunner` 当前支持 Python/JSON/TOML/XML/YAML 标准库解析，以及 JavaScript/TypeScript/C/C++/Go/Rust 的外部工具检查。诊断器会在临时副本中屏蔽已定位语法错误、为缺失 include 生成 stub header 并复跑，以暴露后续独立错误；同时扫描代码区 CJK / 全角字符 OCR 噪声。
 
-### 3.6 代码模式设计决策由来（v1 → v2 → v3）
+### 3.5 代码模式设计决策由来（v1 → v2 → v3）
 
 > 本节凝练 IDE 代码模式布局识别的关键设计反转与多数据集验证结论，供后续维护理解"为什么用行号锚点"。详细逐数据集统计已随历史设计文档下线，可从 git 历史检索。
 
@@ -232,8 +236,9 @@ PageOCR(raw_text, cleaned_text="")
     ▼ OCRCleaner.clean()  [async]
 PageOCR(raw_text, cleaned_text="清洗后文本")
     │
-    ▼ PageDeduplicator.merge_all_pages([page1, page2, ...])
-MergedDocument(markdown="合并去重后的完整文本", images=[...], gaps=[])
+    ▼ IncrementalMerger.add_page(page)  逐页喂入（流式生产路径）
+    ▼ merger.get_markdown()  →  合并去重后的当前文本
+（批量等价：PageDeduplicator.merge_all_pages([...]) → MergedDocument，作测试基准）
     markdown 中包含：
     - <!-- page: {image_filename} --> 页边界标记
     - ![](page1_OCR/images/0.jpg) 重写后的图片引用

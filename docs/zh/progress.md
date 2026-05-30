@@ -1,5 +1,34 @@
 # 开发进度
 
+## 2026-05-30 - 文档减熵：全量对齐流式实现 + 删 DOC_BOUNDARY 残留
+
+**背景**：前几轮删了批量路径死代码（DOC_BOUNDARY 簇 / strip_repeated_lines / dedup 访问器）后，
+docs/ 仍大量描述**流式重构前的批量版架构**——pipeline.md §5 流程图画的是"OCR 全收齐→合并→分段→
+reassemble"串行模型，§10 整章是 DOC_BOUNDARY 多文档聚类，`process_many` 还写"返回 list"。真正描述
+现行实现的反而是被标"历史参考"的 streaming-pipeline.md，事实源被写反了。本轮以**当前代码为唯一真相源**
+（逐符号 grep 核实存活/删除），把活文档全面对齐流式生产者/消费者架构。
+
+**改动范围**（zh + en 各 7 文件 1:1）：
+- **pipeline.md**：§3.1 签名补 `code`/`controller`、`process_many` 改返回**单个** `PipelineResult`；
+  §5 流程图重写为「OCR 生产者 `_ocr_producer` ∥ 流式消费者 `_stream_process`（IncrementalMerger
+  增量合并 + RateController 自适应 L* 切段 + 满 5 页异步取 PII lexicon）→ `_finalize_single_doc`
+  （reassemble→gap fill→final refine→程序化去重兜底→render）」；§4 依赖表 dedup→IncrementalMerger /
+  segmenter→StreamSegmentExtractor / 加 RateController；删 §10 多文档整章并重编号 §11→§10、§12→§11；
+  修死测试引用 `test_process_tree_parallel.py`→`test_process_tree.py`、不存在的 `_stream_and_collect`。
+- **architecture.md**：§3 数据流改流式（删 step⑧边界检测、step③去 strip_repeated_lines）；删 §5.4
+  多文档边界检测、§5.5→§5.4；§6.3 删已落地的"流式 Pipeline 实施"未来项。
+- **processing.md**：删 §3.2 strip_repeated_lines；§3.2 合并 IncrementalMerger(生产)+PageDeduplicator(基准)；
+  §3.3 分段以 StreamSegmentExtractor 为生产路径、DocumentSegmenter 为参考；后续小节重编号。
+- **llm.md / data-models.md / api.md**：删 `detect_doc_boundaries` 协议+实现+prompt 块、删 §3.11
+  `DocBoundary` 模型并重编号、`extract_first_heading` 措辞改为设 `doc_title`、api 多项归因改 process_tree 子目录。
+- **references/streaming-pipeline.md**：历史档不逐行改，仅顶部加 2026-05-29 dated 更正 + 对"保留给下一版"
+  句加删除线，纠正已被推翻的前瞻声明。
+
+**验证**：活文档（排除 progress/archive/streaming-pipeline 历史档）grep 12 个死符号**零残留**；
+en/zh 章节重编号一致（pipeline §1-11、data-models §3.1-3.16，无悬空交叉引用）。
+
+**遗留**：无。详见 memory [[docs_streaming_alignment]] / [[doc_boundary_removed]]。
+
 ## 2026-05-29 - 删除 DOC_BOUNDARY 文档聚合死代码 + tests 减熵审计
 
 **背景**：审计 tests/（约 1076 用例）发现一批过时/空转/冗余测试。其中 DOC_BOUNDARY 文档聚合
