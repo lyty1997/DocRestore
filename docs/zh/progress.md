@@ -50,8 +50,19 @@ garbage 碎片精确救援，第 4 个 gpu_mojo 拆名碎片与邻页重合且�
 （结构桥接）的情形，标 cross_bucket_rescued_weak。**真实端到端 16 → 8 全达成**（gpu_mojo 拆名碎片经桥接归位）。
 12 S2 单测全过，451 passed 无回归。AGE-81 → Done。S0/S1/S2 三步落地，文件碎片化问题在该数据集上根治。
 
-**遗留**：S3（AGE-82，现已解除阻塞）——共识合并 + run 级命名 + line provenance + 端到端回归 + 多数据集防腐。详见
-memory [[code_mode_fragmentation_diagnosis]] / [[linear_workspace]]。
+**S3（AGE-82）已落地**（commit ec3cb88）：`_merge_columns_by_line_no` 改多数共识（替换 keep-first）+ `line_provenance`
+（行号→胜出页，可溯源）；`recover_canonical_path` 取代整串投票做 run 级命名（uniform no-op 防腐安全 / filename 加权投票+
+同长度字符共识 / dir 仅由含 dir 观测分段投票不被 dir-less 投没 / 段数并列偏好更完整路径 / 低置信标 consensus_low）；
+删两个死代码 helper。
+
+**双数据集端到端泛化验证**（直接复跑 `*_OCR/` 中间产物完整代码路径）：124772c5 **16→8**（全部正确）、e8e88280
+**7→6**（零误并：BUiLD.gn/openmax_status.h/两个 250+ 页大文件各自保留；_unknown 页被正确吸收；目录前缀保住）。
+baseline 精确等于线上输出，护栏在未见数据全部成立。39 新单测 + 全量 994 passed（3 个 deepseek 为预存环境失败，
+非回归）。**AGE-78（父）+ S0/S1/S2/S3 全 Done，碎片化根治。**
+
+**遗留**：①窗口标题栏 filename 纳入命名票池（低优先 follow-up，需 ide_meta_extract 增量，当前命名已正确）；
+②θ 阈值多数据集进一步标定；③分支 `feature/s0-line-ledger` 待合并 dev / 真实任务验证。详见 memory
+[[code_mode_fragmentation_diagnosis]] / [[linear_workspace]]。
 
 ## 2026-05-30 - 文档减熵：全量对齐流式实现 + 删 DOC_BOUNDARY 残留
 
