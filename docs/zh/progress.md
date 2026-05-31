@@ -38,8 +38,16 @@ pipeline 逐页用该栏源 `layout.columns[idx]` 建账本、列级 flag 并入
 误并 bug**：`snap_filename_max_distance` 2→1，否则 `x11`↔`x11xv`(差"xv"两字符的真实文件)被错并。真实 16-path 验证
 精确 snap 4 个真噪声碎片、garbage/跨扩展名留 S2、x11/x11xv 不误并。12 单测过，439 passed 无回归。AGE-80 → Done。
 
-**遗留**：S2（AGE-81，现已解除阻塞）→ S3（AGE-82）待做。详见 memory [[code_mode_fragmentation_diagnosis]] /
-[[linear_workspace]]。
+**S2（AGE-81）实现完成待校准**（commit 5d6b9e7，状态 In Review）：`group_into_files` 签名扩展 (ledgers, config)，
+新增 `_overlap_verdict`（confirm/conflict/weak/insufficient 四态）+ `_annotate_overlap_status`（仅标注零回归）+
+`_cross_bucket_rescue`（garbage 碎片靠行号重合 confirm 归并，无命中标 orphan_unrescued）。pipeline 累积 ledgers 传入。
+**真实端到端**（157 页中间结果离线复跑）：baseline 16（精确等于线上）→ S1 13 → S1+S2 **9**；giesz/openmax/.c 三个
+garbage 碎片精确救援，第 4 个 gpu_mojo 拆名碎片与邻页重合且填补行号缺口但 OCR 噪声致一致率 0.56/0.75 落 weak 带，
+按设计安全留 orphan。10 单测全过 449 passed 无回归。**校准发现**：θ_high=0.9 对真实 OCR 偏严（同文件重合落 weak），
+是否放宽待用户拍板，未擅自在单数据集放宽安全阈值。
+
+**遗留**：S2 校准决策（confirm-only=9 / weak+行号桥接=8 / 全局降 θ）待用户定；之后 S3（AGE-82）。详见 memory
+[[code_mode_fragmentation_diagnosis]] / [[linear_workspace]]。
 
 ## 2026-05-30 - 文档减熵：全量对齐流式实现 + 删 DOC_BOUNDARY 残留
 
