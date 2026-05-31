@@ -285,7 +285,7 @@ stop
 
 **新增 quality flags**：`code.line.{nonmonotonic,pairing_suspect}`、`code.meta.{snapped_to_vocab,snap_ambiguous}`、`code.group.{overlap_confirmed,overlap_conflict,overlap_weak,gap_no_overlap,cross_bucket_rescued,orphan_unrescued}`、`code.merge.line_disagreement`、`code.name.consensus_low`。沿用 v3 教训：保守标 flag、不强改正文。
 
-**阈值**（经验初值，全部挂 `CodeRestoreConfig` 可配，落地后多数据集调参）：`overlap_confirm_ratio`(θ_high)=0.90、`overlap_conflict_ratio`(θ_low)=0.50、`overlap_min_lines`=3、`vocab_support_threshold`(τ)=1.5、`vocab_min_frequency`(k)=3、`snap_filename_max_distance`=2。
+**阈值**（经验初值，全部挂 `CodeRestoreConfig` 可配，落地后多数据集调参）：`overlap_confirm_ratio`(θ_high)=0.90、`overlap_conflict_ratio`(θ_low)=0.50、`overlap_min_lines`=3、`vocab_support_threshold`(τ)=1.5、`vocab_min_frequency`(k)=3、`snap_filename_max_distance`=**1**（实测距离 2 会误并真实近名文件如 `x11`↔`x11xv`，故 S1 保守取 1，距离 2 歧义交 S2）、`snap_dir_max_distance`=2、`snap_minority_ratio`=0.5（只并少数派噪声，不合并体量相当的同名近邻）。
 
 **模块划分**：Stage 0 → 新 `processing/code_line_ledger.py`；Stage 1 → 新 `processing/code_path_reconcile.py`（`group_into_files` 之前跑全 batch）；Stage 2/3 → 重构 `processing/code_file_grouping.py`（dir 桥接降为 prior、用行号重合替代 10% 比例硬闸、`_merge_columns_by_line_no` 加共识与命名）。pipeline `_code_pipeline()` 顺序：逐页组装 → Stage 0（每页）→ Stage 1（全 batch）→ `group_into_files`（内含 Stage 2/3）。
 

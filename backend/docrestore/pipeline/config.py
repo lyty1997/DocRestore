@@ -315,6 +315,21 @@ class CodeRestoreConfig(BaseModel):
     #: 可选参考源码根目录。默认空字符串表示关闭；只读离线检索，不联网。
     context_root: str = ""
 
+    # --- AGE-80 Stage 1 批量文件名/路径归一阈值 ---
+    #: full-path 加权支持度（Σ path_confidence）≥ 此值进权威词表。
+    vocab_support_threshold: float = 1.5
+    #: full-path 出现频次 ≥ 此值进权威词表（与 support 取或）。
+    vocab_min_frequency: int = 3
+    #: snap 时 filename stem 编辑距离上限（同扩展名前提下）。取 1（保守）：
+    #: 实测距离 2 会误并真实近名文件（如 x11 vs x11xv，差 "xv" 两字符），
+    #: 距离 2 的歧义交 S2 行号内容裁决。
+    snap_filename_max_distance: int = 1
+    #: snap 时 compact dir 编辑距离上限（容忍漏字符 / 虚假单字符目录段）。
+    snap_dir_max_distance: int = 2
+    #: 仅当碎片支持度 ≤ 此比例 × 目标支持度才 snap（只并少数派噪声，不合并
+    #: 两个体量相当的同名近邻文件——那种交由 S2 行号内容裁决）。
+    snap_minority_ratio: float = 0.5
+
 
 class PipelineConfig(BaseModel):
     """Pipeline 总配置"""

@@ -921,6 +921,11 @@ class Pipeline:
             group_into_files,
         )
         from docrestore.processing.code_line_ledger import build_line_ledger
+        from docrestore.processing.code_path_reconcile import (
+            ReconcileConfig,
+            build_vocabulary,
+            reconcile_paths,
+        )
         from docrestore.processing.ide_layout import analyze_layout
         from docrestore.processing.ide_meta_extract import extract_ide_metas
         context_provider = create_code_context_provider(code_cfg.context_root)
@@ -1029,7 +1034,21 @@ class Pipeline:
                 msg = "代码模式已获得行级 OCR 输出，但未识别出可组装的代码列。"
             raise RuntimeError(msg)
 
-        # 3. 跨张归类 + 落盘
+        # 3. Stage 1：批量文件名/路径归一（AGE-80）。全 batch 建权威词表，把
+        # 少数派噪声 path 碎片 snap 回权威值，就地改写 meta，再交给归类。
+        reconcile_cfg = ReconcileConfig(
+            support_threshold=code_cfg.vocab_support_threshold,
+            min_frequency=code_cfg.vocab_min_frequency,
+            filename_max_distance=code_cfg.snap_filename_max_distance,
+            dir_max_distance=code_cfg.snap_dir_max_distance,
+            minority_ratio=code_cfg.snap_minority_ratio,
+        )
+        vocab = build_vocabulary(
+            [pc.meta for pc in all_pcs], reconcile_cfg,
+        )
+        reconcile_paths(all_pcs, vocab, reconcile_cfg)
+
+        # 4. 跨张归类 + 落盘
         sources = group_into_files(all_pcs)
         report_fn(
             "code_group", len(sources), len(sources),
