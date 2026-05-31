@@ -32,10 +32,12 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from docrestore.processing.code_assembly import CodeColumn
+    from docrestore.processing.code_line_ledger import LineEntry, LineLedger
     from docrestore.processing.ide_meta_extract import IDEMeta, PathCandidate
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,19 @@ class SourceFile:
     line_count: int
     line_no_range: tuple[int, int]
     flags: list[str] = field(default_factory=list)
+    #: 行号 -> 贡献该行最终文本的来源页 stem（S3 可溯源；多页分歧时记胜出页）。
+    line_provenance: dict[int, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class GroupingConfig:
+    """S2 行号锚定归类阈值（pipeline 从 ``CodeRestoreConfig`` 映射传入）。"""
+
+    overlap_min_lines: int = 3
+    overlap_confirm_ratio: float = 0.90
+    overlap_conflict_ratio: float = 0.50
+    rescue_max_orphan_pages: int = 3
+    line_match_ratio: float = 0.80  # 单行视相等的相似度下限
 
 
 def segment_from_page_column(page: PageColumn) -> CodeSegment:
@@ -101,13 +116,21 @@ def segment_from_page_column(page: PageColumn) -> CodeSegment:
     )
 
 
-def group_into_files(page_columns: list[PageColumn]) -> list[SourceFile]:
-    """跨张归类入口
+def group_into_files(
+    page_columns: list[PageColumn],
+    ledgers: dict[tuple[str, int], LineLedger] | None = None,
+    config: GroupingConfig | None = None,
+) -> list[SourceFile]:
+    """跨张归类入口（S2：行号锚定 + 跨桶救援）
 
+    ``ledgers`` 为 S0 产出的 ``{(page_stem, column_index): LineLedger}``，供
+    行号重合区内容一致性裁决；缺省（空）时退回纯文件名/路径归类（向后兼容）。
     返回的 SourceFile 列表按 path 字典序排序，便于稳定输出。
     """
     if not page_columns:
         return []
+    cfg = config or GroupingConfig()
+    ledger_map = ledgers or {}
 
     # 1. fuzzy filename 一级聚类
     by_filename: dict[str, list[PageColumn]] = {}
@@ -137,12 +160,243 @@ def group_into_files(page_columns: list[PageColumn]) -> list[SourceFile]:
     # 4. 同 dir 下 filename 极相似（OCR 字符噪声 / 截断）→ 小组并入大组
     files = _merge_near_duplicate_filenames(files)
 
+    # 4.1 组内行号重合状态标注（仅打 flag，不移动页 → 零功能回归）
+    _annotate_overlap_status(files, ledger_map, cfg)
+
+    # 4.2 跨桶救援：文件名 garbage 的小碎片，靠行号重合区内容一致性归位
+    files = _cross_bucket_rescue(files, ledger_map, cfg)
+
     # 5. path 去重：决策 #3 拆出来的多个 sub_group 可能 canonical_path 相同
     # （都是 status.h），加 :col<i> 后缀避免 AGE-47 写文件时覆盖
     _disambiguate_duplicate_paths(files)
 
     files.sort(key=lambda f: f.path)
     return files
+
+
+def _add_flag(src: SourceFile, flag: str) -> None:
+    if flag not in src.flags:
+        src.flags.append(flag)
+
+
+def _entries_of(
+    pc: PageColumn, ledger_map: dict[tuple[str, int], LineLedger],
+) -> dict[int, LineEntry]:
+    """取某页栏的行账本 entries；缺失返回空 dict。"""
+    ledger = ledger_map.get((pc.page_stem, pc.column_index))
+    return ledger.entries if ledger is not None else {}
+
+
+def _line_matches(text_a: str, text_b: str, cfg: GroupingConfig) -> bool:
+    """两行归一空白后是否视为相同（相等或相似度 ≥ 阈值）。"""
+    norm_a = " ".join(text_a.split())
+    norm_b = " ".join(text_b.split())
+    if norm_a == norm_b:
+        return True
+    if not norm_a or not norm_b:
+        return False
+    return SequenceMatcher(None, norm_a, norm_b).ratio() >= cfg.line_match_ratio
+
+
+def _overlap_verdict(
+    entries_a: dict[int, LineEntry],
+    entries_b: dict[int, LineEntry],
+    cfg: GroupingConfig,
+) -> tuple[str, float, int]:
+    """两页在共享行号上的内容一致裁决。
+
+    仅取双方都 ``anchor_trustable`` 的共享行。返回 ``(verdict, ratio, n_shared)``，
+    verdict ∈ {``confirm``, ``conflict``, ``weak``, ``insufficient``}。
+    """
+    shared: list[int] = []
+    for line_no, entry_a in entries_a.items():
+        if not entry_a.anchor_trustable:
+            continue
+        entry_b = entries_b.get(line_no)
+        if entry_b is None or not entry_b.anchor_trustable:
+            continue
+        shared.append(line_no)
+    if len(shared) < cfg.overlap_min_lines:
+        return "insufficient", 0.0, len(shared)
+    matches = sum(
+        1 for line_no in shared
+        if _line_matches(
+            entries_a[line_no].text, entries_b[line_no].text, cfg,
+        )
+    )
+    ratio = matches / len(shared)
+    if ratio >= cfg.overlap_confirm_ratio:
+        return "confirm", ratio, len(shared)
+    if ratio <= cfg.overlap_conflict_ratio:
+        return "conflict", ratio, len(shared)
+    return "weak", ratio, len(shared)
+
+
+def _annotate_overlap_status(
+    files: list[SourceFile],
+    ledger_map: dict[tuple[str, int], LineLedger],
+    cfg: GroupingConfig,
+) -> None:
+    """标注多页文件组内相邻页的行号重合状态（仅打 flag，不移动页）。"""
+    if not ledger_map:
+        return
+    for src in files:
+        if len(src.pages) < 2:
+            continue
+        ordered = sorted(
+            src.pages, key=lambda pc: _column_line_no_start(pc.column),
+        )
+        statuses: set[str] = set()
+        for prev, curr in zip(ordered, ordered[1:], strict=False):
+            verdict = _overlap_verdict(
+                _entries_of(prev, ledger_map),
+                _entries_of(curr, ledger_map),
+                cfg,
+            )[0]
+            statuses.add(verdict)
+        if "conflict" in statuses:
+            _add_flag(src, "code.group.overlap_conflict")
+        elif "confirm" in statuses:
+            _add_flag(src, "code.group.overlap_confirmed")
+        elif "weak" in statuses:
+            _add_flag(src, "code.group.overlap_weak")
+        else:
+            _add_flag(src, "code.group.gap_no_overlap")
+
+
+def _trustable_line_nos(
+    src: SourceFile, ledger_map: dict[tuple[str, int], LineLedger],
+) -> set[int]:
+    """SourceFile 所有页中 anchor_trustable 的行号并集。"""
+    out: set[int] = set()
+    for pc in src.pages:
+        for line_no, entry in _entries_of(pc, ledger_map).items():
+            if entry.anchor_trustable:
+                out.add(line_no)
+    return out
+
+
+def _orphan_matches_run(
+    orphan: SourceFile,
+    run: SourceFile,
+    ledger_map: dict[tuple[str, int], LineLedger],
+    cfg: GroupingConfig,
+) -> tuple[int, int, float]:
+    """orphan 与 run 的最佳重合匹配，返回 ``(tier, n_shared, ratio)``。
+
+    tier 2 = 任一对页 ``confirm``（一致率 ≥ θ_high）；
+    tier 1 = ``weak``（θ_low < 一致率 < θ_high，即多数行一致非冲突）**且**
+    orphan 填补了 run 缺失的行号（结构桥接，决策 2026-05-31）；
+    tier 0 = 不匹配。weak 必须叠加行号桥接才救援——两个不同文件极难同时满足
+    「同行号多数内容一致」与「连续填补行号缺口」，比单纯降阈值安全。
+    """
+    fills_gap = bool(
+        _trustable_line_nos(orphan, ledger_map)
+        - _trustable_line_nos(run, ledger_map)
+    )
+    best: tuple[int, int, float] = (0, 0, 0.0)
+    for orphan_page in orphan.pages:
+        orphan_entries = _entries_of(orphan_page, ledger_map)
+        if not orphan_entries:
+            continue
+        for run_page in run.pages:
+            if (
+                orphan_page.page_stem == run_page.page_stem
+                and orphan_page.column_index == run_page.column_index
+            ):
+                continue  # 同一页栏不跨桶（防御）
+            verdict, ratio, n_shared = _overlap_verdict(
+                orphan_entries, _entries_of(run_page, ledger_map), cfg,
+            )
+            if verdict == "confirm":
+                tier = 2
+            elif verdict == "weak" and fills_gap:
+                tier = 1
+            else:
+                continue
+            best = max(best, (tier, n_shared, ratio))
+    return best
+
+
+def _cross_bucket_rescue(
+    files: list[SourceFile],
+    ledger_map: dict[tuple[str, int], LineLedger],
+    cfg: GroupingConfig,
+) -> list[SourceFile]:
+    """文件名 garbage 的小碎片，靠行号重合区内容一致性归并进对应 run。
+
+    confirm 或 weak+行号桥接 时救援；无命中标 ``code.group.orphan_unrescued``。
+    无 ledger 时跳过（无内容证据，向后兼容）。
+    """
+    if not ledger_map or len(files) < 2:
+        return files
+    runs = [f for f in files if len(f.pages) > cfg.rescue_max_orphan_pages]
+    orphans = [f for f in files if len(f.pages) <= cfg.rescue_max_orphan_pages]
+    if not runs or not orphans:
+        return files
+    assignment = _assign_orphans_to_runs(orphans, runs, ledger_map, cfg)
+    if not assignment:
+        return files
+    return _apply_rescue(files, orphans, assignment)
+
+
+def _assign_orphans_to_runs(
+    orphans: list[SourceFile],
+    runs: list[SourceFile],
+    ledger_map: dict[tuple[str, int], LineLedger],
+    cfg: GroupingConfig,
+) -> dict[int, tuple[SourceFile, int]]:
+    """每个 orphan 选匹配最强的 run；无命中标 orphan_unrescued。
+
+    返回 ``{id(orphan): (目标 run, tier)}``，tier 2=confirm / 1=weak+桥接。
+    """
+    assignment: dict[int, tuple[SourceFile, int]] = {}
+    for orphan in orphans:
+        best_run: SourceFile | None = None
+        best_score: tuple[int, int, float] = (0, 0, 0.0)
+        for run in runs:
+            score = _orphan_matches_run(orphan, run, ledger_map, cfg)
+            if score[0] > 0 and score > best_score:
+                best_score = score
+                best_run = run
+        if best_run is not None:
+            assignment[id(orphan)] = (best_run, best_score[0])
+        else:
+            _add_flag(orphan, "code.group.orphan_unrescued")
+    return assignment
+
+
+def _apply_rescue(
+    files: list[SourceFile],
+    orphans: list[SourceFile],
+    assignment: dict[int, tuple[SourceFile, int]],
+) -> list[SourceFile]:
+    """把已分配的 orphan 页并入目标 run，重建受影响 run，丢弃被并 orphan。"""
+    extra_pages: dict[int, list[PageColumn]] = {}
+    weak_targets: set[int] = set()
+    for orphan in orphans:
+        entry = assignment.get(id(orphan))
+        if entry is None:
+            continue
+        target, tier = entry
+        extra_pages.setdefault(id(target), []).extend(orphan.pages)
+        if tier == 1:
+            weak_targets.add(id(target))
+    result: list[SourceFile] = []
+    for src in files:
+        if id(src) in assignment:
+            continue  # 该 orphan 已并入 run
+        gained = extra_pages.get(id(src))
+        if gained:
+            extra_flags = ["code.group.cross_bucket_rescued"]
+            if id(src) in weak_targets:
+                extra_flags.append("code.group.cross_bucket_rescued_weak")
+            result.append(_build_source_file(
+                [*src.pages, *gained], extra_flags=extra_flags,
+            ))
+        else:
+            result.append(src)
+    return result
 
 
 #: 小组并入大组时，小组 page 数占两组之和的最大比例。超过此比例视为
@@ -276,12 +530,14 @@ def _edit_distance_within(a: str, b: str, threshold: int) -> bool:
 def _rebuild_source_file(merged: SourceFile) -> SourceFile:
     """合并后用 merged.pages 重新计算 merged_text / line_no_range / flags。"""
     pages = merged.pages
-    merged_text, line_no_range, gap_flags = _merge_columns_by_line_no(
-        pages, language=merged.language,
+    merged_text, line_no_range, gap_flags, provenance = (
+        _merge_columns_by_line_no(pages, language=merged.language)
     )
-    flags = [f for f in merged.flags if not f.startswith(
-        ("code.grouping.missing_line_nos=", "code.grouping.large_gap_collapsed"),
-    )]
+    flags = [f for f in merged.flags if not f.startswith((
+        "code.grouping.missing_line_nos=",
+        "code.grouping.large_gap_collapsed",
+        "code.merge.line_disagreement=",
+    ))]
     flags.extend(gap_flags)
     sorted_pages = sorted(
         pages, key=lambda pc: _column_line_no_start(pc.column),
@@ -296,6 +552,7 @@ def _rebuild_source_file(merged: SourceFile) -> SourceFile:
         line_count=line_count,
         line_no_range=line_no_range,
         flags=flags,
+        line_provenance=provenance,
     )
 
 
@@ -442,42 +699,10 @@ def _build_source_file(
     extra_flags: list[str] | None = None,
 ) -> SourceFile:
     """从同文件多 PageColumn 构造 SourceFile"""
-    # canonical filename：优先选路径置信度高 + 出现频次高的版本。不能只按
-    # 长度选，否则低置信 OCR typo（如多识一个后缀字符）会覆盖高置信路径。
-    filenames = [pc.meta.filename for pc in group if pc.meta.filename]
-    canonical_filename = (
-        max(
-            filenames,
-            key=lambda f: (
-                _filename_confidence_sum(group, f),
-                filenames.count(f),
-                len(f),
-            ),
-        )
-        if filenames
-        else "_unknown"
-    )
-
-    # canonical dir：优先选置信度高 + 频次高 + 段数更多的版本。
-    dirs = [
-        pc.meta.path.rsplit("/", 1)[0]
-        for pc in group
-        if pc.meta.path and "/" in pc.meta.path
-    ]
-    canonical_dir: str | None = None
-    if dirs:
-        dir_counter = Counter(dirs)
-        canonical_dir = max(
-            dirs,
-            key=lambda d: (
-                _dir_confidence_sum(group, d),
-                dir_counter[d],
-                d.count("/"),
-            ),
-        )
-    canonical_path = (
-        f"{canonical_dir}/{canonical_filename}"
-        if canonical_dir else canonical_filename
+    # canonical path/filename：run 级加权共识（分段投票 + 段内字符共识，
+    # 观测唯一时 no-op；S3）。
+    canonical_path, canonical_filename, name_confidence = (
+        recover_canonical_path(group)
     )
 
     # canonical language：第一个非空
@@ -488,8 +713,8 @@ def _build_source_file(
             break
 
     # 按行号合并代码（language 用于决定大 gap 占位注释前缀）
-    merged_text, line_no_range, gap_flags = _merge_columns_by_line_no(
-        group, language=language,
+    merged_text, line_no_range, gap_flags, provenance = (
+        _merge_columns_by_line_no(group, language=language)
     )
 
     flags: list[str] = list(extra_flags or [])
@@ -498,6 +723,8 @@ def _build_source_file(
         flags.append(f"code.grouping.merged_pages={len(group)}")
         if any(_path_confidence(pc) < 0.6 for pc in group):
             flags.append("code.grouping.low_confidence_path_merged")
+        if name_confidence < _NAME_CONSENSUS_LOW:
+            flags.append("code.name.consensus_low")
 
     # pages 按 line_no_range 起点排序
     sorted_pages = sorted(
@@ -517,33 +744,137 @@ def _build_source_file(
         line_count=line_count,
         line_no_range=line_no_range,
         flags=flags,
+        line_provenance=provenance,
     )
+
+
+#: run 级命名共识：主选票权重占比低于此值标 code.name.consensus_low。
+_NAME_CONSENSUS_LOW = 0.6
+#: 分段投票时单段加权多数占比低于此值 → 放弃合成、退回最高权重观测整路径。
+_SEGMENT_MIN_CONCENTRATION = 0.5
+
+
+def recover_canonical_path(group: list[PageColumn]) -> tuple[str, str, float]:
+    """run 级命名共识：从各页 path 观测恢复 canonical ``(path, filename, confidence)``。
+
+    按 ``path_confidence`` 加权：
+      - 观测唯一 → 直接返回（**no-op，防腐安全**：S1 归一后同 run 多为同一路径）。
+      - 否则分段投票（从右逐段加权多数）重建路径，filename 段再做同长度变体的
+        字符级共识；任一段多数占比 < 阈值则放弃合成、退回最高权重观测整路径。
+    confidence = 各段多数占比的最小值（或退回时的整路径权重占比）。
+    """
+    obs: list[tuple[str, float]] = []
+    for pc in group:
+        candidate = pc.meta.path or pc.meta.filename
+        if candidate:
+            obs.append((candidate, _path_confidence(pc)))
+    if not obs:
+        return "_unknown", "_unknown", 0.0
+
+    weight: dict[str, float] = {}
+    for path, w in obs:
+        weight[path] = weight.get(path, 0.0) + w
+    if len(weight) == 1:
+        only = next(iter(weight))
+        return only, _filename_of_path(only), 1.0
+
+    total = sum(weight.values())
+    best_obs = max(weight, key=lambda p: weight[p])
+
+    # filename：全体观测加权投票 + 同长度变体字符共识。
+    filename, fn_conf = _weighted_vote(
+        [(_filename_of_path(p), w) for p, w in obs],
+    )
+    filename = _filename_char_consensus(obs, filename)
+
+    # dir：仅含 dir 的观测参与分段投票——dir-less 观测多是 OCR 漏识面包屑
+    # 目录，不能让它把目录投没了（决策 2026-05-31）。
+    dir_obs = [(p.rsplit("/", 1)[0], w) for p, w in obs if "/" in p]
+    if dir_obs:
+        dir_segments, dir_confs = _segment_vote(dir_obs)
+        path = "/".join([*dir_segments, filename])
+        confidence = min([fn_conf, *dir_confs]) if dir_confs else fn_conf
+    else:
+        path = filename
+        confidence = fn_conf
+
+    if confidence < _SEGMENT_MIN_CONCENTRATION:
+        # 投票分散无明显多数 → 退回最高权重观测整路径（避免合成劣化）。
+        return best_obs, _filename_of_path(best_obs), weight[best_obs] / total
+    return path, filename, confidence
+
+
+def _weighted_vote(items: list[tuple[str, float]]) -> tuple[str, float]:
+    """加权多数投票，返回 ``(winner, 多数占比)``。"""
+    agg: dict[str, float] = {}
+    for value, w in items:
+        agg[value] = agg.get(value, 0.0) + w
+    total = sum(agg.values())
+    winner = max(agg, key=lambda s: agg[s])
+    return winner, (agg[winner] / total if total else 0.0)
+
+
+def _filename_of_path(path: str) -> str:
+    """full-path 的文件名段。"""
+    return path.rsplit("/", 1)[-1] if "/" in path else path
+
+
+def _segment_vote(
+    obs: list[tuple[str, float]],
+) -> tuple[list[str], list[float]]:
+    """从右对齐逐段加权多数投票，返回 ``(segments_left_to_right, 各段多数占比)``。"""
+    pos_votes: dict[int, dict[str, float]] = {}
+    depth_votes: dict[int, float] = {}
+    for path, w in obs:
+        segs = path.split("/")
+        depth_votes[len(segs)] = depth_votes.get(len(segs), 0.0) + w
+        for right_idx, seg in enumerate(reversed(segs)):
+            bucket = pos_votes.setdefault(right_idx, {})
+            bucket[seg] = bucket.get(seg, 0.0) + w
+    # 权重并列时偏好段数更多者：OCR 只会漏识目录段（变短），不会凭空加段。
+    depth = max(depth_votes, key=lambda d: (depth_votes[d], d))
+    chosen_rev: list[str] = []
+    concentrations: list[float] = []
+    for right_idx in range(depth):
+        votes = pos_votes.get(right_idx, {})
+        if not votes:
+            continue
+        seg_total = sum(votes.values())
+        winner = max(votes, key=lambda s: votes[s])
+        chosen_rev.append(winner)
+        concentrations.append(votes[winner] / seg_total)
+    return list(reversed(chosen_rev)), concentrations
+
+
+def _filename_char_consensus(
+    obs: list[tuple[str, float]], voted_filename: str,
+) -> str:
+    """对与 voted_filename 等长的观测 filename 做逐位加权多数字符共识。
+
+    修分散的单字符 OCR 噪声（不同页错在不同位置）；同长度变体 < 2 个则原样返回。
+    """
+    fn_weight: dict[str, float] = {}
+    for path, w in obs:
+        fn_weight[_filename_of_path(path)] = (
+            fn_weight.get(_filename_of_path(path), 0.0) + w
+        )
+    length = len(voted_filename)
+    same_len = {fn: w for fn, w in fn_weight.items() if len(fn) == length}
+    if len(same_len) <= 1:
+        return voted_filename
+    chars: list[str] = []
+    for i in range(length):
+        char_votes: dict[str, float] = {}
+        for fn, w in same_len.items():
+            char_votes[fn[i]] = char_votes.get(fn[i], 0.0) + w
+        chars.append(max(char_votes, key=lambda c: char_votes[c]))
+    return "".join(chars)
 
 
 def _path_confidence(pc: PageColumn) -> float:
     """PageColumn 当前路径的置信度，旧 fixture 缺字段时按中等可信处理。"""
     confidence = getattr(pc.meta, "path_confidence", 0.0)
     return float(confidence) if confidence > 0 else 0.65
-
-
-def _filename_confidence_sum(group: list[PageColumn], filename: str) -> float:
-    """同 filename 在组内的路径置信度总和。"""
-    return sum(
-        _path_confidence(pc)
-        for pc in group
-        if pc.meta.filename == filename
-    )
-
-
-def _dir_confidence_sum(group: list[PageColumn], directory: str) -> float:
-    """同 directory 在组内的路径置信度总和。"""
-    total = 0.0
-    for pc in group:
-        if not pc.meta.path or "/" not in pc.meta.path:
-            continue
-        if pc.meta.path.rsplit("/", 1)[0] == directory:
-            total += _path_confidence(pc)
-    return total
 
 
 def _column_line_no_start(column: CodeColumn) -> int:
@@ -586,48 +917,83 @@ def _merge_columns_by_line_no(
     group: list[PageColumn],
     *,
     language: str | None = None,
-) -> tuple[str, tuple[int, int], list[str]]:
-    """按 line_no 合并多个 column，重复 line 取首次出现。
+) -> tuple[str, tuple[int, int], list[str], dict[int, str]]:
+    """按 line_no 合并多个 column，同行号多页取多数共识（S3）。
 
-    行号 gap 处理：小 gap（≤ ``_GAP_FILL_THRESHOLD``）填空行；大 gap
-    改用单行注释占位避免空白行雪崩。``language`` 控制注释前缀。
+    替换旧「保留首次」：同一 line_no 多页给出不同文本时按多数投票（并列取
+    最早出现），分歧计入 ``code.merge.line_disagreement``。同时产出 provenance
+    （line_no -> 胜出页 stem）。行号 gap：小 gap（≤ ``_GAP_FILL_THRESHOLD``）填
+    空行；大 gap 单行注释占位。``language`` 控制注释前缀。
     """
-    by_line_no: dict[int, str] = {}  # line_no -> 渲染后行（含缩进）
+    # line_no -> [(渲染行, 来源页 stem)]，保留出现顺序
+    observations: dict[int, list[tuple[str, str]]] = {}
     for pc in group:
         for line in pc.column.lines:
-            if line.line_no in by_line_no:
-                continue  # 重叠：保留首次（先到的图）
             rendered = " " * line.indent + line.text
-            by_line_no[line.line_no] = rendered
-    if not by_line_no:
-        return "", (0, 0), []
+            observations.setdefault(line.line_no, []).append(
+                (rendered, pc.page_stem),
+            )
+    if not observations:
+        return "", (0, 0), [], {}
+
+    by_line_no: dict[int, str] = {}
+    provenance: dict[int, str] = {}
+    disagreements = 0
+    for line_no, obs in observations.items():
+        if len({text for text, _ in obs}) > 1:
+            disagreements += 1
+        text, stem = _consensus_line(obs)
+        by_line_no[line_no] = text
+        provenance[line_no] = stem
 
     sorted_nos = sorted(by_line_no)
     lo, hi = sorted_nos[0], sorted_nos[-1]
 
-    # 检测行号 gap（OCR 漏识或拍照漏页）
     flags: list[str] = []
-    expected = set(range(lo, hi + 1))
-    actual = set(sorted_nos)
-    missing = sorted(expected - actual)
+    missing = set(range(lo, hi + 1)) - set(sorted_nos)
     if missing:
         flags.append(f"code.grouping.missing_line_nos={len(missing)}")
+    if disagreements:
+        flags.append(f"code.merge.line_disagreement={disagreements}")
 
+    merged_text, saw_large_gap = _render_with_gaps(
+        by_line_no, sorted_nos, language,
+    )
+    if saw_large_gap:
+        flags.append("code.grouping.large_gap_collapsed")
+    return merged_text, (lo, hi), flags, provenance
+
+
+def _render_with_gaps(
+    by_line_no: dict[int, str],
+    sorted_nos: list[int],
+    language: str | None,
+) -> tuple[str, bool]:
+    """按行号拼接，小 gap 填空行、大 gap 单行注释占位。返回 ``(文本, 见过大gap)``。"""
     parts: list[str] = []
-    prev_no = lo - 1
+    prev_no = sorted_nos[0] - 1
     saw_large_gap = False
     for no in sorted_nos:
         gap = no - prev_no - 1
-        if gap > 0:
-            if gap > _GAP_FILL_THRESHOLD:
-                # 大 gap：单行占位注释，避免肉眼不可读
-                parts.append(_format_gap_marker(gap, language))
-                saw_large_gap = True
-            else:
-                # 小 gap：保持空行兼容已有人工补全工作流
-                parts.extend([""] * gap)
+        if gap > _GAP_FILL_THRESHOLD:
+            parts.append(_format_gap_marker(gap, language))
+            saw_large_gap = True
+        elif gap > 0:
+            parts.extend([""] * gap)
         parts.append(by_line_no[no])
         prev_no = no
-    if saw_large_gap:
-        flags.append("code.grouping.large_gap_collapsed")
-    return "\n".join(parts), (lo, hi), flags
+    return "\n".join(parts), saw_large_gap
+
+
+def _consensus_line(obs: list[tuple[str, str]]) -> tuple[str, str]:
+    """同行号多页观测取多数共识：最高频文本，并列取最早出现。
+
+    返回 ``(胜出文本, 该文本最早出现页 stem)``。
+    """
+    counts = Counter(text for text, _ in obs)
+    first_index: dict[str, int] = {}
+    for i, (text, _) in enumerate(obs):
+        first_index.setdefault(text, i)
+    winner = min(counts, key=lambda t: (-counts[t], first_index[t]))
+    stem = next(stem for text, stem in obs if text == winner)
+    return winner, stem

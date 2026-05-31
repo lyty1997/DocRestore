@@ -917,8 +917,18 @@ class Pipeline:
         )
         from docrestore.processing.code_context import create_code_context_provider
         from docrestore.processing.code_file_grouping import (
+            GroupingConfig,
             PageColumn,
             group_into_files,
+        )
+        from docrestore.processing.code_line_ledger import (
+            LineLedger,
+            build_line_ledger,
+        )
+        from docrestore.processing.code_path_reconcile import (
+            ReconcileConfig,
+            build_vocabulary,
+            reconcile_paths,
         )
         from docrestore.processing.ide_layout import analyze_layout
         from docrestore.processing.ide_meta_extract import extract_ide_metas
@@ -942,6 +952,7 @@ class Pipeline:
             message_params={"total": str(len(pages_ref))},
         )
         all_pcs: list[PageColumn] = []
+        ledgers: dict[tuple[str, int], LineLedger] = {}
         missing_line_pages: list[str] = []
         for i, page in enumerate(pages_ref):
             text_lines = page.text_lines
@@ -988,9 +999,18 @@ class Pipeline:
                     _augment_metas_with_code_context, metas, context_provider,
                 )
             columns = assemble_columns(layout)
-            for col, meta in zip(columns, metas, strict=True):
+            page_stem = page.image_path.stem
+            for col, meta, col_lines in zip(
+                columns, metas, layout.columns, strict=True,
+            ):
+                # Stage 0：行账本完整性校验（AGE-79）。用该栏的源 text_lines
+                # （而非整页，兼容二次 column OCR）回查行号↔文本配对，把列级风险
+                # flag 并入 col.flags，经 quality_report / code_renderer 暴露。
+                ledger = build_line_ledger(page_stem, col, col_lines)
+                col.flags.extend(ledger.flags)
+                ledgers[(page_stem, col.column_index)] = ledger
                 all_pcs.append(PageColumn(
-                    page_stem=page.image_path.stem,
+                    page_stem=page_stem,
                     column_index=col.column_index,
                     meta=meta,
                     column=col,
@@ -1020,8 +1040,28 @@ class Pipeline:
                 msg = "代码模式已获得行级 OCR 输出，但未识别出可组装的代码列。"
             raise RuntimeError(msg)
 
-        # 3. 跨张归类 + 落盘
-        sources = group_into_files(all_pcs)
+        # 3. Stage 1：批量文件名/路径归一（AGE-80）。全 batch 建权威词表，把
+        # 少数派噪声 path 碎片 snap 回权威值，就地改写 meta，再交给归类。
+        reconcile_cfg = ReconcileConfig(
+            support_threshold=code_cfg.vocab_support_threshold,
+            min_frequency=code_cfg.vocab_min_frequency,
+            filename_max_distance=code_cfg.snap_filename_max_distance,
+            dir_max_distance=code_cfg.snap_dir_max_distance,
+            minority_ratio=code_cfg.snap_minority_ratio,
+        )
+        vocab = build_vocabulary(
+            [pc.meta for pc in all_pcs], reconcile_cfg,
+        )
+        reconcile_paths(all_pcs, vocab, reconcile_cfg)
+
+        # 4. 跨张归类 + 落盘（S2：行号锚定 + 跨桶救援，传入 S0 行账本）
+        grouping_cfg = GroupingConfig(
+            overlap_min_lines=code_cfg.overlap_min_lines,
+            overlap_confirm_ratio=code_cfg.overlap_confirm_ratio,
+            overlap_conflict_ratio=code_cfg.overlap_conflict_ratio,
+            rescue_max_orphan_pages=code_cfg.rescue_max_orphan_pages,
+        )
+        sources = group_into_files(all_pcs, ledgers, grouping_cfg)
         report_fn(
             "code_group", len(sources), len(sources),
             f"代码模式：归类得到 {len(sources)} 个源文件",
