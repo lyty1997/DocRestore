@@ -165,6 +165,48 @@ def test_content_conflict_blocks_rescue() -> None:
     assert any(s.filename == "other.cc" for s in sources)
 
 
+def test_weak_overlap_with_gap_bridging_rescues() -> None:
+    """weak 重合（多数行一致非冲突）+ 填补 run 行号缺口 → 救援（结构桥接）。"""
+    pcs: list[PageColumn] = []
+    ledgers: dict[tuple[str, int], LineLedger] = {}
+    # run 覆盖 1-18 与 30-48，缺口 19-29
+    _page(pcs, ledgers, "r0", 0, "a/b/real.cc", _seg(1, 10))
+    _page(pcs, ledgers, "r1", 0, "a/b/real.cc", _seg(8, 18))
+    _page(pcs, ledgers, "r2", 0, "a/b/real.cc", _seg(30, 40))
+    _page(pcs, ledgers, "r3", 0, "a/b/real.cc", _seg(38, 48))
+    # orphan 14-29：与 r1 在 14-18 重合但 2/5 行被 OCR 噪声打乱（→ weak），
+    # 并填补 19-29 缺口（run 没有这些行）。
+    orphan_lines = dict(_seg(14, 29))
+    orphan_lines[15] = "noise token fifteen"
+    orphan_lines[17] = "noise token seventeen"
+    pcs.append(_pc("orphan", 0, "x/garbage.cc", orphan_lines))
+    ledgers[("orphan", 0)] = LineLedger(
+        page_stem="orphan", column_index=0, entries=_entries(orphan_lines),
+    )
+    sources = group_into_files(pcs, ledgers, GroupingConfig())
+    assert not any(s.filename == "garbage.cc" for s in sources)  # 已救援
+    real = next(s for s in sources if s.filename == "real.cc")
+    assert "code.group.cross_bucket_rescued_weak" in real.flags
+
+
+def test_weak_overlap_without_gap_not_rescued() -> None:
+    """weak 重合但不填补任何缺口（孤页全在 run 行号范围内）→ 不救援。"""
+    pcs: list[PageColumn] = []
+    ledgers: dict[tuple[str, int], LineLedger] = {}
+    _run_pages(pcs, ledgers, "a/b/real.cc")  # 连续覆盖 1-42，无缺口
+    orphan_lines = dict(_seg(20, 24))  # 全部落在 run 已有行号内
+    orphan_lines[21] = "noise alpha"
+    orphan_lines[23] = "noise beta"
+    pcs.append(_pc("orphan", 0, "x/garbage.cc", orphan_lines))
+    ledgers[("orphan", 0)] = LineLedger(
+        page_stem="orphan", column_index=0, entries=_entries(orphan_lines),
+    )
+    sources = group_into_files(pcs, ledgers, GroupingConfig())
+    assert len(sources) == 2  # weak 但无桥接 → 不并
+    orphan = next(s for s in sources if s.filename == "garbage.cc")
+    assert "code.group.orphan_unrescued" in orphan.flags
+
+
 def test_within_group_overlap_confirmed_flag() -> None:
     """多页同文件且重合内容一致 → 标 overlap_confirmed。"""
     pcs: list[PageColumn] = []

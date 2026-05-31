@@ -236,7 +236,7 @@ stop
 
 **Stage 1 — 批量文件名/路径归一（方案 1）**：基于「正确名字在 157 页里压倒性高频，OCR 错读零星且低置信」。①按 `path_confidence` 加权统计全 batch 的 `(path/dir/filename)` 支持度，门槛（支持度 ≥ τ 或频次 ≥ k）以上进权威词表 V；②识别候选碎片（低置信 / 频次 1 / 带噪声 flag）；③在 V 中找唯一最近邻 snap 改写（filename 距离做扩展 normalize——去图标残段、合并重复下划线、容忍缺失扩展名点、视觉混淆归一；dir 距离容忍单字符目录段增删、漏字符、`_`↔`/` 互换），命中标 `code.meta.snapped_to_vocab` 保留原值，多邻/不够近则标 `code.meta.snap_ambiguous` 交 Stage 2 裁决。**完全 garbage 的名字（V 无近邻，如 `giesz.cc`）故意不改，留给 Stage 2 用行号独立判定。**
 
-**Stage 2 — 行号锚定的跨页归类（方案 4 主体）**：①**候选分桶**：按归一后 `(filename_key, ext)` 一级聚类缩小比较空间（行号在不同文件间会重复，不能只靠行号全局聚类，必须先用文件名 prior 圈候选）；②**行号重合链装配**（核心，下图）：桶内按起始行号排序，相邻页求行号区间交集，对重合区内双方 `anchor_trustable` 的行比内容一致率——三分支裁决；③**跨桶救援**（修 garbage 碎片关键）：对 `snap_ambiguous`/garbage 碎片绕开文件名，与「行号相邻 + 重合区内容高度一致」的已确认 run 直接匹配，**强制要求重合区存在且一致率 ≥ θ_high**，没有重合区的 garbage 碎片不救（标 `orphan_unrescued`，宁可漏救不可错并）；④保留 `_enforce_one_page_one_file`（同图同名硬约束）。
+**Stage 2 — 行号锚定的跨页归类（方案 4 主体）**：①**候选分桶**：按归一后 `(filename_key, ext)` 一级聚类缩小比较空间（行号在不同文件间会重复，不能只靠行号全局聚类，必须先用文件名 prior 圈候选）；②**行号重合链装配**（核心，下图）：桶内按起始行号排序，相邻页求行号区间交集，对重合区内双方 `anchor_trustable` 的行比内容一致率——三分支裁决；③**跨桶救援**（修 garbage 碎片关键）：对 `snap_ambiguous`/garbage 碎片绕开文件名，与已确认 run 按行号重合区匹配——**confirm**（一致率 ≥ θ_high）直接救援；**weak**（θ_low < 一致率 < θ_high，多数行一致非冲突）**且** orphan 填补了 run 缺失的行号（结构桥接）时也救援（标 `cross_bucket_rescued_weak`）。weak 必须叠加行号桥接：两个不同文件极难同时满足「同行号多数内容一致」与「连续填补行号缺口」，比单纯降 θ 安全（决策 2026-05-31，实测真实 OCR 同文件重合常落 weak 带 0.56/0.75）。`conflict` 或无重合的 garbage 碎片不救（标 `orphan_unrescued`，宁可漏救不可错并）；④保留 `_enforce_one_page_one_file`（同图同名硬约束）。
 
 ```plantuml
 @startuml
@@ -283,7 +283,7 @@ stop
 
 **数据结构改动**：新增 `LineEntry`（`line_no/text/indent/anchor_trustable/confidence`）、`LineLedger`（每 PageColumn 一份 `{line_no -> LineEntry}`）、`PathVocabulary`（词表）；`SourceFile` 新增 `line_provenance`（每行来源页 + 分歧候选）；`IDEMeta` 零侵入复用现有 `path_candidates/path_confidence/flags`，snap 后改写并保留原值。`CodeLine` 不改（已含 `bbox/is_inferred_line_no`）。
 
-**新增 quality flags**：`code.line.{nonmonotonic,pairing_suspect}`、`code.meta.{snapped_to_vocab,snap_ambiguous}`、`code.group.{overlap_confirmed,overlap_conflict,overlap_weak,gap_no_overlap,cross_bucket_rescued,orphan_unrescued}`、`code.merge.line_disagreement`、`code.name.consensus_low`。沿用 v3 教训：保守标 flag、不强改正文。
+**新增 quality flags**：`code.line.{nonmonotonic,pairing_suspect}`、`code.meta.{snapped_to_vocab,snap_ambiguous}`、`code.group.{overlap_confirmed,overlap_conflict,overlap_weak,gap_no_overlap,cross_bucket_rescued,cross_bucket_rescued_weak,orphan_unrescued}`、`code.merge.line_disagreement`、`code.name.consensus_low`。沿用 v3 教训：保守标 flag、不强改正文。
 
 **阈值**（经验初值，全部挂 `CodeRestoreConfig` 可配，落地后多数据集调参）：`overlap_confirm_ratio`(θ_high)=0.90、`overlap_conflict_ratio`(θ_low)=0.50、`overlap_min_lines`=3、`vocab_support_threshold`(τ)=1.5、`vocab_min_frequency`(k)=3、`snap_filename_max_distance`=**1**（实测距离 2 会误并真实近名文件如 `x11`↔`x11xv`，故 S1 保守取 1，距离 2 歧义交 S2）、`snap_dir_max_distance`=2、`snap_minority_ratio`=0.5（只并少数派噪声，不合并体量相当的同名近邻）。
 

@@ -262,16 +262,37 @@ def _annotate_overlap_status(
             _add_flag(src, "code.group.gap_no_overlap")
 
 
+def _trustable_line_nos(
+    src: SourceFile, ledger_map: dict[tuple[str, int], LineLedger],
+) -> set[int]:
+    """SourceFile 所有页中 anchor_trustable 的行号并集。"""
+    out: set[int] = set()
+    for pc in src.pages:
+        for line_no, entry in _entries_of(pc, ledger_map).items():
+            if entry.anchor_trustable:
+                out.add(line_no)
+    return out
+
+
 def _orphan_matches_run(
     orphan: SourceFile,
     run: SourceFile,
     ledger_map: dict[tuple[str, int], LineLedger],
     cfg: GroupingConfig,
-) -> tuple[bool, int, float]:
-    """orphan 与 run 任一对页重合区 confirm → 命中，返回最佳 ``(n_shared, ratio)``。"""
-    hit = False
-    best_n = 0
-    best_ratio = 0.0
+) -> tuple[int, int, float]:
+    """orphan 与 run 的最佳重合匹配，返回 ``(tier, n_shared, ratio)``。
+
+    tier 2 = 任一对页 ``confirm``（一致率 ≥ θ_high）；
+    tier 1 = ``weak``（θ_low < 一致率 < θ_high，即多数行一致非冲突）**且**
+    orphan 填补了 run 缺失的行号（结构桥接，决策 2026-05-31）；
+    tier 0 = 不匹配。weak 必须叠加行号桥接才救援——两个不同文件极难同时满足
+    「同行号多数内容一致」与「连续填补行号缺口」，比单纯降阈值安全。
+    """
+    fills_gap = bool(
+        _trustable_line_nos(orphan, ledger_map)
+        - _trustable_line_nos(run, ledger_map)
+    )
+    best: tuple[int, int, float] = (0, 0, 0.0)
     for orphan_page in orphan.pages:
         orphan_entries = _entries_of(orphan_page, ledger_map)
         if not orphan_entries:
@@ -285,10 +306,14 @@ def _orphan_matches_run(
             verdict, ratio, n_shared = _overlap_verdict(
                 orphan_entries, _entries_of(run_page, ledger_map), cfg,
             )
-            if verdict == "confirm" and (n_shared, ratio) > (best_n, best_ratio):
-                hit = True
-                best_n, best_ratio = n_shared, ratio
-    return hit, best_n, best_ratio
+            if verdict == "confirm":
+                tier = 2
+            elif verdict == "weak" and fills_gap:
+                tier = 1
+            else:
+                continue
+            best = max(best, (tier, n_shared, ratio))
+    return best
 
 
 def _cross_bucket_rescue(
@@ -298,8 +323,8 @@ def _cross_bucket_rescue(
 ) -> list[SourceFile]:
     """文件名 garbage 的小碎片，靠行号重合区内容一致性归并进对应 run。
 
-    只在重合区 ``confirm``（一致率 ≥ θ_high 且行数足够）时救援；无命中标
-    ``code.group.orphan_unrescued``。无 ledger 时跳过（无内容证据，向后兼容）。
+    confirm 或 weak+行号桥接 时救援；无命中标 ``code.group.orphan_unrescued``。
+    无 ledger 时跳过（无内容证据，向后兼容）。
     """
     if not ledger_map or len(files) < 2:
         return files
@@ -318,21 +343,22 @@ def _assign_orphans_to_runs(
     runs: list[SourceFile],
     ledger_map: dict[tuple[str, int], LineLedger],
     cfg: GroupingConfig,
-) -> dict[int, SourceFile]:
-    """每个 orphan 选内容重合最强的 run；无命中标 orphan_unrescued。"""
-    assignment: dict[int, SourceFile] = {}  # id(orphan) -> 目标 run
+) -> dict[int, tuple[SourceFile, int]]:
+    """每个 orphan 选匹配最强的 run；无命中标 orphan_unrescued。
+
+    返回 ``{id(orphan): (目标 run, tier)}``，tier 2=confirm / 1=weak+桥接。
+    """
+    assignment: dict[int, tuple[SourceFile, int]] = {}
     for orphan in orphans:
         best_run: SourceFile | None = None
-        best_key: tuple[int, float] | None = None
+        best_score: tuple[int, int, float] = (0, 0, 0.0)
         for run in runs:
-            ok, n_shared, ratio = _orphan_matches_run(
-                orphan, run, ledger_map, cfg,
-            )
-            if ok and (best_key is None or (n_shared, ratio) > best_key):
-                best_key = (n_shared, ratio)
+            score = _orphan_matches_run(orphan, run, ledger_map, cfg)
+            if score[0] > 0 and score > best_score:
+                best_score = score
                 best_run = run
         if best_run is not None:
-            assignment[id(orphan)] = best_run
+            assignment[id(orphan)] = (best_run, best_score[0])
         else:
             _add_flag(orphan, "code.group.orphan_unrescued")
     return assignment
@@ -341,23 +367,30 @@ def _assign_orphans_to_runs(
 def _apply_rescue(
     files: list[SourceFile],
     orphans: list[SourceFile],
-    assignment: dict[int, SourceFile],
+    assignment: dict[int, tuple[SourceFile, int]],
 ) -> list[SourceFile]:
     """把已分配的 orphan 页并入目标 run，重建受影响 run，丢弃被并 orphan。"""
     extra_pages: dict[int, list[PageColumn]] = {}
+    weak_targets: set[int] = set()
     for orphan in orphans:
-        target = assignment.get(id(orphan))
-        if target is not None:
-            extra_pages.setdefault(id(target), []).extend(orphan.pages)
+        entry = assignment.get(id(orphan))
+        if entry is None:
+            continue
+        target, tier = entry
+        extra_pages.setdefault(id(target), []).extend(orphan.pages)
+        if tier == 1:
+            weak_targets.add(id(target))
     result: list[SourceFile] = []
     for src in files:
         if id(src) in assignment:
             continue  # 该 orphan 已并入 run
         gained = extra_pages.get(id(src))
         if gained:
+            extra_flags = ["code.group.cross_bucket_rescued"]
+            if id(src) in weak_targets:
+                extra_flags.append("code.group.cross_bucket_rescued_weak")
             result.append(_build_source_file(
-                [*src.pages, *gained],
-                extra_flags=["code.group.cross_bucket_rescued"],
+                [*src.pages, *gained], extra_flags=extra_flags,
             ))
         else:
             result.append(src)
