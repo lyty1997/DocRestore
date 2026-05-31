@@ -27,7 +27,13 @@
 **AGE-80 S1**（文件名归一，无依赖）/ **AGE-81 S2**（行号锚定归类，blocked-by S0+S1）/ **AGE-82 S3**（共识合并+命名+
 provenance+端到端回归，blocked-by S2）。依赖已用 blocks/blocked-by 连好；各子 issue 含 API 契约 + 「无输入输出证据不得 Done」门槛。
 
-**遗留**：未写代码（设计先行，待用户拍板从 S0=AGE-79 开工）。详见 memory [[code_mode_fragmentation_diagnosis]] / [[linear_workspace]]。
+**S0（AGE-79）已落地**（分支 `feature/s0-line-ledger`，commit 7da65f4）：新增 `processing/code_line_ledger.py`
+（`build_line_ledger`：行号单调性按视觉 y / 重复行 / inferred / 回查原图 OCR 忠实性 + 回填 OCR score 作 confidence），
+pipeline 逐页用该栏源 `layout.columns[idx]` 建账本、列级 flag 并入 `col.flags`（经 quality_report 暴露）。9 单测全过，
+`tests/processing`+`tests/pipeline` 427 passed 无回归。AGE-79 → Done，已贴证据。
+
+**遗留**：S1（AGE-80，可并行）→ S2（AGE-81，blocked-by S0+S1）→ S3（AGE-82）待做。详见 memory
+[[code_mode_fragmentation_diagnosis]] / [[linear_workspace]]。
 
 ## 2026-05-30 - 文档减熵：全量对齐流式实现 + 删 DOC_BOUNDARY 残留
 
