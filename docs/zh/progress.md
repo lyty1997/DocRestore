@@ -46,8 +46,12 @@ garbage 碎片精确救援，第 4 个 gpu_mojo 拆名碎片与邻页重合且�
 按设计安全留 orphan。10 单测全过 449 passed 无回归。**校准发现**：θ_high=0.9 对真实 OCR 偏严（同文件重合落 weak），
 是否放宽待用户拍板，未擅自在单数据集放宽安全阈值。
 
-**遗留**：S2 校准决策（confirm-only=9 / weak+行号桥接=8 / 全局降 θ）待用户定；之后 S3（AGE-82）。详见 memory
-[[code_mode_fragmentation_diagnosis]] / [[linear_workspace]]。
+用户选「weak + 行号桥接」校准（commit 3c162b2）：跨桶救援接受 weak（多数行一致非冲突）+ orphan 填补 run 行号缺口
+（结构桥接）的情形，标 cross_bucket_rescued_weak。**真实端到端 16 → 8 全达成**（gpu_mojo 拆名碎片经桥接归位）。
+12 S2 单测全过，451 passed 无回归。AGE-81 → Done。S0/S1/S2 三步落地，文件碎片化问题在该数据集上根治。
+
+**遗留**：S3（AGE-82，现已解除阻塞）——共识合并 + run 级命名 + line provenance + 端到端回归 + 多数据集防腐。详见
+memory [[code_mode_fragmentation_diagnosis]] / [[linear_workspace]]。
 
 ## 2026-05-30 - 文档减熵：全量对齐流式实现 + 删 DOC_BOUNDARY 残留
 
