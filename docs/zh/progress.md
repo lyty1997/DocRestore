@@ -32,8 +32,14 @@ provenance+端到端回归，blocked-by S2）。依赖已用 blocks/blocked-by �
 pipeline 逐页用该栏源 `layout.columns[idx]` 建账本、列级 flag 并入 `col.flags`（经 quality_report 暴露）。9 单测全过，
 `tests/processing`+`tests/pipeline` 427 passed 无回归。AGE-79 → Done，已贴证据。
 
-**遗留**：S1（AGE-80，可并行）→ S2（AGE-81，blocked-by S0+S1）→ S3（AGE-82）待做。详见 memory
-[[code_mode_fragmentation_diagnosis]] / [[linear_workspace]]。
+**S1（AGE-80）已落地**（commit 6028c48）：新增 `processing/code_path_reconcile.py`（`build_vocabulary` 加权词表 +
+`build_canonical_map` 传递解析 + `reconcile_paths` 少数派碎片 snap，同扩展名硬约束 + stem 距离≤1 + minority 守门 +
+等距 ambiguous，原值留痕 `path_candidates(source=vocab)`），pipeline 在 group 前对全 batch reconcile。**实测修了一个
+误并 bug**：`snap_filename_max_distance` 2→1，否则 `x11`↔`x11xv`(差"xv"两字符的真实文件)被错并。真实 16-path 验证
+精确 snap 4 个真噪声碎片、garbage/跨扩展名留 S2、x11/x11xv 不误并。12 单测过，439 passed 无回归。AGE-80 → Done。
+
+**遗留**：S2（AGE-81，现已解除阻塞）→ S3（AGE-82）待做。详见 memory [[code_mode_fragmentation_diagnosis]] /
+[[linear_workspace]]。
 
 ## 2026-05-30 - 文档减熵：全量对齐流式实现 + 删 DOC_BOUNDARY 残留
 
