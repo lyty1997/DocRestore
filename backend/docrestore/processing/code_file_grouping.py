@@ -32,10 +32,12 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from docrestore.processing.code_assembly import CodeColumn
+    from docrestore.processing.code_line_ledger import LineEntry, LineLedger
     from docrestore.processing.ide_meta_extract import IDEMeta, PathCandidate
 
 logger = logging.getLogger(__name__)
@@ -80,6 +82,17 @@ class SourceFile:
     flags: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class GroupingConfig:
+    """S2 行号锚定归类阈值（pipeline 从 ``CodeRestoreConfig`` 映射传入）。"""
+
+    overlap_min_lines: int = 3
+    overlap_confirm_ratio: float = 0.90
+    overlap_conflict_ratio: float = 0.50
+    rescue_max_orphan_pages: int = 3
+    line_match_ratio: float = 0.80  # 单行视相等的相似度下限
+
+
 def segment_from_page_column(page: PageColumn) -> CodeSegment:
     """把现有 PageColumn 转成 AGE-62 CodeSegment 审计模型。"""
     return CodeSegment(
@@ -101,13 +114,21 @@ def segment_from_page_column(page: PageColumn) -> CodeSegment:
     )
 
 
-def group_into_files(page_columns: list[PageColumn]) -> list[SourceFile]:
-    """跨张归类入口
+def group_into_files(
+    page_columns: list[PageColumn],
+    ledgers: dict[tuple[str, int], LineLedger] | None = None,
+    config: GroupingConfig | None = None,
+) -> list[SourceFile]:
+    """跨张归类入口（S2：行号锚定 + 跨桶救援）
 
+    ``ledgers`` 为 S0 产出的 ``{(page_stem, column_index): LineLedger}``，供
+    行号重合区内容一致性裁决；缺省（空）时退回纯文件名/路径归类（向后兼容）。
     返回的 SourceFile 列表按 path 字典序排序，便于稳定输出。
     """
     if not page_columns:
         return []
+    cfg = config or GroupingConfig()
+    ledger_map = ledgers or {}
 
     # 1. fuzzy filename 一级聚类
     by_filename: dict[str, list[PageColumn]] = {}
@@ -137,12 +158,210 @@ def group_into_files(page_columns: list[PageColumn]) -> list[SourceFile]:
     # 4. 同 dir 下 filename 极相似（OCR 字符噪声 / 截断）→ 小组并入大组
     files = _merge_near_duplicate_filenames(files)
 
+    # 4.1 组内行号重合状态标注（仅打 flag，不移动页 → 零功能回归）
+    _annotate_overlap_status(files, ledger_map, cfg)
+
+    # 4.2 跨桶救援：文件名 garbage 的小碎片，靠行号重合区内容一致性归位
+    files = _cross_bucket_rescue(files, ledger_map, cfg)
+
     # 5. path 去重：决策 #3 拆出来的多个 sub_group 可能 canonical_path 相同
     # （都是 status.h），加 :col<i> 后缀避免 AGE-47 写文件时覆盖
     _disambiguate_duplicate_paths(files)
 
     files.sort(key=lambda f: f.path)
     return files
+
+
+def _add_flag(src: SourceFile, flag: str) -> None:
+    if flag not in src.flags:
+        src.flags.append(flag)
+
+
+def _entries_of(
+    pc: PageColumn, ledger_map: dict[tuple[str, int], LineLedger],
+) -> dict[int, LineEntry]:
+    """取某页栏的行账本 entries；缺失返回空 dict。"""
+    ledger = ledger_map.get((pc.page_stem, pc.column_index))
+    return ledger.entries if ledger is not None else {}
+
+
+def _line_matches(text_a: str, text_b: str, cfg: GroupingConfig) -> bool:
+    """两行归一空白后是否视为相同（相等或相似度 ≥ 阈值）。"""
+    norm_a = " ".join(text_a.split())
+    norm_b = " ".join(text_b.split())
+    if norm_a == norm_b:
+        return True
+    if not norm_a or not norm_b:
+        return False
+    return SequenceMatcher(None, norm_a, norm_b).ratio() >= cfg.line_match_ratio
+
+
+def _overlap_verdict(
+    entries_a: dict[int, LineEntry],
+    entries_b: dict[int, LineEntry],
+    cfg: GroupingConfig,
+) -> tuple[str, float, int]:
+    """两页在共享行号上的内容一致裁决。
+
+    仅取双方都 ``anchor_trustable`` 的共享行。返回 ``(verdict, ratio, n_shared)``，
+    verdict ∈ {``confirm``, ``conflict``, ``weak``, ``insufficient``}。
+    """
+    shared: list[int] = []
+    for line_no, entry_a in entries_a.items():
+        if not entry_a.anchor_trustable:
+            continue
+        entry_b = entries_b.get(line_no)
+        if entry_b is None or not entry_b.anchor_trustable:
+            continue
+        shared.append(line_no)
+    if len(shared) < cfg.overlap_min_lines:
+        return "insufficient", 0.0, len(shared)
+    matches = sum(
+        1 for line_no in shared
+        if _line_matches(
+            entries_a[line_no].text, entries_b[line_no].text, cfg,
+        )
+    )
+    ratio = matches / len(shared)
+    if ratio >= cfg.overlap_confirm_ratio:
+        return "confirm", ratio, len(shared)
+    if ratio <= cfg.overlap_conflict_ratio:
+        return "conflict", ratio, len(shared)
+    return "weak", ratio, len(shared)
+
+
+def _annotate_overlap_status(
+    files: list[SourceFile],
+    ledger_map: dict[tuple[str, int], LineLedger],
+    cfg: GroupingConfig,
+) -> None:
+    """标注多页文件组内相邻页的行号重合状态（仅打 flag，不移动页）。"""
+    if not ledger_map:
+        return
+    for src in files:
+        if len(src.pages) < 2:
+            continue
+        ordered = sorted(
+            src.pages, key=lambda pc: _column_line_no_start(pc.column),
+        )
+        statuses: set[str] = set()
+        for prev, curr in zip(ordered, ordered[1:], strict=False):
+            verdict = _overlap_verdict(
+                _entries_of(prev, ledger_map),
+                _entries_of(curr, ledger_map),
+                cfg,
+            )[0]
+            statuses.add(verdict)
+        if "conflict" in statuses:
+            _add_flag(src, "code.group.overlap_conflict")
+        elif "confirm" in statuses:
+            _add_flag(src, "code.group.overlap_confirmed")
+        elif "weak" in statuses:
+            _add_flag(src, "code.group.overlap_weak")
+        else:
+            _add_flag(src, "code.group.gap_no_overlap")
+
+
+def _orphan_matches_run(
+    orphan: SourceFile,
+    run: SourceFile,
+    ledger_map: dict[tuple[str, int], LineLedger],
+    cfg: GroupingConfig,
+) -> tuple[bool, int, float]:
+    """orphan 与 run 任一对页重合区 confirm → 命中，返回最佳 ``(n_shared, ratio)``。"""
+    hit = False
+    best_n = 0
+    best_ratio = 0.0
+    for orphan_page in orphan.pages:
+        orphan_entries = _entries_of(orphan_page, ledger_map)
+        if not orphan_entries:
+            continue
+        for run_page in run.pages:
+            if (
+                orphan_page.page_stem == run_page.page_stem
+                and orphan_page.column_index == run_page.column_index
+            ):
+                continue  # 同一页栏不跨桶（防御）
+            verdict, ratio, n_shared = _overlap_verdict(
+                orphan_entries, _entries_of(run_page, ledger_map), cfg,
+            )
+            if verdict == "confirm" and (n_shared, ratio) > (best_n, best_ratio):
+                hit = True
+                best_n, best_ratio = n_shared, ratio
+    return hit, best_n, best_ratio
+
+
+def _cross_bucket_rescue(
+    files: list[SourceFile],
+    ledger_map: dict[tuple[str, int], LineLedger],
+    cfg: GroupingConfig,
+) -> list[SourceFile]:
+    """文件名 garbage 的小碎片，靠行号重合区内容一致性归并进对应 run。
+
+    只在重合区 ``confirm``（一致率 ≥ θ_high 且行数足够）时救援；无命中标
+    ``code.group.orphan_unrescued``。无 ledger 时跳过（无内容证据，向后兼容）。
+    """
+    if not ledger_map or len(files) < 2:
+        return files
+    runs = [f for f in files if len(f.pages) > cfg.rescue_max_orphan_pages]
+    orphans = [f for f in files if len(f.pages) <= cfg.rescue_max_orphan_pages]
+    if not runs or not orphans:
+        return files
+    assignment = _assign_orphans_to_runs(orphans, runs, ledger_map, cfg)
+    if not assignment:
+        return files
+    return _apply_rescue(files, orphans, assignment)
+
+
+def _assign_orphans_to_runs(
+    orphans: list[SourceFile],
+    runs: list[SourceFile],
+    ledger_map: dict[tuple[str, int], LineLedger],
+    cfg: GroupingConfig,
+) -> dict[int, SourceFile]:
+    """每个 orphan 选内容重合最强的 run；无命中标 orphan_unrescued。"""
+    assignment: dict[int, SourceFile] = {}  # id(orphan) -> 目标 run
+    for orphan in orphans:
+        best_run: SourceFile | None = None
+        best_key: tuple[int, float] | None = None
+        for run in runs:
+            ok, n_shared, ratio = _orphan_matches_run(
+                orphan, run, ledger_map, cfg,
+            )
+            if ok and (best_key is None or (n_shared, ratio) > best_key):
+                best_key = (n_shared, ratio)
+                best_run = run
+        if best_run is not None:
+            assignment[id(orphan)] = best_run
+        else:
+            _add_flag(orphan, "code.group.orphan_unrescued")
+    return assignment
+
+
+def _apply_rescue(
+    files: list[SourceFile],
+    orphans: list[SourceFile],
+    assignment: dict[int, SourceFile],
+) -> list[SourceFile]:
+    """把已分配的 orphan 页并入目标 run，重建受影响 run，丢弃被并 orphan。"""
+    extra_pages: dict[int, list[PageColumn]] = {}
+    for orphan in orphans:
+        target = assignment.get(id(orphan))
+        if target is not None:
+            extra_pages.setdefault(id(target), []).extend(orphan.pages)
+    result: list[SourceFile] = []
+    for src in files:
+        if id(src) in assignment:
+            continue  # 该 orphan 已并入 run
+        gained = extra_pages.get(id(src))
+        if gained:
+            result.append(_build_source_file(
+                [*src.pages, *gained],
+                extra_flags=["code.group.cross_bucket_rescued"],
+            ))
+        else:
+            result.append(src)
+    return result
 
 
 #: 小组并入大组时，小组 page 数占两组之和的最大比例。超过此比例视为

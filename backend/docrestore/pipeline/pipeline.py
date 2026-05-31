@@ -917,10 +917,14 @@ class Pipeline:
         )
         from docrestore.processing.code_context import create_code_context_provider
         from docrestore.processing.code_file_grouping import (
+            GroupingConfig,
             PageColumn,
             group_into_files,
         )
-        from docrestore.processing.code_line_ledger import build_line_ledger
+        from docrestore.processing.code_line_ledger import (
+            LineLedger,
+            build_line_ledger,
+        )
         from docrestore.processing.code_path_reconcile import (
             ReconcileConfig,
             build_vocabulary,
@@ -948,6 +952,7 @@ class Pipeline:
             message_params={"total": str(len(pages_ref))},
         )
         all_pcs: list[PageColumn] = []
+        ledgers: dict[tuple[str, int], LineLedger] = {}
         missing_line_pages: list[str] = []
         for i, page in enumerate(pages_ref):
             text_lines = page.text_lines
@@ -1003,6 +1008,7 @@ class Pipeline:
                 # flag 并入 col.flags，经 quality_report / code_renderer 暴露。
                 ledger = build_line_ledger(page_stem, col, col_lines)
                 col.flags.extend(ledger.flags)
+                ledgers[(page_stem, col.column_index)] = ledger
                 all_pcs.append(PageColumn(
                     page_stem=page_stem,
                     column_index=col.column_index,
@@ -1048,8 +1054,14 @@ class Pipeline:
         )
         reconcile_paths(all_pcs, vocab, reconcile_cfg)
 
-        # 4. 跨张归类 + 落盘
-        sources = group_into_files(all_pcs)
+        # 4. 跨张归类 + 落盘（S2：行号锚定 + 跨桶救援，传入 S0 行账本）
+        grouping_cfg = GroupingConfig(
+            overlap_min_lines=code_cfg.overlap_min_lines,
+            overlap_confirm_ratio=code_cfg.overlap_confirm_ratio,
+            overlap_conflict_ratio=code_cfg.overlap_conflict_ratio,
+            rescue_max_orphan_pages=code_cfg.rescue_max_orphan_pages,
+        )
+        sources = group_into_files(all_pcs, ledgers, grouping_cfg)
         report_fn(
             "code_group", len(sources), len(sources),
             f"代码模式：归类得到 {len(sources)} 个源文件",

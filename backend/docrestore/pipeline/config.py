@@ -330,6 +330,16 @@ class CodeRestoreConfig(BaseModel):
     #: 两个体量相当的同名近邻文件——那种交由 S2 行号内容裁决）。
     snap_minority_ratio: float = 0.5
 
+    # --- AGE-81 Stage 2 行号锚定归类阈值 ---
+    #: 重合区有效（双方可信）行数下限，低于则视为无可用重合。
+    overlap_min_lines: int = 3
+    #: 重合区内容一致率 ≥ 此值 → 确认续接 / 跨桶救援命中。
+    overlap_confirm_ratio: float = 0.90
+    #: 重合区内容一致率 ≤ 此值 → 判内容冲突。
+    overlap_conflict_ratio: float = 0.50
+    #: 页数 ≤ 此值的小组才作为跨桶救援的 orphan 候选。
+    rescue_max_orphan_pages: int = 3
+
 
 class PipelineConfig(BaseModel):
     """Pipeline 总配置"""
