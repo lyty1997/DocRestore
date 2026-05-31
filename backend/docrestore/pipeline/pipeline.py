@@ -920,6 +920,7 @@ class Pipeline:
             PageColumn,
             group_into_files,
         )
+        from docrestore.processing.code_line_ledger import build_line_ledger
         from docrestore.processing.ide_layout import analyze_layout
         from docrestore.processing.ide_meta_extract import extract_ide_metas
         context_provider = create_code_context_provider(code_cfg.context_root)
@@ -988,9 +989,17 @@ class Pipeline:
                     _augment_metas_with_code_context, metas, context_provider,
                 )
             columns = assemble_columns(layout)
-            for col, meta in zip(columns, metas, strict=True):
+            page_stem = page.image_path.stem
+            for col, meta, col_lines in zip(
+                columns, metas, layout.columns, strict=True,
+            ):
+                # Stage 0：行账本完整性校验（AGE-79）。用该栏的源 text_lines
+                # （而非整页，兼容二次 column OCR）回查行号↔文本配对，把列级风险
+                # flag 并入 col.flags，经 quality_report / code_renderer 暴露。
+                ledger = build_line_ledger(page_stem, col, col_lines)
+                col.flags.extend(ledger.flags)
                 all_pcs.append(PageColumn(
-                    page_stem=page.image_path.stem,
+                    page_stem=page_stem,
                     column_index=col.column_index,
                     meta=meta,
                     column=col,
