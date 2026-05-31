@@ -1,5 +1,34 @@
 # 开发进度
 
+## 2026-05-31 - 代码模式碎片化诊断 + 跨页归类重构设计（方案 1+4，已确认待实现）
+
+**背景**：chromium 显示子系统代码数据集（157 张 IDE 截图）跑代码模式，本应收敛成 **8 个真实源文件**，
+实际产出 **16 个**，半数是从真实文件掉下来的「幽灵碎片」（`ui/g/`、`giesz.cc`、`c/gl_surface_egl.h`、
+双下划线 `__gles2.h`、`gpu_mojo/media/client/linux.cc` 等）。
+
+**诊断（已对照原图 + `text_lines.jsonl` 中间结果坐标确认）**：代码正文 OCR 没问题，崩在「从 IDE 界面壳子
+（标题栏/标签/面包屑）反推文件名+路径」这条零容错元数据链——三层防线全被 OCR 噪声击穿：①面包屑「唯一真相」
+本身被污染（丢点 `gles2.h`→`gles2h`、漏字符 `gl`→`g`、图标 `C`→目录 `c`、文件名碎块当多级目录）；
+②标签兜底抓到灰色 preview 标签（OCR 看不到高亮、`×` active 正则脆）+ 窗口标题噪声过滤脆（`-src[`→`-sic[`）；
+③`_merge_near_duplicate_filenames` 开口太窄（精确 dir 分桶 + 10% 比例硬闸把 18% 双下划线变体判成独立文件）。
+
+**设计产出**：`docs/zh/backend/processing.md` **§3.6**（含 2 张已 `java -jar plantuml.jar` 真编译验证的活动图；
+按用户要求直接写进代码模式章节，不另起 references 文档）。核心原则「行号+行内容 > 文件名」：文件名（方案 1 清洗后）
+只提候选，行号重合区内容一致性裁决归属。四 Stage——S0 每页行账本完整性校验（保证源干净）→ S1 batch 文件名归一
+（高置信词表 snap 碎片）→ S2 行号锚定跨页归类（重合区内容一致性三分支 + garbage 碎片跨桶救援）→ S3 共识合并 +
+命名 + provenance。已拆 4 个 sub-issue（S0→S1→S2→S3）。
+
+**用户确认的三点调整**：①阈值用经验初值、落地后多数据集调参；②line provenance **必做**（可溯源调试）；
+③文档迁入 processing.md §3.6（删原 references 独立文档）。**新增「文件名/路径 run 级加权共识恢复」小节**回答用户提问
+——先用行号+内容确认 run，再对 run 内全部名字观测做**路径分段投票 + 段内字符级共识**（替代现有整串投票），并把
+窗口标题栏 filename 纳入票池。
+
+**Linear issue 树**（team claude-code-team / project DocRestore）：父 **AGE-78**，子 **AGE-79 S0**（行账本校验，无依赖）/
+**AGE-80 S1**（文件名归一，无依赖）/ **AGE-81 S2**（行号锚定归类，blocked-by S0+S1）/ **AGE-82 S3**（共识合并+命名+
+provenance+端到端回归，blocked-by S2）。依赖已用 blocks/blocked-by 连好；各子 issue 含 API 契约 + 「无输入输出证据不得 Done」门槛。
+
+**遗留**：未写代码（设计先行，待用户拍板从 S0=AGE-79 开工）。详见 memory [[code_mode_fragmentation_diagnosis]] / [[linear_workspace]]。
+
 ## 2026-05-30 - 文档减熵：全量对齐流式实现 + 删 DOC_BOUNDARY 残留
 
 **背景**：前几轮删了批量路径死代码（DOC_BOUNDARY 簇 / strip_repeated_lines / dedup 访问器）后，
