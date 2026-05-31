@@ -61,8 +61,8 @@ baseline 精确等于线上输出，护栏在未见数据全部成立。39 新�
 非回归）。**AGE-78（父）+ S0/S1/S2/S3 全 Done，碎片化根治。**
 
 **遗留**：①窗口标题栏 filename 纳入命名票池（低优先 follow-up，需 ide_meta_extract 增量，当前命名已正确）；
-②θ 阈值多数据集进一步标定；③分支 `feature/s0-line-ledger` 待合并 dev / 真实任务验证。详见 memory
-[[code_mode_fragmentation_diagnosis]] / [[linear_workspace]]。
+②θ 阈值多数据集进一步标定；③**已合并 dev**（merge 6d51d9e，feature 分支已推送 origin 备份），待真实任务端到端验证。
+详见 memory [[code_mode_fragmentation_diagnosis]] / [[linear_workspace]]。
 
 ## 2026-05-30 - 文档减熵：全量对齐流式实现 + 删 DOC_BOUNDARY 残留
 
