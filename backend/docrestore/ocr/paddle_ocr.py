@@ -120,12 +120,14 @@ class PaddleOCREngine(WorkerBackedOCREngine):
             "cmd": "initialize",
             "pipeline": self._config.paddle_pipeline,
         }
-        # vl 模式才需要 server_url（basic 不依赖 vllm-server）
-        if self._config.paddle_pipeline == "vl" and self._config.paddle_server_url:
-            init_cmd["server_url"] = self._config.paddle_server_url
-            init_cmd["server_model_name"] = (
-                self._config.paddle_server_model_name
-            )
+        # vl 模式透传 pipeline_version（v1.6 等）；server_url 仅 server 模式需要
+        if self._config.paddle_pipeline == "vl":
+            init_cmd["pipeline_version"] = self._config.paddle_pipeline_version
+            if self._config.paddle_server_url:
+                init_cmd["server_url"] = self._config.paddle_server_url
+                init_cmd["server_model_name"] = (
+                    self._config.paddle_server_model_name
+                )
         return init_cmd
 
     async def _terminate_process(self) -> None:

@@ -29,7 +29,7 @@ DocRestore 启动脚本
     PPOCR_GPU_ID   绑定 GPU 编号；留空则不导出 CUDA_VISIBLE_DEVICES，
                    由 vLLM 自动枚举 + docrestore 内部按显存挑卡 (默认 留空)
     PPOCR_PORT     genai_server 端口 (默认 8119)
-    PPOCR_MODEL    模型名 (默认 PaddleOCR-VL-1.5-0.9B)
+    PPOCR_MODEL    模型名 (默认 PaddleOCR-VL-1.6-0.9B)
 
 示例:
   ./scripts/start.sh                                 # 后端 + 前端
@@ -65,7 +65,7 @@ FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 # 后端启动路径下由 docrestore.ocr.gpu_detect.pick_best_gpu 统一挑显存最大的一张。
 PPOCR_GPU_ID="${PPOCR_GPU_ID:-}"
 PPOCR_PORT="${PPOCR_PORT:-8119}"
-PPOCR_MODEL="${PPOCR_MODEL:-PaddleOCR-VL-1.5-0.9B}"
+PPOCR_MODEL="${PPOCR_MODEL:-PaddleOCR-VL-1.6-0.9B}"
 
 # 颜色输出
 RED='\033[0;31m'

@@ -128,7 +128,7 @@ bash scripts/start.sh frontend  # 前端页面：http://localhost:5173
 | `FRONTEND_PORT` | `5173` | 前端开发服务器端口 |
 | `PPOCR_GPU_ID` | 空（自动） | PaddleOCR server 使用的 GPU；留空时由 `gpu_detect.pick_best_gpu` 自动推荐 |
 | `PPOCR_PORT` | `8119` | PaddleOCR server 端口 |
-| `PPOCR_MODEL` | `PaddleOCR-VL-1.5-0.9B` | PaddleOCR 模型名 |
+| `PPOCR_MODEL` | `PaddleOCR-VL-1.6-0.9B` | PaddleOCR 模型名 |
 
 ### 3.2 PaddleOCR 安装变量
 
@@ -221,7 +221,7 @@ PPOCR_GPU_ID=0 PPOCR_PORT=9119 bash scripts/start.sh ppocr-server
 | `paddle_server_port` | ppocr-server 端口（默认 8119） |
 | `paddle_server_startup_timeout` | server 启动超时秒数（默认 300） |
 | `paddle_server_host` / `paddle_server_port` / `paddle_server_api_version` | 自动拼接 `paddle_server_url`（默认 `http://localhost:8119/v1`） |
-| `paddle_server_model_name` | server 模型名（默认 `PaddleOCR-VL-1.5-0.9B`） |
+| `paddle_server_model_name` | server 模型名（默认 `PaddleOCR-VL-1.6-0.9B`） |
 | `paddle_ocr_timeout` | 单张 OCR 超时秒数（默认 300） |
 | `paddle_restart_interval` | 每 N 张重启 worker（server 模式建议设 0） |
 
@@ -366,7 +366,7 @@ User=docrestore
 Environment="PATH=/path/to/conda/envs/ppocr_vlm/bin"
 # 需要固定到某张 GPU 再设置（留空则让 vLLM 自行枚举所有可见 GPU）
 # Environment="CUDA_VISIBLE_DEVICES=0"
-ExecStart=/path/to/conda/envs/ppocr_vlm/bin/paddleocr genai_server --model_name PaddleOCR-VL-1.5-0.9B --backend vllm --port 8119
+ExecStart=/path/to/conda/envs/ppocr_vlm/bin/paddleocr genai_server --model_name PaddleOCR-VL-1.6-0.9B --backend vllm --port 8119
 Restart=always
 
 [Install]

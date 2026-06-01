@@ -337,7 +337,7 @@ Contains many fields, grouped by sub-feature:
 - `paddle_ocr_timeout: int = 300` / `paddle_restart_interval: int = 20`
 - `paddle_worker_script: str = ""` -- empty string falls back to the default in-repo path
 - `paddle_server_url: str = ""` -- when empty, EngineManager auto-assembles from host/port/api_version
-- `paddle_server_model_name: str = "PaddleOCR-VL-1.5-0.9B"`
+- `paddle_server_model_name: str = "PaddleOCR-VL-1.6-0.9B"`
 - `paddle_min_image_size: int = 64`
 - `paddle_server_python: str = ""` -- ppocr_vlm conda environment (for starting the server)
 - `paddle_server_host: str = "localhost"` / `paddle_server_port: int = 8119` / `paddle_server_api_version: str = "v1"`

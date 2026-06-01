@@ -232,7 +232,7 @@ async def main() -> None:
         "--paddle-server-url", default="http://localhost:8119/v1",
     )
     parser.add_argument(
-        "--paddle-server-model", default="PaddleOCR-VL-1.5-0.9B",
+        "--paddle-server-model", default="PaddleOCR-VL-1.6-0.9B",
     )
     parser.add_argument("--deepseek-python", default="")
     parser.add_argument(

@@ -146,7 +146,11 @@ class OCRConfig(BaseModel):
 
     # PaddleOCR server 模式（paddle_server_url 非空时启用）
     paddle_server_url: str = ""  # 如 "http://localhost:8119/v1"
-    paddle_server_model_name: str = "PaddleOCR-VL-1.5-0.9B"
+    paddle_server_model_name: str = "PaddleOCR-VL-1.6-0.9B"
+    #: PaddleOCR-VL 管线版本（``v1`` / ``v1.5`` / ``v1.6``）。决定版面模型
+    #: （PP-DocLayout）与 VL prompt 版本，需与 ``paddle_server_model_name`` 的
+    #: 模型版本匹配（如 1.6 模型 + ``v1.6``）。VL-1.5 已废弃，默认 ``v1.6``。
+    paddle_pipeline_version: str = "v1.6"
     paddle_min_image_size: int = 64  # 过滤宽或高小于此值的小图标（px）
 
     # ppocr-server 自动管理（EngineManager 控制）
