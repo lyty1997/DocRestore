@@ -71,30 +71,36 @@ DocRestore 将连续拍摄的文档照片还原为格式化的 Markdown 文档�
 
 ## 3. 数据流
 
-```
-① OCR → ② 清洗 → ③ 去重合并 → ④ PII 脱敏(可选)
-    → ⑤ 分段 → ⑥ LLM 精修 → ⑦ 重组
-    → ⑧ 多文档边界检测(可选) → [每个子文档分别进入以下流程]
-    → ⑨ 缺口补充(可选) → ⑩ 整篇精修(可选) → ⑪ 输出
+文档模式是**流式生产者/消费者**：OCR 边产出、LLM 边消费，一个目录视为一篇文档。
 
-代码模式分支：
-① OCR text_lines → ② IDE 布局/行号列识别 → ③ 代码栏组装
+```
+文档模式（_stream_pipeline）：
+  ① OCR 生产者：逐页 OCR → ② 清洗 → ③ 可选 regex PII → 入 page_queue
+                                     ∥（并发）
+  ④ 流式消费者：逐页增量合并 → ⑤ 按 L* 切段 → ⑥ LLM 段级精修
+       （⑦ 满 5 页异步取 PII lexicon）
+  收齐后终结化：⑧ 重组 → ⑨ 缺口补充(可选) → ⑩ 整篇精修(可选)
+              → ⑪ 程序化去重兜底 → ⑫ 输出 → 单个 PipelineResult
+
+代码模式分支（_code_pipeline）：
+  ① OCR text_lines → ② IDE 布局/行号列识别 → ③ 代码栏组装
     → ④ 跨页按路径/文件名分组为 SourceFile → ⑤ LLM 字符级精修/修复
     → ⑥ 轻量诊断 → ⑦ 输出 files/、files-index.json 和兼容 Markdown
 ```
 
-详细说明：
-- ① OCR：逐张照片 OCR，生成每页 `{stem}_OCR/` 目录
+详细说明（文档模式）：
+- ① OCR：逐张照片 OCR，生成每页 `{stem}_OCR/` 目录；OCR 串行受 `gpu_lock` 保护
 - ② 清洗：页内去重、乱码/空行修复
-- ③ 去重合并：相邻页滚动合并，跨页频率过滤（`strip_repeated_lines`）移除侧栏噪声，插入 `<!-- page: ... -->` 边界标记
-- ④ PII 脱敏（可选）：结构化正则（手机/邮箱/身份证/银行卡）+ LLM 实体检测，产出 `EntityLexicon` 供 re-OCR 片段复用
-- ⑤ 分段：按标题/空行分段，相邻段保留 `overlap_lines` 行上下文
-- ⑥ LLM 精修：逐段修复 markdown 结构，解析 Gap 标记，检测模型截断（`finish_reason == "length"` 或启发式行数比）
-- ⑦ 重组：拼接段结果，汇总 gaps 与 warnings
-- ⑧ 多文档边界检测（可选）：`LLMRefiner.detect_doc_boundaries()` 独立 LLM 调用，将合并文本拆成多个 `PipelineResult`
+- ③ PII regex（可选）：生产阶段逐页 `redact_regex_only`（手机/邮箱/身份证/银行卡）先行脱敏
+- ④ 增量合并：`IncrementalMerger.add_page()` 逐页滚动合并去重，插入 `<!-- page: ... -->` 边界标记
+- ⑤ 流式切段：`StreamSegmentExtractor` 按 `RateController` 运行时自适应段长 L* 从增长中的文本切段
+- ⑥ LLM 精修：逐段修复 markdown 结构，解析 Gap 标记，检测模型截断（`finish_reason == "length"` 或启发式行数比），命中 `LLMCache` 跳过；失败回退原文
+- ⑦ PII 实体检测（可选）：满 5 页后异步 `detect_pii_entities()` 取 `EntityLexicon`，供缺口补充 re-OCR 片段复用
+- ⑧ 重组：`_reassemble()` 拼接各段结果
 - ⑨ 缺口补充（可选）：`OCREngine.reocr_page()` re-OCR + `LLMRefiner.fill_gap()`，带 GPU 锁与单 gap 异常降级
 - ⑩ 整篇精修（可选）：全文最终精修，再次 `parse_gaps()`
-- ⑪ 输出：`Renderer` 汇总插图复制/重命名，按 `doc_dir` 写入（单文档根目录 / 多文档子目录）
+- ⑪ 程序化去重兜底：0 LLM 成本删除重复 HTML 表 / H2 章节 / 代码块视觉行号 / 残留 UI 噪音
+- ⑫ 输出：`Renderer` 汇总插图复制/重命名，写入 `output_dir/document.md`
 - 代码模式输出：`render_code_files()` 写出 `output_dir/files/**`、`files-index.json` 和 `document.md`；`files-index.json` 是前端 CodeViewer 的文件列表、来源页、质量 flags 与诊断事实源
 
 ## 4. 目录结构
@@ -132,23 +138,17 @@ docrestore/
 - 对 OCR 微小差异更鲁棒，成本适中
 
 ### 5.3 LLM 精修策略
-- 优先按标题切分，保持语义完整
-- 相邻段保留 overlap 提供上下文（拼入 `Segment.text`，由 LLM 精修时去重）
+- 流式按标题/空行切段，段长 L* 由 `RateController` 运行时自适应
+- 相邻段保留 backward overlap 提供上下文（拼入段文本，由 LLM 精修时去重）
 - 支持云端（litellm）和本地（OpenAI 兼容 API：vLLM / ollama / llama.cpp）两种 provider
 - 截断双层检测：模型 `finish_reason` + 输出/输入行数比启发式阈值（`LLMConfig.truncation_*`）
 - 代码 refine 模式对大 SourceFile 按行数/字符数自动切块，单个 chunk 失败只回退该 chunk；rewrite 模式不自动切块
 
-### 5.4 多文档边界检测
-- 由独立 LLM 调用 `detect_doc_boundaries()` 完成（不与分段精修耦合）
-- 合并文本送入 LLM 返回 `list[DocBoundary]`（JSON 容错，解析失败降级为单文档）
-- `Pipeline.process_many()` 根据 boundary 切分子文档，每个子文档独立做 gap fill / final refine / render
-- 输出目录：单文档写 `output_dir/`，多文档写 `output_dir/{sanitize_dirname(title)}/`；dirname 冲突时 `dedupe_dirnames()` 追加后缀
-
-### 5.5 并发模型
+### 5.4 并发模型
 - GPU 串行（`asyncio.Lock` 保护 OCR 调用 + 引擎切换）
 - `EngineManager.switch_lock` 防止并发切换，等待当前 OCR 操作释放 `gpu_lock` 后再切换引擎
 - 无组级并发（单任务独占 GPU）；任务级并发由 TaskManager 控制
-- 流式并行 Pipeline 设计记录见 `docs/zh/backend/references/streaming-pipeline.md`；实施状态以 `pipeline/` 当前代码和 `backend/pipeline.md` 为准
+- **流式并行已落地**：`process_many` 内 OCR 生产者与 LLM 消费者并发；`process_tree` 多子目录用最长目录 warmup cold start 后并发，共享一个 `RateController`。设计反转由来见 `docs/zh/backend/references/streaming-pipeline.md`，事实源以 `pipeline/` 代码和 `backend/pipeline.md` 为准
 
 ## 6. 扩展性设计
 
@@ -167,7 +167,6 @@ docrestore/
 ### 6.3 当前边界与未来扩展
 - 代码模式已支持 IDE 代码照片 → 源文件、来源图片联动、轻量诊断和单文件编辑保存；仍可继续增强函数级切块、项目级依赖图和成熟代码编辑器组件
 - PDF 输入支持
-- 流式并行 Pipeline 实施（历史设计见 references，当前状态以 `pipeline/` 代码为准）
 - 前端多文档结果展示已落地基础导航；后续可补真实 fixture 的端到端视觉验证
 
 ## 7. 相关文档

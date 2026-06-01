@@ -1,5 +1,212 @@
 # 开发进度
 
+## 2026-05-31 - 代码模式碎片化诊断 + 跨页归类重构设计（方案 1+4，已确认待实现）
+
+**背景**：chromium 显示子系统代码数据集（157 张 IDE 截图）跑代码模式，本应收敛成 **8 个真实源文件**，
+实际产出 **16 个**，半数是从真实文件掉下来的「幽灵碎片」（`ui/g/`、`giesz.cc`、`c/gl_surface_egl.h`、
+双下划线 `__gles2.h`、`gpu_mojo/media/client/linux.cc` 等）。
+
+**诊断（已对照原图 + `text_lines.jsonl` 中间结果坐标确认）**：代码正文 OCR 没问题，崩在「从 IDE 界面壳子
+（标题栏/标签/面包屑）反推文件名+路径」这条零容错元数据链——三层防线全被 OCR 噪声击穿：①面包屑「唯一真相」
+本身被污染（丢点 `gles2.h`→`gles2h`、漏字符 `gl`→`g`、图标 `C`→目录 `c`、文件名碎块当多级目录）；
+②标签兜底抓到灰色 preview 标签（OCR 看不到高亮、`×` active 正则脆）+ 窗口标题噪声过滤脆（`-src[`→`-sic[`）；
+③`_merge_near_duplicate_filenames` 开口太窄（精确 dir 分桶 + 10% 比例硬闸把 18% 双下划线变体判成独立文件）。
+
+**设计产出**：`docs/zh/backend/processing.md` **§3.6**（含 2 张已 `java -jar plantuml.jar` 真编译验证的活动图；
+按用户要求直接写进代码模式章节，不另起 references 文档）。核心原则「行号+行内容 > 文件名」：文件名（方案 1 清洗后）
+只提候选，行号重合区内容一致性裁决归属。四 Stage——S0 每页行账本完整性校验（保证源干净）→ S1 batch 文件名归一
+（高置信词表 snap 碎片）→ S2 行号锚定跨页归类（重合区内容一致性三分支 + garbage 碎片跨桶救援）→ S3 共识合并 +
+命名 + provenance。已拆 4 个 sub-issue（S0→S1→S2→S3）。
+
+**用户确认的三点调整**：①阈值用经验初值、落地后多数据集调参；②line provenance **必做**（可溯源调试）；
+③文档迁入 processing.md §3.6（删原 references 独立文档）。**新增「文件名/路径 run 级加权共识恢复」小节**回答用户提问
+——先用行号+内容确认 run，再对 run 内全部名字观测做**路径分段投票 + 段内字符级共识**（替代现有整串投票），并把
+窗口标题栏 filename 纳入票池。
+
+**Linear issue 树**（team claude-code-team / project DocRestore）：父 **AGE-78**，子 **AGE-79 S0**（行账本校验，无依赖）/
+**AGE-80 S1**（文件名归一，无依赖）/ **AGE-81 S2**（行号锚定归类，blocked-by S0+S1）/ **AGE-82 S3**（共识合并+命名+
+provenance+端到端回归，blocked-by S2）。依赖已用 blocks/blocked-by 连好；各子 issue 含 API 契约 + 「无输入输出证据不得 Done」门槛。
+
+**S0（AGE-79）已落地**（分支 `feature/s0-line-ledger`，commit 7da65f4）：新增 `processing/code_line_ledger.py`
+（`build_line_ledger`：行号单调性按视觉 y / 重复行 / inferred / 回查原图 OCR 忠实性 + 回填 OCR score 作 confidence），
+pipeline 逐页用该栏源 `layout.columns[idx]` 建账本、列级 flag 并入 `col.flags`（经 quality_report 暴露）。9 单测全过，
+`tests/processing`+`tests/pipeline` 427 passed 无回归。AGE-79 → Done，已贴证据。
+
+**S1（AGE-80）已落地**（commit 6028c48）：新增 `processing/code_path_reconcile.py`（`build_vocabulary` 加权词表 +
+`build_canonical_map` 传递解析 + `reconcile_paths` 少数派碎片 snap，同扩展名硬约束 + stem 距离≤1 + minority 守门 +
+等距 ambiguous，原值留痕 `path_candidates(source=vocab)`），pipeline 在 group 前对全 batch reconcile。**实测修了一个
+误并 bug**：`snap_filename_max_distance` 2→1，否则 `x11`↔`x11xv`(差"xv"两字符的真实文件)被错并。真实 16-path 验证
+精确 snap 4 个真噪声碎片、garbage/跨扩展名留 S2、x11/x11xv 不误并。12 单测过，439 passed 无回归。AGE-80 → Done。
+
+**S2（AGE-81）实现完成待校准**（commit 5d6b9e7，状态 In Review）：`group_into_files` 签名扩展 (ledgers, config)，
+新增 `_overlap_verdict`（confirm/conflict/weak/insufficient 四态）+ `_annotate_overlap_status`（仅标注零回归）+
+`_cross_bucket_rescue`（garbage 碎片靠行号重合 confirm 归并，无命中标 orphan_unrescued）。pipeline 累积 ledgers 传入。
+**真实端到端**（157 页中间结果离线复跑）：baseline 16（精确等于线上）→ S1 13 → S1+S2 **9**；giesz/openmax/.c 三个
+garbage 碎片精确救援，第 4 个 gpu_mojo 拆名碎片与邻页重合且填补行号缺口但 OCR 噪声致一致率 0.56/0.75 落 weak 带，
+按设计安全留 orphan。10 单测全过 449 passed 无回归。**校准发现**：θ_high=0.9 对真实 OCR 偏严（同文件重合落 weak），
+是否放宽待用户拍板，未擅自在单数据集放宽安全阈值。
+
+用户选「weak + 行号桥接」校准（commit 3c162b2）：跨桶救援接受 weak（多数行一致非冲突）+ orphan 填补 run 行号缺口
+（结构桥接）的情形，标 cross_bucket_rescued_weak。**真实端到端 16 → 8 全达成**（gpu_mojo 拆名碎片经桥接归位）。
+12 S2 单测全过，451 passed 无回归。AGE-81 → Done。S0/S1/S2 三步落地，文件碎片化问题在该数据集上根治。
+
+**S3（AGE-82）已落地**（commit ec3cb88）：`_merge_columns_by_line_no` 改多数共识（替换 keep-first）+ `line_provenance`
+（行号→胜出页，可溯源）；`recover_canonical_path` 取代整串投票做 run 级命名（uniform no-op 防腐安全 / filename 加权投票+
+同长度字符共识 / dir 仅由含 dir 观测分段投票不被 dir-less 投没 / 段数并列偏好更完整路径 / 低置信标 consensus_low）；
+删两个死代码 helper。
+
+**双数据集端到端泛化验证**（直接复跑 `*_OCR/` 中间产物完整代码路径）：124772c5 **16→8**（全部正确）、e8e88280
+**7→6**（零误并：BUiLD.gn/openmax_status.h/两个 250+ 页大文件各自保留；_unknown 页被正确吸收；目录前缀保住）。
+baseline 精确等于线上输出，护栏在未见数据全部成立。39 新单测 + 全量 994 passed（3 个 deepseek 为预存环境失败，
+非回归）。**AGE-78（父）+ S0/S1/S2/S3 全 Done，碎片化根治。**
+
+**遗留**：①窗口标题栏 filename 纳入命名票池（低优先 follow-up，需 ide_meta_extract 增量，当前命名已正确）；
+②θ 阈值多数据集进一步标定；③**已合并 dev**（merge 6d51d9e，feature 分支已推送 origin 备份），待真实任务端到端验证。
+详见 memory [[code_mode_fragmentation_diagnosis]] / [[linear_workspace]]。
+
+## 2026-05-30 - 文档减熵：全量对齐流式实现 + 删 DOC_BOUNDARY 残留
+
+**背景**：前几轮删了批量路径死代码（DOC_BOUNDARY 簇 / strip_repeated_lines / dedup 访问器）后，
+docs/ 仍大量描述**流式重构前的批量版架构**——pipeline.md §5 流程图画的是"OCR 全收齐→合并→分段→
+reassemble"串行模型，§10 整章是 DOC_BOUNDARY 多文档聚类，`process_many` 还写"返回 list"。真正描述
+现行实现的反而是被标"历史参考"的 streaming-pipeline.md，事实源被写反了。本轮以**当前代码为唯一真相源**
+（逐符号 grep 核实存活/删除），把活文档全面对齐流式生产者/消费者架构。
+
+**改动范围**（zh + en 各 7 文件 1:1）：
+- **pipeline.md**：§3.1 签名补 `code`/`controller`、`process_many` 改返回**单个** `PipelineResult`；
+  §5 流程图重写为「OCR 生产者 `_ocr_producer` ∥ 流式消费者 `_stream_process`（IncrementalMerger
+  增量合并 + RateController 自适应 L* 切段 + 满 5 页异步取 PII lexicon）→ `_finalize_single_doc`
+  （reassemble→gap fill→final refine→程序化去重兜底→render）」；§4 依赖表 dedup→IncrementalMerger /
+  segmenter→StreamSegmentExtractor / 加 RateController；删 §10 多文档整章并重编号 §11→§10、§12→§11；
+  修死测试引用 `test_process_tree_parallel.py`→`test_process_tree.py`、不存在的 `_stream_and_collect`。
+- **architecture.md**：§3 数据流改流式（删 step⑧边界检测、step③去 strip_repeated_lines）；删 §5.4
+  多文档边界检测、§5.5→§5.4；§6.3 删已落地的"流式 Pipeline 实施"未来项。
+- **processing.md**：删 §3.2 strip_repeated_lines；§3.2 合并 IncrementalMerger(生产)+PageDeduplicator(基准)；
+  §3.3 分段以 StreamSegmentExtractor 为生产路径、DocumentSegmenter 为参考；后续小节重编号。
+- **llm.md / data-models.md / api.md**：删 `detect_doc_boundaries` 协议+实现+prompt 块、删 §3.11
+  `DocBoundary` 模型并重编号、`extract_first_heading` 措辞改为设 `doc_title`、api 多项归因改 process_tree 子目录。
+- **references/streaming-pipeline.md**：历史档不逐行改，仅顶部加 2026-05-29 dated 更正 + 对"保留给下一版"
+  句加删除线，纠正已被推翻的前瞻声明。
+
+**验证**：活文档（排除 progress/archive/streaming-pipeline 历史档）grep 12 个死符号**零残留**；
+en/zh 章节重编号一致（pipeline §1-11、data-models §3.1-3.16，无悬空交叉引用）。
+
+**遗留**：无。详见 memory [[docs_streaming_alignment]] / [[doc_boundary_removed]]。
+
+## 2026-05-29 - 删除 DOC_BOUNDARY 文档聚合死代码 + tests 减熵审计
+
+**背景**：审计 tests/（约 1076 用例）发现一批过时/空转/冗余测试。其中 DOC_BOUNDARY 文档聚合
+那套"保留给下一版"的代码，经核实代码模式用的是独立的 `group_into_files`（页列→源文件）聚合，
+从未复用 DOC_BOUNDARY；用户确认文档模式也不再用 → 保留理由被证伪，整体清除。
+
+**删除范围**（生产零调用，调用方只在测试自我循环）：
+- 后端：`models.py::DocBoundary`；`llm/prompts.py` 4 个符号（`_DOC_BOUNDARY_PATTERN` /
+  `parse_doc_boundaries` / `DOC_BOUNDARY_DETECT_SYSTEM_PROMPT` / `build_doc_boundary_detect_prompt`）；
+  `llm/base.py` 抽象+具体 `detect_doc_boundaries`（连带删 `import json`）；`pipeline.py` 两段死簇
+  （`_split_by_doc_boundaries`/`_resolve_split_points`/`_build_sub_docs`/`_resolve_sub_output_dir`
+  与 `_detect_doc_boundaries`/`_insert_doc_boundaries`，连带删失效 import `Region`/`sanitize_dirname`）。
+- 测试：删 `test_doc_boundary.py`/`test_doc_split.py`/`test_boundary_gap_combo.py` 整文件 +
+  `test_process_tree.py::TestProcessTreeDocTitleDir` + `test_full_chain_mocked.py::TestMultiDocFullChain`；
+  手术编辑 `test_base_semaphore.py`/`test_concurrent_tasks.py`/`test_selective_rerun.py` 去掉
+  `detect_doc_boundaries` 入口/mock/fake 方法。
+- 前端：删 zh-CN/zh-TW/en 三处 `progress.docBoundary` key + 更新 progressPhase.ts 注释。
+
+**保留**（活路径仍用）：`extract_first_heading` / `_HEADING_RE`（pipeline 取文档标题）、`_PAGE_MARKER_RE`。
+
+**验证**：后端 mypy --strict + ruff 全过（mypy 仅剩 ocr torch 类型预存噪声）；前端 `npm run typecheck` 过；
+pytest pipeline+llm+processing 561 passed/67 skipped、api+其余 258 passed/10 skipped；收集 1076→1054 无报错。
+
+**遗留**：见下方"续二"。详见 memory [[test_suite_audit]] / [[doc_boundary_removed]]。
+
+### 续：清理旧集成测试 + 空转测试（同日）
+
+**A. 整删 6 个模块级 skip 的旧集成测试**（绑定旧串行 pipeline 接口，>1 月未改，功能已被单元测试接住）：
+`test_truncation.py` / `test_warnings_e2e.py` / `test_pii_integration.py` / `test_local_provider_e2e.py` /
+`test_process_tree_parallel.py` / `test_full_chain_mocked.py`。删前已 grep 确认无其它文件 import 其 helper/fixture。
+
+**B. 删空转测试**（仅删"断言不验证行为"的，保留装配契约/解耦不变量测试）：
+- `test_prompts.py`：删 2 个纯 prompt 关键词断言（`test_system_prompt_keywords` / `test_preserves_page_markers`）；
+  **保留**结构/meta 位置/prefix 顺序/no-truncation 等装配契约测试（细读后确认非空转，原审计过度标记）。
+- `test_pii_detect_prompt.py`：删 2 个关键词断言，保留 verbatim 透传契约（3 个）。
+- `test_code_restore_config.py`：删 4 个纯 pydantic 赋值回读，保留默认值守卫 + `TestCodeModeOcrDecoupling` 解耦不变量。
+- `test_router.py`：3 个 `assert not None` **强化为 isinstance**（空转→真路由覆盖），非删除。
+
+**验证**：改动文件 35 passed；pipeline+llm+privacy 342 passed/16 skipped；全量收集 1054→1010、无 collection error。
+`test_gap_fill_prompt.py` 细读后全部保留（测输入嵌入 + 条件分支 + fill_gap mock 行为，非空转）。
+
+### 续二：preprocessor 收集报错修复 + 代码模式 e2e 重复核查（同日）
+
+**① 修 `test_preprocessor.py` 收集报错**：`preprocessor.py:27` 模块级 `import torchvision`，缺它会让
+本文件 collection error（而非 skip）。补 `pytest.importorskip("torchvision")`，与已有 `importorskip("torch")`
+一致 → 缺 torchvision 时优雅 skip。
+
+**② 代码模式 e2e"三层重复"核查 → 结论：基本不是真重复**（审计再次过度标记，同 prompt 误标）：
+- `test_code_file_grouping`(单元) / `test_age8_e2e`(处理链验收) / `test_code_mode_e2e`(HTTP API 层) 是健康
+  测试金字塔，各抓不同失败面，**不删**。
+- `test_age8_compile_classify.py` 是 `_classify_errors`（OCR 噪声 vs sysroot 分类启发式）的专属单元测试，
+  `compile_check` 只间接覆盖编排层，两者不重叠，**不删**。
+- **唯一删除**：`test_age8_e2e.py`（217 行/7 用例）——fixture `tests/fixtures/age8-probe-basic` 从未提交 git、
+  自始至终一次没跑过；其产物级断言已被真在跑的 `test_code_mode_e2e.py`（自包含合成 fixture）覆盖。用户确认删除。
+
+**验证**：全量收集 1010→1003、无 collection error；全量 960 passed / 41 skipped。
+**已知预存失败（与本次无关）**：`test_deepseek_engine.py` 3 个 fail——本机缺 DeepSeek vLLM worker venv，
+其 skipif 只挡 torch/GPU 没挡 worker 路径未配（独立 test 卫生问题，文件本次未碰）。
+
+## 2026-05-29 - 仓库整体减熵：归档老 progress / references 加 STATUS / .gitignore 收尾
+
+通读 backend / frontend / docs / scripts 全量代码与文档后，对疑似 legacy 项逐条核实，多数被
+误报（memory 中"已决策保留项"明确保留），实际可减熵的有限。本轮处理：
+
+- **docs/progress.md → docs/progress.archive.md**：项目根的旧进度档案（2492 行，2026-03-14
+  ~ 2026-05-11）改名归档，顶部加 banner 说明"当前事实源为 `docs/zh/progress.md`"。修
+  `docs/zh/backend/performance_toolkit.md` / `docs/en/backend/performance_toolkit.md`
+  指向；更新 `docs/README.md` / `docs/zh/README.md` / `docs/en/README.md` 索引（en
+  README 原本的 `progress.md` 死链改为指 `../zh/progress.md` + archive）。
+- **docs/zh + en/backend/references/*.md（6 份）顶部加 STATUS 标签**：明确 streaming-pipeline
+  / pipeline-parallel / deepseek-ocr2 三份均为历史参考，当前以 `pipeline/` 代码 + 模块
+  事实源文档为准；防止未来维护者被旧设计 dict 签名 / 参数名误导。
+- **.gitignore 补 `test_images/Chromium_VDA_code`**：本机符号链接（→ `/mnt/TrueNAS_Share/
+  chromium/chromium_decode/code/`），与已 ignore 的 `TMedia_source_code` 同类，git status
+  不再挂残留。
+
+**未动（核实后确认是有意保留，非 legacy）**：
+- `parse_doc_boundaries` / `_split_by_doc_boundaries` / `DocBoundary` / `detect_doc_boundaries`
+  —— 多文档聚类逻辑，下一版代码照片还原恢复时复用
+- `tests/pipeline/test_process_tree.py`（仅末尾 `TestProcessTreeDocTitleDir` 标 skip，前
+  3 个 class 仍 active）与 `tests/pipeline/test_boundary_gap_combo.py`（全 skip）——
+  streaming-pipeline.md 明确"代码还原版解锁"
+- `compile_*` / `_legacy_compile_status` / `legacy_compile_failure` —— 前端 CodeViewer
+  仍硬依赖兼容字段
+- `_legacy_analytical_l_star()` —— rate_controller 冷启动 fallback，注释明确
+- `FixtureOCREngine` / 所有 `scripts/*` / 所有 i18n key / 所有 CSS class —— 引用核查全部命中
+- memory `MEMORY.md` 28 索引 ↔ 28 文件完全一致，无垃圾
+
+**未做（用户选项决议）**：`docs/en/known-issues.md` 仍未补（本轮范围限 legacy 清理，i18n
+缺失另行处理）。
+
+工程量：9 文件改动 + 1 rename，无源码改动。
+
+## 2026-05-28 - 全量文档校齐：TextLine / 代码模式 OCR 契约 / 前端代码模式审查 / WYSIWYG 编辑器
+
+通读项目文档与代码后对齐近期改动遗留的几处不一致：
+
+- **zh + en `backend/data-models.md`**：新增 §3.2 `TextLine`（代码模式抽象产物，与 OCR
+  provider 解耦），§3.3 `PageOCR` 补 `text_lines` 字段与生命周期"代码模式必填"说明；
+  原 3.3~3.16 顺延为 3.4~3.17，无对外引用断裂。
+- **en `architecture.md` §6**：补 §6.2 "OCR Contract for Code Mode" 与 §6.3
+  "Current Boundaries and Future Extensions"，与 zh 同步；原 "Future Extension
+  Directions" 内容并入 §6.3。
+- **en `README.md` Core capabilities**：补 "Code mode" 一条，与 zh 6 条对齐。
+- **en `frontend/features.md`**：补 §7 "Code Mode Review"（覆盖 files-index /
+  CodeViewer / 编辑态实时诊断 / localStorage 接受记录），并把断裂的 §5.5/§6/§7 改回
+  连续编号 §5~§11，结构与 zh 完全 1:1。
+- **zh + en `frontend/features.md` 组件结构**：在 `TaskResult` 下补
+  `MarkdownWysiwygEditor`，在 `TaskDetail` 下补 `CodeViewer`。
+- **zh + en `frontend/tech-stack.md` §1 核心技术**：新增 "Markdown WYSIWYG 编辑：
+  @tiptap/react 3.22 + StarterKit + extension-image/link/placeholder/table"。
+
+工程量：zh 4 文件 + en 5 文件，无源码改动。无新增 §标号引用，文档内章节号自洽。
+
 ## 2026-05-28 - 代码模式设计文档补全（zh + en）
 
 继前一项清理后，按"先评估、再按缺口补"补全代码模式设计文档。zh 覆盖度（命中行数）：

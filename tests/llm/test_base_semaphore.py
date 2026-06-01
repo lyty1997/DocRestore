@@ -112,8 +112,7 @@ class TestSemaphoreRateLimit:
     async def test_all_entry_points_go_through_semaphore(self) -> None:
         """所有 LLM 入口都走 semaphore，验证没有 bypass 路径。
 
-        覆盖：refine / fill_gap / final_refine / detect_doc_boundaries
-        / detect_pii_entities。
+        覆盖：refine / fill_gap / final_refine / detect_pii_entities。
         """
         sem = asyncio.Semaphore(1)
 
@@ -127,8 +126,7 @@ class TestSemaphoreRateLimit:
             await asyncio.sleep(0.01)
             active -= 1
             # 对所有入口都合法的响应：空 JSON 对象（PII 检测需要 dict），
-            # refine/fill_gap/final_refine 按普通文本处理；
-            # detect_doc_boundaries 解析 JSON 时非 list 会走 fallback（返回 []）。
+            # refine/fill_gap/final_refine 按普通文本处理。
             return _make_response("{}")
 
         from docrestore.models import Gap
@@ -150,7 +148,6 @@ class TestSemaphoreRateLimit:
                 refiner.refine("raw", _make_context()),
                 refiner.fill_gap(gap, "cur", "nxt", "b.jpg"),
                 refiner.final_refine("md"),
-                refiner.detect_doc_boundaries("md"),
                 refiner.detect_pii_entities("t"),
             )
 

@@ -118,12 +118,12 @@ class TaskResultResponse(BaseModel):
     task_id: str
     output_path: str
     markdown: str
-    doc_title: str = ""                    # Multi-document identifier (empty for single document)
+    doc_title: str = ""                    # Document title (first heading)
     doc_dir: str = ""                      # Subdirectory name relative to task.output_dir
 
 class TaskResultsResponse(BaseModel):
     task_id: str
-    results: list[TaskResultResponse]      # LLM boundary detection may produce >1 items
+    results: list[TaskResultResponse]      # process_tree multiple subdirectories may produce >1 items
 ```
 
 **Task list (persistent, paginated)**:

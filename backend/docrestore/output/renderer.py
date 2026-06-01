@@ -118,7 +118,7 @@ class Renderer:
         # markdown 格式：![alt]({stem}_OCR/images/0.jpg)
         md_pattern = re.compile(
             r"!\[([^\]]*)\]\("
-            r"([A-Za-z0-9_]+)_OCR/images/"
+            r"([A-Za-z0-9_.]+)_OCR/images/"
             r"(\d+)\.(\w+)"
             r"\)"
         )
@@ -136,7 +136,7 @@ class Renderer:
         # HTML 格式：src="{stem}_OCR/images/0.jpg"
         html_pattern = re.compile(
             r'src="'
-            r"([A-Za-z0-9_]+)_OCR/images/"
+            r"([A-Za-z0-9_.]+)_OCR/images/"
             r"(\d+)\.(\w+)"
             r'"'
         )

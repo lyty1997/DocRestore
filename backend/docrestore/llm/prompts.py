@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 
-from docrestore.models import DocBoundary, Gap, RefineContext
+from docrestore.models import Gap, RefineContext
 
 REFINE_SYSTEM_PROMPT = (
     "你是一个 OCR 文档格式修复助手。输入是从相机拍照后 OCR 识别得到的 "
@@ -544,46 +544,8 @@ def build_pii_detect_prompt(
     ]
 
 
-# --- 文档边界检测 ---
-
-# DOC_BOUNDARY 标记正则：匹配 JSON 格式的边界标记
-_DOC_BOUNDARY_PATTERN = re.compile(
-    r"<!--\s*DOC_BOUNDARY:\s*(\{[^}]+\})\s*-->"
-)
-
 # 提取首个一级标题
 _HEADING_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
-
-
-def parse_doc_boundaries(
-    markdown: str,
-) -> tuple[str, list[DocBoundary]]:
-    """解析并移除 DOC_BOUNDARY 标记。
-
-    容错策略：JSON 解析失败的标记直接忽略，不报错。
-    返回 (清理掉 DOC_BOUNDARY 标记的 markdown, DocBoundary 列表)。
-    """
-    import json
-
-    boundaries: list[DocBoundary] = []
-
-    for match in _DOC_BOUNDARY_PATTERN.finditer(markdown):
-        try:
-            data = json.loads(match.group(1))
-        except (json.JSONDecodeError, ValueError):
-            continue
-        after_page = data.get("after_page", "")
-        new_title = data.get("new_title", "")
-        if after_page:
-            boundaries.append(
-                DocBoundary(
-                    after_page=str(after_page),
-                    new_title=str(new_title),
-                )
-            )
-
-    cleaned = _DOC_BOUNDARY_PATTERN.sub("", markdown)
-    return cleaned, boundaries
 
 
 def extract_first_heading(markdown: str) -> str:
@@ -595,39 +557,6 @@ def extract_first_heading(markdown: str) -> str:
     if match:
         return match.group(1).strip()
     return ""
-
-
-# --- 文档边界检测 prompt ---
-
-DOC_BOUNDARY_DETECT_SYSTEM_PROMPT = (
-    "你是文档边界识别助手。输入是合并后的完整 markdown 文本，"
-    "其中包含 <!-- page: 文件名.jpg --> 标记表示页边界。\n"
-    "你的任务是识别文本中是否包含**多篇完全不同的文档**。规则：\n"
-    "1. 仔细分析页边界标记之间的内容变化\n"
-    "2. 文档切换的典型特征：\n"
-    "   - 封面/标题页突然出现（新的文档标题、版本号、作者信息）\n"
-    "   - 页眉页脚格式完全改变\n"
-    "   - 主题/领域完全不同（如从诊断手册切换到使用指南）\n"
-    "   - 目录/章节编号重新开始\n"
-    "3. **不是文档边界**的情况：\n"
-    "   - 同一文档内的章节切换\n"
-    "   - 附录、参考文献等\n"
-    "   - 内容主题相关的不同章节\n"
-    "4. 输出格式：纯 JSON 数组，每个边界一个对象\n"
-    '   [{"after_page":"前文档最后一页.jpg","new_title":"新文档标题"}]\n'
-    "5. 如果只有一篇文档，输出空数组 []\n"
-    "6. 不要输出任何解释文字"
-)
-
-
-def build_doc_boundary_detect_prompt(
-    merged_markdown: str,
-) -> list[dict[str, str]]:
-    """构造文档边界检测的 [system, user] messages。"""
-    return [
-        {"role": "system", "content": DOC_BOUNDARY_DETECT_SYSTEM_PROMPT},
-        {"role": "user", "content": merged_markdown},
-    ]
 
 
 # ─── AGE-48: IDE 代码字符级修正（CodeLLMRefiner） ──────────────────────────

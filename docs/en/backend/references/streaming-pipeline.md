@@ -16,6 +16,10 @@ limitations under the License.
 
 # Streaming Pipeline Design
 
+> **Status**: Historical design reference. The streaming Pipeline has landed; the current source of truth is `docs/en/backend/pipeline.md` and the code under `backend/docrestore/pipeline/`. This document is retained to record the design reversals, the trade-offs behind disabling DOC_BOUNDARY aggregation, and the rationale for skip-marked tests. Names and signatures may drift from the active implementation.
+
+> **Correction (2026-05-29)**: Several places below state that the `parse_doc_boundaries` / `_split_by_doc_boundaries` / `get_text_after` / `all_page_names` code and tests are "retained for the next version" — that decision has been reversed: these DOC_BOUNDARY aggregation dead-code paths, along with their tests, have been **fully deleted** (code mode uses its own `group_into_files` aggregation and never reused DOC_BOUNDARY; doc mode is also confirmed to no longer use it). The "retain" wording below is kept only as a historical record — do not use it to look up symbols that still exist. See `pipeline.md §9.4`.
+
 > **Note (2026-04-14)**: When this document was written, the Pipeline still used
 > request-level overrides in the `llm_override: dict` style. The Pipeline has
 > since been refactored to use Config objects — the API layer synthesizes the
@@ -31,8 +35,9 @@ limitations under the License.
 > 1. **Drop LLM document aggregation**. In the photo restoration scenario, one
 >    subdirectory equals one document, so `process_many` no longer detects
 >    `DOC_BOUNDARY` / splits multi-document content / runs parallel finalization.
->    The `parse_doc_boundaries` / `_split_by_doc_boundaries` code and tests are
->    retained for the next-generation code-restoration scenario. `DocumentState`
+>    ~~The `parse_doc_boundaries` / `_split_by_doc_boundaries` code and tests are
+>    retained for the next-generation code-restoration scenario~~ (deleted
+>    2026-05-29, see correction at top). `DocumentState`
 >    is removed, and `process_many` returns a single `PipelineResult` (the
 >    upper-layer `process_tree` aggregates them into a list).
 > 2. **Remove LPT scheduling**. The actual `gpu_lock` acquisition order across

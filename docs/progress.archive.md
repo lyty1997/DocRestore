@@ -14,7 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# DocRestore 开发进度
+# DocRestore 开发进度（历史归档 / Historical Archive）
+
+> **Status**: 归档文件。覆盖 2026-03-14 → 2026-05-11 的迭代记录，自 2026-05-08 起改由 [`zh/progress.md`](zh/progress.md) 继续维护。
+> 本文件仅供审计追溯，不应作为"当前实现事实源"；旧条目里的"待办/下一步"多数已被后续迭代覆盖或推翻，须以 `docs/zh/architecture.md`、`docs/zh/backend/*.md` 和当前代码为准。
+>
+> **Status**: Archive file. Covers iteration entries from 2026-03-14 through 2026-05-11. Active progress logging moved to [`zh/progress.md`](zh/progress.md) starting 2026-05-08.
+> Use this file for audit traceability only — not as a current source of truth. "TODO" / "next step" mentions in old entries are usually superseded; refer to `docs/zh/architecture.md`, `docs/zh/backend/*.md`, and the current code instead.
 
 ## 2026-05-11 流式分段避开跨页重叠区
 

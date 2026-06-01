@@ -16,13 +16,10 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
-
 import pytest
 
 from docrestore.llm.cloud import CloudLLMRefiner
 from docrestore.llm.local import LocalLLMRefiner
-from docrestore.models import RefineContext, RefinedResult
 from docrestore.pipeline.config import LLMConfig, PipelineConfig
 from docrestore.pipeline.pipeline import Pipeline
 
@@ -93,28 +90,6 @@ class TestLocalRefinerPII:
             model="ollama/qwen2.5",
         )
         refiner = Pipeline(PipelineConfig())._create_refiner(cfg)
-        # _redact_pii 中的 isinstance 检查
+        # PII 云端门控按 isinstance(CloudLLMRefiner) 区分本地/云端 refiner，
+        # 本地 refiner 必须不命中该分支
         assert not isinstance(refiner, CloudLLMRefiner)
-
-
-class TestLocalRefinerSegments:
-    """local provider + mock refiner 精修流程"""
-
-    @pytest.mark.asyncio
-    async def test_refine_one_segment_with_local(self) -> None:
-        """使用 mock LocalLLMRefiner 精修单段"""
-        mock_refiner = MagicMock(spec=LocalLLMRefiner)
-        expected = RefinedResult(markdown="精修后的文本")
-        mock_refiner.refine = AsyncMock(return_value=expected)
-
-        result = await Pipeline._refine_one_segment(
-            mock_refiner, "原始文本", 0, 1,
-        )
-        assert result.markdown == "精修后的文本"
-        mock_refiner.refine.assert_awaited_once()
-
-        # 验证传入的 RefineContext
-        call_args = mock_refiner.refine.call_args
-        ctx: RefineContext = call_args[0][1]
-        assert ctx.segment_index == 1
-        assert ctx.total_segments == 1

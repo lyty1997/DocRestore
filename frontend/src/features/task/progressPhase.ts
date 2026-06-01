@@ -3,7 +3,7 @@
  *
  * 流式 Pipeline 并发发 OCR 帧与 LLM 精修帧：
  *   - OCR Producer: stage ∈ {init, ocr}
- *   - Stream Processor / 终结化: stage ∈ {clean, merge, refine, doc_boundary,
+ *   - Stream Processor / 终结化: stage ∈ {clean, merge, refine,
  *     final_refine, render}
  *
  * 前端按 (subtask, phase) 分桶，每个子目录同时展示 OCR/LLM 两条进度条。

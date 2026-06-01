@@ -57,9 +57,7 @@ class TestBasicBehavior:
         merger = IncrementalMerger(dedup_config)
         assert merger.get_markdown() == ""
         assert merger.page_count == 0
-        assert merger.all_page_names == []
         assert merger.get_all_images() == []
-        assert merger.total_length == 0
 
     def test_single_page(
         self, dedup_config: DedupConfig, tmp_path: Path,
@@ -71,7 +69,6 @@ class TestBasicBehavior:
         assert "<!-- page: a.jpg -->" in md
         assert "# Hello" in md
         assert merger.page_count == 1
-        assert merger.all_page_names == ["a.jpg"]
 
 
 class TestConsistencyWithBatch:
@@ -132,7 +129,6 @@ class TestConsistencyWithBatch:
 
         assert incr_md == batch_md
         assert incr.page_count == 3
-        assert incr.all_page_names == ["p1.jpg", "p2.jpg", "p3.jpg"]
 
     def test_image_refs_rewritten(
         self, dedup_config: DedupConfig, tmp_path: Path,
@@ -147,15 +143,3 @@ class TestConsistencyWithBatch:
         md = incr.get_markdown()
         assert "x_OCR/images/0.jpg" in md
         assert "(images/0.jpg)" not in md
-
-
-class TestTextAfter:
-    def test_get_text_after(
-        self, dedup_config: DedupConfig, tmp_path: Path,
-    ) -> None:
-        merger = IncrementalMerger(dedup_config)
-        merger.add_page(_make_page("a.jpg", "body-a", tmp_path))
-        full = merger.get_markdown()
-        assert merger.get_text_after(0) == full
-        assert merger.get_text_after(len(full)) == ""
-        assert merger.get_text_after(5) == full[5:]

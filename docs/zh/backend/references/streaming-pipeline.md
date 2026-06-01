@@ -16,6 +16,10 @@ limitations under the License.
 
 # 流式并行 Pipeline 设计（Streaming Pipeline）
 
+> **Status**: 历史设计参考。流式 Pipeline 已落地，当前事实源为 `docs/zh/backend/pipeline.md` 与 `backend/docrestore/pipeline/` 代码。本文档保留以记录设计反转、停用 DOC_BOUNDARY 聚合的权衡和测试 skip 由来；细节如类名 / 参数签名可能与现行实现有出入。
+>
+> **更正（2026-05-29）**：本文下文多处提到"保留 `parse_doc_boundaries` / `_split_by_doc_boundaries` / `get_text_after` / `all_page_names` 等代码和测试给下一版"——该决策已被推翻：这些 DOC_BOUNDARY 聚合死代码连同测试已**彻底删除**（代码模式用独立的 `group_into_files` 聚合，从未复用 DOC_BOUNDARY；文档模式也确认不再用）。下文相关"保留"表述仅作历史记录，请勿据此查找现存符号。详见 `pipeline.md §9.4`。
+
 > **说明（2026-04-14）**：本文档成文时 Pipeline 仍采用 `llm_override: dict`
 > 风格的请求级覆盖。Pipeline 后续已完成 Config 对象化重构——API 层一次性
 > 合成完整 `LLMConfig / OCRConfig / PIIConfig` 并直接传入下游，`pipeline`
@@ -26,10 +30,10 @@ limitations under the License.
 > **方向调整（2026-04-19）**：本轮实施在原设计基础上做三处关键精简与加强：
 >
 > 1. **放弃 LLM 文档聚合**。图片还原场景下一个子目录即一篇文档，`process_many`
->    不再检测 `DOC_BOUNDARY` / 拆分多文档 / 终结化并行。保留
+>    不再检测 `DOC_BOUNDARY` / 拆分多文档 / 终结化并行。~~保留
 >    `parse_doc_boundaries` / `_split_by_doc_boundaries` 代码和测试给下一版
->    代码还原场景使用。删除 `DocumentState`，`process_many` 返回单一
->    `PipelineResult`（上层 `process_tree` 聚合成 list）。
+>    代码还原场景使用~~（**2026-05-29 已删除，见顶部更正**）。删除 `DocumentState`，
+>    `process_many` 返回单一 `PipelineResult`（上层 `process_tree` 聚合成 list）。
 > 2. **移除 LPT 排序**。多子目录 gpu_lock 实际 acquire 顺序被前置 async IO
 >    （mkdir / scan_images / engine_manager.ensure）的 race 污染，LPT 索引
 >    排序不等于实际串行顺序，收益无法兑现。改用 `process_tree` warmup

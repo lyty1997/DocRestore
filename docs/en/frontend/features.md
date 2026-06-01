@@ -94,7 +94,9 @@ App
 ├── TaskDetail               # Detail view for created tasks
 │   ├── TaskProgress         # Progress display (WS + polling fallback)
 │   ├── SourceImagePanel     # Source image viewer (/source-images)
-│   └── TaskResult           # Sub-document tabs + Markdown rendering + refinement/download
+│   ├── TaskResult           # Sub-document tabs + Markdown rendering + refinement/download
+│   │   └── MarkdownWysiwygEditor  # Tiptap-based WYSIWYG editor for doc-mode manual refinement
+│   └── CodeViewer           # Code-mode source file list, editor, diagnostics, and source-image linkage
 ├── BackToTopButton          # Helper for long Markdown content
 └── ConfirmDialog            # Delete/cancel confirmation
 ```
@@ -110,7 +112,7 @@ Image references in Markdown need to be rewritten to assets API paths, compatibl
 
 Implementation: react-markdown custom `img` component that constructs a prefix using the current result's `doc_dir`.
 
-## 5.5 OCR Engine Warmup
+## 6. OCR Engine Warmup
 
 The **Preload Engine** button at the top of `TaskForm` lets the user move the model/GPU into place before submitting a task, avoiding a cold-start wait on the first image.
 
@@ -127,7 +129,20 @@ Implementation notes (`TaskForm.tsx`):
 - Entering `warming` starts a 3 s `/ocr/status` poll, stops as soon as the target matches and `is_ready`; the timer is hard-capped at 60 s as a fail-safe.
 - A `useRef<setInterval>` clears the timer on unmount.
 
-## 6. Download Functionality
+## 7. Code Mode Review
+
+`TaskDetail` enters the code-mode review view when it detects a `files-index.json` for the task. Core data flow:
+
+- `GET /tasks/{task_id}/files-index` retrieves the file index; each entry carries path, language, source pages, line-number range, quality flags, and `diagnostic`.
+- After a file is selected, `GET /tasks/{task_id}/files/{path}` lazy-loads the source body.
+- `CodeViewer` shows the file list on the left, the code body or edit textarea in the middle, and the original pages from `/source-images` (cross-referenced via `source_pages`) on the right with synchronized scrolling.
+- In read mode, the gutter and tooltips are rendered from `diagnostic.items` (with compatibility for the legacy `compile_*` fields).
+- In edit mode, draft content is debounced 350 ms and sent to `POST /tasks/{task_id}/code-diagnostics` for live diagnostics; saving calls `PUT /tasks/{task_id}/files/{path}`.
+- Users may accept individual explainable diagnostics (e.g. missing include) one by one; acceptances are keyed by task / file / diagnostic / current line text and stored in `localStorage`, with a one-click restore.
+
+The current code-mode editor is a plain `textarea`; diagnostics surface in the gutter and the list. An IDE-style inline squiggle would require an independent evaluation of CodeMirror/Monaco. Doc-mode manual refinement uses the Tiptap-based `MarkdownWysiwygEditor` (see Section 4 Component Structure).
+
+## 8. Download Functionality
 
 Clicking the "Download Result" button:
 ```typescript
@@ -143,24 +158,24 @@ const downloadResult = async (taskId: string) => {
 }
 ```
 
-## 7. Error Handling
+## 9. Error Handling
 
-### 7.1 Network Errors
+### 9.1 Network Errors
 - API call failure: display error message, allow retry
 - WebSocket disconnect: automatic fallback to polling
 
-### 7.2 Task Failure
+### 9.2 Task Failure
 - Display error summary
 - Optionally expand detailed traceback (collapsible panel)
 
-## 8. Resource Cleanup
+## 10. Resource Cleanup
 
 The following must be cleaned up on component unmount:
 - WebSocket connections: `ws.close()`
 - Polling timers: `clearInterval()`
 - AbortController: `abort()`
 
-## 9. Related Documentation
+## 11. Related Documentation
 
 - [Tech Stack](tech-stack.md)
 - [Backend API](../backend/api.md)

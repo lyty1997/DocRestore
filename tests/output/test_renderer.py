@@ -97,6 +97,29 @@ class TestRenderer:
         assert (tmp_path / "images" / "page1_0.jpg").exists()
 
     @pytest.mark.asyncio
+    async def test_rewrites_image_reference_with_dotted_stem(
+        self, renderer: Renderer, tmp_path: Path
+    ) -> None:
+        """回归：文件名含点（Path.stem 只剥最后一级后缀）时图片引用仍正确重写。
+
+        例如 my.photo.jpg → stem=my.photo → OCR 目录 my.photo_OCR；
+        正则字符类若漏掉 '.' 会错配 stem，导致源图找不到、引用断裂。
+        """
+        ocr_dir = tmp_path / "my.photo_OCR" / "images"
+        ocr_dir.mkdir(parents=True)
+        (ocr_dir / "0.jpg").write_bytes(b"fake image data")
+
+        doc = MergedDocument(
+            markdown="文本\n![](my.photo_OCR/images/0.jpg)\n更多文本"
+        )
+        result_path, _ = await renderer.render(doc, tmp_path)
+        content = result_path.read_text(encoding="utf-8")
+
+        assert "![](images/my.photo_0.jpg)" in content
+        assert "my.photo_OCR" not in content
+        assert (tmp_path / "images" / "my.photo_0.jpg").exists()
+
+    @pytest.mark.asyncio
     async def test_multiple_images(
         self, renderer: Renderer, tmp_path: Path
     ) -> None:

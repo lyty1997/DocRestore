@@ -35,7 +35,7 @@ Two **providers** are supported -- cloud and local:
 
 | File | Responsibility |
 |---|---|
-| `llm/base.py` | `LLMRefiner` Protocol + `BaseLLMRefiner` shared implementation (litellm calls, refine/fill_gap/final_refine/detect_doc_boundaries/detect_pii_entities) |
+| `llm/base.py` | `LLMRefiner` Protocol + `BaseLLMRefiner` shared implementation (litellm calls, refine/fill_gap/final_refine/detect_pii_entities) |
 | `llm/cloud.py` | `CloudLLMRefiner(BaseLLMRefiner)` (cloud implementation, overrides `detect_pii_entities` for real entity detection) |
 | `llm/local.py` | `LocalLLMRefiner(BaseLLMRefiner)` (local implementation, `detect_pii_entities` inherits the default empty implementation) |
 | `llm/prompts.py` | Prompt templates + GAP parsing (`parse_gaps()`, etc.) |
@@ -66,10 +66,6 @@ class LLMRefiner(Protocol):
 
     async def final_refine(self, markdown: str) -> RefinedResult: ...
 
-    async def detect_doc_boundaries(
-        self, merged_markdown: str,
-    ) -> list[DocBoundary]: ...
-
     async def detect_pii_entities(
         self, text: str,
     ) -> tuple[list[str], list[str]]: ...
@@ -80,7 +76,6 @@ class LLMRefiner(Protocol):
 - Output: `RefinedResult(markdown, gaps, truncated)`
   - `gaps`: a list of `Gap` objects parsed from the LLM output (the LLM expresses gap locations via comment markers)
   - `truncated`: whether the model output was suspected to be truncated (see Section 6)
-- `detect_doc_boundaries()`: Detects multi-document boundaries in the full merged text, returning `list[DocBoundary]`; degrades to `[]` (single document) if JSON parsing fails or a non-array is returned
 - `detect_pii_entities()`: Default empty implementation (data stays local in the local scenario); `CloudLLMRefiner` overrides it with real LLM-based entity recognition
 
 ## 4. Dependencies
@@ -102,7 +97,6 @@ The LLM layer does not depend on the implementation details of OCR/processing/ou
 - Per-segment refinement `refine()`
 - Gap filling `fill_gap()`
 - Whole-document refinement `final_refine()`
-- Document boundary detection `detect_doc_boundaries()`
 - PII entity detection `detect_pii_entities()` (returns empty lists by default; overridden by cloud)
 - Output truncation marking (`finish_reason == "length"` -> `truncated=True`)
 
@@ -129,10 +123,6 @@ class BaseLLMRefiner:
     ) -> str: ...
 
     async def final_refine(self, markdown: str) -> RefinedResult: ...
-
-    async def detect_doc_boundaries(
-        self, merged_markdown: str,
-    ) -> list[DocBoundary]: ...
 
     async def detect_pii_entities(
         self, text: str,
@@ -163,7 +153,7 @@ Key points:
 
 `LocalLLMRefiner(BaseLLMRefiner)` is the implementation for the local provider:
 
-- Purely inherits the base class's `refine()/fill_gap()/final_refine()/detect_doc_boundaries()`
+- Purely inherits the base class's `refine()/fill_gap()/final_refine()`
 - `detect_pii_entities()` inherits the base class's empty implementation (data stays local in the local scenario; PII redaction relies solely on regex and custom sensitive words)
 
 ### 5.4 Prompt Templates and GAP Parsing (llm/prompts.py)
@@ -186,11 +176,8 @@ Key points:
 - PII entity detection:
   - `PII_DETECT_SYSTEM_PROMPT`
   - `build_pii_detect_prompt(text)`
-- Multi-document boundary:
-  - `DOC_BOUNDARY_SYSTEM_PROMPT`
-  - `build_doc_boundary_detect_prompt(merged_markdown)`
-  - `parse_doc_boundaries(llm_response) -> list[DocBoundary]` (JSON fault-tolerant)
-  - `extract_first_heading(markdown) -> str` (fallback naming for untitled sub-documents)
+- Heading extraction:
+  - `extract_first_heading(markdown) -> str` (takes the first heading as `PipelineResult.doc_title`)
 
 GAP marker parsing:
 

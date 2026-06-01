@@ -70,25 +70,37 @@ This four-layer architecture is **just right**:
 
 ## 3. Data Flow
 
+Doc mode is a **streaming producer/consumer**: OCR produces while the LLM consumes, and one directory is treated as one document.
+
 ```
-Step 1: OCR -> Step 2: Cleaning -> Step 3: Dedup & Merge -> Step 4: PII Redaction (optional)
-    -> Step 5: Segmentation -> Step 6: LLM Refinement -> Step 7: Reassembly
-    -> Step 8: Multi-doc Boundary Detection (optional) -> [each sub-document enters the following]
-    -> Step 9: Gap Filling (optional) -> Step 10: Full-text Refinement (optional) -> Step 11: Output
+Doc mode (_stream_pipeline):
+  (1) OCR producer: per-page OCR -> (2) Cleaning -> (3) optional regex PII -> push into page_queue
+                                       || (concurrent)
+  (4) Streaming consumer: per-page incremental merge -> (5) segment by L* -> (6) LLM segment refinement
+       ((7) once 5 pages accumulate, asynchronously fetch the PII lexicon)
+  After all pages collected, finalize: (8) reassemble -> (9) gap filling (optional) -> (10) full-text refinement (optional)
+              -> (11) programmatic dedup fallback -> (12) output -> a single PipelineResult
+
+Code mode branch (_code_pipeline):
+  (1) OCR text_lines -> (2) IDE layout / line-number column detection -> (3) code-column assembly
+    -> (4) cross-page grouping by path/filename into SourceFile -> (5) LLM character-level refinement/repair
+    -> (6) lightweight diagnostics -> (7) output files/, files-index.json, and a compatible Markdown
 ```
 
-Detailed description:
-- Step 1 - OCR: Run OCR on each photo, generating a `{stem}_OCR/` directory per page
-- Step 2 - Cleaning: Intra-page deduplication, garbled text/blank line repair
-- Step 3 - Dedup & Merge: Rolling merge of adjacent pages, cross-page frequency filtering (`strip_repeated_lines`) to remove sidebar noise, insert `<!-- page: ... -->` boundary markers
-- Step 4 - PII Redaction (optional): Structured regex (phone/email/national ID/bank card) + LLM entity detection, producing an `EntityLexicon` for reuse on re-OCR fragments
-- Step 5 - Segmentation: Split by headings/blank lines, adjacent segments retain `overlap_lines` lines of context
-- Step 6 - LLM Refinement: Per-segment markdown structure repair, Gap marker parsing, model truncation detection (`finish_reason == "length"` or heuristic line-count ratio)
-- Step 7 - Reassembly: Concatenate segment results, aggregate gaps and warnings
-- Step 8 - Multi-doc Boundary Detection (optional): `LLMRefiner.detect_doc_boundaries()` as an independent LLM call, splitting the merged text into multiple `PipelineResult` instances
-- Step 9 - Gap Filling (optional): `OCREngine.reocr_page()` re-OCR + `LLMRefiner.fill_gap()`, with GPU lock and per-gap exception fallback
-- Step 10 - Full-text Refinement (optional): Final full-text refinement pass, re-running `parse_gaps()`
-- Step 11 - Output: `Renderer` aggregates illustrations with copy/rename, writing to `doc_dir` (root directory for single document / subdirectories for multiple documents)
+Detailed description (doc mode):
+- (1) OCR: Run OCR on each photo, generating a `{stem}_OCR/` directory per page; OCR is serialized under `gpu_lock`
+- (2) Cleaning: Intra-page deduplication, garbled text/blank line repair
+- (3) PII regex (optional): During production, per-page `redact_regex_only` (phone/email/national ID/bank card) redacts first
+- (4) Incremental merge: `IncrementalMerger.add_page()` rolling merge/dedup page by page, inserting `<!-- page: ... -->` boundary markers
+- (5) Streaming segmentation: `StreamSegmentExtractor` cuts segments from the growing text by the runtime-adaptive segment length L* driven by `RateController`
+- (6) LLM Refinement: Per-segment markdown structure repair, Gap marker parsing, model truncation detection (`finish_reason == "length"` or heuristic line-count ratio); on `LLMCache` hit it is skipped; on failure it falls back to the original text
+- (7) PII entity detection (optional): After 5 pages accumulate, asynchronously call `detect_pii_entities()` to obtain an `EntityLexicon` for reuse on gap-filling re-OCR fragments
+- (8) Reassembly: `_reassemble()` concatenates segment results
+- (9) Gap Filling (optional): `OCREngine.reocr_page()` re-OCR + `LLMRefiner.fill_gap()`, with GPU lock and per-gap exception fallback
+- (10) Full-text Refinement (optional): Final full-text refinement pass, re-running `parse_gaps()`
+- (11) Programmatic dedup fallback: zero-LLM-cost removal of duplicate HTML tables / H2 sections / visual code-block line numbers / residual UI noise
+- (12) Output: `Renderer` aggregates illustrations with copy/rename, writing to `output_dir/document.md`
+- Code mode output: `render_code_files()` writes `output_dir/files/**`, `files-index.json`, and `document.md`; `files-index.json` is the source of truth for the frontend CodeViewer's file list, source pages, quality flags, and diagnostics
 
 ## 4. Directory Structure
 
@@ -98,11 +110,11 @@ docrestore/
 │   ├── api/              # FastAPI application and routes (REST + WebSocket + file upload)
 │   ├── pipeline/         # Pipeline orchestration and scheduling
 │   ├── ocr/              # OCR engines (subprocess workers + EngineManager on-demand switching)
-│   ├── processing/       # Cleaning and deduplication
+│   ├── processing/       # Cleaning, deduplication, IDE layout, code assembly and diagnostics
 │   ├── privacy/          # PII redaction
-│   ├── llm/              # LLM refinement (cloud / local)
+│   ├── llm/              # LLM refinement (cloud / local) and code refinement/repair
 │   ├── persistence/      # SQLite task persistence
-│   ├── output/           # Markdown rendering output
+│   ├── output/           # Markdown rendering and code-mode file output
 │   ├── utils/            # Utility functions
 │   └── models.py         # Data models
 ├── frontend/             # React 19 + TypeScript + Vite frontend
@@ -125,22 +137,17 @@ docrestore/
 - More robust against minor OCR differences, with moderate computational cost
 
 ### 5.3 LLM Refinement Strategy
-- Preferentially splits by headings to maintain semantic coherence
-- Adjacent segments retain overlap for context (embedded in `Segment.text`, deduplicated by LLM during refinement)
+- Streaming segmentation by headings/blank lines, with segment length L* adapted at runtime by `RateController`
+- Adjacent segments retain backward overlap for context (embedded in the segment text, deduplicated by the LLM during refinement)
 - Supports two providers: cloud (litellm) and local (OpenAI-compatible API: vLLM / ollama / llama.cpp)
 - Dual-layer truncation detection: model `finish_reason` + output/input line-count ratio heuristic threshold (`LLMConfig.truncation_*`)
+- The code refine mode auto-chunks large `SourceFile`s by line/character count, and a single failed chunk only falls back to that chunk; the rewrite mode does not auto-chunk
 
-### 5.4 Multi-Document Boundary Detection
-- Performed by an independent LLM call `detect_doc_boundaries()` (decoupled from segment refinement)
-- Merged text is sent to the LLM, which returns `list[DocBoundary]` (JSON fault-tolerant; parse failure falls back to single document)
-- `Pipeline.process_many()` splits sub-documents based on boundaries; each sub-document independently undergoes gap fill / final refine / render
-- Output directory: single document writes to `output_dir/`; multiple documents write to `output_dir/{sanitize_dirname(title)}/`; dirname conflicts are resolved by `dedupe_dirnames()` appending suffixes
-
-### 5.5 Concurrency Model
+### 5.4 Concurrency Model
 - GPU serialization (`asyncio.Lock` protecting OCR calls + engine switching)
 - `EngineManager.switch_lock` prevents concurrent switching; waits for the current OCR operation to release `gpu_lock` before switching engines
 - No group-level concurrency (single task monopolizes GPU); task-level concurrency is controlled by TaskManager
-- Streaming parallel Pipeline design document: `docs/backend/references/streaming-pipeline.md` (pending implementation)
+- **Streaming parallelism is implemented**: within `process_many` the OCR producer runs concurrently with the LLM consumer; for `process_tree` with multiple subdirectories, the longest directory does a warmup cold start and then the rest run concurrently, sharing a single `RateController`. For the origin of this design reversal see `docs/en/backend/references/streaming-pipeline.md`; the source of truth is the `pipeline/` code and `backend/pipeline.md`
 
 ## 6. Extensibility Design
 
@@ -149,11 +156,15 @@ docrestore/
 - LLM refinement: implement the `LLMRefiner` Protocol
 - PII redaction: implement the `PIIRedactor` interface
 
-### 6.2 Future Extension Directions
-- IDE code screenshots -> source files
+### 6.2 OCR Contract for Code Mode
+- Code mode does not bind to a specific OCR provider; the API and config layers must not force a switch to PaddleOCR.
+- Code mode only depends on the abstract artifact `PageOCR.text_lines`: any OCR engine that populates line-level `bbox/text/score` can plug into the IDE layout analysis chain.
+- When the active OCR engine does not provide `text_lines`, code mode must fail explicitly with a capability error rather than silently skip pages or fall back to doc mode.
+
+### 6.3 Current Boundaries and Future Extensions
+- Code mode already supports IDE code photos -> source files, source-image linkage, lightweight diagnostics, and single-file manual edit/save; further enhancements remain possible: function-level chunking, project-level dependency graphs, and a mature code editor component
 - PDF input support
-- Streaming parallel Pipeline implementation (AGE-16, design completed)
-- Frontend multi-document result display (AGE-33)
+- Frontend multi-document result display has a basic navigation in place; end-to-end visual verification with real fixtures is still pending
 
 ## 7. Related Documentation
 

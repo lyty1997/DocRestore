@@ -29,7 +29,6 @@ import pytest
 
 from docrestore.llm.base import LLMRefiner
 from docrestore.models import (
-    DocBoundary,
     Gap,
     RefineContext,
     RefinedResult,
@@ -79,12 +78,6 @@ class _FakeRefiner:
     ) -> RefinedResult:
         del markdown, chunk_index, total_chunks, retry_hint
         return RefinedResult(markdown="")
-
-    async def detect_doc_boundaries(
-        self, merged_markdown: str,
-    ) -> list[DocBoundary]:
-        del merged_markdown
-        return []
 
     async def detect_pii_entities(
         self, text: str,

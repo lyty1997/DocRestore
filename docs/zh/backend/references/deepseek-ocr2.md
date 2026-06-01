@@ -16,6 +16,8 @@ limitations under the License.
 
 # DeepSeek-OCR-2 部署与调用参考
 
+> **Status**: 历史参考。当前以 `backend/docrestore/ocr/deepseek_ocr2.py` 与 `vendor/DeepSeek-OCR-2/` 实际代码为准；本文档保留作为环境搭建与设计来源的背景资料，参数细节可能与现行实现有出入。
+
 基于 `third_party/DeepSeek-OCR-2/` 源码分析整理。
 
 ## 1. 环境要求

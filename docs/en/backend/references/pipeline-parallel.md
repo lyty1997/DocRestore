@@ -16,6 +16,8 @@ limitations under the License.
 
 # Pipeline-Level Parallelism Design (Multi-Task Parallel Pipelines)
 
+> **Status**: Historical design reference. Multi-task pipeline scheduling status is tracked in Linear AGE-71 (hardware-aware multi-task scheduling); the repo currently ships only the single-task streaming pipeline. Retained to record the motivation and constraints.
+
 > Drafted 2026-04-16. Orthogonal to `streaming-pipeline.md` (intra-task OCR↔LLM overlap):
 > this design lets **multiple tasks** run pipelines concurrently. The OCR stage is
 > serialized by the GPU lock, while non-GPU stages (LLM / PII / render) run

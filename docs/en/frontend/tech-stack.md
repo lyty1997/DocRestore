@@ -23,6 +23,7 @@ limitations under the License.
 - **Language**: TypeScript 5.9 (strict mode)
 - **Styling**: CSS Modules
 - **Markdown rendering**: react-markdown 10 + remark-gfm + rehype-raw
+- **Markdown WYSIWYG editing**: @tiptap/react 3.22 + StarterKit + extension-image/link/placeholder/table (used by doc-mode manual refinement; source: `frontend/src/components/MarkdownWysiwygEditor.tsx`)
 - **Data validation**: zod v4
 - **i18n**: Custom Context (`src/i18n/`), supports zh-CN / zh-TW / en
 

@@ -97,7 +97,7 @@ class PathCandidate:
     path: str | None
     filename: str | None
     language: str | None
-    source: Literal["breadcrumb", "tab", "peer", "reference", "content"]
+    source: Literal["breadcrumb", "tab", "peer", "reference", "content", "vocab"]
     confidence: float
     raw_text: str = ""
     flags: list[str] = field(default_factory=list)

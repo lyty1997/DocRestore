@@ -31,7 +31,7 @@ Core responsibilities:
   - LLM rate limiting: All LLM API calls (refine / fill_gap / final_refine / detect_*) are gated by `scheduler.llm_semaphore`
     (constructed from `LLMConfig.max_concurrent_requests`). The cap applies across **all concurrently running pipelines**. See Section 9.2.
 
-> Historical note: Earlier coordinate-based / text-feature clustering has been removed. Multi-document recognition is now handled by **LLM document boundary detection** (`LLMRefiner.detect_doc_boundaries()`); see Section 10. In single-document scenarios, `list[PipelineResult]` has length 1.
+> Historical note: Earlier coordinate- / text-feature-based clustering, and the later LLM document boundary detection (`DOC_BOUNDARY`), have both been removed (see the §9.4 historical note). Now "one leaf directory = one document": `process_many()` returns a single `PipelineResult`, and `process_tree()` returns one per leaf directory aggregated into a `list[PipelineResult]`.
 
 ## 2. File List
 
@@ -65,6 +65,7 @@ class Pipeline:
         gpu_lock: asyncio.Lock | None = None,
         pii: PIIConfig | None = None,
         ocr: OCRConfig | None = None,
+        code: CodeRestoreConfig | None = None,
     ) -> list[PipelineResult]: ...
 
     async def process_many(
@@ -76,7 +77,9 @@ class Pipeline:
         gpu_lock: asyncio.Lock | None = None,
         pii: PIIConfig | None = None,
         ocr: OCRConfig | None = None,
-    ) -> list[PipelineResult]: ...
+        code: CodeRestoreConfig | None = None,
+        controller: RateController | None = None,
+    ) -> PipelineResult: ...
 
     async def shutdown(self) -> None: ...
 ```
@@ -84,9 +87,9 @@ class Pipeline:
 **Calling conventions**:
 
 - You must call `initialize()` before `process_tree()` / `process_many()`; call `shutdown()` after tasks complete to release resources.
-- `process_tree()` is the unified entry point: it automatically detects single/multi-subdirectory structures and ultimately delegates to `process_many()`. Multiple leaf subdirectories run in parallel via `asyncio.gather` (see §9.3).
-- `process_many()` returns `list[PipelineResult]` (supporting multi-document output).
-- **Multi-document processing**: After reassembly, calls `refiner.detect_doc_boundaries()` (a separate LLM call returning `list[DocBoundary]`), then splits into multiple sub-documents by boundary. Each sub-document independently undergoes gap fill -> final refine -> render, with artifacts placed in `{output_dir}/{sanitized_title}/document.md`.
+- `process_tree()` is the unified entry point: it automatically detects single/multi-subdirectory structures and ultimately delegates to `process_many()`, returning `list[PipelineResult]` (one per leaf directory; length 1 for a single directory). For multiple subdirectories it first warms up the cold start with the longest directory, then runs the rest concurrently via `asyncio.gather` (see §9.3).
+- `process_many()` **treats one directory as one document** and returns a **single** `PipelineResult`; it does no LLM document-clustering split. Internally it runs concurrently as an "OCR producer + streaming consumer" (see §5).
+- `controller`: a `RateController` instance. The `process_tree` parallel branch creates one **shared** controller and passes it into each `process_many`, so cold-start sampling and adaptive segment length are reused across subdirectories; when `None`, `process_many` creates one internally on the fly.
 - `gpu_lock`:
   - When provided by `PipelineScheduler`, enables **cross-task** OCR/re-OCR serialization;
   - When omitted, Pipeline creates a default lock that only guarantees serialization **within a single call**.
@@ -160,8 +163,9 @@ Pipeline is the "omniscient" layer, directly depending on all processing modules
 | `ocr/engine_manager.py` | `EngineManager` (on-demand engine switching, ppocr-server management) |
 | `ocr/base.py` | `OCREngine` Protocol |
 | `processing/cleaner.py` | `OCRCleaner` |
-| `processing/dedup.py` | `PageDeduplicator` |
-| `processing/segmenter.py` | `DocumentSegmenter` |
+| `processing/dedup.py` | `IncrementalMerger` (streaming per-page incremental merge) |
+| `processing/segmenter.py` | `StreamSegmentExtractor` (streaming incremental segmentation) |
+| `pipeline/rate_controller.py` | `RateController` (runtime-adaptive segment length L*, OCR/LLM rate pacing) |
 | `llm/base.py` | `LLMRefiner` Protocol |
 | `llm/cloud.py` | `CloudLLMRefiner` (cloud implementation: refine/fill_gap/final_refine + PII entity detection) |
 | `llm/local.py` | `LocalLLMRefiner` (local implementation: refine/fill_gap/final_refine) |
@@ -169,63 +173,58 @@ Pipeline is the "omniscient" layer, directly depending on all processing modules
 | `privacy/redactor.py` | `PIIRedactor` (regex redaction + (optional) cloud entity detection + redaction records) |
 | `output/renderer.py` | `Renderer` (renders and writes the final `document.md`) |
 
-## 5. Orchestration Flow Diagram
+## 5. Orchestration Flow Diagram (Streaming: OCR Producer ∥ Streaming Consumer)
+
+`process_many()` (implemented as `_stream_pipeline`) launches two concurrent coroutines: OCR produces
+while the LLM consumes, with `RateController` adapting the segment length L* at runtime. OCR is
+serialized under `gpu_lock`; while the LLM engine performs refinement the GPU is free, so OCR can keep
+advancing to the next page — this is the core benefit of streaming over batch.
 
 ```
-Pipeline.process_many(image_dir, output_dir, on_progress?, gpu_lock?) -> list[PipelineResult]
+Pipeline.process_many(image_dir, output_dir, ...) -> PipelineResult (single document)
     |
     |-- scan_images(image_dir) -> list[Path]
+    |-- controller = controller or RateController(llm)   # process_tree passes a shared instance
+    |-- page_queue: asyncio.Queue[PageOCR | None]
+    |-- subscribe to the circuit-breaker OPEN event -> llm_unavailable progress frame (unsubscribe in finally)
     |
-    |-- OCR + Clean (GPU Lock protected)
-    |  engine = await engine_manager.ensure(ocr)  # On-demand engine switching (ocr is a full OCRConfig snapshot or None)
-    |  for each image:
-    |    async with gpu_lock:
-    |      page = await engine.ocr(image, output_dir)
-    |    await cleaner.clean(page)
+    |--+-- (1) OCR producer _ocr_producer (asyncio.Task)
+    |  |    for each image:
+    |  |      async with gpu_lock: page = engine.ocr(image, output_dir)
+    |  |      cleaner.clean(page) -> quality detection -> optional per-page redact_regex_only
+    |  |      controller.record_ocr(dt, chars); page_queue.put(page)
+    |  |      debug: {stem}_cleaned.md
+    |  |    finally: page_queue.put(None)   # sentinel, emitted even on the exception path
+    |  |
+    |  +-- (2) streaming consumer _stream_process
+    |       merger = IncrementalMerger; extractor = StreamSegmentExtractor
+    |       while (page := await page_queue.get()) is not None:
+    |         merger.add_page(page)                       # per-page incremental merge/dedup
+    |         if pii.enable and merger.page_count >= 5 and not done yet:
+    |           entity_lexicon = _delayed_pii_detect(...)  # fetch LLM lexicon once enough pages accumulate
+    |         _try_extract_and_refine(...)                 # cut segments by controller.target(L*)
+    |           -> extractor.try_extract -> refiner.refine (skip on LLMCache hit; fall back to original on failure)
+    |           -> accumulate refined_results / all_gaps; controller.record_llm feeds pacing
+    |       after sentinel: extract_remaining handles the tail segment
+    |       debug: merged_raw.md, rate_controller.json
     |
-    |-- Dedup & Merge
-    |  dedup.merge_all_pages(pages) -> MergedDocument
-    |  debug: merged_raw.md
-    |
-    |-- PII Redaction (optional, PIIConfig.enable=True)
-    |  PIIRedactor.redact_for_cloud()
-    |    -> (MergedDocument, RedactionRecord[], EntityLexicon?, cloud_blocked)
-    |  debug: after_pii.md
-    |
-    |-- Segment Refinement (if not cloud_blocked)
-    |  segmenter.segment() -> list[Segment]
-    |  for seg in segments:
-    |    refiner.refine(seg.text, context) -> RefinedResult (falls back to original on failure)
-    |  Truncation detection: finish_reason=="length" or line-count ratio heuristic (thresholds:
-    |    LLMConfig.truncation_ratio_threshold / truncation_min_input_lines) -> warnings
-    |
-    |-- Reassemble
-    |  _reassemble(refined_results, merged_doc) -> MergedDocument
-    |  debug: reassembled.md
-    |
-    |-- Gap Auto-Fill (optional, LLMConfig.enable_gap_fill=True)
-    |  for gap in merged_doc.gaps:
-    |    re-OCR (GPU Lock protected): reocr_page() -> re-OCR text
-    |    fill_gap() -> generate fill text and insert
-    |    re-OCR cache + per-gap exception degradation
-    |  debug: after_gap_fill.md
-    |
-    |-- Final Refinement (optional, LLMConfig.enable_final_refine=True)
-    |  final_refine(markdown) -> RefinedResult (falls back to original on failure)
-    |  debug: final_refined.md
-    |
-    |-- Parse residual GAP markers -> Gap list
-    |
-    |-- Output
-    |  renderer.render(document, output_dir) -> document.md
-    |
-    +-- Aggregate warnings -> PipelineResult
+    +-- (3) finalize _finalize_single_doc (after all segments collected)
+         reassemble(refined_results) -> doc            debug: reassembled.md
+         -> gap fill (optional enable_gap_fill): re-OCR(gpu_lock)+fill_gap, per-gap exception degradation
+         -> final refine (optional enable_final_refine): falls back on failure; duplicate H2 triggers one hinted redo
+         -> programmatic fallback (zero LLM cost): dedup_html_tables / dedup_h2_sections
+                                    / strip_code_block_line_numbers / strip_residual_ui_noise
+         -> parse_gaps collects residual GAPs -> renderer.render -> document.md
+         -> aggregate warnings + extract_first_heading(doc_title) -> PipelineResult
 ```
 
 Notes:
 
-- **Debug intermediate artifacts**: Used for diagnosing differences across OCR/redaction/refinement/gap-fill stages; filenames are implementation-defined (e.g. `merged_raw.md`, `after_pii.md`, etc.).
-- **Truncation detection**: Identifies the risk of LLM output being truncated by context/length limits and surfaces it as warnings; does not interrupt the pipeline. For threshold details, see [llm.md Section 6](llm.md#6-truncation-detection).
+- **Producer/consumer decoupling**: `page_queue` is the back-pressure channel; `controller.set_queue_depth(qsize)` feeds the pacer.
+- **PII streaming strategy**: during the OCR production stage, per-page `redact_regex_only` runs first; after `_PII_DETECT_THRESHOLD` (5) pages accumulate, an `EntityLexicon` is fetched once asynchronously for reuse on gap-fill re-OCR fragments (see [privacy.md](privacy.md)).
+- **Debug intermediate artifacts**: Used for diagnosing differences across stages; filenames are implementation-defined (`{stem}_cleaned.md` / `merged_raw.md` / `reassembled.md` / `rate_controller.json`, etc.).
+- **Truncation detection**: Identifies the risk of LLM output being truncated by length limits and surfaces it as warnings; does not interrupt the pipeline. For threshold details, see [llm.md Section 6](llm.md#6-truncation-detection).
+- **Code mode**: when `CodeRestoreConfig.enable=True`, the consumer is replaced by `_code_pipeline`, which does no streaming refinement (see §10).
 
 ## 6. Programming Interface Example
 
@@ -238,20 +237,20 @@ from docrestore.pipeline.pipeline import Pipeline
 pipeline = Pipeline(PipelineConfig())
 await pipeline.initialize()
 
-results = await pipeline.process_many(
+result = await pipeline.process_many(
     image_dir=Path("/path/to/photos"),
     output_dir=Path("/path/to/output"),
 )
-# results: list[PipelineResult] (LLM clustering may split into multiple documents)
-# results[0].output_path          -- .md file path
-# results[0].markdown             -- markdown content
-# results[0].warnings             -- pipeline warnings (including truncation detection, etc.)
-# results[0].redaction_records    -- PII redaction statistics (if enabled)
+# result: PipelineResult (one directory is one document)
+# result.output_path          -- .md file path
+# result.markdown             -- markdown content
+# result.warnings             -- pipeline warnings (including truncation detection, etc.)
+# result.redaction_records    -- PII redaction statistics (if enabled)
 
 await pipeline.shutdown()
 ```
 
-> For multi-subdirectory input, use `process_tree()` instead -- it calls `process_many()` for each leaf directory and aggregates results.
+> For multi-subdirectory input, use `process_tree()` instead -- it calls `process_many()` per leaf directory and aggregates each single `PipelineResult` into a `list[PipelineResult]` (one per leaf).
 
 ## 7. `_reassemble()` Concatenation Algorithm
 
@@ -262,7 +261,7 @@ _reassemble(refined_results: list[RefinedResult], merged_doc: MergedDocument) ->
     3. Replace merged_doc.markdown with the joined result, preserving images and gaps
 ```
 
-The LLM is responsible for deduplicating inter-segment overlaps during refinement; `_reassemble()` only performs simple concatenation.
+The LLM is responsible for deduplicating inter-segment overlaps during refinement; `_reassemble()` only performs simple concatenation. In the streaming version, this algorithm is invoked inside `_finalize_single_doc()` after all segments have been consumed from the queue (followed by gap fill -> final refine -> programmatic fallback -> render).
 
 ## 8. Error Handling Strategies
 
@@ -311,7 +310,7 @@ During development, full tracebacks are returned for debugging convenience. The 
 - `PipelineScheduler.llm_semaphore` is constructed from `LLMConfig.max_concurrent_requests`
   (default 3) and shared across every pipeline instance.
 - `BaseLLMRefiner._call_llm()` is the single entry point for every LLM call
-  (`refine` / `fill_gap` / `final_refine` / `detect_doc_boundaries` / `detect_pii_entities`);
+  (`refine` / `fill_gap` / `final_refine` / `detect_pii_entities`);
   all of them are rate-limited through this gate.
 - Injection path: `api/app.py` lifespan creates the Scheduler, then
   `pipeline.set_llm_semaphore(scheduler.llm_semaphore)` → `Pipeline._create_refiner()`
@@ -343,72 +342,68 @@ can start OCR immediately, avoiding the "GPU idle while LLM runs" gap. If any su
 raises, `asyncio.gather` fails fast and the upstream `TaskManager` marks the task as
 FAILED (same semantics as the serial version).
 
-> Test: `tests/pipeline/test_process_tree_parallel.py` inspects the time axis and
-> asserts that subdir 2's OCR starts before subdir 1's refine ends.
+> Test: `tests/pipeline/test_process_tree.py` covers the single/multi-subdirectory entry point and the parallel branch.
 
 ### 9.4 No Group-level Concurrency
 
 Clustering has been removed -- all images are treated as a single document, so there is no "group-level concurrency" or "split-by-group task" scheduling logic. All concurrency strategies are bounded at the task level.
 
-## 10. Multi-document Processing (LLM Document Clustering)
+> **History**: there once was an "LLM document clustering" design — the refinement stage detected `DOC_BOUNDARY` markers to split the merged text into multiple sub-documents. That path, along with the `parse_doc_boundaries` / `detect_doc_boundaries` / `DocBoundary` symbols, was fully removed on 2026-05-29 (code mode uses its own `group_into_files` aggregation and never reused DOC_BOUNDARY; doc mode no longer uses it either). Now "one leaf directory = one document", and `process_many()` returns only a single `PipelineResult`. For the origin of this design reversal see [references/streaming-pipeline.md](references/streaming-pipeline.md).
 
-### 10.1 Overview
+## 10. Code Mode Orchestration (`CodeRestoreConfig.enable=True`)
 
-Document boundary markers (`DOC_BOUNDARY`) detected during LLM refinement automatically split the content into multiple sub-documents, each output independently.
+When `PipelineConfig.code.enable=True`, after launching the OCR producer `_stream_pipeline` picks one of two branches based on `code_cfg.enable`: the consumer is replaced by the dedicated code-mode branch `_code_pipeline` (instead of `_stream_process`), skipping the plain-mode streaming refine / incremental merge / segmentation chain.
 
-### 10.2 Workflow
-
-```
-OCR -> Clean -> Dedup & Merge -> PII Redaction -> Segment Refinement (detect DOC_BOUNDARY)
-    -> Split into sub-documents -> Each sub-document independently: gap fill -> final refine -> render
-```
-
-### 10.3 Document Boundary Detection
-
-- After segment refinement + reassembly, Pipeline calls `refiner.detect_doc_boundaries(merged_markdown)`
-- The LLM returns a JSON array: `[{"after_page": "page12.jpg", "new_title": "Second Document Title"}, ...]`
-- `llm/prompts.py::parse_doc_boundaries()` performs JSON fault tolerance: on parse failure or non-array result, degrades to `[]` (single document)
-- Untitled sub-documents are named by `extract_first_heading()` as a fallback; directory names are sanitized via `utils/paths.sanitize_dirname()` + `dedupe_dirnames()` to remove illegal characters and deduplicate
-
-### 10.4 Output Structure
-
-- Single document: `{output_dir}/document.md`
-- Multiple documents: `{output_dir}/{sanitized_title}/document.md` (`PipelineResult.doc_dir` records the relative subdirectory name, `doc_title` records the original title)
-
-### 10.5 API Compatibility
-
-- `Pipeline.process_many()` / `process_tree()` always return `list[PipelineResult]`
-- `Task.results: list[PipelineResult]`; API `GET /tasks/{id}/results` returns the multi-document list, `GET /tasks/{id}/result` returns the first item (backward compatible)
-
-## 11. Code Mode Orchestration (`CodeRestoreConfig.enable=True`)
-
-When `PipelineConfig.code.enable=True`, Pipeline switches to the dedicated `_code_pipeline` branch after the OCR stage, skipping the plain-mode streaming refine / dedup / segmenter chain. The branching lives in `Pipeline._stream_and_collect` and dispatches to either `_code_pipeline` or `_stream_process` based on `code_cfg.enable`.
-
-### 11.1 OCR Engine Forced to `basic`
+### 10.1 OCR Engine Forced to `basic`
 
 Code mode forces the OCR engine to PaddleOCR's `basic` pipeline (PP-OCRv5), because only `basic` produces line-level `text_lines` (with bbox + text) and code-column assembly depends on that input; the VL pipeline does not emit `text_lines`, so enabling code mode would fail with nothing to assemble. Request-level `ocr` overrides are rewritten through `_ocr_config_for_code_mode` so the check is centralized rather than duplicated at every call site (B4 H5).
 
-### 11.2 Chain (Runs Sequentially After OCR Drains)
+### 10.2 Orchestration Flow Diagram (OCR Producer → Code Consumer, Sequential)
+
+Unlike document mode, the code-mode consumer is **not streaming**: it first drains the OCR
+queue, then runs the code chain over the collected pages sequentially. The OCR producer is
+shared with document mode (serialized by `gpu_lock`); only the consumer is swapped to `_code_pipeline`.
 
 ```
-Per image: analyze_layout → [secondary_column_ocr*] → extract_ide_metas → assemble_columns
-                          → build PageColumn[]
-Cross images: group_into_files → SourceFile[]
-Post-OCR: clean_code_ocr_text (conservative character-level fixes, line-count preserved,
-          before PII / LLM)
-PII: _redact_code_headers (only the leading comment block of each file)
-Diagnose: diagnose_source_files → pre-refine diagnostics
-LLM refine (per SourceFile, sequential):
-  ├─ syntax_dirty       → DiagnosticCodeRepairer.repair → re-diagnose → CodeConsistencyAuditor.audit
-  ├─ Large file > threshold → skipped, flag code.repair.skipped_large_file_no_window
-  └─ Otherwise          → CodeLLMRefiner.refine (mode=refine|rewrite)
-Render: render_code_files → output_dir/files/<relative-path> + files-index.json
-Quality: detect_code_mode_quality → .quality_report.json
+Pipeline.process_many(code.enable=True) → PipelineResult (markdown="")
+    │
+    ├─ ① OCR producer _ocr_producer (same as document mode, gpu_lock serialized) → page_queue
+    │     code mode forces PaddleOCR basic via _ocr_config_for_code_mode (emits text_lines)
+    │
+    └─ ② Code consumer _code_pipeline (runs after page_queue drains)
+        │
+        ├─ 1. Drain queue to sentinel; pages_ref filled by producer (empty → RuntimeError)
+        │
+        ├─ 2. Assemble PageColumn per image (progress: code_layout)
+        │     for page in pages_ref:
+        │       no text_lines → record in missing_line_pages and skip
+        │       analyze_layout(text_lines, image_size)
+        │       [rerun_column_ocr*]            # only when code_cfg.secondary_column_ocr=True
+        │       extract_ide_metas → [_augment_metas_with_code_context]  # when context_root given
+        │       assemble_columns → PageColumn[]
+        │     all_pcs empty → RuntimeError ("no line-level output" vs "no assemblable code column")
+        │
+        ├─ 3. group_into_files(all_pcs) → SourceFile[] (progress: code_group)
+        │     3.1 clean_code_ocr_text   conservative OCR fixes (line-count preserved, before PII/LLM)
+        │     3.2 diagnose_source_files pre-refine diagnostics → pre_refine_diagnostics_by_path
+        │     3.5 PII _redact_code_headers   leading comment block only (regex+lexicon+custom words)
+        │
+        ├─ 4. LLM refine (per SourceFile, sequential; catch Exception → fall back to original) (progress: code_refine)
+        │     for src in sources:
+        │       ├─ syntax_dirty   → DiagnosticCodeRepairer.repair → re-diagnose → CodeConsistencyAuditor.audit
+        │       ├─ large file > threshold → skipped, flag code.repair.skipped_large_file_no_window
+        │       └─ otherwise      → CodeLLMRefiner.refine (mode=refine|rewrite)
+        │
+        ├─ 5. render_code_files → output_dir/files/<relative-path> + files-index.json + document.md
+        │     detect_code_mode_quality → .quality_report.json (progress: code_render)
+        │
+        └─ PipelineResult(output_path=document.md, markdown="",
+                          warnings=["code_mode: N files, M skipped"])
 ```
 
 `*` runs only when `code_cfg.secondary_column_ocr=True` — each detected column is cropped, enhanced, and re-OCR'd (off by default).
 
-### 11.3 Error Handling
+### 10.3 Error Handling
 
 - **Image with no `text_lines`**: the page is skipped and added to `missing_line_pages` (reported upstream); other pages continue.
 - **No columns produced at all**: `raise RuntimeError("代码模式：OCR producer 未产出任何页")`, caught at the task layer and written as an error result.
@@ -416,20 +411,20 @@ Quality: detect_code_mode_quality → .quality_report.json
 - **PII failure** (cloud entity detection error): same policy as plain mode — degrade per `SourceFile`.
 - **Missing external diagnostic tool**: `CodeDiagnosticRunner` degrades to `tool_unavailable` rather than failing the task (see [processing.md §3.5](processing.md)).
 
-### 11.4 Concurrency and Resources
+### 10.4 Concurrency and Resources
 
 - The OCR producer and `_code_pipeline` are decoupled through `page_queue`; OCR is serialized by `gpu_lock`, and `_code_pipeline` runs the downstream stages sequentially once the OCR queue drains.
 - LLM refine / repair / audit run **sequentially per file**, not concurrently (avoid firing many long-context requests at the LLM provider simultaneously and triggering rate limits; the number of `SourceFile`s is typically ≤ a few dozen, sequential is manageable).
 - Blocking IO (`diagnose_source_files`, the rglob / read_text inside `build_repair_contexts`) is dispatched via `asyncio.to_thread` to keep the event loop responsive (B7 C12 / S3).
 
-### 11.5 Output and Compatibility
+### 10.5 Output and Compatibility
 
 `_code_pipeline` returns `PipelineResult(output_path=document.md, markdown="")`:
 - `output_path` points to `output_dir/document.md` (placeholder, kept for the legacy UI route)
 - `markdown` is empty; the frontend renders the code-mode review view from `files-index.json` (see [frontend/features.md §7](../frontend/features.md))
 - `warnings` carries a `code_mode: N files, M skipped` summary
 
-## 12. Related Documents
+## 11. Related Documents
 
 - [Data Models](data-models.md)
 - [OCR Layer](ocr.md)

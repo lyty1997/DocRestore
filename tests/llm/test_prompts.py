@@ -168,17 +168,3 @@ class TestBuildFinalRefinePrompt:
         """默认 chunk=1/1 表示整篇单次精修"""
         msgs = build_final_refine_prompt("正文")
         assert "chunk=1/1" in msgs[1]["content"]
-
-    def test_system_prompt_keywords(self) -> None:
-        """system prompt 包含去重相关关键指令"""
-        msgs = build_final_refine_prompt("正文")
-        system = msgs[0]["content"]
-        assert "页眉" in system
-        assert "重复" in system
-        assert "严禁压缩" in system
-
-    def test_preserves_page_markers(self) -> None:
-        """system prompt 要求保留页边界标记"""
-        msgs = build_final_refine_prompt("正文")
-        system = msgs[0]["content"]
-        assert "<!-- page:" in system

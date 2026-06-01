@@ -41,7 +41,8 @@ DocRestore 将连续拍摄的文档照片还原为格式化的 Markdown 文档�
 
 ```
 docs/
-├── README.md          # This file (bilingual index)
+├── README.md             # This file (bilingual index)
+├── progress.archive.md   # Historical progress log (2026-03 ~ 2026-05-11, frozen)
 ├── en/                # English documentation
 │   ├── README.md
 │   ├── architecture.md

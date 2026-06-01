@@ -16,6 +16,8 @@ limitations under the License.
 
 # Pipeline 级并行设计（Multi-Task Parallel Pipelines）
 
+> **Status**: 历史设计参考。多任务并行调度的实现状态见 Linear AGE-71（按硬件调度多任务）；当前仓库内已有单任务流式 Pipeline，多任务编排尚未落地。本文档保留作为设计动机和约束记录。
+
 > 2026-04-16 制定。与 `streaming-pipeline.md`（单任务内 OCR↔LLM overlap）正交：
 > 本设计让**多个任务**同时跑 Pipeline，OCR 阶段靠 GPU 锁串行，LLM/PII/
 > render 等非 GPU 阶段在任务间并发执行，以吃掉当前多任务场景下 GPU 空闲周期。

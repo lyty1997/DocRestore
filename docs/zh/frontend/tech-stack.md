@@ -23,6 +23,7 @@ limitations under the License.
 - **语言**：TypeScript 5.9（strict mode）
 - **样式**：CSS Modules
 - **Markdown 渲染**：react-markdown 10 + remark-gfm + rehype-raw
+- **Markdown WYSIWYG 编辑**：@tiptap/react 3.22 + StarterKit + extension-image/link/placeholder/table（文档模式手工精修使用，源码位于 `frontend/src/components/MarkdownWysiwygEditor.tsx`）
 - **数据校验**：zod v4
 - **i18n**：自建 Context（`src/i18n/`），支持 zh-CN / zh-TW / en 三语
 

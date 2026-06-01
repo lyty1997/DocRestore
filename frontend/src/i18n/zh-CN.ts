@@ -128,7 +128,6 @@ export const zhCN = {
   "progress.gapFill": "补充缺口 {current}/{total}...",
   "progress.finalRefine": "整篇文档级精修...",
   "progress.finalRefineChunks": "整篇文档级精修...（{chunks} 块并行）",
-  "progress.docBoundary": "检测文档边界...",
   "progress.piiRedaction": "PII 脱敏...",
   "progress.render": "渲染输出...",
   "progress.completed": "处理完成",

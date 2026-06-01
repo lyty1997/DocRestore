@@ -31,7 +31,7 @@ limitations under the License.
 
 ## 3. 数据对象（models.py）
 
-按数据流顺序排列：OCR 产物 → 合并中间产物 → 合并结果 → LLM 分段/精修 → 脱敏记录 → 多文档边界 → 最终输出 → 进度。
+按数据流顺序排列：OCR 产物 → 合并中间产物 → 合并结果 → LLM 分段/精修 → 脱敏记录 → 最终输出 → 进度。
 
 ### 3.1 Region
 
@@ -44,7 +44,20 @@ class Region:
     cropped_path: Path | None = None   # 裁剪后保存路径（OCR 阶段填充）
 ```
 
-### 3.2 PageOCR
+### 3.2 TextLine
+
+```python
+@dataclass
+class TextLine:
+    """单行文字识别结果（OCR 引擎提供的行级 bbox + text）"""
+    bbox: tuple[int, int, int, int]  # (x1, y1, x2, y2) 像素坐标
+    text: str
+    score: float
+```
+
+**用途**：代码模式的抽象产物，与具体 OCR provider 解耦。任意 OCR 引擎只要填充 `PageOCR.text_lines`，即可接入 IDE 布局分析链路（见 `processing/ide_layout.py`、`processing/code_assembly.py`）。
+
+### 3.3 PageOCR
 
 ```python
 @dataclass
@@ -57,14 +70,16 @@ class PageOCR:
     regions: list[Region] = field(default_factory=list)
     output_dir: Path | None = None     # 该页输出目录：{output_dir}/{image_stem}_OCR/（OCR 层保证填充，下游可断言非 None）
     has_eos: bool = True               # 是否正常结束（无 eos 可能是循环输出截断）
+    text_lines: list[TextLine] = field(default_factory=list)  # 行级 bbox + text + score；代码模式必填，文档模式可空
 ```
 
 **生命周期**：
-- OCR 层创建，填充 `image_path`、`image_size`、`raw_text`、`regions`、`output_dir`、`has_eos`
+- OCR 层创建，填充 `image_path`、`image_size`、`raw_text`、`regions`、`output_dir`、`has_eos`，以及代码模式所需的 `text_lines`
 - 清洗层填充 `cleaned_text`
 - 去重层读取 `cleaned_text` 进行合并
+- 代码模式从 `text_lines` 进入 IDE 布局识别链路；OCR 引擎若不支持行级输出，应在代码模式下明确报告能力缺失而不是静默退化
 
-### 3.3 MergeResult
+### 3.4 MergeResult
 
 ```python
 @dataclass
@@ -75,7 +90,7 @@ class MergeResult:
     similarity: float                  # 重叠区域的匹配相似度
 ```
 
-### 3.4 Gap
+### 3.5 Gap
 
 ```python
 @dataclass
@@ -88,7 +103,7 @@ class Gap:
     filled_content: str = ""           # 补充的内容
 ```
 
-### 3.5 MergedDocument
+### 3.6 MergedDocument
 
 ```python
 @dataclass
@@ -99,7 +114,7 @@ class MergedDocument:
     gaps: list[Gap] = field(default_factory=list)         # 检测到的内容缺口
 ```
 
-### 3.6 Segment
+### 3.7 Segment
 
 ```python
 @dataclass
@@ -110,7 +125,7 @@ class Segment:
     end_line: int                      # 在原文中的结束行号
 ```
 
-### 3.7 RefineContext
+### 3.8 RefineContext
 
 ```python
 @dataclass
@@ -122,7 +137,7 @@ class RefineContext:
     overlap_after: str                 # 与后段重叠的上下文（空字符串表示最后一段）
 ```
 
-### 3.8 RefinedResult
+### 3.9 RefinedResult
 
 ```python
 @dataclass
@@ -137,7 +152,7 @@ class RefinedResult:
 1. LLM 返回的 `finish_reason == "length"` → 直接标记
 2. 启发式行数比例：输入行数 > 20 且输出行数少于输入的 70% → 标记
 
-### 3.9 RedactionRecord
+### 3.10 RedactionRecord
 
 ```python
 @dataclass
@@ -148,18 +163,6 @@ class RedactionRecord:
     placeholder: str                   # 替换占位符
     count: int                         # 替换次数
 ```
-
-### 3.10 DocBoundary
-
-```python
-@dataclass(frozen=True)
-class DocBoundary:
-    """LLM 检测到的文档边界（多文档聚类）"""
-    after_page: str                    # 前一篇文档的最后一页文件名
-    new_title: str                     # 新文档的标题
-```
-
-由 `LLMRefiner.detect_doc_boundaries()` 产出；Pipeline 据此把 reassemble 后的合并 markdown 拆成多份独立文档。单文档场景下返回空列表。
 
 ### 3.11 PipelineResult
 
@@ -173,11 +176,11 @@ class PipelineResult:
     gaps: list[Gap] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)          # 流程警告信息（截断等）
     redaction_records: list[RedactionRecord] = field(default_factory=list)  # PII 脱敏统计
-    doc_title: str = ""                # 文档标题（多文档场景标识，单文档为 ""）
-    doc_dir: str = ""                  # 相对 task.output_dir 的子目录名（单文档为 ""）
+    doc_title: str = ""                # 文档标题（取首个标题，extract_first_heading）
+    doc_dir: str = ""                  # 相对 task.output_dir 的子目录名（单目录为 ""）
 ```
 
-多文档场景下 `Pipeline.process_many()` 返回 `list[PipelineResult]`；每个子文档的产物位于 `output_dir/{doc_dir}/` 下。
+`process_many()` 返回**单个** `PipelineResult`（一个目录一篇文档）。`process_tree()` 多子目录时每个叶子目录一份、聚合为 `list[PipelineResult]`，各自产物位于 `output_dir/{doc_dir}/` 下。
 
 ### 3.12 TaskProgress
 

@@ -95,6 +95,7 @@ App
 │   ├── TaskProgress         # 进度展示（WS + 轮询降级）
 │   ├── SourceImagePanel     # 源图片查看器（/source-images）
 │   ├── TaskResult           # 子文档 tab + Markdown 渲染 + 精修/下载
+│   │   └── MarkdownWysiwygEditor  # 文档模式手工精修用 Tiptap WYSIWYG 编辑器
 │   └── CodeViewer           # 代码模式源文件列表、编辑器、诊断和来源图片联动
 ├── BackToTopButton          # 长 Markdown 辅助
 └── ConfirmDialog            # 删除/取消确认
@@ -139,7 +140,7 @@ Markdown 中的图片引用需要重写为 assets API 路径，兼容多文档�
 - 编辑态对草稿内容做 350ms debounce，调用 `POST /tasks/{task_id}/code-diagnostics` 获取实时诊断；保存时调用 `PUT /tasks/{task_id}/files/{path}`。
 - 用户可按条接受可解释诊断（例如缺失 include），接受记录按任务、文件、诊断信息和当前行文本写入 `localStorage`，可一键恢复。
 
-当前编辑器基于原生 textarea，诊断标注落在 gutter 和列表中；若需要 IDE 式内联波浪线，应独立评估 CodeMirror/Monaco 替换。
+代码模式编辑器基于原生 textarea，诊断标注落在 gutter 和列表中；若需要 IDE 式内联波浪线，应独立评估 CodeMirror/Monaco 替换。文档模式的手工精修走 Tiptap 实现的 `MarkdownWysiwygEditor`（见第 4 节组件结构）。
 
 ## 8. 下载功能
 

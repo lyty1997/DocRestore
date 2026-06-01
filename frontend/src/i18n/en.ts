@@ -137,7 +137,6 @@ export const en: Record<TranslationKey, string> = {
   "progress.gapFill": "Filling gap {current}/{total}...",
   "progress.finalRefine": "Final document refine...",
   "progress.finalRefineChunks": "Final document refine... ({chunks} chunks in parallel)",
-  "progress.docBoundary": "Detecting document boundaries...",
   "progress.piiRedaction": "PII redaction...",
   "progress.render": "Rendering output...",
   "progress.completed": "Completed",

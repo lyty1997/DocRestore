@@ -60,26 +60,19 @@ from docrestore.processing.markdown_polish import (
 from docrestore.processing.table_dedup import dedup_html_tables
 from docrestore.llm.prompts import (
     extract_first_heading,
-    parse_doc_boundaries,
     parse_gaps,
 )
-from docrestore.processing.segmenter import (
-    DocumentSegmenter,
-    StreamSegmentExtractor,
-)
+from docrestore.processing.segmenter import StreamSegmentExtractor
 from docrestore.models import (
-    DocBoundary,
     Gap,
     MergedDocument,
     PageOCR,
     PipelineResult,
-    RedactionRecord,
     RefineContext,
     RefinedResult,
-    Region,
     TaskProgress,
 )
-from docrestore.ocr.base import OCREngine, WorkerBackedOCREngine
+from docrestore.ocr.base import OCREngine
 from docrestore.ocr.engine_manager import EngineManager
 from docrestore.output.renderer import Renderer
 from docrestore.pipeline.config import (
@@ -102,7 +95,6 @@ from docrestore.pipeline.rate_controller import RateController
 from docrestore.privacy.redactor import EntityLexicon, PIIRedactor
 from docrestore.processing.cleaner import OCRCleaner
 from docrestore.processing.dedup import IncrementalMerger
-from docrestore.utils.paths import sanitize_dirname
 
 
 #: 流式 Pipeline 延迟 PII 实体检测的页面阈值（见 streaming-pipeline §6）。
@@ -359,15 +351,6 @@ def _count_images(d: Path) -> int:
         )
     except OSError:
         return 0
-
-
-def _sort_leaves_lpt(leaves: list[Path]) -> list[Path]:
-    """按页数降序排序子目录（Longest Processing Time first）。
-
-    页数相同时按目录名稳定排序，保证可重复。OCR 阶段 gpu_lock 串行时，
-    最长子目录先 OCR，让后续目录的 OCR 与它的 LLM 阶段重叠，压缩关键路径。
-    """
-    return sorted(leaves, key=lambda p: (-_count_images(p), str(p)))
 
 
 def find_image_dirs(root: Path) -> list[Path]:
@@ -934,8 +917,18 @@ class Pipeline:
         )
         from docrestore.processing.code_context import create_code_context_provider
         from docrestore.processing.code_file_grouping import (
+            GroupingConfig,
             PageColumn,
             group_into_files,
+        )
+        from docrestore.processing.code_line_ledger import (
+            LineLedger,
+            build_line_ledger,
+        )
+        from docrestore.processing.code_path_reconcile import (
+            ReconcileConfig,
+            build_vocabulary,
+            reconcile_paths,
         )
         from docrestore.processing.ide_layout import analyze_layout
         from docrestore.processing.ide_meta_extract import extract_ide_metas
@@ -959,6 +952,7 @@ class Pipeline:
             message_params={"total": str(len(pages_ref))},
         )
         all_pcs: list[PageColumn] = []
+        ledgers: dict[tuple[str, int], LineLedger] = {}
         missing_line_pages: list[str] = []
         for i, page in enumerate(pages_ref):
             text_lines = page.text_lines
@@ -1005,9 +999,18 @@ class Pipeline:
                     _augment_metas_with_code_context, metas, context_provider,
                 )
             columns = assemble_columns(layout)
-            for col, meta in zip(columns, metas, strict=True):
+            page_stem = page.image_path.stem
+            for col, meta, col_lines in zip(
+                columns, metas, layout.columns, strict=True,
+            ):
+                # Stage 0：行账本完整性校验（AGE-79）。用该栏的源 text_lines
+                # （而非整页，兼容二次 column OCR）回查行号↔文本配对，把列级风险
+                # flag 并入 col.flags，经 quality_report / code_renderer 暴露。
+                ledger = build_line_ledger(page_stem, col, col_lines)
+                col.flags.extend(ledger.flags)
+                ledgers[(page_stem, col.column_index)] = ledger
                 all_pcs.append(PageColumn(
-                    page_stem=page.image_path.stem,
+                    page_stem=page_stem,
                     column_index=col.column_index,
                     meta=meta,
                     column=col,
@@ -1037,8 +1040,28 @@ class Pipeline:
                 msg = "代码模式已获得行级 OCR 输出，但未识别出可组装的代码列。"
             raise RuntimeError(msg)
 
-        # 3. 跨张归类 + 落盘
-        sources = group_into_files(all_pcs)
+        # 3. Stage 1：批量文件名/路径归一（AGE-80）。全 batch 建权威词表，把
+        # 少数派噪声 path 碎片 snap 回权威值，就地改写 meta，再交给归类。
+        reconcile_cfg = ReconcileConfig(
+            support_threshold=code_cfg.vocab_support_threshold,
+            min_frequency=code_cfg.vocab_min_frequency,
+            filename_max_distance=code_cfg.snap_filename_max_distance,
+            dir_max_distance=code_cfg.snap_dir_max_distance,
+            minority_ratio=code_cfg.snap_minority_ratio,
+        )
+        vocab = build_vocabulary(
+            [pc.meta for pc in all_pcs], reconcile_cfg,
+        )
+        reconcile_paths(all_pcs, vocab, reconcile_cfg)
+
+        # 4. 跨张归类 + 落盘（S2：行号锚定 + 跨桶救援，传入 S0 行账本）
+        grouping_cfg = GroupingConfig(
+            overlap_min_lines=code_cfg.overlap_min_lines,
+            overlap_confirm_ratio=code_cfg.overlap_confirm_ratio,
+            overlap_conflict_ratio=code_cfg.overlap_conflict_ratio,
+            rescue_max_orphan_pages=code_cfg.rescue_max_orphan_pages,
+        )
+        sources = group_into_files(all_pcs, ledgers, grouping_cfg)
         report_fn(
             "code_group", len(sources), len(sources),
             f"代码模式：归类得到 {len(sources)} 个源文件",
@@ -1720,226 +1743,6 @@ class Pipeline:
             org_names=tuple(org_names),
         )
 
-    async def _ocr_and_clean(
-        self,
-        images: list[Path],
-        output_dir: Path,
-        gpu_lock: asyncio.Lock | None,
-        report_fn: ReportFn,
-        ocr: OCRConfig | None = None,
-    ) -> list[PageOCR]:
-        """OCR（支持 batch 并发）→ 清洗，返回 PageOCR 列表。
-
-        - ocr_batch_size >= 2 且引擎支持 `ocr_batch` → 一次性提交所有图，
-          引擎内部按 batch_size 分块并发，vLLM 做 continuous batching。
-        - 否则回退到逐张 ocr()（保留旧路径）。
-        gpu_lock 覆盖整个 ocr_batch 调用或每次单图调用。
-        """
-        # 通过 EngineManager 获取正确引擎（按需切换）
-        if self._engine_manager is not None:
-            # 引擎初始化进度 → 通过 report_fn 推送到前端（stage="init"）
-            def _init_progress(msg: str) -> None:
-                report_fn("init", 0, 0, msg)
-
-            engine = await self._engine_manager.ensure(
-                ocr, on_progress=_init_progress,
-            )
-        elif self._ocr_engine is not None:
-            engine = self._ocr_engine  # 兼容测试注入
-        else:
-            msg = "OCR 引擎未初始化"
-            raise RuntimeError(msg)
-
-        ocr_cfg = ocr or self._config.ocr
-        batch_size = max(1, ocr_cfg.ocr_batch_size)
-        pages = await self._run_ocr(
-            engine, images, output_dir,
-            gpu_lock, report_fn, batch_size,
-        )
-
-        # 清洗 + 落盘 debug（纯 CPU/IO，与 GPU 无关，顺序处理即可）
-        profiler = current_profiler()
-        cleaner = OCRCleaner()
-        for page in pages:
-            with profiler.stage(
-                "cleaner.page", stem=page.image_path.stem,
-            ):
-                await cleaner.clean(page)
-            await self._save_debug(
-                output_dir,
-                f"{page.image_path.stem}_cleaned.md",
-                page.cleaned_text,
-            )
-
-        return pages
-
-    async def _run_ocr(
-        self,
-        engine: OCREngine,
-        images: list[Path],
-        output_dir: Path,
-        gpu_lock: asyncio.Lock | None,
-        report_fn: ReportFn,
-        batch_size: int,
-    ) -> list[PageOCR]:
-        """OCR 调度：batch_size>=2 走 ocr_batch，否则逐张 ocr。"""
-        profiler = current_profiler()
-        total = len(images)
-
-        def _on_batch_progress(done: int, tot: int) -> None:
-            report_fn(
-                "ocr", done, tot, f"OCR {done}/{tot}...",
-                message_key="progress.ocrPage",
-                message_params={
-                    "current": str(done),
-                    "total": str(tot),
-                },
-            )
-
-        # 只有 WorkerBackedOCREngine 子类才有真正的 ocr_batch 实现
-        # （避免 AsyncMock 等测试替身让 hasattr/iscoroutinefunction 误判）
-        if batch_size >= 2 and isinstance(engine, WorkerBackedOCREngine):
-            with profiler.stage(
-                "ocr.batch",
-                num_images=total,
-                batch_size=batch_size,
-            ):
-                if gpu_lock is not None:
-                    async with gpu_lock:
-                        return await engine.ocr_batch(
-                            images, output_dir, _on_batch_progress,
-                        )
-                return await engine.ocr_batch(
-                    images, output_dir, _on_batch_progress,
-                )
-
-        # Fallback：逐张 ocr()，保留旧路径
-        pages: list[PageOCR] = []
-        for i, img in enumerate(images):
-            with profiler.stage("ocr.single", stem=img.stem):
-                if gpu_lock is not None:
-                    async with gpu_lock:
-                        page = await engine.ocr(img, output_dir)
-                else:
-                    page = await engine.ocr(img, output_dir)
-            report_fn(
-                "ocr", i + 1, total,
-                f"OCR 第 {i + 1}/{total} 张...",
-                message_key="progress.ocrPage",
-                message_params={
-                    "current": str(i + 1),
-                    "total": str(total),
-                },
-            )
-            pages.append(page)
-        return pages
-
-    async def _refine_segments(
-        self,
-        merged: MergedDocument,
-        output_dir: Path,
-        llm: LLMConfig | None,
-        report_fn: ReportFn,
-    ) -> tuple[list[RefinedResult], list[Gap]]:
-        """分段 LLM 精修，返回 (精修结果列表, gap 列表)。"""
-        if llm is None:
-            llm_cfg = self._config.llm
-            refiner = self._refiner
-        else:
-            llm_cfg = llm
-            refiner = self._create_refiner(llm_cfg)
-
-        profiler = current_profiler()
-        with profiler.stage("llm.segment"):
-            segmenter = DocumentSegmenter(
-                max_chars_per_segment=llm_cfg.max_chars_per_segment,
-                overlap_lines=llm_cfg.segment_overlap_lines,
-            )
-            segments = segmenter.segment(merged.markdown)
-
-        all_gaps: list[Gap] = []
-        refined_results: list[RefinedResult] = []
-
-        for i, seg in enumerate(segments):
-            report_fn(
-                "refine", i + 1, len(segments),
-                f"精修第 {i + 1}/{len(segments)} 段...",
-                message_key="progress.refineSegment",
-                message_params={
-                    "current": str(i + 1),
-                    "total": str(len(segments)),
-                },
-            )
-            await self._save_debug(
-                output_dir, f"segments/{i}_input.md", seg.text
-            )
-
-            with profiler.stage(
-                "llm.refine_segment",
-                index=i + 1,
-                total=len(segments),
-                input_chars=len(seg.text),
-            ):
-                result = await self._refine_one_segment(
-                    refiner, seg.text, i, len(segments),
-                )
-
-            # 截断检测（合并 finish_reason=length 与行数比例启发式）：
-            # 任一判定为 truncated 则直接回退到原文 —— 截断的精修结果
-            # 会丢失后半段内容，比"未精修但信息完整"的原文更危险
-            input_lines = seg.text.count("\n") + 1
-            output_lines = result.markdown.count("\n") + 1
-            heuristic_truncated = (
-                input_lines > llm_cfg.truncation_min_input_lines
-                and output_lines
-                < input_lines * (1 - llm_cfg.truncation_ratio_threshold)
-            )
-            if result.truncated or heuristic_truncated:
-                logger.warning(
-                    "段 %d 疑似截断（输入 %d 行 → 输出 %d 行），回退到原文",
-                    i + 1, input_lines, output_lines,
-                )
-                # gaps 基于截断后内容不可信，清空；保留 truncated 标记用于 warnings
-                result = RefinedResult(
-                    markdown=seg.text,
-                    gaps=[],
-                    truncated=True,
-                )
-
-            refined_results.append(result)
-            all_gaps.extend(result.gaps)
-            await self._save_debug(
-                output_dir, f"segments/{i}_output.md", result.markdown,
-            )
-
-        return refined_results, all_gaps
-
-    @staticmethod
-    async def _refine_one_segment(
-        refiner: LLMRefiner | None,
-        text: str,
-        index: int,
-        total: int,
-    ) -> RefinedResult:
-        """精修单个分段，失败时回退到原文。"""
-        if refiner is None:
-            return RefinedResult(markdown=text)
-        ctx = RefineContext(
-            segment_index=index + 1,
-            total_segments=total,
-            overlap_before="",
-            overlap_after="",
-        )
-        try:
-            return await refiner.refine(text, ctx)
-        except Exception:
-            logger.warning(
-                "段 %d 精修失败，回退到原文",
-                index + 1,
-                exc_info=True,
-            )
-            return RefinedResult(markdown=text)
-
     @staticmethod
     async def _refine_segment_with_cache(
         refiner: LLMRefiner | None,
@@ -2528,177 +2331,6 @@ class Pipeline:
             gaps=merged_doc.gaps,
         )
 
-    def _split_by_doc_boundaries(
-        self,
-        doc: MergedDocument,
-        pages: list[PageOCR],
-    ) -> list[tuple[str, list[str], MergedDocument]]:
-        """按 DOC_BOUNDARY 标记拆分文档。
-
-        返回 list[(title, page_names, sub_document)]。
-        无边界时返回单元素列表（向下兼容单文档场景）。
-        """
-        cleaned_md, boundaries = parse_doc_boundaries(doc.markdown)
-
-        # 收集所有 page marker 的名称和位置
-        page_positions: list[tuple[str, int]] = []
-        for m in _PAGE_MARKER_RE.finditer(cleaned_md):
-            page_positions.append((m.group(1).strip(), m.start()))
-
-        all_page_names = [name for name, _ in page_positions]
-
-        if not boundaries or not page_positions:
-            title = extract_first_heading(cleaned_md)
-            return [(
-                title,
-                [p.image_path.name for p in pages],
-                MergedDocument(
-                    markdown=cleaned_md,
-                    images=doc.images,
-                    gaps=doc.gaps,
-                ),
-            )]
-
-        # 解析有效的切分点
-        split_indices, boundary_titles = self._resolve_split_points(
-            boundaries, page_positions,
-        )
-
-        if not split_indices:
-            title = extract_first_heading(cleaned_md)
-            return [(
-                title,
-                [p.image_path.name for p in pages],
-                MergedDocument(
-                    markdown=cleaned_md,
-                    images=doc.images,
-                    gaps=doc.gaps,
-                ),
-            )]
-
-        return self._build_sub_docs(
-            cleaned_md, doc.images,
-            split_indices, boundary_titles,
-            page_positions, all_page_names,
-        )
-
-    @staticmethod
-    def _resolve_split_points(
-        boundaries: list[DocBoundary],
-        page_positions: list[tuple[str, int]],
-    ) -> tuple[list[int], list[str]]:
-        """将 DOC_BOUNDARY 列表映射为 page_positions 索引。
-
-        返回 (排序后的索引列表, 对应的标题列表)。
-        找不到对应 page marker 的 boundary 忽略并记录 warning。
-        """
-        split_indices: list[int] = []
-        boundary_titles: list[str] = []
-        for b in boundaries:
-            for pi, (pname, _) in enumerate(page_positions):
-                if pname == b.after_page:
-                    split_indices.append(pi)
-                    boundary_titles.append(b.new_title)
-                    break
-            else:
-                logger.warning(
-                    "DOC_BOUNDARY after_page=%s 未找到对应 page marker，忽略",
-                    b.after_page,
-                )
-
-        if not split_indices:
-            return [], []
-
-        # 排序并去重
-        paired = sorted(
-            zip(split_indices, boundary_titles, strict=True),
-            key=lambda x: x[0],
-        )
-        return [p[0] for p in paired], [p[1] for p in paired]
-
-    @staticmethod
-    def _build_sub_docs(
-        cleaned_md: str,
-        all_images: list[Region],
-        split_indices: list[int],
-        boundary_titles: list[str],
-        page_positions: list[tuple[str, int]],
-        all_page_names: list[str],
-    ) -> list[tuple[str, list[str], MergedDocument]]:
-        """根据切分点构造子文档列表。"""
-        # 切分 markdown 文本
-        split_positions: list[int] = []
-        for si in split_indices:
-            if si + 1 < len(page_positions):
-                split_positions.append(page_positions[si + 1][1])
-
-        md_parts: list[str] = []
-        prev = 0
-        for pos in split_positions:
-            md_parts.append(cleaned_md[prev:pos])
-            prev = pos
-        md_parts.append(cleaned_md[prev:])
-
-        # 为每部分分配 page_names
-        page_name_groups: list[list[str]] = []
-        prev_pi = 0
-        for si in split_indices:
-            page_name_groups.append(all_page_names[prev_pi:si + 1])
-            prev_pi = si + 1
-        page_name_groups.append(all_page_names[prev_pi:])
-
-        # 构造标题列表：首篇从 heading 提取，后续从 boundary
-        titles = [extract_first_heading(md_parts[0])]
-        titles.extend(boundary_titles[:len(md_parts) - 1])
-
-        # 图片引用正则
-        img_ref_re = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
-
-        result: list[tuple[str, list[str], MergedDocument]] = []
-        for i, md_part in enumerate(md_parts):
-            refs = set(img_ref_re.findall(md_part))
-            sub_images = [
-                img for img in all_images
-                if img.cropped_path is not None
-                and any(
-                    str(img.cropped_path).endswith(ref)
-                    or ref in str(img.cropped_path)
-                    for ref in refs
-                )
-            ]
-
-            result.append((
-                titles[i] if i < len(titles) else f"文档_{i + 1}",
-                page_name_groups[i] if i < len(page_name_groups) else [],
-                MergedDocument(
-                    markdown=md_part,
-                    images=sub_images,
-                    gaps=[],
-                ),
-            ))
-
-        return result
-
-    @staticmethod
-    def _resolve_sub_output_dir(
-        output_dir: Path,
-        title: str,
-        index: int,
-        total: int,
-    ) -> Path:
-        """确定子文档输出目录。
-
-        单文档(total==1)：返回 output_dir 本身（兼容）。
-        多文档：返回 output_dir / sanitized_title。
-        """
-        if total <= 1:
-            return output_dir
-
-        dirname = sanitize_dirname(title)
-        if not dirname:
-            dirname = f"文档_{index + 1}"
-        return output_dir / dirname
-
     async def _maybe_fill_gaps(
         self,
         doc: MergedDocument,
@@ -3245,117 +2877,3 @@ class Pipeline:
                     f"缺口（{g.after_image} 之后）未能自动补充"
                 )
         return warnings
-
-    async def _detect_doc_boundaries(
-        self,
-        merged: MergedDocument,
-        llm: LLMConfig | None,
-        report_fn: ReportFn,
-    ) -> list[DocBoundary]:
-        """检测文档边界。"""
-        report_fn(
-            "doc_boundary", 0, 1, "检测文档边界...",
-            message_key="progress.docBoundary",
-        )
-        refiner = self._get_refiner(llm)
-        if refiner is None:
-            logger.warning("未配置 LLM refiner，跳过文档边界检测")
-            return []
-        boundaries = await refiner.detect_doc_boundaries(merged.markdown)
-        logger.info("检测到 %d 个文档边界", len(boundaries))
-        return boundaries
-
-    @staticmethod
-    def _insert_doc_boundaries(
-        merged: MergedDocument,
-        boundaries: list[DocBoundary],
-    ) -> MergedDocument:
-        """将文档边界标记插入到markdown中。"""
-        if not boundaries:
-            return merged
-
-        # 找到所有page marker位置
-        page_positions: dict[str, int] = {}
-        for m in _PAGE_MARKER_RE.finditer(merged.markdown):
-            page_name = m.group(1).strip()
-            page_positions[page_name] = m.end()
-
-        # 按位置倒序插入（避免位置偏移）
-        insertions: list[tuple[int, str]] = []
-        for b in boundaries:
-            pos = page_positions.get(b.after_page)
-            if pos is not None:
-                marker = (
-                    f'\n<!-- DOC_BOUNDARY: {{"after_page":"{b.after_page}",'
-                    f'"new_title":"{b.new_title}"}} -->\n'
-                )
-                insertions.append((pos, marker))
-
-        insertions.sort(reverse=True)
-        md = merged.markdown
-        for pos, marker in insertions:
-            md = md[:pos] + marker + md[pos:]
-
-        return MergedDocument(
-            markdown=md,
-            images=merged.images,
-            gaps=merged.gaps,
-        )
-
-    async def _redact_pii(
-        self,
-        merged: MergedDocument,
-        llm: LLMConfig | None,
-        pii_config: PIIConfig,
-        output_dir: Path,
-        report_fn: ReportFn,
-    ) -> tuple[
-        MergedDocument,
-        list[RedactionRecord],
-        EntityLexicon | None,
-        bool,
-    ]:
-        """PII 脱敏阶段。
-
-        返回 (脱敏后文档, 脱敏记录, 实体词典, 是否阻断云端)。
-        """
-        report_fn(
-            "pii_redaction", 0, 1, "PII 脱敏...",
-            message_key="progress.piiRedaction",
-        )
-
-        redactor = PIIRedactor(pii_config)
-
-        # LLMRefiner Protocol 统一暴露 detect_pii_entities；
-        # 本地实现返回空列表，云端实现调用 LLM 做真实识别。
-        refiner = self._get_refiner(llm)
-
-        text, records, lexicon = (
-            await redactor.redact_for_cloud(
-                merged.markdown, refiner,
-            )
-        )
-
-        await self._save_debug(
-            output_dir, "after_pii_redaction.md", text,
-        )
-
-        # 判断是否需要阻断云端调用
-        cloud_blocked = False
-        needs_entity = (
-            pii_config.redact_person_name
-            or pii_config.redact_org_name
-        )
-        if (
-            needs_entity
-            and lexicon is None
-            and pii_config.block_cloud_on_detect_failure
-        ):
-            cloud_blocked = True
-
-        new_doc = MergedDocument(
-            markdown=text,
-            images=merged.images,
-            gaps=merged.gaps,
-        )
-        return new_doc, records, lexicon, cloud_blocked

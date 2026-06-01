@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 import re
-from collections import Counter
 from collections.abc import Callable
 from difflib import SequenceMatcher
 
@@ -39,112 +38,6 @@ logger = logging.getLogger(__name__)
 def _normalize_line(line: str) -> str:
     """归一化行文本：去首尾空白 + 压缩连续空格。"""
     return " ".join(line.split())
-
-
-def _mark_noise_blocks(
-    lines: list[str],
-    noise_lines: set[str],
-    min_block: int,
-) -> list[bool]:
-    """标记需要移除的连续噪声行块。
-
-    扫描 lines，将连续 ≥ min_block 行的噪声块标记为 True。
-
-    Args:
-        lines: 页面文本行列表
-        noise_lines: 已识别的噪声行集合（归一化后）
-        min_block: 连续噪声行最小块大小
-
-    Returns:
-        与 lines 等长的布尔列表，True 表示该行应被移除
-    """
-    is_noise = [_normalize_line(line) in noise_lines for line in lines]
-    remove = [False] * len(lines)
-    block_start = -1
-
-    for i, noisy in enumerate(is_noise):
-        if noisy:
-            if block_start < 0:
-                block_start = i
-        else:
-            if block_start >= 0 and (i - block_start) >= min_block:
-                for j in range(block_start, i):
-                    remove[j] = True
-            block_start = -1
-
-    # 处理末尾的连续块
-    if block_start >= 0 and (len(lines) - block_start) >= min_block:
-        for j in range(block_start, len(lines)):
-            remove[j] = True
-
-    return remove
-
-
-def strip_repeated_lines(
-    pages: list[PageOCR],
-    config: DedupConfig,
-) -> None:
-    """跨页频率过滤：移除在多数页面中重复出现的侧栏噪声行。
-
-    **原地修改** 每页的 cleaned_text。
-
-    算法：
-    1. 逐页按行拆分，对每行归一化后统计出现在多少个不同页面中
-    2. 出现频率 ≥ threshold 的行标记为噪声
-    3. 在每页中，只移除连续 ≥ min_block 行的噪声块（防误删孤立重复行）
-
-    Args:
-        pages: OCR 清洗后的页面列表（会原地修改 cleaned_text）
-        config: 去重配置（含频率过滤参数）
-    """
-    total = len(pages)
-    if total < config.repeated_line_min_pages:
-        return
-
-    threshold_count = max(1, int(total * config.repeated_line_threshold))
-
-    # 统计每个归一化行出现在多少个不同页面中
-    line_page_count: Counter[str] = Counter()
-    for page in pages:
-        text = page.cleaned_text or page.raw_text
-        # 每页只计一次（set 去重同一页内的重复行）
-        unique_lines = {
-            _normalize_line(line)
-            for line in text.splitlines()
-            if len(line.strip()) > 1  # 跳过空行和单字符行
-        }
-        line_page_count.update(unique_lines)
-
-    # 筛选噪声行集合
-    noise_lines: set[str] = {
-        line
-        for line, count in line_page_count.items()
-        if count >= threshold_count
-    }
-
-    if not noise_lines:
-        return
-
-    logger.info(
-        "跨页频率过滤: 检测到 %d 个噪声行 (阈值=%d/%d 页)",
-        len(noise_lines), threshold_count, total,
-    )
-
-    # 逐页移除连续噪声块
-    min_block = config.repeated_line_min_block
-    removed_total = 0
-    for page in pages:
-        text = page.cleaned_text or page.raw_text
-        lines = text.splitlines()
-        remove = _mark_noise_blocks(lines, noise_lines, min_block)
-        kept = [line for line, rm in zip(lines, remove, strict=True) if not rm]
-        removed_count = len(lines) - len(kept)
-        if removed_count > 0:
-            removed_total += removed_count
-            page.cleaned_text = "\n".join(kept)
-
-    if removed_total > 0:
-        logger.info("跨页频率过滤: 共移除 %d 行噪声", removed_total)
 
 
 class PageDeduplicator:
@@ -473,25 +366,11 @@ class IncrementalMerger:
         """返回当前合并的 markdown（与 merge_all_pages 一致，末尾去换行）。"""
         return self._merged_markdown.rstrip("\n")
 
-    def get_text_after(self, offset: int) -> str:
-        """返回 get_markdown()[offset:]。"""
-        return self.get_markdown()[offset:]
-
     def get_all_images(self) -> list[Region]:
         """返回所有已合并页面的 Region 汇总。"""
         return list(self._all_regions)
 
     @property
-    def total_length(self) -> int:
-        """当前合并 markdown 的字符数。"""
-        return len(self.get_markdown())
-
-    @property
     def page_count(self) -> int:
         """已合并的页面数。"""
         return len(self._page_names)
-
-    @property
-    def all_page_names(self) -> list[str]:
-        """所有已合并页面的文件名（按添加顺序）。"""
-        return list(self._page_names)
