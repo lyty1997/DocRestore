@@ -1,0 +1,10 @@
+# PaddleOCR-VL genai_server（vLLM 后端）参数
+# 由 paddlex 解析为 vLLM CLI 参数；EngineManager / start.sh 通过
+# `--backend_config` 传给 `paddleocr genai_server`。
+#
+# enforce_eager: 关闭 CUDA graph 捕获。VL-1.6 在 12G 显存卡上若开启 CUDA graph，
+#   捕获 + 视觉激活会吃光预算，vLLM 报 "No available memory for the cache blocks"
+#   而启动失败。关掉后 KV cache 才有空间。≥16G 显存可删掉本行换取更快推理。
+enforce_eager: true
+# gpu_memory_utilization: vLLM 预留的单卡显存比例。
+gpu_memory_utilization: 0.92
