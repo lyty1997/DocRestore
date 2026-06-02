@@ -25,7 +25,6 @@
 #   ./scripts/setup_paddle_ocr.sh --help
 #
 # 环境变量：
-#   PPOCR_GPU_MEMORY_UTIL  — 显存利用率（默认 0.85）
 #   CUDA_VERSION           — CUDA 工具链版本（默认 12.8）
 #   PADDLE_GPU_VERSION     — paddlepaddle-gpu 版本（默认 3.3.0）
 #   PADDLE_GPU_WHL_INDEX   — paddlepaddle-gpu pip index
@@ -42,7 +41,6 @@ cd "$PROJECT_ROOT"
 
 # ──────────── 默认值 ────────────
 
-PPOCR_GPU_MEMORY_UTIL="${PPOCR_GPU_MEMORY_UTIL:-0.85}"
 CUDA_VERSION="${CUDA_VERSION:-12.8}"
 PADDLE_GPU_VERSION="${PADDLE_GPU_VERSION:-3.3.0}"
 PADDLE_GPU_WHL_INDEX="${PADDLE_GPU_WHL_INDEX:-https://www.paddlepaddle.org.cn/packages/stable/cu126/}"
@@ -80,7 +78,6 @@ show_help() {
     echo "  --help          显示帮助"
     echo ""
     echo "环境变量："
-    echo "  PPOCR_GPU_MEMORY_UTIL   显存利用率（默认 0.85）"
     echo "  CUDA_VERSION            CUDA 工具链版本（默认 12.8）"
     echo "  PADDLE_GPU_VERSION      paddlepaddle-gpu 版本（默认 3.3.0）"
     echo "  FLASH_ATTN_VERSION      flash-attn 版本（默认 2.8.2）"
@@ -189,23 +186,12 @@ install_server() {
     conda run -n "$SERVER_ENV" \
         paddleocr install_genai_server_deps vllm
 
-    # 修改显存利用率配置
-    log "修改显存利用率为 ${PPOCR_GPU_MEMORY_UTIL}..."
-    local config_path
-    config_path=$(conda run -n "$SERVER_ENV" python -c "
-import paddlex, os
-print(os.path.join(os.path.dirname(paddlex.__file__),
-    'inference/genai/configs/paddleocr_vl_09b.py'))
-" 2>/dev/null) || true
-
-    if [[ -n "$config_path" && -f "$config_path" ]]; then
-        sed -i "s/\"gpu-memory-utilization\": [0-9.]*/\"gpu-memory-utilization\": ${PPOCR_GPU_MEMORY_UTIL}/" \
-            "$config_path"
-        log "已修改: $config_path"
-    else
-        warn "未找到 paddlex genai 配置文件，跳过显存利用率修改"
-        warn "可稍后手动修改 paddleocr_vl_09b.py 中的 gpu-memory-utilization"
-    fi
+    # 显存利用率 / enforce_eager 不再改 paddlex 内置 config——改由 genai_server
+    # 启动时的 backend_config YAML 控制：backend/docrestore/resources/
+    # ppocr_vl_backend.yaml（OCRConfig.paddle_server_backend_config / start.sh 默认
+    # 指向它）。注意：VL-1.6 在 12G 显存卡上必须靠 enforce_eager 关 CUDA graph 才不会
+    # "No available memory for the cache blocks"，单调 gpu-memory-utilization 无效。
+    log "显存/enforce_eager 由 ppocr_vl_backend.yaml 在启动时控制（见 start.sh / OCRConfig）"
 
     log "Server 环境安装完成 ✓"
 }
