@@ -327,7 +327,7 @@ class PaddleOCREngine:
 | `paddle_server_connect_timeout` | `2.0` | 单次端口可达性探测超时（秒） |
 | `paddle_server_poll_interval` | `2.0` | 启动就绪轮询间隔（秒） |
 | `paddle_server_shutdown_timeout` | `10.0` | 关闭阶段 SIGTERM 等待（超时后升级 SIGKILL） |
-| `paddle_server_model_name` | `"PaddleOCR-VL-1.5-0.9B"` | server 端模型名称 |
+| `paddle_server_model_name` | `"PaddleOCR-VL-1.6-0.9B"` | server 端模型名称 |
 | `paddle_ocr_timeout` | `300` | 单张 OCR 超时（秒） |
 | `paddle_restart_interval` | `20` | 每 N 张重启 worker（server 模式建议 `0`） |
 | `paddle_worker_script` | `""` | worker 脚本路径；空串回退仓库内默认（支持绝对路径） |

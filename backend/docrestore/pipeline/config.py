@@ -21,9 +21,20 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+# PaddleOCR-VL genai_server 默认 backend_config（含 enforce_eager）。12G 显存卡
+# 启动 VL-1.6 若不关 CUDA graph，vLLM 会报 "No available memory for the cache
+# blocks" 而失败；详见该 YAML。设为空串则不传 --backend_config（≥16G 显存可用，
+# 换取 CUDA graph 提速）。
+_PPOCR_VL_BACKEND_CONFIG = str(
+    Path(__file__).resolve().parent.parent
+    / "resources"
+    / "ppocr_vl_backend.yaml"
+)
 
 
 class ColumnFilterThresholds(BaseModel):
@@ -141,12 +152,17 @@ class OCRConfig(BaseModel):
     paddle_restart_interval: int = 20  # 每 N 张图片重启 worker（0 禁用）
     # worker 脚本路径（空串时使用默认仓库内路径）
     paddle_worker_script: str = ""
-    # ppocr-server 的 --backend_config YAML 路径（空串时用 PaddleOCR 默认配置）
-    paddle_server_backend_config: str = ""
+    # ppocr-server 的 --backend_config YAML 路径（默认指向仓库内 enforce_eager
+    # 配置，避免 12G 卡 VL-1.6 OOM；空串则用 PaddleOCR 默认，仅 ≥16G 显存推荐）
+    paddle_server_backend_config: str = _PPOCR_VL_BACKEND_CONFIG
 
     # PaddleOCR server 模式（paddle_server_url 非空时启用）
     paddle_server_url: str = ""  # 如 "http://localhost:8119/v1"
-    paddle_server_model_name: str = "PaddleOCR-VL-1.5-0.9B"
+    paddle_server_model_name: str = "PaddleOCR-VL-1.6-0.9B"
+    #: PaddleOCR-VL 管线版本（``v1`` / ``v1.5`` / ``v1.6``）。决定版面模型
+    #: （PP-DocLayout）与 VL prompt 版本，需与 ``paddle_server_model_name`` 的
+    #: 模型版本匹配（如 1.6 模型 + ``v1.6``）。VL-1.5 已废弃，默认 ``v1.6``。
+    paddle_pipeline_version: str = "v1.6"
     paddle_min_image_size: int = 64  # 过滤宽或高小于此值的小图标（px）
 
     # ppocr-server 自动管理（EngineManager 控制）

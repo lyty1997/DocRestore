@@ -29,7 +29,7 @@ DocRestore 启动脚本
     PPOCR_GPU_ID   绑定 GPU 编号；留空则不导出 CUDA_VISIBLE_DEVICES，
                    由 vLLM 自动枚举 + docrestore 内部按显存挑卡 (默认 留空)
     PPOCR_PORT     genai_server 端口 (默认 8119)
-    PPOCR_MODEL    模型名 (默认 PaddleOCR-VL-1.5-0.9B)
+    PPOCR_MODEL    模型名 (默认 PaddleOCR-VL-1.6-0.9B)
 
 示例:
   ./scripts/start.sh                                 # 后端 + 前端
@@ -65,7 +65,7 @@ FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 # 后端启动路径下由 docrestore.ocr.gpu_detect.pick_best_gpu 统一挑显存最大的一张。
 PPOCR_GPU_ID="${PPOCR_GPU_ID:-}"
 PPOCR_PORT="${PPOCR_PORT:-8119}"
-PPOCR_MODEL="${PPOCR_MODEL:-PaddleOCR-VL-1.5-0.9B}"
+PPOCR_MODEL="${PPOCR_MODEL:-PaddleOCR-VL-1.6-0.9B}"
 
 # 颜色输出
 RED='\033[0;31m'
@@ -242,6 +242,16 @@ start_ppocr_server() {
     conda activate ppocr_vlm
     set -u
 
+    # backend_config（enforce_eager 等）：默认用仓库内 YAML，避免 12G 卡 VL-1.6
+    # 启动 OOM；设 PPOCR_BACKEND_CONFIG="" 可禁用（≥16G 显存换 CUDA graph 提速）。
+    local _repo_root _bc _bc_args
+    _repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    _bc="${PPOCR_BACKEND_CONFIG-$_repo_root/backend/docrestore/resources/ppocr_vl_backend.yaml}"
+    _bc_args=()
+    if [ -n "$_bc" ] && [ -f "$_bc" ]; then
+        _bc_args=(--backend_config "$_bc")
+    fi
+
     # 未显式指定 PPOCR_GPU_ID 时不设 CUDA_VISIBLE_DEVICES，vLLM 自行探测所有 GPU；
     # 避免"被 hard code 指向不存在的设备导致 NVMLError_InvalidArgument"。
     # setsid 隔离 session（同 start_backend / start_frontend 注释）。
@@ -251,11 +261,13 @@ start_ppocr_server() {
         setsid paddleocr genai_server \
             --model_name "$PPOCR_MODEL" \
             --backend vllm \
+            "${_bc_args[@]}" \
             --port "$PPOCR_PORT" </dev/null &
     else
         setsid paddleocr genai_server \
             --model_name "$PPOCR_MODEL" \
             --backend vllm \
+            "${_bc_args[@]}" \
             --port "$PPOCR_PORT" </dev/null &
     fi
 }

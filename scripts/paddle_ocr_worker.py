@@ -67,6 +67,7 @@ class Worker:
         server_url: str = "",
         server_model_name: str = "",
         pipeline: str = "vl",
+        pipeline_version: str = "v1.6",
     ) -> dict[str, object]:
         """初始化 PaddleOCR pipeline。
 
@@ -75,6 +76,8 @@ class Worker:
             server_model_name: server 端模型名称（vl 用）
             pipeline: ``vl``（PaddleOCR-VL，文档默认）或 ``basic``
                 （PP-OCRv5 行级 bbox，IDE 代码场景）
+            pipeline_version: PaddleOCR-VL 版本（``v1`` / ``v1.5`` / ``v1.6``，
+                仅 vl pipeline 生效）；VL-1.5 已废弃，默认 ``v1.6``
         """
         try:
             self._pipeline_kind = pipeline
@@ -101,6 +104,7 @@ class Worker:
 
             if server_url:
                 self._pipeline = PaddleOCRVL(
+                    pipeline_version=pipeline_version,
                     vl_rec_backend="vllm-server",
                     vl_rec_server_url=server_url,
                     vl_rec_api_model_name=server_model_name,
@@ -110,7 +114,9 @@ class Worker:
                     file=sys.stderr,
                 )
             else:
-                self._pipeline = PaddleOCRVL()
+                self._pipeline = PaddleOCRVL(
+                    pipeline_version=pipeline_version,
+                )
                 print(
                     "PaddleOCRVL 初始化完成（本地模式）",
                     file=sys.stderr,
@@ -535,7 +541,7 @@ class Worker:
 
             with Image.open(img_path) as img:
                 w, h = img.size
-                return w < min_size or h < min_size
+                return bool(w < min_size or h < min_size)
         except Exception:
             return False
 
@@ -603,6 +609,9 @@ def main() -> None:
                     request.get("server_model_name", "")
                 ),
                 pipeline=str(request.get("pipeline", "vl")),
+                pipeline_version=str(
+                    request.get("pipeline_version", "v1.6")
+                ),
             ), seq=seq)
         elif cmd == "ocr":
             min_img_raw = request.get("min_image_size", 0)

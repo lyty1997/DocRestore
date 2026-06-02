@@ -1,5 +1,35 @@
 # 开发进度
 
+## 2026-06-02 - PaddleOCR-VL 1.5 → 1.6 全面升级（废弃 1.5）+ 12G 显存 OOM 修复
+
+**背景**：PPT 还原 spike（AGE-84）选定 VL-1.6 为主引擎后，进一步对比 1.5 vs 1.6——化学结构页两者≈等价
+（1.6 在视觉折行处把正文断成两段、略差），但**表格页 1.6 明显胜**：表结构 7 列正确（1.5 错乱成 8 列 +
+重复 Organism 列 + 幻影 `$c$` 列），实体 ID OCR 也更准（P31116 vs P3I116）。故全面升级、废弃 1.5。
+
+**环境**（分支 `feature/vl16-upgrade`）：`ppocr_vlm`（server）+ `ppocr_client`（client/worker）均
+`pip -U paddleocr[doc-parser]` 从 3.4.0 升 **3.6.0**（vllm 0.10.2 / torch 2.8-cu128 / flash_attn 2.8.2 复用不重编）；
+临时验证 env `ppocr_vlm16` 用后删除。
+
+**代码改动**：
+- commit `86717e6`：`OCRConfig.paddle_server_model_name`→1.6 + 新增 `paddle_pipeline_version="v1.6"`；
+  `paddle_ocr.py` init_cmd 透传 pipeline_version；`paddle_ocr_worker.py` `PaddleOCRVL(pipeline_version=...)`；
+  start.sh / run_e2e / bench / docs(zh+en) 全部 1.5→1.6。
+- commit `38530e9`（OOM 修复）：paddleocr 3.6 的 VL-1.6 在 12G 卡开 CUDA graph 会 `No available memory for the
+  cache blocks`。新增 `backend/docrestore/resources/ppocr_vl_backend.yaml`（`enforce_eager: true` +
+  `gpu_memory_utilization: 0.92`），`OCRConfig.paddle_server_backend_config` 默认指向它，`start.sh` 透传
+  `--backend_config`（`PPOCR_BACKEND_CONFIG` 可覆盖/置空——≥16G 显存换 CUDA graph 提速）。
+
+**验证（e2e 通过）**：VL-1.6 server 带 backend_config 正常启动（不再 OOM）；文档模式
+`PaddleOCRVL(pipeline_version="v1.6", vllm-server)` 从 ppocr_client 出 markdown（472 字符、内容正确）；
+代码模式 basic PP-OCRv5 在 3.6 出 28 行行级结果。`tests/` 无 1.5 残留，pre-commit（mypy/ruff/typos）全过。
+
+**架构澄清**：VL-1.6 server（ppocr_vlm vllm）**文档模式 + PPT 模式共用**；代码模式走 basic PP-OCRv5
+**纯本地**（ppocr_client，不起 server）。
+
+**遗留**：① `feature/vl16-upgrade` 分支未合并 dev（待 review/merge）；② `paddle_pipeline_version` 新字段的
+docs/backend 说明待补；③ PPT 还原模式本体（S1 设计 AGE-85 起）待开工。
+
+
 ## 2026-05-31 - 代码模式碎片化诊断 + 跨页归类重构设计（方案 1+4，已确认待实现）
 
 **背景**：chromium 显示子系统代码数据集（157 张 IDE 截图）跑代码模式，本应收敛成 **8 个真实源文件**，
