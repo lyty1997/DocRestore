@@ -327,7 +327,7 @@ class PaddleOCREngine:
 | `paddle_server_connect_timeout` | `2.0` | Single port reachability probe timeout (seconds) |
 | `paddle_server_poll_interval` | `2.0` | Startup readiness polling interval (seconds) |
 | `paddle_server_shutdown_timeout` | `10.0` | SIGTERM wait during shutdown (escalates to SIGKILL on timeout) |
-| `paddle_server_model_name` | `"PaddleOCR-VL-1.5-0.9B"` | Server-side model name |
+| `paddle_server_model_name` | `"PaddleOCR-VL-1.6-0.9B"` | Server-side model name |
 | `paddle_ocr_timeout` | `300` | Per-image OCR timeout (seconds) |
 | `paddle_restart_interval` | `20` | Restart worker every N images (recommend `0` in server mode) |
 | `paddle_worker_script` | `""` | Worker script path; empty string falls back to the repository default (supports absolute paths) |

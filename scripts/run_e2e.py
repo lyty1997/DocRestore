@@ -151,7 +151,7 @@ async def main() -> None:
     )
     parser.add_argument(
         "--paddle-server-model",
-        default="PaddleOCR-VL-1.5-0.9B",
+        default="PaddleOCR-VL-1.6-0.9B",
         help="PaddleOCR server 模型名称",
     )
     parser.add_argument(

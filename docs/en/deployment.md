@@ -128,7 +128,7 @@ After the services are running:
 | `FRONTEND_PORT` | `5173` | Frontend dev server port |
 | `PPOCR_GPU_ID` | empty (auto) | GPU used by PaddleOCR server; when empty, `gpu_detect.pick_best_gpu` recommends one automatically |
 | `PPOCR_PORT` | `8119` | PaddleOCR server port |
-| `PPOCR_MODEL` | `PaddleOCR-VL-1.5-0.9B` | PaddleOCR model name |
+| `PPOCR_MODEL` | `PaddleOCR-VL-1.6-0.9B` | PaddleOCR model name |
 
 ### 3.2 PaddleOCR Installation Variables
 
@@ -221,7 +221,7 @@ PPOCR_GPU_ID=0 PPOCR_PORT=9119 bash scripts/start.sh ppocr-server
 | `paddle_server_port` | ppocr-server port (default 8119) |
 | `paddle_server_startup_timeout` | Server startup timeout in seconds (default 300) |
 | `paddle_server_host` / `paddle_server_port` / `paddle_server_api_version` | Auto-assembled into `paddle_server_url` (default `http://localhost:8119/v1`) |
-| `paddle_server_model_name` | Server model name (default `PaddleOCR-VL-1.5-0.9B`) |
+| `paddle_server_model_name` | Server model name (default `PaddleOCR-VL-1.6-0.9B`) |
 | `paddle_ocr_timeout` | Per-image OCR timeout in seconds (default 300) |
 | `paddle_restart_interval` | Restart worker every N images (recommend 0 in server mode) |
 
@@ -366,7 +366,7 @@ User=docrestore
 Environment="PATH=/path/to/conda/envs/ppocr_vlm/bin"
 # Pin to a specific GPU if needed (leave unset to let vLLM enumerate every visible GPU)
 # Environment="CUDA_VISIBLE_DEVICES=0"
-ExecStart=/path/to/conda/envs/ppocr_vlm/bin/paddleocr genai_server --model_name PaddleOCR-VL-1.5-0.9B --backend vllm --port 8119
+ExecStart=/path/to/conda/envs/ppocr_vlm/bin/paddleocr genai_server --model_name PaddleOCR-VL-1.6-0.9B --backend vllm --port 8119
 Restart=always
 
 [Install]
