@@ -357,6 +357,26 @@ class CodeRestoreConfig(BaseModel):
     rescue_max_orphan_pages: int = 3
 
 
+class PowerPointRestoreConfig(BaseModel):
+    """PPT 屏摄照片还原模式配置（AGE-83）。
+
+    enable=True 时启用第三分支 ``_ppt_pipeline``：屏摄照片 → S2 透视矫正
+    （逐页前处理）→ VL-1.6 doc_parser 识别 + 化学结构裁图 → 单页保序组装
+    合并为单个 document.md。与文档 / 代码模式互斥三选一。
+    """
+
+    enable: bool = False
+    #: S2 透视矫正（默认开，S0 结论：屏摄强透视下矫正必需）
+    rectify: bool = True
+    #: 落盘 before/after 对照图到 output_dir/<rectify_debug_dir>（S2 验收证据）
+    rectify_save_debug: bool = True
+    rectify_debug_dir: str = ".rectified"
+    #: 顶边上抬比例，补回常被吊顶 / 暗标题栏遮挡的区域
+    rectify_top_extend_ratio: float = 0.2
+    #: 可选 LLM 轻润色（默认关，前端可开；开启时不得改公式 / 图片引用）
+    llm_polish: bool = False
+
+
 class PipelineConfig(BaseModel):
     """Pipeline 总配置"""
 
@@ -366,6 +386,7 @@ class PipelineConfig(BaseModel):
     output: OutputConfig = Field(default_factory=OutputConfig)
     pii: PIIConfig = Field(default_factory=PIIConfig)
     code: CodeRestoreConfig = Field(default_factory=CodeRestoreConfig)
+    ppt: PowerPointRestoreConfig = Field(default_factory=PowerPointRestoreConfig)
     db_path: str = "data/docrestore.db"  # SQLite 持久化路径
     debug: bool = True  # 落盘各阶段中间结果到 output_dir/debug/
 

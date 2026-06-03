@@ -95,6 +95,9 @@ class APIErrorCode(StrEnum):
     BROWSE_NOT_DIR = "BROWSE_NOT_DIR"
     BROWSE_PERMISSION_DENIED = "BROWSE_PERMISSION_DENIED"
 
+    # ── 处理模式（文档 / 代码 / PPT 三选一互斥）──────
+    MODE_CONFLICT = "MODE_CONFLICT"
+
 
 class ApiBusinessError(HTTPException):
     """业务异常：携带机器可读的 ``code`` + 可参数化 ``params``。

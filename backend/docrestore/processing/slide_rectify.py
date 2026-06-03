@@ -29,15 +29,18 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeAlias
 
 import cv2
 import numpy as np
+from cv2.typing import MatLike
 from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
 
-#: OpenCV 图像类型别名（BGR 通道，uint8）
-ImageBGR = NDArray[np.uint8]
+#: OpenCV 图像类型别名（BGR 通道）。用 cv2 官方 MatLike 以匹配 cv2 函数签名
+#: （opencv-python-headless 自带 stub，函数返回非 uint8 的宽泛 ndarray 类型）。
+ImageBGR: TypeAlias = MatLike
 
 #: approxPolyDP epsilon 相对周长比例：值越大越激进地把轮廓简化成少边形
 _APPROX_EPSILON_RATIO = 0.02

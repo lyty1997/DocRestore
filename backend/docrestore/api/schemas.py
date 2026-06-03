@@ -84,6 +84,15 @@ class CodeRestoreConfigRequest(BaseModel):
     context_root: str | None = None
 
 
+class PowerPointRestoreConfigRequest(BaseModel):
+    """PPT 屏摄还原模式配置（请求级覆盖，全可选；None = 用后端默认）"""
+
+    enable: bool | None = None
+    rectify: bool | None = None
+    rectify_save_debug: bool | None = None
+    llm_polish: bool | None = None
+
+
 class CreateTaskRequest(BaseModel):
     """创建任务请求"""
 
@@ -93,6 +102,7 @@ class CreateTaskRequest(BaseModel):
     ocr: OCRConfigRequest | None = None
     pii: PIIConfigRequest | None = None
     code: CodeRestoreConfigRequest | None = None
+    ppt: PowerPointRestoreConfigRequest | None = None
 
 
 class UpdateMarkdownRequest(BaseModel):

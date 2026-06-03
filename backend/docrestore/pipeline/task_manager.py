@@ -35,6 +35,7 @@ from docrestore.pipeline.config import (
     LLMConfig,
     OCRConfig,
     PIIConfig,
+    PowerPointRestoreConfig,
 )
 from docrestore.pipeline.pipeline import Pipeline
 from docrestore.pipeline.scheduler import PipelineScheduler
@@ -73,6 +74,7 @@ class Task:
     ocr: OCRConfig | None = None
     pii: PIIConfig | None = None
     code: CodeRestoreConfig | None = None
+    ppt: PowerPointRestoreConfig | None = None
     progress: TaskProgress | None = None
     results: list[PipelineResult] = field(default_factory=list)
     error: str | None = None
@@ -170,6 +172,7 @@ class TaskManager:
                     ocr=row.ocr,
                     pii=row.pii,
                     code=row.code,
+                    ppt=row.ppt,
                     error=row.error,
                     created_at=datetime.fromisoformat(row.created_at),
                 )
@@ -240,6 +243,7 @@ class TaskManager:
         ocr: OCRConfig | None = None,
         pii: PIIConfig | None = None,
         code: CodeRestoreConfig | None = None,
+        ppt: PowerPointRestoreConfig | None = None,
     ) -> Task:
         """创建任务，状态为 PENDING。同步返回，DB 写入由后台完成。"""
         task_id = uuid.uuid4().hex[:8]
@@ -254,6 +258,7 @@ class TaskManager:
             ocr=ocr,
             pii=pii,
             code=code,
+            ppt=ppt,
         )
         self._tasks[task_id] = task
 
@@ -280,6 +285,7 @@ class TaskManager:
                 ocr=task.ocr,
                 pii=task.pii,
                 code=task.code,
+                ppt=task.ppt,
                 created_at=task.created_at.isoformat(),
             )
         except Exception:
@@ -371,6 +377,7 @@ class TaskManager:
                 pii=task.pii,
                 ocr=task.ocr,
                 code=task.code,
+                ppt=task.ppt,
             )
 
             # process_tree 在 2026-04-21 之后不再对子目录异常 raise，而是把失败
@@ -572,6 +579,7 @@ class TaskManager:
             llm=row.llm,
             ocr=row.ocr,
             pii=row.pii,
+            ppt=row.ppt,
             error=row.error,
             created_at=datetime.fromisoformat(row.created_at),
         )
