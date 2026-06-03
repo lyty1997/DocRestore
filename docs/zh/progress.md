@@ -903,3 +903,19 @@ AGE-72 / 探测信号 AGE-73 / 决策策略 AGE-74 / API AGE-75 / 前端 AGE-76�
 遗留问题：
 - 矫正对当前 9 张屏摄 100% 命中；更复杂场景（下边缘被观众严重遮挡、屏幕强反光）鲁棒性待 S6 全量/更多数据验证。
 - pipeline 接入 + `.rectified/` 打包排除留 S5。
+
+## 2026-06-03 CST - PPT 模式 S3 VL doc_parser 识别验证（AGE-87）
+
+完成内容：
+- 起 PaddleOCR-VL-1.6 vllm-server（`EngineManager.ensure`，启动 ~50s），对 S2 矫正后 3 张真图跑 `doc_parser`，验证 S1 设计 §11-C/§14-D 关键假设。
+- **化学结构裁图覆盖** ✓：化学骨架式/SMILES 反应路径裁成 `images/*.jpg`（HTML img 引用），不误转文字（501 页裁 2 张、503 页裁 11 张）。
+- **公式 LaTeX** ✓：数据表内 kcat 单位 `$1/s$`、`$^{+}$` 转 LaTeX；数据表识别为 HTML table（Entry/Gene/Organism/kcat/EC 共 7 列，EC 号准确）。
+- **阅读序可靠** ✓：标题→正文→图→表→说明顺序正确 → **决策 D 确认：信任 VL 阅读序，不引入 region bbox 排序**（§11-C/§14-D 关闭）。
+
+验证：
+- 3 张矫正图 OCR 成功：raw_text 414/269/2365 字，regions 2/1/11；产出 `{stem}_OCR/result.mmd` + `images/`。
+- GPU 干净释放（server shutdown 无 vllm 孤儿残留）；证据留存 `/tmp/ppt_ocr_out`。
+
+遗留问题：
+- 2.1（PPT OCR 配置确保 vl、不走 code 强制 basic）属 S5 `ocr_effective` 分支代码，留 S5/AGE-89。
+- 本次验证 3 张（化学页 + 数据表页）；全量 9 张及更多版式覆盖在 S6 E2E。

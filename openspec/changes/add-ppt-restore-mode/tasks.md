@@ -9,9 +9,9 @@
 ## 2. S3 识别与裁图（AGE-87）
 
 - [ ] 2.1 PPT 模式 OCR 配置确保 `vl` pipeline（不走 `_ocr_config_for_code_mode`）
-- [ ] 2.2 验证 VL `doc_parser` 裁图覆盖化学结构/分子模型（真图证据）
-- [ ] 2.3 公式 LaTeX 兜底验证（无法识别回退图片/原文）
-- [ ] 2.4 实测单页阅读序是否可靠，决定是否需要 region bbox 排序（Open Question）
+- [x] 2.2 验证 VL `doc_parser` 裁图覆盖化学结构/分子模型（真图证据）
+- [x] 2.3 公式 LaTeX 兜底验证（无法识别回退图片/原文）
+- [x] 2.4 实测单页阅读序是否可靠，决定是否需要 region bbox 排序（Open Question）→ 阅读序可靠，**不引入** region bbox 排序
 
 ## 3. S4 组装与合并（AGE-88）
 
