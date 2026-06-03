@@ -919,3 +919,21 @@ AGE-72 / 探测信号 AGE-73 / 决策策略 AGE-74 / API AGE-75 / 前端 AGE-76�
 遗留问题：
 - 2.1（PPT OCR 配置确保 vl、不走 code 强制 basic）属 S5 `ocr_effective` 分支代码，留 S5/AGE-89。
 - 本次验证 3 张（化学页 + 数据表页）；全量 9 张及更多版式覆盖在 S6 E2E。
+
+## 2026-06-03 CST - PPT 模式 S4 ppt_renderer 多页保序合并（AGE-88）
+
+完成内容：
+- 新增 `backend/docrestore/output/ppt_renderer.py::render_ppt_document`：单页按 VL 阅读序组装 → 多页按输入文件序合并单 `document.md`，**不跨页去重**（每页独立幻灯片），复用 `Renderer.render` 做图片复制/marker 处理/写盘。
+- 重构 `processing/dedup.py`：抽出 module 级 public `rewrite_image_refs_to_ocr_dir`（图片引用加 `{stem}_OCR` 前缀），`PageDeduplicator._rewrite_image_refs` 委托，文档/PPT 模式共用单一真相源。
+- **修 `output/renderer.py` 图片正则不支持中文/Unicode 文件名 bug**：`[A-Za-z0-9_.]+` → markdown `[^/)]+` / HTML `[^/]+`，文档模式同受益；已记 `known-issues.md`。
+- LLM 轻润色（3.4）移至 S5 `_ppt_pipeline`（render 纯组装）。
+
+验证：
+- 单测 `tests/output/test_ppt_renderer.py` 5 例：保序 / 不跨页去重 / HTML img 重写+复制 / marker 磁盘去内存留 / 分隔线。
+- 回归 tests/output + pipeline + processing/test_dedup **223 passed**（含 renderer 正则改动）。
+- **真实端到端**（S2 矫正 → S3 VL doc_parser → S4 组装）：3 页真实 PageOCR → `document.md` 3840 bytes，保序合并（FGRFP→NeoPathTP→REME）+ 分隔线 + 5 张中文文件名裁图复制 + 数据表 HTML/LaTeX + 化学结构图引用，阅读序正确。
+- commit `0fbd7f6`（分支 `feature/ppt-restore-mode`）。
+
+遗留问题：
+- LLM 轻润色在 S5 `_ppt_pipeline` 接入。
+- 真实验证 3 页；全量 9 页 + 多版式 E2E 在 S6。

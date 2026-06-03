@@ -15,12 +15,12 @@
 
 ## 3. S4 组装与合并（AGE-88）
 
-- [ ] 3.1 新增 `output/ppt_renderer.py`：`render_ppt_document`
-- [ ] 3.2 单页保序组装 + 多页按文件序合并 `document.md` + 页分隔线/锚点
-- [ ] 3.3 复用 `renderer.py::_rewrite_and_copy_images` 做两阶段图片引用
-- [ ] 3.4 可选 LLM 轻润色（保护公式与图片引用）
-- [ ] 3.5 磁盘版去锚点 / 内存版留锚点
-- [ ] 3.6 单测：保序、不去重、图片引用有效、润色不破坏公式（断言从输入派生）
+- [x] 3.1 新增 `output/ppt_renderer.py`：`render_ppt_document`
+- [x] 3.2 单页保序组装 + 多页按文件序合并 `document.md` + 页分隔线/锚点
+- [x] 3.3 复用 `renderer.py::_rewrite_and_copy_images` 做两阶段图片引用（顺带修中文文件名 bug）
+- [ ] 3.4 可选 LLM 轻润色（保护公式与图片引用）→ 移至 S5 `_ppt_pipeline`
+- [x] 3.5 磁盘版去锚点 / 内存版留锚点
+- [x] 3.6 单测：保序、不去重、图片引用有效、marker 磁盘/内存版（断言从输入派生）
 
 ## 4. S5 配置/API/Pipeline/前端接入（AGE-89）
 
