@@ -110,3 +110,15 @@ limitations under the License.
 - 优先从当前子文档 Markdown 的 `<!-- page: ... -->` 标记提取页集合，用页文件名匹配源图。
 - `doc_dir` 只作为输入目录前缀线索；当 `doc_dir` 形如 `输入子目录/输出标题` 时，逐级剥掉尾部标题目录后再匹配。
 - 没有 page marker 时才退回旧的 `doc_dir/` 前缀过滤，保持输入子目录拆分场景兼容。
+
+## Renderer 图片引用正则不支持中文/Unicode 文件名（PPT 模式 S4 暴露）
+
+现象：
+- `output/renderer.py::_rewrite_and_copy_images` 的 markdown / HTML 图片正则原用 `[A-Za-z0-9_.]+` 匹配 `{stem}_OCR` 的 stem，只覆盖 ASCII 文件名。
+- 输入照片文件名含中文（如 `微信图片_20260428...`）时 stem 含中文字符，正则不匹配 → 图片引用既不重写也不复制，`document.md` 的 `<img src>` 仍指向不存在的相对路径，`images/` 为空。
+- 文档模式因测试数据多为 ASCII 文件名未暴露；PPT 模式 S4 用真实中文文件名照片时显现。
+
+处理策略：
+- stem 字符类从 `[A-Za-z0-9_.]+` 放宽为排除路径分隔/定界符：markdown 用 `[^/)]+`（排除 `/` `)`），HTML 用 `[^/]+`（排除 `/`），靠后续 `_OCR/images/` 与 `)` / `"` 锚定回溯，兼容任意 Unicode 文件名。
+- 图片引用加 OCR 目录前缀的逻辑抽到 `processing/dedup.py::rewrite_image_refs_to_ocr_dir`（module 级 public），文档模式与 PPT 模式共用，避免规则分叉。
+- 回归：tests/output + tests/pipeline 全通过；真实 3 页中文文件名照片 → `document.md` + 5 张 `{中文stem}_N.jpg` 正确复制。

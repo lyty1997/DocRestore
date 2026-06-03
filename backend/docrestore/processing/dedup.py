@@ -35,6 +35,34 @@ from docrestore.pipeline.config import DedupConfig
 logger = logging.getLogger(__name__)
 
 
+def rewrite_image_refs_to_ocr_dir(page: PageOCR) -> str:
+    """把单页 markdown 里的相对图片引用 ``images/N`` 加上该页 OCR 目录前缀
+    （``{ocr_dir}/images/N``），供多页合并后 ``Renderer`` 统一复制与重写。
+
+    支持 markdown ``![](images/..)`` 与 HTML ``src="images/.."`` 两种格式；
+    用 ``page.output_dir.name`` 作前缀（兼容 ``{stem}_cropped_OCR``），
+    ``output_dir`` 为 None 时回退 ``{stem}_OCR``。文档模式与 PPT 模式共用，
+    确保图片引用重写规则单一真相源。
+    """
+    if page.output_dir is not None:
+        ocr_dirname = page.output_dir.name
+    else:
+        ocr_dirname = f"{page.image_path.stem}_OCR"
+    text = page.cleaned_text or page.raw_text
+    # markdown 格式：![alt](images/...) → ![alt]({ocr_dirname}/images/...)
+    text = re.sub(
+        r"!\[([^\]]*)\]\(images/",
+        rf"![\1]({ocr_dirname}/images/",
+        text,
+    )
+    # HTML 格式：src="images/..." → src="{ocr_dirname}/images/..."
+    return re.sub(
+        r'src="images/',
+        f'src="{ocr_dirname}/images/',
+        text,
+    )
+
+
 def _normalize_line(line: str) -> str:
     """归一化行文本：去首尾空白 + 压缩连续空格。"""
     return " ".join(line.split())
@@ -303,30 +331,8 @@ class PageDeduplicator:
         )
 
     def _rewrite_image_refs(self, page: PageOCR) -> str:
-        """重写图片引用（支持 markdown 和 HTML img 两种格式）。
-
-        使用 page.output_dir.name 作为 OCR 目录名，
-        确保裁剪页面（{stem}_cropped_OCR）也能正确指向。
-        """
-        # output_dir 已包含正确的 OCR 目录名（含 _cropped 后缀），
-        # 回退到 image_path.stem + _OCR 以兼容 output_dir 为 None 的情况
-        if page.output_dir is not None:
-            ocr_dirname = page.output_dir.name
-        else:
-            ocr_dirname = f"{page.image_path.stem}_OCR"
-        text = page.cleaned_text or page.raw_text
-        # markdown 格式：![alt](images/...) → ![alt]({ocr_dirname}/images/...)
-        text = re.sub(
-            r"!\[([^\]]*)\]\(images/",
-            rf"![\1]({ocr_dirname}/images/",
-            text,
-        )
-        # HTML 格式：src="images/..." → src="{ocr_dirname}/images/..."
-        return re.sub(
-            r'src="images/',
-            f'src="{ocr_dirname}/images/',
-            text,
-        )
+        """重写图片引用：委托模块级 ``rewrite_image_refs_to_ocr_dir``。"""
+        return rewrite_image_refs_to_ocr_dir(page)
 
 
 class IncrementalMerger:
