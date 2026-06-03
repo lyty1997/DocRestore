@@ -1023,3 +1023,20 @@ AGE-72 / 探测信号 AGE-73 / 决策策略 AGE-74 / API AGE-75 / 前端 AGE-76�
 遗留：
 - 低优先级 review 项记入 `known-issues.md`：关精修仍报“精修第 X 页”文案、`progress.pptDone` 死键、`_ocr_config_*` 克隆、retry 无 PPT 兜底、关精修建空 `.llm_cache/`。
 - 英文文档 `docs/en/` 同步仍留后续。
+
+## 2026-06-04 CST - review 第二轮低优先级 5 项清理
+
+完成内容（清空上一条「遗留」里的低优先级 review 项）：
+- **进度文案**：`_ppt_pipeline` 按 `refining` 分支——关精修报 `progress.pptPagePlain`「处理第 X 页」，不再误报「精修第 X 页」。
+- **死 i18n 键**：删除从不发射的 `progress.pptDone`（en/zh-CN/zh-TW）；新增 `progress.pptPagePlain`（三语）。
+- **去克隆**：`_ocr_config_for_code_mode` / `_ocr_config_for_ppt_mode` 合一为参数化 `_ocr_config_force_pipeline(ocr, default_ocr, pipeline_name)`，两薄封装分别传 basic / vl。
+- **retry PPT 兜底**：新增 `TaskManager._retry_ppt_config`（对称 `_retry_code_config`），`task.ppt` 为空时用 `output_dir/.rectified/` 推断回 PPT 模式；retry/resume 改走它。
+- **空缓存目录**：`_ppt_pipeline` 段级缓存 `enabled=enable_cache and (refiner is not None)`，关精修时不再建空 `.llm_cache/`。
+
+验证：
+- backend `mypy --strict` Success(66) + `ruff` + `typos` + 前端 `tsc -b` + `eslint` 全绿；**pytest 1016 passed, 45 skipped**（新增 5 用例：retry/resume PPT 兜底 ×2、`_ocr_config_for_ppt_mode` 强制/穿透 ×3；并扩充 `test_ppt_refine_disabled_skips` 断言 pptPagePlain + 无 `.llm_cache/`）。
+- `known-issues.md` 对应「暂缓」清单改记为「已清理（2026-06-04）」。
+
+遗留：
+- 前端 `TaskProgress` stage 标签未本地化 `ppt_refine`/`ppt_render`/`ppt_page` 仅为次要技术 token 展示（message_key 主文案已本地化），后续顺手再清。
+- 英文文档 `docs/en/` 同步仍留后续。

@@ -142,4 +142,9 @@ limitations under the License.
 - `_order_corners` 改“按 y 排序分上下、组内按 x 分左右”（取代极角 + x+y 锚点）：旋转/强倾斜下标号仍正确，回归断言标号正确而非仅 4 角互异。
 - `rectify` 退化 sliver（任一边 < `_MIN_RECTIFIED_SIDE_PX=16`）回退整张原图，不产 1×N 竹签图喂坏 OCR。
 
-暂缓（低优先级，择期清理）：关精修时仍报“精修第 X 页”进度文案、`progress.pptDone` 死 i18n 键、`_ocr_config_for_ppt_mode`/`_ocr_config_for_code_mode` 克隆可合一为参数化 helper、retry/resume 无 PPT 产物兜底（对称于 `_retry_code_config`）、关精修时 `_ppt_pipeline` 仍建空 `.llm_cache/` 目录。
+已清理（2026-06-04，原暂缓 5 项全做）：
+- 关精修时改报 `progress.pptPagePlain`「处理第 X 页」（refining 分支控制），不再误报「精修第 X 页」。
+- 删除从不发射的死 i18n 键 `progress.pptDone`（三语）。
+- `_ocr_config_for_code_mode` / `_ocr_config_for_ppt_mode` 合一为参数化 `_ocr_config_force_pipeline(ocr, default_ocr, pipeline_name)`，两薄封装分别传 basic / vl。
+- 新增 `TaskManager._retry_ppt_config`（对称 `_retry_code_config`）：retry/resume 时 `task.ppt` 为空则用 `output_dir/.rectified/` 推断回 PPT 模式，不再静默退回文档模式。
+- `_ppt_pipeline` 段级缓存 `enabled=enable_cache and (refiner is not None)`：关精修时禁用缓存、不再建空 `.llm_cache/` 目录。

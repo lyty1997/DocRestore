@@ -892,13 +892,14 @@ class TaskManager:
 
         # 用原任务配置创建新任务
         code = self._retry_code_config(task)
+        ppt = self._retry_ppt_config(task)
         return self.create_task(
             image_dir=task.image_dir,
             llm=task.llm,
             ocr=task.ocr,
             pii=task.pii,
             code=code,
-            ppt=task.ppt,
+            ppt=ppt,
         )
 
     async def resume_task(self, task_id: str) -> Task | str | None:
@@ -921,6 +922,7 @@ class TaskManager:
             return f"任务状态为 {task.status.value}，仅失败任务可继续"
 
         code = self._retry_code_config(task)
+        ppt = self._retry_ppt_config(task)
         return self.create_task(
             image_dir=task.image_dir,
             output_dir=task.output_dir,  # 关键：复用 → OCR cache 命中
@@ -928,7 +930,7 @@ class TaskManager:
             ocr=task.ocr,
             pii=task.pii,
             code=code,
-            ppt=task.ppt,
+            ppt=ppt,
         )
 
     @staticmethod
@@ -948,4 +950,22 @@ class TaskManager:
             or (output_dir / "files").is_dir()
         ):
             return CodeRestoreConfig(enable=True)
+        return None
+
+    @staticmethod
+    def _retry_ppt_config(task: Task) -> PowerPointRestoreConfig | None:
+        """重试/继续时恢复 PPT 模式配置（对称于 ``_retry_code_config``）。
+
+        正常路径直接沿用 ``task.ppt``。兼容旧 bug：历史 retry/resume 曾不转发 ppt，
+        产生 ppt 快照丢失但 output_dir 已有 PPT 产物的任务；此时若 output_dir 存在
+        透视矫正产物目录（``.rectified/``，PPT 分支独有），补一个最小 ppt 配置让重试
+        继续走 PPT 分支，而不是静默退回文档模式。
+        """
+        if task.ppt is not None:
+            return task.ppt
+
+        output_dir = Path(task.output_dir)
+        rectify_dir = PowerPointRestoreConfig().rectify_debug_dir
+        if (output_dir / rectify_dir).is_dir():
+            return PowerPointRestoreConfig(enable=True)
         return None

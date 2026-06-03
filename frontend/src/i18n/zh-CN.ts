@@ -148,8 +148,8 @@ export const zhCN = {
   "progress.llmUnavailable":
     "LLM provider 暂不可用（{model}），已熔断 {cool_down_s}s，相关段级精修降级为原文",
   "progress.pptPage": "PPT 模式：精修第 {current}/{total} 页",
+  "progress.pptPagePlain": "PPT 模式：处理第 {current}/{total} 页",
   "progress.pptRender": "PPT 模式：组装文档...",
-  "progress.pptDone": "PPT 模式：完成",
 
   // ── 任务结果 ──
   "taskResult.title": "处理结果",

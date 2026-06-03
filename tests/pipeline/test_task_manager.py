@@ -36,7 +36,10 @@ import pytest
 
 from docrestore.models import PipelineResult, TaskProgress
 from docrestore.persistence.database import TaskDatabase, TaskRow
-from docrestore.pipeline.config import CodeRestoreConfig
+from docrestore.pipeline.config import (
+    CodeRestoreConfig,
+    PowerPointRestoreConfig,
+)
 from docrestore.pipeline.task_manager import Task, TaskManager, TaskStatus
 
 
@@ -394,6 +397,34 @@ class TestRetryTask:
         assert new.code is not None
         assert new.code.enable is True
 
+    @pytest.mark.asyncio
+    async def test_retry_infers_legacy_ppt_mode_from_rectified(
+        self, tmp_path: Path,
+    ) -> None:
+        """旧 retry 丢 ppt 但 output_dir 有 .rectified/ → 推断回 PPT 模式。
+
+        回归（review 第二轮配套）：对称于 code 模式的 files-index.json 推断，
+        PPT 用透视矫正产物目录 .rectified/ 作为模式信号，避免静默退回文档模式。
+        """
+        mgr = _make_manager()
+        out = tmp_path / "out"
+        (out / ".rectified").mkdir(parents=True)
+        failed = Task(
+            task_id="legacy-ppt",
+            status=TaskStatus.FAILED,
+            image_dir="/orig/imgs",
+            output_dir=str(out),
+            ppt=None,
+        )
+        mgr._tasks[failed.task_id] = failed
+
+        new = await mgr.retry_task(failed.task_id)
+
+        assert isinstance(new, Task)
+        assert new.ppt is not None
+        assert new.ppt.enable is True
+        assert new.code is None  # .rectified/ 不触发代码模式推断
+
 
 class TestResumeTask:
     """resume_task 保留 output_dir，并延续代码模式配置"""
@@ -438,6 +469,25 @@ class TestResumeTask:
         assert new.output_dir == failed.output_dir
         assert new.code is not None
         assert new.code.enable is True
+
+    @pytest.mark.asyncio
+    async def test_resume_preserves_ppt_config(self) -> None:
+        """resume 直接沿用已持久化的 task.ppt（正常路径，无需产物推断）。"""
+        mgr = _make_manager()
+        failed = Task(
+            task_id="failed-ppt",
+            status=TaskStatus.FAILED,
+            image_dir="/orig/imgs",
+            output_dir="/orig/out",
+            ppt=PowerPointRestoreConfig(enable=True),
+        )
+        mgr._tasks[failed.task_id] = failed
+
+        new = await mgr.resume_task(failed.task_id)
+
+        assert isinstance(new, Task)
+        assert new.output_dir == failed.output_dir
+        assert new.ppt == failed.ppt
 
 
 class TestListTasksInMemory:

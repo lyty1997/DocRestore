@@ -302,8 +302,8 @@ export const zhTW: Record<TranslationKey, string> = {
   "taskForm.refineDesc":
     "對文件 / 程式碼 / PPT 所有模式生效：開啟則用 LLM 精修辨識結果（文件分段、PPT 按頁），關閉則只輸出 OCR 清洗文字。",
   "progress.pptPage": "PPT 模式：精修第 {current}/{total} 頁",
+  "progress.pptPagePlain": "PPT 模式：處理第 {current}/{total} 頁",
   "progress.pptRender": "PPT 模式：組裝文件...",
-  "progress.pptDone": "PPT 模式：完成",
   // ── API 業務錯誤 ──
   "errors.api.mode_conflict": "模式衝突：文件 / 程式碼 / PPT 三選一互斥",
   "errors.api.unauthorized": "缺少或無效的 API Token",

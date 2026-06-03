@@ -306,19 +306,33 @@ def _augment_metas_with_code_context(
             ))
 
 
+def _ocr_config_force_pipeline(
+    ocr: OCRConfig | None,
+    default_ocr: OCRConfig,
+    pipeline_name: str,
+) -> OCRConfig | None:
+    """把有效 OCR 配置的 ``paddle_pipeline`` 强制为 ``pipeline_name``。
+
+    底座（请求级 ``ocr`` 或 ``default_ocr``）已是目标 pipeline 则原样返回 ``ocr``
+    （可能为 None=无请求级覆盖）；否则在底座上 ``model_copy`` 强制覆盖。代码模式
+    与 PPT 模式共用，避免两份近乎相同的 force 逻辑各自漂移。
+    """
+    base = ocr if ocr is not None else default_ocr
+    if base.paddle_pipeline == pipeline_name:
+        return ocr
+    return base.model_copy(update={"paddle_pipeline": pipeline_name})
+
+
 def _ocr_config_for_code_mode(
     ocr: OCRConfig | None,
     default_ocr: OCRConfig,
 ) -> OCRConfig | None:
     """代码模式所需的有效 OCR 配置：强制 PaddleOCR basic（产出行级 bbox）。
 
-    底座（请求级 ``ocr`` 或 ``default_ocr``）已是 basic 则原样返回 ``ocr``；
-    否则在底座上 ``model_copy`` 强制 ``paddle_pipeline="basic"``（B4 H5）。
+    basic(PP-OCRv5) 才产 ``text_lines``（行级 bbox）；vl 不产，代码模式会因无可
+    组装内容而失败。统一强制使任何代码模式请求都走 basic（B4 H5）。
     """
-    base = ocr if ocr is not None else default_ocr
-    if base.paddle_pipeline == "basic":
-        return ocr
-    return base.model_copy(update={"paddle_pipeline": "basic"})
+    return _ocr_config_force_pipeline(ocr, default_ocr, "basic")
 
 
 def _ocr_config_for_ppt_mode(
@@ -329,16 +343,10 @@ def _ocr_config_for_ppt_mode(
 
     官方文档结论：PPT 还原所需输出（带格式 markdown + LaTeX 公式 + 化学结构/
     图表裁图 + 阅读序）只有 PaddleOCR-VL 端到端产出；basic(PP-OCRv5) 仅纯文本
-    行、PP-StructureV3 无 markdown/无 VLM 语义。故强制 ``paddle_pipeline="vl"``，
-    防止默认或误配 basic 让 PPT 模式静默降级为纯文字拼接（与代码模式强制 basic 对称）。
-
-    底座（请求级 ``ocr`` 或 ``default_ocr``）已是 vl 则原样返回 ``ocr``；
-    否则在底座上 ``model_copy`` 强制 ``paddle_pipeline="vl"``。
+    行、PP-StructureV3 无 markdown/无 VLM 语义。强制 ``paddle_pipeline="vl"`` 防止
+    默认或误配 basic 让 PPT 静默降级为纯文字拼接（与代码模式强制 basic 对称）。
     """
-    base = ocr if ocr is not None else default_ocr
-    if base.paddle_pipeline == "vl":
-        return ocr
-    return base.model_copy(update={"paddle_pipeline": "vl"})
+    return _ocr_config_force_pipeline(ocr, default_ocr, "vl")
 
 
 def _ocr_config_for_mode(
@@ -969,10 +977,13 @@ class Pipeline:
         from docrestore.output.ppt_renderer import render_ppt_document
 
         refiner = self._get_refiner(llm)
+        refining = refiner is not None
         llm_cfg = llm if llm is not None else self._config.llm
-        # 复用文档模式段级精修缓存：resume 复用 output_dir 时按页命中
+        # 段级精修缓存（resume 复用 output_dir 时按页命中）；enabled 关联 refiner：
+        # 关精修（refiner=None）时禁用 → LLMCache 不建目录，不留空 .llm_cache/。
         cache = LLMCache(
-            output_dir / ".llm_cache", enabled=llm_cfg.enable_cache,
+            output_dir / ".llm_cache",
+            enabled=llm_cfg.enable_cache and refining,
         )
 
         ordered_pages: list[PageOCR] = []
@@ -984,7 +995,7 @@ class Pipeline:
                 break
             # 图片引用先加 OCR 目录前缀（与文档模式同一真相源），精修在其上做
             body = rewrite_image_refs_to_ocr_dir(page).strip()
-            if refiner is not None:
+            if refining:
                 # slide_mode：用 SLIDE_REFINE_SYSTEM_PROMPT，只修格式不跨页去重
                 result, _used = await self._refine_segment_with_cache(
                     refiner, body, idx, total, cache, llm_cfg, quality,
@@ -993,10 +1004,17 @@ class Pipeline:
                 body = result.markdown
             ordered_pages.append(page)
             bodies.append(body)
+            # 进度文案区分是否真精修：关精修时只是逐页组装，不报"精修"误导用户
             report_fn(
-                "ppt_refine", idx + 1, total,
-                f"PPT 模式：第 {idx + 1}/{total} 页",
-                message_key="progress.pptPage",
+                "ppt_refine" if refining else "ppt_page", idx + 1, total,
+                (
+                    f"PPT 模式：精修第 {idx + 1}/{total} 页" if refining
+                    else f"PPT 模式：处理第 {idx + 1}/{total} 页"
+                ),
+                message_key=(
+                    "progress.pptPage" if refining
+                    else "progress.pptPagePlain"
+                ),
                 message_params={
                     "current": str(idx + 1), "total": str(total),
                 },
