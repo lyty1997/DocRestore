@@ -136,6 +136,8 @@ async def test_ppt_per_page_refine_applied(tmp_path: Path) -> None:
     assert len(fake.calls) == 2
     assert [c.segment_index for c in fake.calls] == [1, 2]
     assert {c.total_segments for c in fake.calls} == {2}
+    # PPT 走 slide 模式：is_slide=True → 用 SLIDE_REFINE_SYSTEM_PROMPT（不跨页去重）
+    assert all(c.is_slide for c in fake.calls)
     md = result.markdown
     assert md.count(_REFINE_PREFIX) == 2  # 两页都走了精修
     assert "甲页正文ALPHA" in md

@@ -44,8 +44,10 @@ from docrestore.models import Gap, RefinedResult
 
 logger = logging.getLogger(__name__)
 
-# 段级与整文档级各自独立命名空间，避免 prompt 模板不同时误命中
+# 段级 / PPT 按页 / 整文档级各自独立命名空间，避免 prompt 模板不同时误命中
+# （slide 用 SLIDE_REFINE_SYSTEM_PROMPT，与文档分段 prompt 不同，不能共用 key）
 _KIND_SEGMENT = "seg"
+_KIND_SLIDE = "slide"
 _KIND_FINAL = "final"
 
 
@@ -75,11 +77,16 @@ class LLMCache:
         return self._enabled
 
     def get_segment(
-        self, *, model: str, api_base: str, text: str,
+        self, *, model: str, api_base: str, text: str, slide: bool = False,
     ) -> RefinedResult | None:
-        """命中段级缓存返回 RefinedResult；miss 返回 None。"""
+        """命中段级缓存返回 RefinedResult；miss 返回 None。
+
+        ``slide=True``（PPT 按页精修）走独立 ``slide`` 命名空间，按 slide prompt
+        指纹计算 key，与文档分段缓存互不串味。
+        """
+        kind = _KIND_SLIDE if slide else _KIND_SEGMENT
         return self._get(
-            _KIND_SEGMENT, model=model, api_base=api_base, text=text,
+            kind, model=model, api_base=api_base, text=text,
         )
 
     def put_segment(
@@ -89,10 +96,12 @@ class LLMCache:
         api_base: str,
         text: str,
         result: RefinedResult,
+        slide: bool = False,
     ) -> None:
-        """写段级缓存。`truncated=True` 直接跳过。"""
+        """写段级缓存。`truncated=True` 直接跳过。``slide=True`` 走 slide 命名空间。"""
+        kind = _KIND_SLIDE if slide else _KIND_SEGMENT
         self._put(
-            _KIND_SEGMENT,
+            kind,
             model=model, api_base=api_base, text=text, result=result,
         )
 
@@ -137,6 +146,12 @@ class LLMCache:
         if kind == _KIND_SEGMENT:
             prompt_body = (
                 prompts.REFINE_SYSTEM_PROMPT
+                + "\n"
+                + prompts.REFINE_USER_TEMPLATE
+            )
+        elif kind == _KIND_SLIDE:
+            prompt_body = (
+                prompts.SLIDE_REFINE_SYSTEM_PROMPT
                 + "\n"
                 + prompts.REFINE_USER_TEMPLATE
             )

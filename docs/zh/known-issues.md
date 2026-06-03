@@ -122,3 +122,24 @@ limitations under the License.
 - stem 字符类从 `[A-Za-z0-9_.]+` 放宽为排除路径分隔/定界符：markdown 用 `[^/)]+`（排除 `/` `)`），HTML 用 `[^/]+`（排除 `/`），靠后续 `_OCR/images/` 与 `)` / `"` 锚定回溯，兼容任意 Unicode 文件名。
 - 图片引用加 OCR 目录前缀的逻辑抽到 `processing/dedup.py::rewrite_image_refs_to_ocr_dir`（module 级 public），文档模式与 PPT 模式共用，避免规则分叉。
 - 回归：tests/output + tests/pipeline 全通过；真实 3 页中文文件名照片 → `document.md` + 5 张 `{中文stem}_N.jpg` 正确复制。
+
+## 统一 LLM 精修开关不能连带关掉 PII 实体检测
+
+现象：
+- 引入统一 `LLMConfig.enable_refine` 后，把开关拦截点放进 `_get_refiner`（`enable_refine=False` → 返回 None），会同时关掉**非精修**用途的 LLM 客户端——`_delayed_pii_detect`（文档模式人名/机构名检测）与 `_redact_code_headers`（代码头脱敏）都经 `_get_refiner` 取 refiner。
+- 后果：用户“关精修 + 开脱敏”时，正则只兜手机/邮箱/身份证/银行卡，人名/机构名检测被精修开关连带关掉，泄漏到云端 LLM 与输出。属隐私回归（max-effort review 第二轮 #1）。
+
+处理策略：
+- 区分“精修策略”与“LLM 客户端能力”：`_get_refiner(llm, *, for_refine=True)`。精修调用点用默认 `True`（受 `enable_refine` 约束）；PII 等非精修用途显式传 `for_refine=False`（只看 `model` 是否配置，不看 `enable_refine`）。
+- `initialize` 预建 `self._refiner` 不再以 `enable_refine` 为前置条件——它是客户端能力，关精修也要可用。
+- 代码模式 `base_refiner` 用 `for_refine=False` 取（供 PII 头脱敏），字符级精修 / pre-refine 诊断两段另按 `enable_refine` 各自 gate。
+- 通则：凡新增“统一开关”集中拦截某个多用途方法时，先盘点该方法的全部调用点用途，避免把无关功能一并关停。
+
+## PPT 按页精修的 prompt / 角点 / 退化四边形（review 第二轮其余三项）
+
+现象与对策详见 `ppt-mode.md` §15「max-effort code-review 第二轮修复」。要点：
+- PPT 每页独立 → 用 `SLIDE_REFINE_SYSTEM_PROMPT`（**不跨页去重**，否则误删合理重复的标题/页脚），缓存走独立 `slide` 命名空间（按 slide prompt 指纹，不与文档分段缓存串味）。
+- `_order_corners` 改“按 y 排序分上下、组内按 x 分左右”（取代极角 + x+y 锚点）：旋转/强倾斜下标号仍正确，回归断言标号正确而非仅 4 角互异。
+- `rectify` 退化 sliver（任一边 < `_MIN_RECTIFIED_SIDE_PX=16`）回退整张原图，不产 1×N 竹签图喂坏 OCR。
+
+暂缓（低优先级，择期清理）：关精修时仍报“精修第 X 页”进度文案、`progress.pptDone` 死 i18n 键、`_ocr_config_for_ppt_mode`/`_ocr_config_for_code_mode` 克隆可合一为参数化 helper、retry/resume 无 PPT 产物兜底（对称于 `_retry_code_config`）、关精修时 `_ppt_pipeline` 仍建空 `.llm_cache/` 目录。

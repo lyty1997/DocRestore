@@ -547,11 +547,10 @@ class Pipeline:
                 )
             await self._ocr_engine.initialize()
 
-        if (
-            self._refiner is None
-            and self._config.llm.model
-            and self._config.llm.enable_refine
-        ):
+        # 只要配置了 model 就预建 refiner —— 它是"LLM 客户端能力"，PII 实体
+        # 检测 / 代码头脱敏也复用它，不受 enable_refine 影响。是否做精修的策略
+        # 开关在 `_get_refiner(for_refine=True)` 里判 enable_refine，不在这里拦。
+        if self._refiner is None and self._config.llm.model:
             self._refiner = self._create_refiner(self._config.llm)
 
     async def process_tree(
@@ -986,8 +985,10 @@ class Pipeline:
             # 图片引用先加 OCR 目录前缀（与文档模式同一真相源），精修在其上做
             body = rewrite_image_refs_to_ocr_dir(page).strip()
             if refiner is not None:
+                # slide_mode：用 SLIDE_REFINE_SYSTEM_PROMPT，只修格式不跨页去重
                 result, _used = await self._refine_segment_with_cache(
                     refiner, body, idx, total, cache, llm_cfg, quality,
+                    slide_mode=True,
                 )
                 body = result.markdown
             ordered_pages.append(page)
@@ -1214,17 +1215,22 @@ class Pipeline:
             if postfix_result.flags:
                 src.flags = list({*src.flags, *postfix_result.flags})
 
-        # 共享一个 refiner：PII 实体检测 + 代码字符级精修都用它
+        # 共享一个 LLM 客户端：PII 实体检测 + 代码字符级精修都用它。用
+        # for_refine=False 取——只要 model 配了就拿到客户端，不受 enable_refine
+        # 影响（否则"关精修 + 开脱敏"会把代码头的人名/邮箱/公司名检测一并关掉）。
+        # 是否做精修单独看 llm_cfg.enable_refine。
         llm_cfg = llm if llm is not None else self._config.llm
+        refine_on = llm_cfg.enable_refine
         base_refiner = (
-            self._get_refiner(llm)
-            if (llm_cfg.model and sources) else None
+            self._get_refiner(llm, for_refine=False)
+            if (llm_cfg.model and sources and (refine_on or pii_cfg.enable))
+            else None
         )
         base_refiner_obj = (
             base_refiner if isinstance(base_refiner, BaseLLMRefiner) else None
         )
         pre_refine_diagnostics_by_path: dict[str, list[CodeDiagnostic]] = {}
-        if base_refiner_obj is not None and sources:
+        if refine_on and base_refiner_obj is not None and sources:
             from docrestore.processing.code_diagnostics import diagnose_source_files
 
             pre_refine_diagnostics = await asyncio.to_thread(
@@ -1243,8 +1249,9 @@ class Pipeline:
                 sources, pii_cfg, base_refiner_obj,
             )
 
-        # 4. 可选 LLM 字符级精修（每个 SourceFile 独立调用，失败回退原文）
-        if base_refiner_obj is not None:
+        # 4. 可选 LLM 字符级精修（每个 SourceFile 独立调用，失败回退原文）；
+        # 受统一精修开关约束，关精修时跳过（但上面的 PII 头脱敏仍照常执行）。
+        if refine_on and base_refiner_obj is not None:
             from docrestore.llm.code_repair import (
                 CodeConsistencyAuditor,
                 DiagnosticCodeRepairer,
@@ -1877,7 +1884,9 @@ class Pipeline:
             pii_cfg.redact_person_name or pii_cfg.redact_org_name
         ):
             return None
-        refiner = self._get_refiner(llm)
+        # PII 实体检测不受精修开关约束：用户"关精修 + 开脱敏"时仍需 LLM 检测
+        # 人名 / 机构名（正则只兜手机/邮箱/身份证/银行卡）。
+        refiner = self._get_refiner(llm, for_refine=False)
         if refiner is None:
             return None
         try:
@@ -1903,6 +1912,8 @@ class Pipeline:
         cache: LLMCache,
         llm_cfg: LLMConfig,
         quality: QualityReport | None = None,
+        *,
+        slide_mode: bool = False,
     ) -> tuple[RefinedResult, bool]:
         """段级精修带磁盘缓存。返回 `(result, used_refiner)`。
 
@@ -1916,12 +1927,16 @@ class Pipeline:
         `quality` 非 None 时，每次实际 refine 调用后写入 LLM 段级质量信号
         （截断 / 回退到原文 / UI 噪音残留）。缓存命中路径不写信号，
         避免历史重放污染当次任务的质量报告。
+
+        `slide_mode=True`（PPT 按页精修）：ctx 标记 is_slide → 用 slide prompt
+        （不跨页去重），缓存走独立 slide 命名空间，与文档分段缓存互不串味。
         """
         if cache.enabled:
             cached = cache.get_segment(
                 model=llm_cfg.model,
                 api_base=llm_cfg.api_base,
                 text=text,
+                slide=slide_mode,
             )
             if cached is not None:
                 logger.info(
@@ -1937,6 +1952,7 @@ class Pipeline:
             total_segments=total,
             overlap_before="",
             overlap_after="",
+            is_slide=slide_mode,
         )
         try:
             result = await refiner.refine(text, ctx)
@@ -1995,6 +2011,7 @@ class Pipeline:
             api_base=llm_cfg.api_base,
             text=text,
             result=result,
+            slide=slide_mode,
         )
         return result, True
 
@@ -2189,6 +2206,7 @@ class Pipeline:
             overlap_before="",
             overlap_after="",
             retry_hint=ctx.retry_hint,
+            is_slide=ctx.is_slide,
         )
         sub_results: list[RefinedResult] = []
         for sub_text in halves:
@@ -2305,6 +2323,7 @@ class Pipeline:
                 "请完整保留输入全部内容，只修复 Markdown 格式，"
                 "不要省略、总结或提前结束。"
             ),
+            is_slide=ctx.is_slide,
         )
         try:
             retry_result = await refiner.refine(text, retry_ctx)
@@ -2366,6 +2385,7 @@ class Pipeline:
                 "但必须保留每个 page marker 后的有效正文和所有图片引用；"
                 "只允许删除逐字重复的句子，不允许整页删除或添加解释性注释。"
             ),
+            is_slide=ctx.is_slide,
         )
         try:
             retry_result = await refiner.refine(text, retry_ctx)
@@ -2427,6 +2447,7 @@ class Pipeline:
                 "以 `▶▼☐` 开头的视觉 UI 行；若留在代码块内，"
                 "剥离后保持代码块闭合。"
             ),
+            is_slide=ctx.is_slide,
         )
         try:
             retry_result = await refiner.refine(text, retry_ctx)
@@ -2724,12 +2745,20 @@ class Pipeline:
     def _get_refiner(
         self,
         llm: LLMConfig | None,
+        *,
+        for_refine: bool = True,
     ) -> LLMRefiner | None:
         """获取 refiner 实例：llm 非空时按请求快照新建，否则复用默认实例。
 
-        统一精修开关：有效 ``LLMConfig.enable_refine`` 为 False 时直接返回
-        None——文档（分段）/ 代码 / PPT（按页）三模式既有的
-        ``if refiner is None: 跳过`` 回退路径统一生效，无需逐处判断。
+        ``for_refine`` 区分两类用途，避免"精修开关"误伤"LLM 客户端能力"：
+        - ``True``（默认，所有精修调用点）：受统一精修开关约束，有效
+          ``LLMConfig.enable_refine`` 为 False 时直接返回 None —— 文档（分段）
+          / 代码 / PPT（按页）三模式既有的 ``if refiner is None: 跳过`` 回退
+          路径统一生效，改这一处即可关停所有模式的精修。
+        - ``False``（PII 实体检测 / 代码头脱敏等非精修用途）：**不看**
+          enable_refine，只要配置了 model 就返回客户端。否则用户"关精修但开
+          脱敏"时，基于 LLM 的人名 / 机构名检测会被精修开关连带关掉，
+          导致正则兜不住的隐私（人名 / 公司名）泄漏到云端 / 输出。
 
         llm 非空但 `llm.model` 为空串时返回 None —— 下游调用点已有
         `if refiner is None: 跳过` 的回退路径。否则 `_create_refiner` 会
@@ -2737,7 +2766,7 @@ class Pipeline:
         在 stderr 打"Provider List: https://docs.litellm.ai/docs/providers"。
         """
         effective = llm if llm is not None else self._config.llm
-        if not effective.enable_refine:
+        if for_refine and not effective.enable_refine:
             return None
         if llm is None:
             return self._refiner

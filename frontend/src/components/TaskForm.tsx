@@ -740,7 +740,14 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
           <span className="pii-title">{t("taskForm.modeLabel")}</span>
         </div>
         <div className="mode-radio-group">
-          <label className="mode-radio-option" htmlFor="mode-doc">
+          <label
+            className={
+              mode === "doc"
+                ? "mode-radio-option mode-radio-option--active"
+                : "mode-radio-option"
+            }
+            htmlFor="mode-doc"
+          >
             <input
               id="mode-doc"
               type="radio"
@@ -753,7 +760,14 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
             />
             <span>{t("taskForm.mode_doc")}</span>
           </label>
-          <label className="mode-radio-option" htmlFor="mode-code">
+          <label
+            className={
+              mode === "code"
+                ? "mode-radio-option mode-radio-option--active"
+                : "mode-radio-option"
+            }
+            htmlFor="mode-code"
+          >
             <input
               id="mode-code"
               type="radio"
@@ -766,7 +780,14 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
             />
             <span>{t("taskForm.mode_code")}</span>
           </label>
-          <label className="mode-radio-option" htmlFor="mode-ppt">
+          <label
+            className={
+              mode === "ppt"
+                ? "mode-radio-option mode-radio-option--active"
+                : "mode-radio-option"
+            }
+            htmlFor="mode-ppt"
+          >
             <input
               id="mode-ppt"
               type="radio"

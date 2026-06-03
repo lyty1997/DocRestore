@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 from docrestore.llm.prompts import (
+    REFINE_SYSTEM_PROMPT,
+    SLIDE_REFINE_SYSTEM_PROMPT,
     build_final_refine_prompt,
     build_refine_prompt,
     parse_gaps,
@@ -77,6 +79,33 @@ class TestBuildRefinePrompt:
         content = msgs[1]["content"]
         assert "overlap_before_tail" not in content
         assert "overlap_after_head" not in content
+
+    def test_document_mode_uses_dedup_system_prompt(self) -> None:
+        """is_slide=False（默认，文档分段）→ system 用 REFINE_SYSTEM_PROMPT。"""
+        ctx = RefineContext(
+            segment_index=1, total_segments=1,
+            overlap_before="", overlap_after="",
+        )
+        msgs = build_refine_prompt("正文", ctx)
+        assert msgs[0]["content"] == REFINE_SYSTEM_PROMPT
+
+    def test_slide_mode_uses_slide_system_prompt(self) -> None:
+        """is_slide=True（PPT 按页）→ system 切到 SLIDE_REFINE_SYSTEM_PROMPT。
+
+        回归（max-effort review #2）：PPT 复用文档版"跨页去重"prompt 会误删
+        合理重复的幻灯片标题/页脚。slide prompt 必须与文档版不同，且不携带
+        跨页去重指令。
+        """
+        ctx = RefineContext(
+            segment_index=1, total_segments=1,
+            overlap_before="", overlap_after="", is_slide=True,
+        )
+        msgs = build_refine_prompt("正文", ctx)
+        assert msgs[0]["content"] == SLIDE_REFINE_SYSTEM_PROMPT
+        assert SLIDE_REFINE_SYSTEM_PROMPT != REFINE_SYSTEM_PROMPT
+        # 语义对照：文档版含"跨页"去重指令，slide 版明确"不做跨页去重"
+        assert "跨页" in REFINE_SYSTEM_PROMPT
+        assert "不做跨页去重" in SLIDE_REFINE_SYSTEM_PROMPT
 
 
 class TestParseGaps:

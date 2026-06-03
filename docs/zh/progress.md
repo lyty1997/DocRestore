@@ -1004,3 +1004,22 @@ AGE-72 / 探测信号 AGE-73 / 决策策略 AGE-74 / API AGE-75 / 前端 AGE-76�
 - LLM 轻润色 `_ppt_pipeline` 占位（开启记 warning 未接入）；完整实现后续。
 - 英文文档 `docs/en/` PPT 模式同步留后续。
 - **PPT 还原模式 S0–S6 全部完成**；`feature/ppt-restore-mode` 待合并 `dev`。
+
+## 2026-06-03 CST - max-effort code-review 第二轮修复（复审上一轮提交，4 项）
+
+背景：对上一轮提交（统一精修 + 首轮 4 修）再跑 max-effort code-review，发现 4 项并按用户确认修复。
+
+完成内容：
+- **#1 隐私回归（最高优先级）**：统一 `enable_refine` 拦截点在 `_get_refiner` 无条件返回 None，连带关掉 PII 实体检测（`_delayed_pii_detect`）与代码头脱敏（`_redact_code_headers`）的 LLM 客户端 →“关精修 + 开脱敏”时人名/机构名泄漏。修法：`_get_refiner(llm, *, for_refine=True)`，PII 等用途传 `for_refine=False`（只看 model）；`initialize` 预建 refiner 去掉 `enable_refine` 前置；代码模式 base_refiner 改 `for_refine=False`，精修两段另按 `enable_refine` gate。
+- **#2 PPT 不跨页去重**：新增 `SLIDE_REFINE_SYSTEM_PROMPT`（只修格式、保留公式/裁图、不去重）；`RefineContext.is_slide` → `build_refine_prompt` 选 slide prompt；`_refine_segment_with_cache(slide_mode=True)` 透传 + 4 处重试 ctx 带 `is_slide`；缓存独立 `slide` 命名空间。
+- **#3 `_order_corners` 旋转误标**：改“y 排序分上下、组内分左右”（取代上一轮极角 + x+y 锚点），旋转下标号仍正确，回归断言标号正确。
+- **#4 `rectify` 退化 sliver**：新增 `_MIN_RECTIFIED_SIDE_PX=16`，任一边低于阈值回退原图，不产竹签图喂 OCR。
+- **顺带前端 UI**：处理模式三选一与 LLM Provider 选择统一为「整框背景染色 + 无 radio 小圆点」的分段按钮样式（`.mode-radio-option--active` 比照 `.llm-provider-option--active`，两处 radio input 视觉隐藏但保留可聚焦）。Playwright 截图验证选中态整框染色且点击切换正确。
+
+验证：
+- backend `mypy --strict` Success(65) + `ruff` All passed + `typos` OK；**pytest 1011 passed, 45 skipped**（新增 11 个回归用例：get_refiner for_refine 解耦 ×4 / prompts slide 选择 ×2 / cache slide 命名空间 ×2 / ppt_refine is_slide ×1 / slide_rectify 旋转标号 + sliver ×2）。
+- 前端未改动（`enable_refine` 已透出），沿用上次门禁绿。
+
+遗留：
+- 低优先级 review 项记入 `known-issues.md`：关精修仍报“精修第 X 页”文案、`progress.pptDone` 死键、`_ocr_config_*` 克隆、retry 无 PPT 兜底、关精修建空 `.llm_cache/`。
+- 英文文档 `docs/en/` 同步仍留后续。
