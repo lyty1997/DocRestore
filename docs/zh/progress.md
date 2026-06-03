@@ -866,3 +866,22 @@ AGE-72 / 探测信号 AGE-73 / 决策策略 AGE-74 / API AGE-75 / 前端 AGE-76�
 遗留问题：
 - `80d16349` 中 `openmax_status.h` 出现 LLM `repair.truncated`（baseline 是 `repair.applied=1`），导致 OCR 噪声字符（如 `王`、枚举名首字母 `E` 误识为 `F`、`StatusTraits {` 误识为 `StatusTraits Y` 等）残留——属 LLM 输出长度抖动，与本次 revert 无关；可考虑独立排期 `code_repair` 的 truncated 重试或 max_tokens 自适应策略。
 - baseline 也合不到的 3 个剩余 noisy 变体（`media/gpu7openmax/...h`、`media/openmax_..._accelerator.h`、`media/openmax_..._accelerator.cc`）是 `_dirs_compatible` 旧规则盲区（compact 既不等也不互为后缀且不空），不在本次回归范围；若未来要堵 a/x↔b/x 桥接，正确做法是先在 `_dirs_compatible` 内为非空 compact 加 Levenshtein ≤ 2 容忍再换全连接（方案 B），不要直接砍单连接。
+
+## 2026-06-03 CST - PPT 还原模式 S1 设计定稿 + OpenSpec 生成（AGE-85）
+
+完成内容：
+- 基于 S0 选型结论（AGE-84：VL-1.6 主引擎 + 透视矫正必需 + 化学结构裁图，剔除 MinerU/dots），产出 PPT 模式 S1 设计文档 `docs/zh/ppt-mode.md`（约 560 行，含三模式分支架构组件图 + 端到端流水线活动图，均经 PlantUML 真编译验证）。
+- 架构定位：流式 Pipeline 第三消费者分支 `_ppt_pipeline`，与文档/代码模式互斥三选一，共享 `_ocr_producer` + `page_queue`。链路 S2 透视矫正(逐页前处理 hook) → S3 VL-1.6 doc_parser 识别+自动裁图 → S4 逐页保序组装合并 document.md。
+- 关键决策（用户 2026-06-03 拍板 6 项）：A 不跨页去重（每页独立幻灯片）；B LLM 轻润色默认关 + 前端透出开关（按 OCR 效果决定）；C 前端 radio 三选一互斥（替代 codeMode toggle）；D 信任 VL 阅读序、留 S3 实测回退 region bbox 排序；E 页间分隔线 + page marker；F DB ppt 列同 code 列机制。
+- 复用 `PageOCR`（VL markdown 入 raw_text、裁图入 Region.cropped_path）、`PipelineResult`、两阶段图片引用、前端多文档展示；净新增 `slide_rectify.py` + `ppt_renderer.py` + 1 config + 1 request schema + 1 消费者分支 + producer hook + 前端三选一 + DB migration（工程量评估「刚刚好」）。设计文档 §7 已列 17 处接入点 文件:行。
+- 首次在项目引入 OpenSpec（CLI v1.2.0，`openspec init --tools claude`）：生成 change `add-ppt-restore-mode`，含 proposal/design/tasks + 4 个 capability spec（ppt-perspective-rectify / ppt-page-recognition / ppt-document-assembly / ppt-mode-integration，对应 S2–S5）。
+- 同步 `docs/zh/architecture.md`（§3 数据流加 PPT 分支、§6.3 扩展边界加指针，均标注「设计中」）。
+
+验证：
+- `bash ~/.claude/skills/plantuml-in-markdown/scripts/extract_and_compile.sh docs/zh/ppt-mode.md`：2 张图 exit 0、非空 PNG。
+- `openspec validate add-ppt-restore-mode --strict`：valid，退出码 0（0/32 tasks）。
+
+遗留问题：
+- OpenCV(cv2) 既未在 `pyproject.toml` 声明也未在生产 env 安装 → S2(AGE-86) 接入第一步必须补（tasks 1.1）。
+- B/D 两项留实测口：VL 单页阅读序可靠性、LLM 轻润色收益均待 S3 真图实测决定。
+- 下一步：S2（AGE-86）透视矫正开工（待用户确认）。
