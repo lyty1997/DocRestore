@@ -34,13 +34,13 @@
 - [x] 4.8 新增 `_ppt_pipeline` 消费者（收齐保序 → render → 可选润色）
 - [x] 4.9 前端 `TaskForm` radio 三选一互斥 + PPT 润色开关 + `onSubmit`/`useTaskRunner` 透传
 - [x] 4.10 i18n keys（en / zh-CN / zh-TW）
-- [ ] 4.11 下载打包默认排除 `.rectified/` → 留 S6 验证
+- [x] 4.11 下载打包默认排除 `.rectified/`（打包白名单仅 document.md + images/，点目录天然排除）
 - [x] 4.12 错误 i18n：`mode.conflict`（前后端链路）
 
 ## 5. S6 E2E 验证与收尾（AGE-90）
 
-- [ ] 5.1 `test_images/PPT` 全量真图 E2E：`document.md` 页序正确 + 文字/公式/图片三类齐全 + 图片引用有效
-- [ ] 5.2 断言从输入派生（不写死数据集文件名/正文关键词）
-- [ ] 5.3 质量门禁 `bash scripts/check_quality.sh` 全绿（mypy/ruff/typos/前端/pytest）
-- [ ] 5.4 更新 `docs/zh/progress.md` + 模块文档 + 项目 memory
-- [ ] 5.5 英文文档 `docs/en/` 同步排期
+- [x] 5.1 `test_images/PPT` 全量真图 E2E：`document.md` 页序正确 + 文字/公式/图片三类齐全 + 图片引用有效
+- [x] 5.2 断言从输入派生（不写死数据集文件名/正文关键词）
+- [x] 5.3 质量门禁 `bash scripts/check_quality.sh` 全绿（mypy/ruff/typos/前端/pytest）
+- [x] 5.4 更新 `docs/zh/progress.md` + 模块文档 + 项目 memory
+- [ ] 5.5 英文文档 `docs/en/` 同步排期（留后续）

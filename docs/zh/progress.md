@@ -953,3 +953,20 @@ AGE-72 / 探测信号 AGE-73 / 决策策略 AGE-74 / API AGE-75 / 前端 AGE-76�
 - 4.11 下载打包排除 `.rectified/` 留 S6（点目录，影响小）。
 - LLM 轻润色 `_ppt_pipeline` 占位（开启记 warning 未接入）；完整实现后续。
 - 下一步 S6（AGE-90）：全量 9 图 E2E + 质量门禁 + 文档收尾。
+
+## 2026-06-03 CST - PPT 模式 S6 全量 E2E + 质量门禁（AGE-90，父 AGE-83 闭环）
+
+完成内容：
+- 完整 Pipeline 跑 PPT 模式 on `test_images/PPT` 全 **9 图**（`process_tree(ppt=PowerPointRestoreConfig(enable=True))`，与前端建任务同链路）：9 图屏摄 → 矫正（`.rectified/` 18 张 before/after）→ VL `doc_parser` 识别 → `_ppt_pipeline` 组装。
+- 产出 `document.md` 9636 bytes，**9 页 marker 全保序**（页序 = 输入文件序），14 张裁图复制，无错误；三类内容齐全（文字 + 公式 LaTeX + 化学/表格裁图引用）。
+- 4.11 确认：下载打包白名单仅 `document.md` + `images/**`，`.rectified/` 天然排除，无需改动。
+
+验证：
+- **质量门禁全绿**：backend mypy --strict Success(65) + ruff All passed + typos OK + 后端 613 passed；前端 `tsc -b` + eslint + playwright 视觉验证。
+- GPU shutdown 干净释放（15 MiB）。
+- 父 AGE-83 + S0–S6（AGE-84~90）全部 Done。
+
+遗留：
+- LLM 轻润色 `_ppt_pipeline` 占位（开启记 warning 未接入）；完整实现后续。
+- 英文文档 `docs/en/` PPT 模式同步留后续。
+- **PPT 还原模式 S0–S6 全部完成**；`feature/ppt-restore-mode` 待合并 `dev`。
