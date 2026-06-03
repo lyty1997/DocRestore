@@ -885,3 +885,21 @@ AGE-72 / 探测信号 AGE-73 / 决策策略 AGE-74 / API AGE-75 / 前端 AGE-76�
 - OpenCV(cv2) 既未在 `pyproject.toml` 声明也未在生产 env 安装 → S2(AGE-86) 接入第一步必须补（tasks 1.1）。
 - B/D 两项留实测口：VL 单页阅读序可靠性、LLM 轻润色收益均待 S3 真图实测决定。
 - 下一步：S2（AGE-86）透视矫正开工（待用户确认）。
+
+## 2026-06-03 CST - PPT 模式 S2 透视矫正落地（AGE-86）
+
+完成内容：
+- 新增 `backend/docrestore/processing/slide_rectify.py`：`detect_slide_quad`（Otsu 亮区→最大外轮廓→approxPolyDP 取4角）/ `rectify`（warpPerspective 转正视图 + 顶边上抬 20% 补暗标题栏）/ `rectify_page`（异步入口 `asyncio.to_thread`，落盘 `.rectified/` before/after，失败回退原图不中断）。
+- 模块纯图像处理、不依赖 `PipelineConfig`（解耦）；pipeline 接入（`_ocr_producer` 逐页 hook）留 S5/AGE-89 tasks 4.7。
+- 依赖 `opencv-python-headless` 加进 `pyproject.toml` + 装入 docrestore env（cv2 4.13.0）；cv2 加 mypy override。
+- 单测 `tests/processing/test_slide_rectify.py` 8 例：合成图确定性（检测/角点排序/矫正/小亮块过滤）+ `rectify_page` 落盘与回退；断言从输入派生。
+
+验证：
+- `pytest tests/processing/test_slide_rectify.py`：8 passed。
+- 真图 `test_images/PPT` **9/9 全命中**：1706×1279 屏摄 → ~1200×970 正视图，强透视拉正、标题栏完整、吊顶/观众裁掉（before/after 对照留存 `/tmp/ppt_rectify_evidence`）。
+- processing 全量 284 passed 无回归。
+- commit `01ad20b`（分支 `feature/ppt-restore-mode`）；AGE-86 → Done。
+
+遗留问题：
+- 矫正对当前 9 张屏摄 100% 命中；更复杂场景（下边缘被观众严重遮挡、屏幕强反光）鲁棒性待 S6 全量/更多数据验证。
+- pipeline 接入 + `.rectified/` 打包排除留 S5。

@@ -1,10 +1,10 @@
 ## 1. S2 透视矫正（AGE-86）
 
-- [ ] 1.1 确认 OpenCV(cv2) 在 `pyproject.toml` 依赖，缺则补齐
-- [ ] 1.2 新增 `processing/slide_rectify.py`：`Quad` / `detect_slide_quad` / `rectify` / `rectify_page`
-- [ ] 1.3 `rectify_page` 落盘 `.rectified/` before/after 对照 + 失败回退原图路径
-- [ ] 1.4 OpenCV 阻塞调用走 `asyncio.to_thread`，不阻塞事件循环
-- [ ] 1.5 单测：正常矫正 + 检测失败回退 + 落盘证据（真图 before/after，断言从输入派生）
+- [x] 1.1 确认 OpenCV(cv2) 在 `pyproject.toml` 依赖，缺则补齐
+- [x] 1.2 新增 `processing/slide_rectify.py`：`Quad` / `detect_slide_quad` / `rectify` / `rectify_page`
+- [x] 1.3 `rectify_page` 落盘 `.rectified/` before/after 对照 + 失败回退原图路径
+- [x] 1.4 OpenCV 阻塞调用走 `asyncio.to_thread`，不阻塞事件循环
+- [x] 1.5 单测：正常矫正 + 检测失败回退 + 落盘证据（真图 before/after，断言从输入派生）
 
 ## 2. S3 识别与裁图（AGE-87）
 
