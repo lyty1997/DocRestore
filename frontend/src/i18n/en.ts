@@ -296,7 +296,21 @@ export const en: Record<TranslationKey, string> = {
   "sourcePicker.sizeKB": "{size} KB",
   "sourcePicker.imageCount": "{count} images",
 
+  // ── PPT 模式 i18n（taskForm / progress / errors 集中补充）──
+  "taskForm.modeLabel": "Processing Mode",
+  "taskForm.mode_doc": "Document",
+  "taskForm.mode_code": "Code",
+  "taskForm.mode_ppt": "PPT",
+  "taskForm.docModeDesc":
+    "Default: restore document photos to formatted Markdown, with cross-page dedup.",
+  "taskForm.pptModeDesc":
+    "Restore screen-shot slides to ordered Markdown: auto perspective rectify, text + formulas (LaTeX); chemical structures / charts cropped as images.",
+  "taskForm.pptPolishLabel": "LLM Polish",
+  "progress.pptRender": "PPT mode: assembling document...",
+  "progress.pptDone": "PPT mode: done",
   // ── API business errors ──
+  "errors.api.mode_conflict":
+    "Mode conflict: Document / Code / PPT are mutually exclusive",
   "errors.api.unauthorized": "Missing or invalid API Token",
   "errors.api.service_not_initialized": "Service not initialized",
   "errors.api.engine_manager_not_initialized": "OCR engine manager not initialized",
