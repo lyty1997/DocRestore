@@ -937,3 +937,19 @@ AGE-72 / 探测信号 AGE-73 / 决策策略 AGE-74 / API AGE-75 / 前端 AGE-76�
 遗留问题：
 - LLM 轻润色在 S5 `_ppt_pipeline` 接入。
 - 真实验证 3 页；全量 9 页 + 多版式 E2E 在 S6。
+
+## 2026-06-03 CST - PPT 模式 S5 全栈接入（AGE-89）
+
+完成内容：
+- **后端**（commit `13ace55`）：`config` PowerPointRestoreConfig + PipelineConfig.ppt；`schemas` 请求 schema + CreateTaskRequest.ppt；`errors` APIErrorCode.MODE_CONFLICT；`routes` ppt_cfg 合成 + code/ppt 互斥校验；`task_manager` Task.ppt + `database` DB ppt 列 migration（同 code 列机制）；`pipeline` process_tree/process_many/_stream_pipeline 签名加 ppt + `elif ppt_cfg.enable` → `_ppt_pipeline` + `_ocr_producer` 矫正 hook（逐页 rectify_page，page.image_path 改回原图名）+ 新增 `_ppt_pipeline`（保序组装，润色占位）。
+- **前端**（commit `2b12ddd`）：TaskForm codeMode toggle → mode radio 三选一（文档/代码/PPT 互斥）+ PPT 润色开关；useTaskRunner/client ppt 透传；i18n 3-locale；App.css radio 样式。
+- `slide_rectify` ImageBGR 改 `cv2.typing.MatLike`（适配 opencv 4.13 自带 stub）。
+
+验证：
+- 全量 backend mypy **Success（65 files）**；后端 **613 passed** 无回归。
+- 前端 `tsc -b` + eslint 通过；**playwright 视觉验证**：radio 三选一并列、选 PPT 切换描述 + 显示润色开关。
+
+遗留：
+- 4.11 下载打包排除 `.rectified/` 留 S6（点目录，影响小）。
+- LLM 轻润色 `_ppt_pipeline` 占位（开启记 warning 未接入）；完整实现后续。
+- 下一步 S6（AGE-90）：全量 9 图 E2E + 质量门禁 + 文档收尾。

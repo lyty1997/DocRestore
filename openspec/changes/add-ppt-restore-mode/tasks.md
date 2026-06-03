@@ -24,18 +24,18 @@
 
 ## 4. S5 配置/API/Pipeline/前端接入（AGE-89）
 
-- [ ] 4.1 `config.py` 新增 `PowerPointRestoreConfig` + `PipelineConfig.ppt`
-- [ ] 4.2 `schemas.py` 新增 `PowerPointRestoreConfigRequest` + `CreateTaskRequest.ppt`
-- [ ] 4.3 `routes.py` 合成 `ppt_cfg` + 模式互斥校验（`mode.conflict`）
-- [ ] 4.4 `task_manager.py` `Task.ppt` + 持久化/hydrate + DB `ppt` 列 migration
-- [ ] 4.5 `pipeline.py` `process_tree`/`process_many`/`_stream_pipeline` 签名加 `ppt`
-- [ ] 4.6 `pipeline.py` 分支点加 `elif ppt_cfg.enable` → `_ppt_pipeline`；`ocr_effective` 用 `vl`
-- [ ] 4.7 `_ocr_producer` 加矫正 hook（PPT 模式逐页先 `rectify_page`）
-- [ ] 4.8 新增 `_ppt_pipeline` 消费者（收齐保序 → render → 可选润色）
-- [ ] 4.9 前端 `TaskForm` radio 三选一互斥 + PPT 润色开关 + `onSubmit`/`useTaskRunner` 透传
-- [ ] 4.10 i18n keys（en / zh-CN / zh-TW）
-- [ ] 4.11 下载打包默认排除 `.rectified/`
-- [ ] 4.12 错误 i18n：`mode.conflict`（前后端链路）
+- [x] 4.1 `config.py` 新增 `PowerPointRestoreConfig` + `PipelineConfig.ppt`
+- [x] 4.2 `schemas.py` 新增 `PowerPointRestoreConfigRequest` + `CreateTaskRequest.ppt`
+- [x] 4.3 `routes.py` 合成 `ppt_cfg` + 模式互斥校验（`mode.conflict`）
+- [x] 4.4 `task_manager.py` `Task.ppt` + 持久化/hydrate + DB `ppt` 列 migration
+- [x] 4.5 `pipeline.py` `process_tree`/`process_many`/`_stream_pipeline` 签名加 `ppt`
+- [x] 4.6 `pipeline.py` 分支点加 `elif ppt_cfg.enable` → `_ppt_pipeline`；`ocr_effective` 用 `vl`
+- [x] 4.7 `_ocr_producer` 加矫正 hook（PPT 模式逐页先 `rectify_page`）
+- [x] 4.8 新增 `_ppt_pipeline` 消费者（收齐保序 → render → 可选润色）
+- [x] 4.9 前端 `TaskForm` radio 三选一互斥 + PPT 润色开关 + `onSubmit`/`useTaskRunner` 透传
+- [x] 4.10 i18n keys（en / zh-CN / zh-TW）
+- [ ] 4.11 下载打包默认排除 `.rectified/` → 留 S6 验证
+- [x] 4.12 错误 i18n：`mode.conflict`（前后端链路）
 
 ## 5. S6 E2E 验证与收尾（AGE-90）
 
