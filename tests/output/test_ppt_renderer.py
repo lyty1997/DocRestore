@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from docrestore.models import PageOCR
 from docrestore.output.ppt_renderer import render_ppt_document
 
@@ -98,3 +100,28 @@ async def test_pages_separated(tmp_path: Path) -> None:
     ]
     _, memory_md = await render_ppt_document(pages, out)
     assert "---" in memory_md
+
+
+async def test_bodies_override_used_verbatim(tmp_path: Path) -> None:
+    """提供 bodies（按页预精修正文）时按页使用，不再内部 rewrite 原始正文。"""
+    out = tmp_path / "out"
+    pages = [
+        _make_page(out, "pageA", "原始甲", n_images=0),
+        _make_page(out, "pageB", "原始乙", n_images=0),
+    ]
+    bodies = ["精修甲BODYA", "精修乙BODYB"]
+    _, memory_md = await render_ppt_document(pages, out, bodies=bodies)
+    assert "精修甲BODYA" in memory_md
+    assert "精修乙BODYB" in memory_md
+    assert "原始甲" not in memory_md  # 原始正文被 bodies 覆盖
+    assert memory_md.index("BODYA") < memory_md.index("BODYB")  # 保序
+    # marker 仍取自 page（文件名），与 body 来源无关
+    assert "<!-- page: pageA.jpg -->" in memory_md
+
+
+async def test_bodies_length_mismatch_raises(tmp_path: Path) -> None:
+    """bodies 与 pages 长度不一致直接报错（防错位拼装）。"""
+    out = tmp_path / "out"
+    pages = [_make_page(out, "pageA", "正文", n_images=0)]
+    with pytest.raises(ValueError, match="长度"):
+        await render_ppt_document(pages, out, bodies=["a", "b"])

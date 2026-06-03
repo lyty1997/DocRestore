@@ -227,6 +227,11 @@ class LLMConfig(BaseModel):
     timeout_per_1k_chars_s: float = 3.0
     #: 单次 timeout 上限（秒）。防止超长 input 把 timeout 放到天上去。
     timeout_max_s: int = 180
+    #: 统一 LLM 精修总开关：文档（分段）/ 代码 / PPT（按页）三模式共用。
+    #: True=按各模式策略精修；False=跳过所有 LLM 精修，仅输出 OCR 清洗结果。
+    #: 在 ``_get_refiner`` 单点拦截——False 时返回 None，下游各模式既有的
+    #: ``if refiner is None: 跳过`` 回退路径统一生效（无需逐处判断）。
+    enable_refine: bool = True
     enable_final_refine: bool = True  # 分段精修后是否做整篇文档级精修
     # 整篇精修分块：文档超过 final_refine_min_chars 时切成 final_refine_chunks 块
     # 并行调用；块数 ≤1 退化为单次整篇调用。每块按 <!-- page: --> 边界切分。
@@ -373,8 +378,6 @@ class PowerPointRestoreConfig(BaseModel):
     rectify_debug_dir: str = ".rectified"
     #: 顶边上抬比例，补回常被吊顶 / 暗标题栏遮挡的区域
     rectify_top_extend_ratio: float = 0.2
-    #: 可选 LLM 轻润色（默认关，前端可开；开启时不得改公式 / 图片引用）
-    llm_polish: bool = False
 
 
 class PipelineConfig(BaseModel):

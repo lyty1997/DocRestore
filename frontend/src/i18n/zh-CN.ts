@@ -105,7 +105,9 @@ export const zhCN = {
     "默认模式：文档照片还原为带格式的 Markdown，跨页自动去重合并。",
   "taskForm.pptModeDesc":
     "屏摄幻灯片还原为保序 Markdown：自动透视矫正，文字 + 公式（LaTeX），化学结构 / 图表裁剪为图片。",
-  "taskForm.pptPolishLabel": "LLM 润色",
+  "taskForm.refineTitle": "LLM 精修",
+  "taskForm.refineDesc":
+    "对文档 / 代码 / PPT 所有模式生效：开启则用 LLM 精修识别结果（文档分段、PPT 按页），关闭则只输出 OCR 清洗文本。",
   "taskForm.piiTitle": "脱敏功能",
   "taskForm.piiDesc":
     "开启后自动检测并脱敏手机号、邮箱、身份证号等隐私信息。也可添加自定义敏感词，无需开启即生效。",
@@ -145,6 +147,7 @@ export const zhCN = {
   "progress.failed": "处理失败",
   "progress.llmUnavailable":
     "LLM provider 暂不可用（{model}），已熔断 {cool_down_s}s，相关段级精修降级为原文",
+  "progress.pptPage": "PPT 模式：精修第 {current}/{total} 页",
   "progress.pptRender": "PPT 模式：组装文档...",
   "progress.pptDone": "PPT 模式：完成",
 

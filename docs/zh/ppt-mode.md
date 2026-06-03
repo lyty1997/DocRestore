@@ -46,7 +46,8 @@ PPT 模式是流式 Pipeline 的**第三消费者分支**（与文档模式 `_st
 | OCR pipeline | `vl` | 强制 `basic`（行级） | **`vl`** |
 | 前处理 | 无 | 无 | **S2 透视矫正（逐页）** |
 | 跨页关系 | **跨页去重 + 流式精修** | 跨页归类成源文件 | **不去重，逐页独立保序** |
-| LLM | 分段精修（重） | 字符级修正/重写 | **可选轻润色（默认关）** |
+| LLM | 分段精修（重） | 字符级修正/重写 | **按页精修** |
+| LLM 精修开关 | 统一 `LLMConfig.enable_refine`（默认开） | 同左 | 同左（AGE-9x，§15） |
 | 图片 | 两阶段引用 | 无 | **两阶段引用（复用文档模式）** |
 | 输出 | `document.md` + `images/` | `files/` + `files-index.json` | **`document.md` + `images/`** |
 
@@ -131,8 +132,8 @@ partition "S4 组装与合并" {
   :单页区域按阅读顺序\n拼成单页 markdown;
   :多页按原文件序合并\n逐页分节 加 分隔;
   :图片两阶段引用\nimages 目录 stem_N 后缀;
-  if (启用 LLM 轻润色?) then (是)
-    :润色 不破坏公式与图片引用;
+  if (启用 LLM 精修? 统一开关) then (是)
+    :按页精修 不破坏公式与图片引用;
   else (否)
   endif
 }
@@ -146,7 +147,8 @@ stop
 
 - **S2（AGE-86）**：原屏摄照片 → 检测幻灯片四边形 → 矫正为正视图，落盘 before/after 对照，失败回退原图。产物喂给 `_ocr_producer`。
 - **S3（AGE-87）**：矫正图 → VL-1.6 `doc_parser` 版面分析 + 区域分类 + 识别。文字/公式入 `raw_text`（markdown + LaTeX），图形区域裁成 `Region.cropped_path`。产出 `PageOCR`。
-- **S4（AGE-88）**：单页区域按阅读顺序拼成单页 markdown → 多页按原文件序合并为单 `document.md`（逐页分节）→ 图片两阶段引用落 `images/`。可选 LLM 轻润色。
+- **S4（AGE-88）**：单页区域按阅读顺序拼成单页 markdown → 多页按原文件序合并为单 `document.md`（逐页分节）→ 图片两阶段引用落 `images/`。
+- **按页精修（AGE-9x）**：`_ppt_pipeline` 出队循环内逐页 LLM 精修（与 producer OCR 重叠），由统一开关 `LLMConfig.enable_refine` 控制；详见 §15。
 
 ---
 
@@ -165,9 +167,13 @@ class PowerPointRestoreConfig(BaseModel):
     rectify_debug_dir: str = ".rectified"     # 对照图子目录（相对 output_dir）
     rectify_top_extend_ratio: float = 0.2     # 顶边上抬补暗标题栏比例
     crop_figures: bool = True                 # 图形区域裁成 images/（化学结构等）
-    llm_polish: bool = False                  # 可选 LLM 轻润色（默认关，前端可开）
     images_dir: str = "images"                # 图片输出子目录（复用文档模式）
 ```
+
+> **LLM 精修不在本 config**（AGE-9x 变更，见 §15）：原 `llm_polish` 字段实测无效已删除。
+> 是否精修由**统一开关 `LLMConfig.enable_refine`**（默认 `True`）控制，文档（分段）/
+> 代码 / PPT（按页）三模式共用；PPT 模式在 `_ppt_pipeline` 出队循环内**按页**调用
+> 既有段级精修器（`_refine_segment_with_cache`），与 producer OCR 重叠。
 
 > 字段命名沿用 `CodeRestoreConfig` 风格（`enable` + 行为开关 + 子目录名）。VL 引擎参数（`paddle_pipeline=vl` / `paddle_pipeline_version` / `paddle_server_model_name` / `backend_config`）复用 `OCRConfig`（`config.py:142`），**不在本 config 重复**。
 
@@ -226,7 +232,7 @@ VL `doc_parser` 本身就是已集成的 OCR 引擎，沿用现有接口（`ocr/
 async def ocr(self, image_path: Path, output_dir: Path) -> PageOCR: ...
 ```
 
-区域裁图由 VL worker 自动产出到 `PageOCR.regions[].cropped_path`，**S3 无需新增识别代码**，只需在 OCR 配置上确保 `paddle_pipeline="vl"`（PPT 模式不走代码模式的 basic 强制路径）。S3 的工作量主要落在**验证 VL 裁图覆盖化学结构/分子模型**（spike 已验证）+ 公式 LaTeX 兜底。
+区域裁图由 VL worker 自动产出到 `PageOCR.regions[].cropped_path`，**S3 无需新增识别代码**。PPT 模式由 `_ocr_config_for_ppt_mode` **强制 `paddle_pipeline="vl"`**（AGE-9x，与代码模式强制 basic 对称，防误配 basic 静默降级）。S3 的工作量主要落在**验证 VL 裁图覆盖化学结构/分子模型**（spike 已验证）+ 公式 LaTeX 兜底。
 
 ### S4 组装与合并（新增 `output/ppt_renderer.py`）
 
@@ -234,11 +240,14 @@ async def ocr(self, image_path: Path, output_dir: Path) -> PageOCR: ...
 async def render_ppt_document(
     pages: list[PageOCR],              # 按原文件序（scan_images 序）
     output_dir: Path,
-    cfg: PowerPointRestoreConfig,
+    *,
+    output_config: OutputConfig | None = None,
+    bodies: list[str] | None = None,   # 按页预精修正文（与 pages 等长）；None=内部 rewrite
 ) -> tuple[Path, str]:
     """单页 raw_text（VL 阅读序 markdown）→ 逐页分节合并 document.md
     → 图片两阶段引用落 images/。返回 (document.md 路径, 含 page-marker 的内存版 markdown)。
-    复用 renderer.py 的 _rewrite_and_copy_images 做图片重写。"""
+    复用 renderer.py 的 _rewrite_and_copy_images 做图片重写。
+    bodies 非空时按页直接拼装（精修结果），不再重复 rewrite。"""
 ```
 
 ### PPT 消费者分支（新增 `pipeline.py::_ppt_pipeline`）
@@ -247,18 +256,17 @@ async def render_ppt_document(
 async def _ppt_pipeline(
     self,
     page_queue: asyncio.Queue[PageOCR | None],
-    pages_ref: list[PageOCR],
     output_dir: Path,
-    llm: LLMConfig | None,
-    pii_cfg: PIIConfig,
     report_fn: ReportFn,
-    ocr: OCRConfig | None,
-    ppt_cfg: PowerPointRestoreConfig,
     *,
-    quality: QualityReport,
+    llm: LLMConfig | None,
+    total: int,                        # 预期页数（len(images)），仅用于进度/精修上下文
+    quality: QualityReport | None = None,
 ) -> PipelineResult:
-    """从 page_queue 收齐 PageOCR（保序，不去重）→ render_ppt_document
-    → 可选 LLM 轻润色（ppt_cfg.llm_polish）。签名对齐 _code_pipeline。"""
+    """逐页出队 → rewrite_image_refs →（统一开关开时）按页 LLM 精修 →
+    单页保序组装合并 document.md（不去重）。**按页精修在出队循环内完成**，
+    精修第 i 页与 producer OCR 第 i+1 页重叠（同文档模式段级精修）；是否精修由
+    _get_refiner(llm) 统一开关（LLMConfig.enable_refine）控制（见 §15）。"""
 ```
 
 ---
@@ -297,8 +305,9 @@ class PowerPointRestoreConfigRequest(BaseModel):
     enable: bool | None = None
     rectify: bool | None = None
     rectify_save_debug: bool | None = None
-    llm_polish: bool | None = None
 ```
+
+> 是否 LLM 精修不在 PPT 请求里：经 `LLMConfigRequest.enable_refine`（统一开关）控制（§15）。
 
 - `CreateTaskRequest.ppt: PowerPointRestoreConfigRequest | None = None`
 - **合成优先级**：`req.ppt`（非空字段）> `defaults.ppt`，沿用 `model_copy(update=exclude_none)`（与 `code` 同机制，`routes.py:387`）。
@@ -324,17 +333,20 @@ class PowerPointRestoreConfigRequest(BaseModel):
 
 ```typescript
 const [mode, setMode] = useState<"doc" | "code" | "ppt">("doc");
-const [pptPolish, setPptPolish] = useState(false);   // PPT 模式 LLM 润色开关
+const [refineEnabled, setRefineEnabled] = useState(true);  // 统一 LLM 精修开关（全模式）
 // 提交时（TaskForm.tsx:472 附近）：
 const code = mode === "code" ? { enable: true } : undefined;
-const ppt  = mode === "ppt"  ? { enable: true, llmPolish: pptPolish } : undefined;
+const ppt  = mode === "ppt"  ? { enable: true } : undefined;
+// refine 关闭时即使无其它覆盖也必须发 llm（携带 enable_refine=false）
+const llm = (...其它覆盖... || !refineEnabled)
+  ? { ...其它字段, enable_refine: refineEnabled } : undefined;
 onSubmit(trimmed, outputDir, llm, pii, ocr, code, ppt);
 ```
 
 - `onSubmit` 签名追加 `ppt?: PowerPointRestoreConfig`；`useTaskRunner` 透传到 `CreateTaskRequest.ppt`。
-- 前端 `PowerPointRestoreConfig` 接口（参照 `CodeRestoreConfig` `TaskForm.tsx:95`）：`{ enable: boolean; llmPolish?: boolean }`。
-- **LLM 润色开关**（用户确认 B）：仅 `mode === "ppt"` 时显示一个 toggle 绑 `pptPolish`，默认关——让用户视 OCR 效果决定是否开润色。
-- **i18n keys**（`en.ts` / `zh-CN.ts` / `zh-TW.ts` 同位置）：`taskForm.modeDoc` / `taskForm.modeCode` / `taskForm.modePpt` / `taskForm.pptModeDesc` / `taskForm.pptPolishTitle` / `taskForm.pptPolishDesc`。
+- 前端 `PowerPointRestoreConfig` 接口：`{ enable: boolean }`（**无** `llm_polish`，AGE-9x 删）。
+- **统一 LLM 精修开关**（AGE-9x，见 §15）：独立于模式 radio 的单一 toggle，绑 `refineEnabled`（默认开），对文档 / 代码 / PPT 三模式均生效，写入 `llm.enable_refine`。**不再有 PPT 专属润色开关**。
+- **i18n keys**（`en.ts` / `zh-CN.ts` / `zh-TW.ts` 同位置）：`taskForm.modeLabel` / `taskForm.mode_doc` / `taskForm.mode_code` / `taskForm.mode_ppt` / `taskForm.docModeDesc` / `taskForm.pptModeDesc` / `taskForm.refineTitle` / `taskForm.refineDesc` / `progress.pptPage`。
 - 互斥天然由 radio 单选保证；后端再加一道校验（§8）防御非常规请求。
 
 ---
@@ -383,3 +395,44 @@ onSubmit(trimmed, outputDir, llm, pii, ocr, code, ppt);
 | F | DB migration | ✅ **同 `code` 列机制**，老任务无需手动迁移（§7#7） |
 
 > 6 项已确认（含 B / D 的实测留口）。据此生成 OpenSpec（change proposal + spec deltas），下游 S2–S6 据此细化内部步骤。
+
+---
+
+## 15. 变更记录
+
+### AGE-9x：统一 LLM 精修开关 + PPT 按页精修（2026-06-03）
+
+**背景**：S5 落地的 PPT 专属 `llm_polish` 开关**实测无效**——`_ppt_pipeline` 仅记 warning
+占位、从未调用精修器。用户要求：**所有模式用同一个 LLM 精修开关统一控制是否精修，
+PPT 模式不再单独设功能**。
+
+**决策**（取代 §14-B「PPT 专属轻润色」）：
+
+| 项 | 旧（S5） | 新（AGE-9x） |
+|---|---|---|
+| 开关位置 | `PowerPointRestoreConfig.llm_polish` | **统一 `LLMConfig.enable_refine`**（默认 `True`） |
+| 作用范围 | 仅 PPT | **文档 / 代码 / PPT 三模式共用** |
+| PPT 精修实现 | 占位 no-op（warning） | **按页精修**：`_ppt_pipeline` 出队循环内逐页调 `_refine_segment_with_cache`，与 producer OCR 重叠（同文档模式段级精修的并行思路，只是粒度=页） |
+| 统一拦截点 | 无 | `_get_refiner(llm)`：`enable_refine=False` → 返回 `None`，各模式既有 `if refiner is None: 跳过` 回退路径统一生效 |
+| 前端 | PPT 专属 `pptPolish` toggle | **独立于模式 radio 的单一「LLM 精修」toggle**（默认开），写 `llm.enable_refine` |
+
+**落地点**：`LLMConfig.enable_refine`（`config.py`）/ `Pipeline._get_refiner` + `_ppt_pipeline`
+按页精修 / `render_ppt_document(bodies=...)` 接收按页预精修正文 / `schemas.LLMConfigRequest.enable_refine`
+/ `TaskForm` 单一 refine toggle + 三语 i18n（`taskForm.refineTitle/refineDesc` / `progress.pptPage`）。
+顺带修复：`retry_task`/`resume_task` 转发 `ppt=task.ppt`、`get_task_async` 补 `code=row.code`
+（原 review 发现的 PPT 重试丢配置 bug）。
+
+### max-effort code-review 修复（2026-06-03，用户确认 4 项全修）
+
+1. **`slide_rectify.rectify()` height 重复放大 ~20%**：`tl/tr` 原是 `src` 的 numpy view，原地外扩后
+   `_dist` 把上抬量算进边长、再 `*(1+ratio)` 等于 `(1+ratio)²`。修法：角点取 `.copy()` 再外扩 src。
+2. **PPT 强制 VL**：新增 `_ocr_config_for_ppt_mode` + `_ocr_config_for_mode` 分派器，PPT 分支强制
+   `paddle_pipeline="vl"`（与代码模式强制 basic 对称）。依据：官方文档表明 PPT 还原所需
+   markdown+LaTeX 公式+裁图+阅读序**只有 PaddleOCR-VL 能端到端产**（PP-OCRv5 纯文本 / PP-StructureV3
+   无 markdown 无 VLM 语义 / PP-ChatOCRv4 是 KIE）；属能力匹配而非质量对比，故不跑 4 路 bake-off。
+3. **`_rectify_sync` 落盘兜底**：mkdir + 两次 imwrite 整体包 `try/except (OSError, cv2.error)` → 回退原图，
+   兑现"任何失败回退原图、不中断 OCR"契约（原先这段在 try 外，只读目录/编码失败会崩 task）。
+4. **`_order_corners` 旋转塌缩**：旧 x+y/y-x 启发式对旋转四边形会把两角判到同一点（src 退化 → 奇异矩阵）。
+   改"相对质心极角升序排环 + x+y 最小者为左上锚点"，保证 4 角互异。
+
+各项均带回归测试，质量门禁全绿（pytest 1001 passed）。

@@ -1,5 +1,39 @@
 # 开发进度
 
+## 2026-06-03 - 统一 LLM 精修开关 + PPT 按页精修（替代失效的 llm_polish）+ code-review
+
+**背景**：对 PPT 还原模式（AGE-83，S0–S6 刚合并 dev）做了一轮 max-effort code-review，
+随后用户实测反馈 **PPT 模式的 `llm_polish` 无效**——`_ppt_pipeline` 只记 warning 占位、
+从未真正调用精修器。用户要求：**所有模式用同一个 LLM 精修开关统一控制是否精修，
+PPT 模式不再单独设功能**。
+
+**设计决策**（用户确认）：精修默认**开**（保持文档/代码模式现状）；文档模式=分段精修
+（与 OCR 并行），**PPT 模式=按页精修**（同样在出队循环内与 producer OCR 重叠）。
+
+**改动**：
+- `LLMConfig.enable_refine: bool = True`（统一开关）；删除 `PowerPointRestoreConfig.llm_polish`。
+- `Pipeline._get_refiner` 单点拦截：有效 `enable_refine=False` → 返回 None，文档/代码/PPT
+  既有 `if refiner is None: 跳过` 路径统一生效；`initialize` 同步加守卫。
+- `_ppt_pipeline` 重构：逐页出队 → `rewrite_image_refs_to_ocr_dir` → 按页 `_refine_segment_with_cache`
+  （复用文档段级精修的缓存+截断兜底）→ 单页保序组装；签名改为 `(queue, output_dir, report_fn, *, llm, total, quality)`。
+- `render_ppt_document` 加可选 `bodies` 参数（按页预精修正文，None 时维持内部 rewrite）。
+- API：`LLMConfigRequest.enable_refine`；删 `PowerPointRestoreConfigRequest.llm_polish`；client.ts/useTaskRunner 同步。
+- 前端：删 PPT 专属润色 toggle + `pptPolish`，新增独立「LLM 精修」单一 toggle（默认开，全模式生效）→ `llm.enable_refine`；三语 i18n（`refineTitle/refineDesc` + `progress.pptPage`，删 `pptPolishLabel`）。
+- 顺带修 review 发现的 PPT 重试丢配置：`retry_task`/`resume_task` 转发 `ppt=task.ppt`，`get_task_async` 补 `code=row.code`。
+
+**验证**：`bash scripts/check_quality.sh` 全绿（mypy --strict 66 文件 0 错 / ruff / typos /
+前端 tsc + eslint / pytest 998 passed, 45 skipped）。新增 `tests/pipeline/test_ppt_refine.py`
+（按页精修保序 + 统一开关关闭跳过）+ `test_ppt_renderer.py` 加 bodies 用例。设计文档
+`ppt-mode.md`（含 §15 变更记录 + PlantUML 重编译验证）/ `architecture.md` 同步。
+
+**review bug 跟踪（4 个全修复，用户确认）**：① ✅ `slide_rectify.rectify()` numpy view 别名导致 height
+重复乘 `(1+ratio)`、矫正图竖向拉伸 ~20%（角点取 .copy() 再外扩 + 回归测试）；② ✅ PPT 强制 VL（新增
+`_ocr_config_for_ppt_mode` + `_ocr_config_for_mode` 分派器，仿代码模式强制 basic；官方文档结论：PPT 还原所需
+markdown+LaTeX+裁图+阅读序只有 PaddleOCR-VL 能产，非质量对比是能力匹配，故不做 4 路 bake-off）；③ ✅
+`_rectify_sync` 落盘段整体包 try/except(OSError,cv2.error) 回退原图，兑现"任何失败回退原图"契约 + 回归测试；
+④ ✅ `_order_corners` 旋转四边形角点塌缩（改极角排环 + 4 角互异测试）。质量门禁全绿（pytest 1001 passed, 45 skipped）。
+
+
 ## 2026-06-02 - PaddleOCR-VL 1.5 → 1.6 全面升级（废弃 1.5）+ 12G 显存 OOM 修复
 
 **背景**：PPT 还原 spike（AGE-84）选定 VL-1.6 为主引擎后，进一步对比 1.5 vs 1.6——化学结构页两者≈等价

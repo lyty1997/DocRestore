@@ -298,7 +298,10 @@ export const zhTW: Record<TranslationKey, string> = {
     "預設模式：文件照片還原為帶格式的 Markdown，跨頁自動去重合併。",
   "taskForm.pptModeDesc":
     "螢幕拍攝投影片還原為保序 Markdown：自動透視矯正，文字 + 公式（LaTeX），化學結構 / 圖表裁剪為圖片。",
-  "taskForm.pptPolishLabel": "LLM 潤色",
+  "taskForm.refineTitle": "LLM 精修",
+  "taskForm.refineDesc":
+    "對文件 / 程式碼 / PPT 所有模式生效：開啟則用 LLM 精修辨識結果（文件分段、PPT 按頁），關閉則只輸出 OCR 清洗文字。",
+  "progress.pptPage": "PPT 模式：精修第 {current}/{total} 頁",
   "progress.pptRender": "PPT 模式：組裝文件...",
   "progress.pptDone": "PPT 模式：完成",
   // ── API 業務錯誤 ──

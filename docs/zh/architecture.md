@@ -87,9 +87,10 @@ DocRestore 将连续拍摄的文档照片还原为格式化的 Markdown 文档�
     → ④ 跨页按路径/文件名分组为 SourceFile → ⑤ LLM 字符级精修/修复
     → ⑥ 轻量诊断 → ⑦ 输出 files/、files-index.json 和兼容 Markdown
 
-PPT 模式分支（_ppt_pipeline，设计中，见 ppt-mode.md）：
+PPT 模式分支（_ppt_pipeline，见 ppt-mode.md）：
   ① S2 透视矫正(逐页前处理) → ② VL-1.6 doc_parser 版面识别 + 化学结构裁图
-    → ③ 单页保序组装 → ④ 多页按原序合并(不去重) → ⑤ 可选 LLM 轻润色
+    → ③ 逐页出队 + 按页 LLM 精修(统一开关 enable_refine，与 OCR 重叠)
+    → ④ 单页保序组装 → ⑤ 多页按原序合并(不去重)
     → ⑥ 输出 document.md、images/
 ```
 

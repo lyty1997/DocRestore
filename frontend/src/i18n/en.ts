@@ -305,7 +305,10 @@ export const en: Record<TranslationKey, string> = {
     "Default: restore document photos to formatted Markdown, with cross-page dedup.",
   "taskForm.pptModeDesc":
     "Restore screen-shot slides to ordered Markdown: auto perspective rectify, text + formulas (LaTeX); chemical structures / charts cropped as images.",
-  "taskForm.pptPolishLabel": "LLM Polish",
+  "taskForm.refineTitle": "LLM Refine",
+  "taskForm.refineDesc":
+    "Applies to all modes (Document / Code / PPT): when on, refine OCR results with the LLM (document by segment, PPT by page); when off, output cleaned OCR text only.",
+  "progress.pptPage": "PPT mode: refining page {current}/{total}",
   "progress.pptRender": "PPT mode: assembling document...",
   "progress.pptDone": "PPT mode: done",
   // ── API business errors ──

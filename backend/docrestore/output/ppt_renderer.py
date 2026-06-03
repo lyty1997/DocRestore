@@ -37,6 +37,7 @@ async def render_ppt_document(
     output_dir: Path,
     *,
     output_config: OutputConfig | None = None,
+    bodies: list[str] | None = None,
 ) -> tuple[Path, str]:
     """单页保序组装 + 多页按文件序合并为单个 ``document.md``。
 
@@ -46,14 +47,27 @@ async def render_ppt_document(
     - 复用 ``Renderer.render``：裁图复制到 ``images/{stem}_N``、磁盘版去锚点、
       内存版保留锚点（前端滚动定位）。
 
+    ``bodies`` 非空时按页使用调用方提供的、**已重写图片引用 + 可选按页 LLM
+    精修**的正文（须与 ``pages`` 等长一一对应），render 不再重复 rewrite；为
+    None 时内部用 ``rewrite_image_refs_to_ocr_dir`` 计算（无精修的默认路径）。
+
     ``pages`` 须已按输入文件顺序（``scan_images`` 序）排列。
     返回 ``(document.md 路径, 含 page-marker 的内存版 markdown)``。
     """
+    if bodies is not None and len(bodies) != len(pages):
+        msg = (
+            f"render_ppt_document: bodies 长度 {len(bodies)} "
+            f"与 pages 长度 {len(pages)} 不一致"
+        )
+        raise ValueError(msg)
     sections: list[str] = []
     all_regions: list[Region] = []
-    for page in pages:
+    for i, page in enumerate(pages):
         marker = f"<!-- page: {page.image_path.name} -->"
-        body = rewrite_image_refs_to_ocr_dir(page).strip()
+        body = (
+            bodies[i] if bodies is not None
+            else rewrite_image_refs_to_ocr_dir(page)
+        ).strip()
         sections.append(f"{marker}\n{body}")
         all_regions.extend(page.regions)
 

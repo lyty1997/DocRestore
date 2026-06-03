@@ -78,6 +78,8 @@ export interface LLMConfig {
   model?: string | undefined;
   api_base?: string | undefined;
   api_key?: string | undefined;
+  /** 统一 LLM 精修总开关（文档分段 / 代码 / PPT 按页共用）；省略=后端默认 true */
+  enable_refine?: boolean | undefined;
 }
 
 /** 自定义敏感词条目：word 必填，code 可选（为空时后端回退到默认占位符） */
@@ -100,7 +102,6 @@ export interface CodeRestoreConfig {
 /** PPT 屏摄还原模式配置 */
 export interface PowerPointRestoreConfig {
   enable: boolean;
-  llm_polish?: boolean | undefined;
 }
 
 /** 处理模式三选一 */
@@ -229,9 +230,11 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
     };
   }, []);
 
-  /* AGE-8 IDE 代码模式：勾选后强制 OCR 走 basic pipeline 输出独立源文件 */
+  /* 处理模式三选一：doc（默认）/ code（IDE 代码）/ ppt（屏摄幻灯片） */
   const [mode, setMode] = useState<ProcessingMode>("doc");
-  const [pptPolish, setPptPolish] = useState(false);
+  /* 统一 LLM 精修开关：对所有模式生效（文档分段 / 代码 / PPT 按页）。
+     默认开，保持文档/代码模式既有行为；关闭时所有模式只输出 OCR 清洗结果。 */
+  const [refineEnabled, setRefineEnabled] = useState(true);
 
   /* 脱敏开关 + 敏感词（每条可选独立代号） */
   const [piiEnabled, setPiiEnabled] = useState(false);
@@ -446,13 +449,16 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
 
     /* provider 非默认值（local）也算"显式覆盖"，需要透传给后端 */
     const providerOverridden = llmProvider !== DEFAULT_LLM_PROVIDER;
+    /* refine 关闭时即使无其它覆盖也必须发 llm（携带 enable_refine=false）；
+       开启且无其它覆盖时 llm=undefined，后端用默认 enable_refine=true */
     const llm: LLMConfig | undefined =
-      model || apiBase || apiKey || providerOverridden
+      model || apiBase || apiKey || providerOverridden || !refineEnabled
         ? {
             provider: providerOverridden ? llmProvider : undefined,
             model: model || undefined,
             api_base: apiBase || undefined,
             api_key: apiKey || undefined,
+            enable_refine: refineEnabled,
           }
         : undefined;
 
@@ -483,7 +489,7 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
     const code: CodeRestoreConfig | undefined =
       mode === "code" ? { enable: true } : undefined;
     const ppt: PowerPointRestoreConfig | undefined =
-      mode === "ppt" ? { enable: true, llm_polish: pptPolish } : undefined;
+      mode === "ppt" ? { enable: true } : undefined;
 
     onSubmit(
       trimmed,
@@ -781,25 +787,31 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
           <p className="pii-desc">{t("taskForm.codeModeDesc")}</p>
         )}
         {mode === "ppt" && (
-          <>
-            <p className="pii-desc">{t("taskForm.pptModeDesc")}</p>
-            <label className="toggle-switch" htmlFor="ppt-polish-toggle">
-              <input
-                id="ppt-polish-toggle"
-                type="checkbox"
-                checked={pptPolish}
-                onChange={(e) => {
-                  setPptPolish(e.target.checked);
-                }}
-                disabled={disabled}
-              />
-              <span className="toggle-slider" />
-              <span className="toggle-label">
-                {t("taskForm.pptPolishLabel")}
-              </span>
-            </label>
-          </>
+          <p className="pii-desc">{t("taskForm.pptModeDesc")}</p>
         )}
+      </div>
+
+      {/* 统一 LLM 精修开关：对文档 / 代码 / PPT 三模式均生效 */}
+      <div className="form-group pii-section">
+        <div className="pii-header">
+          <span className="pii-title">{t("taskForm.refineTitle")}</span>
+          <label className="toggle-switch" htmlFor="refine-toggle">
+            <input
+              id="refine-toggle"
+              type="checkbox"
+              checked={refineEnabled}
+              onChange={(e) => {
+                setRefineEnabled(e.target.checked);
+              }}
+              disabled={disabled}
+            />
+            <span className="toggle-slider" />
+            <span className="toggle-label">
+              {refineEnabled ? t("common.enabled") : t("common.disabled")}
+            </span>
+          </label>
+        </div>
+        <p className="pii-desc">{t("taskForm.refineDesc")}</p>
       </div>
 
       {/* 脱敏功能 */}

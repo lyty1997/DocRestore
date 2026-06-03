@@ -78,19 +78,23 @@ def _dist(a: NDArray[np.float32], b: NDArray[np.float32]) -> float:
 def _order_corners(pts: NDArray[np.float32]) -> Quad:
     """把任意顺序的 4 个角点排成 左上 / 右上 / 右下 / 左下。
 
-    经典方法：x+y 最小为左上、最大为右下；y-x 最小为右上、最大为左下。
+    按各点相对质心的极角升序排环（图像坐标 y 向下时，升序恰好是
+    左上 → 右上 → 右下 → 左下 的顺时针环序），再以 x+y 最小者为左上锚点
+    循环对齐。相比旧的"x+y 最小=左上 / y-x 最小=右上"启发式，本法对旋转 /
+    强倾斜四边形也不会把两角塌到同一点——每点极角唯一 ⇒ 4 角必互异，
+    避免 getPerspectiveTransform 因重复点得到奇异矩阵、产出乱图。
     """
-    s = pts.sum(axis=1)
-    diff = pts[:, 1] - pts[:, 0]  # y - x
-    tl = pts[int(np.argmin(s))]
-    br = pts[int(np.argmax(s))]
-    tr = pts[int(np.argmin(diff))]
-    bl = pts[int(np.argmax(diff))]
+    center = pts.mean(axis=0)
+    angles = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
+    ordered = pts[np.argsort(angles)]
+    # 极角环序已是 左上→右上→右下→左下，旋到 x+y 最小者（最靠左上）为起点
+    tl_pos = int(np.argmin(ordered.sum(axis=1)))
+    ordered = np.roll(ordered, -tl_pos, axis=0)
     return Quad(
-        top_left=(int(tl[0]), int(tl[1])),
-        top_right=(int(tr[0]), int(tr[1])),
-        bottom_right=(int(br[0]), int(br[1])),
-        bottom_left=(int(bl[0]), int(bl[1])),
+        top_left=(int(ordered[0][0]), int(ordered[0][1])),
+        top_right=(int(ordered[1][0]), int(ordered[1][1])),
+        bottom_right=(int(ordered[2][0]), int(ordered[2][1])),
+        bottom_left=(int(ordered[3][0]), int(ordered[3][1])),
     )
 
 
@@ -131,15 +135,21 @@ def rectify(
     顶边上抬：屏摄常被吊顶 / 暗标题栏遮挡，把源四边形顶边沿"向上"方向
     外扩 top_extend_ratio 比例，使矫正结果纳入标题栏区域。
     """
-    src = quad.as_array().copy()
-    tl, tr, br, bl = src[0], src[1], src[2], src[3]
+    src = quad.as_array()
+    # 取原始角点副本：下面要原地外扩 src[0]/src[1]，而 tl/tr/br/bl 必须保持
+    # 原值用于测距——它们若是 src 的视图，被外扩后 _dist(bl, tl) 会把上抬量算进
+    # 边长，再乘 (1+ratio) 等于重复放大，矫正图竖向被多拉伸 (1+ratio) 倍。
+    tl, tr, br, bl = (
+        src[0].copy(), src[1].copy(), src[2].copy(), src[3].copy(),
+    )
     # 左右两条竖边的"向上"向量（底 → 顶），用于把顶边外扩
     left_up = tl - bl
     right_up = tr - br
     src[0] = tl + left_up * top_extend_ratio   # 顶左外扩
     src[1] = tr + right_up * top_extend_ratio  # 顶右外扩
 
-    # 目标矩形尺寸：宽取上下边最大长度，高取左右边最大长度（含上抬）
+    # 目标矩形尺寸：宽取上下边最大长度（原始角点）；高取左右边原始最大长度，
+    # 按上抬比例放大一次（= 外扩后源四边形的竖向跨度），不再重复乘。
     width = max(_dist(tr, tl), _dist(br, bl))
     height = max(_dist(bl, tl), _dist(br, tr)) * (1.0 + top_extend_ratio)
     w, h = int(round(width)), int(round(height))
@@ -182,16 +192,25 @@ def _rectify_sync(
         return image_path
 
     rectified_dir = output_dir / debug_dir
-    rectified_dir.mkdir(parents=True, exist_ok=True)
     stem = image_path.stem
     suffix = image_path.suffix or ".jpg"
     after_path = rectified_dir / f"{stem}_after{suffix}"
-    if not cv2.imwrite(str(after_path), warped):
-        logger.warning("矫正图写盘失败，回退原图：%s", image_path.name)
+    # 落盘段整体兜底：mkdir / imwrite 可能抛 OSError（只读目录、磁盘满、父级是
+    # 文件）或 cv2.error（编码失败），统一回退原图，兑现"任何失败回退原图、
+    # 不中断下游 OCR"契约（否则异常会冒泡到 _ocr_producer 崩整个 task）。
+    try:
+        rectified_dir.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(after_path), warped):
+            logger.warning("矫正图写盘失败，回退原图：%s", image_path.name)
+            return image_path
+        if save_debug:
+            # before 对照：原图副本，便于与 after 目视对比验收
+            cv2.imwrite(str(rectified_dir / f"{stem}_before{suffix}"), image)
+    except (OSError, cv2.error):
+        logger.warning(
+            "矫正图落盘异常，回退原图：%s", image_path.name, exc_info=True,
+        )
         return image_path
-    if save_debug:
-        # before 对照：原图副本，便于与 after 目视对比验收
-        cv2.imwrite(str(rectified_dir / f"{stem}_before{suffix}"), image)
     return after_path
 
 

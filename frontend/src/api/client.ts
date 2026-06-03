@@ -58,6 +58,8 @@ interface CreateTaskBody {
     api_base?: string | undefined;
     api_key?: string | undefined;
     max_chars_per_segment?: number | undefined;
+    /** 统一 LLM 精修总开关（文档/代码/PPT 共用）；省略=后端默认 true */
+    enable_refine?: boolean | undefined;
   } | undefined;
   pii?: {
     enable?: boolean | undefined;
@@ -76,7 +78,6 @@ interface CreateTaskBody {
   } | undefined;
   ppt?: {
     enable: boolean;
-    llm_polish?: boolean | undefined;
   } | undefined;
 }
 

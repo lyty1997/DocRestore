@@ -579,6 +579,7 @@ class TaskManager:
             llm=row.llm,
             ocr=row.ocr,
             pii=row.pii,
+            code=row.code,
             ppt=row.ppt,
             error=row.error,
             created_at=datetime.fromisoformat(row.created_at),
@@ -897,6 +898,7 @@ class TaskManager:
             ocr=task.ocr,
             pii=task.pii,
             code=code,
+            ppt=task.ppt,
         )
 
     async def resume_task(self, task_id: str) -> Task | str | None:
@@ -926,6 +928,7 @@ class TaskManager:
             ocr=task.ocr,
             pii=task.pii,
             code=code,
+            ppt=task.ppt,
         )
 
     @staticmethod

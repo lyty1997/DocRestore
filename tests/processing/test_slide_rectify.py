@@ -63,6 +63,23 @@ def test_order_corners_sorts_to_tl_tr_br_bl() -> None:
     assert quad.bottom_left == (100, 500)
 
 
+def test_order_corners_rotated_no_collision() -> None:
+    """旋转(菱形)四边形：4 角必互异、不塌缩。
+
+    回归：旧的 x+y 最小=左上 / y-x 最大=左下 启发式对 ~45° 旋转四边形会把
+    同一个点同时判成左上和左下（tl==bl），src 退化 → getPerspectiveTransform
+    出奇异矩阵 → 矫正乱图。极角排环法保证 4 角互异。
+    """
+    diamond = np.array(
+        [(20, 300), (300, 20), (480, 260), (260, 480)], dtype=np.float32,
+    )
+    quad = _order_corners(diamond)
+    corners = [
+        quad.top_left, quad.top_right, quad.bottom_right, quad.bottom_left,
+    ]
+    assert len(set(corners)) == 4
+
+
 def test_detect_finds_trapezoid() -> None:
     """合成透视梯形应被检测为四边形，4 角接近输入角（容差内）。"""
     img = _make_slide_image(_TRAPEZOID)
@@ -101,6 +118,26 @@ def test_rectify_outputs_positive_frontal() -> None:
     assert warped.shape[1] > 0
 
 
+def test_rectify_height_single_extend() -> None:
+    """height 只按 top_extend_ratio 放大一次（回归 numpy view 别名重复放大）。
+
+    旧实现里 tl/tr 是 src 的视图，原地外扩后 _dist(bl, tl) 已含上抬量，再乘
+    (1+ratio) ⇒ 高 = 原边长*(1+ratio)²，矫正图竖向被多拉伸 ~20%。
+    """
+    tl, tr, br, bl = (200, 100), (600, 100), (700, 500), (100, 500)
+    img = _make_slide_image([tl, tr, br, bl])
+    quad = Quad(
+        top_left=tl, top_right=tr, bottom_right=br, bottom_left=bl,
+    )
+    ratio = 0.2
+    warped = rectify(img, quad, top_extend_ratio=ratio)
+    side = ((bl[0] - tl[0]) ** 2 + (bl[1] - tl[1]) ** 2) ** 0.5
+    expected = side * (1.0 + ratio)        # 正确：只乘一次
+    double = side * (1.0 + ratio) ** 2     # 旧 bug：重复乘
+    assert abs(warped.shape[0] - round(expected)) <= 2
+    assert abs(warped.shape[0] - round(double)) > 2
+
+
 async def test_rectify_page_saves_before_after(tmp_path: Path) -> None:
     """合成梯形图矫正成功：返回 .rectified 下的 after 路径 + before/after 落盘。"""
     src = tmp_path / "slide.jpg"
@@ -121,6 +158,21 @@ async def test_rectify_page_fallback_on_blank(tmp_path: Path) -> None:
     result = await rectify_page(src, out_dir)
     assert result == src
     assert not (out_dir / ".rectified").exists()
+
+
+async def test_rectify_page_fallback_on_unwritable_dir(tmp_path: Path) -> None:
+    """落盘目录建不出来（output_dir 是文件）：回退原图、不抛异常。
+
+    回归：矫正成功后的 mkdir/imwrite 段曾在 try/except 外，OSError 会冒泡崩 task，
+    违反"任何失败回退原图"契约。
+    """
+    src = tmp_path / "slide.jpg"
+    cv2.imwrite(str(src), _make_slide_image(_TRAPEZOID))
+    # output_dir 指向已存在的文件 → mkdir(output_dir/.rectified) 抛 NotADirectoryError
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")
+    result = await rectify_page(src, blocker)
+    assert result == src
 
 
 @pytest.mark.skipif(
