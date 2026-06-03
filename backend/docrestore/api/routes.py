@@ -68,6 +68,7 @@ from docrestore.pipeline.config import (
     LLMConfig,
     OCRConfig,
     PIIConfig,
+    PowerPointRestoreConfig,
 )
 
 if TYPE_CHECKING:
@@ -390,6 +391,22 @@ async def create_task(
             update=req.code.model_dump(exclude_none=True),
         )
 
+    ppt_cfg: PowerPointRestoreConfig | None = None
+    if req.ppt is not None:
+        ppt_cfg = defaults.ppt.model_copy(
+            update=req.ppt.model_dump(exclude_none=True),
+        )
+
+    # 文档 / 代码 / PPT 三模式互斥：code 与 ppt 不能同时启用
+    if (
+        code_cfg is not None and code_cfg.enable
+        and ppt_cfg is not None and ppt_cfg.enable
+    ):
+        raise ApiBusinessError(
+            APIErrorCode.MODE_CONFLICT, 400,
+            "代码模式与 PPT 模式不能同时启用",
+        )
+
     task = manager.create_task(
         image_dir=req.image_dir,
         output_dir=req.output_dir,
@@ -397,6 +414,7 @@ async def create_task(
         ocr=ocr_cfg,
         pii=pii_cfg,
         code=code_cfg,
+        ppt=ppt_cfg,
     )
     logger.info("任务已创建: task_id=%s", task.task_id)
     bg = asyncio.create_task(

@@ -74,6 +74,10 @@ interface CreateTaskBody {
     enable: boolean;
     output_files_dir?: string | undefined;
   } | undefined;
+  ppt?: {
+    enable: boolean;
+    llm_polish?: boolean | undefined;
+  } | undefined;
 }
 
 /** 合并认证 header 与自定义 header */

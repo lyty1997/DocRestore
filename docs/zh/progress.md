@@ -866,3 +866,107 @@ AGE-72 / 探测信号 AGE-73 / 决策策略 AGE-74 / API AGE-75 / 前端 AGE-76�
 遗留问题：
 - `80d16349` 中 `openmax_status.h` 出现 LLM `repair.truncated`（baseline 是 `repair.applied=1`），导致 OCR 噪声字符（如 `王`、枚举名首字母 `E` 误识为 `F`、`StatusTraits {` 误识为 `StatusTraits Y` 等）残留——属 LLM 输出长度抖动，与本次 revert 无关；可考虑独立排期 `code_repair` 的 truncated 重试或 max_tokens 自适应策略。
 - baseline 也合不到的 3 个剩余 noisy 变体（`media/gpu7openmax/...h`、`media/openmax_..._accelerator.h`、`media/openmax_..._accelerator.cc`）是 `_dirs_compatible` 旧规则盲区（compact 既不等也不互为后缀且不空），不在本次回归范围；若未来要堵 a/x↔b/x 桥接，正确做法是先在 `_dirs_compatible` 内为非空 compact 加 Levenshtein ≤ 2 容忍再换全连接（方案 B），不要直接砍单连接。
+
+## 2026-06-03 CST - PPT 还原模式 S1 设计定稿 + OpenSpec 生成（AGE-85）
+
+完成内容：
+- 基于 S0 选型结论（AGE-84：VL-1.6 主引擎 + 透视矫正必需 + 化学结构裁图，剔除 MinerU/dots），产出 PPT 模式 S1 设计文档 `docs/zh/ppt-mode.md`（约 560 行，含三模式分支架构组件图 + 端到端流水线活动图，均经 PlantUML 真编译验证）。
+- 架构定位：流式 Pipeline 第三消费者分支 `_ppt_pipeline`，与文档/代码模式互斥三选一，共享 `_ocr_producer` + `page_queue`。链路 S2 透视矫正(逐页前处理 hook) → S3 VL-1.6 doc_parser 识别+自动裁图 → S4 逐页保序组装合并 document.md。
+- 关键决策（用户 2026-06-03 拍板 6 项）：A 不跨页去重（每页独立幻灯片）；B LLM 轻润色默认关 + 前端透出开关（按 OCR 效果决定）；C 前端 radio 三选一互斥（替代 codeMode toggle）；D 信任 VL 阅读序、留 S3 实测回退 region bbox 排序；E 页间分隔线 + page marker；F DB ppt 列同 code 列机制。
+- 复用 `PageOCR`（VL markdown 入 raw_text、裁图入 Region.cropped_path）、`PipelineResult`、两阶段图片引用、前端多文档展示；净新增 `slide_rectify.py` + `ppt_renderer.py` + 1 config + 1 request schema + 1 消费者分支 + producer hook + 前端三选一 + DB migration（工程量评估「刚刚好」）。设计文档 §7 已列 17 处接入点 文件:行。
+- 首次在项目引入 OpenSpec（CLI v1.2.0，`openspec init --tools claude`）：生成 change `add-ppt-restore-mode`，含 proposal/design/tasks + 4 个 capability spec（ppt-perspective-rectify / ppt-page-recognition / ppt-document-assembly / ppt-mode-integration，对应 S2–S5）。
+- 同步 `docs/zh/architecture.md`（§3 数据流加 PPT 分支、§6.3 扩展边界加指针，均标注「设计中」）。
+
+验证：
+- `bash ~/.claude/skills/plantuml-in-markdown/scripts/extract_and_compile.sh docs/zh/ppt-mode.md`：2 张图 exit 0、非空 PNG。
+- `openspec validate add-ppt-restore-mode --strict`：valid，退出码 0（0/32 tasks）。
+
+遗留问题：
+- OpenCV(cv2) 既未在 `pyproject.toml` 声明也未在生产 env 安装 → S2(AGE-86) 接入第一步必须补（tasks 1.1）。
+- B/D 两项留实测口：VL 单页阅读序可靠性、LLM 轻润色收益均待 S3 真图实测决定。
+- 下一步：S2（AGE-86）透视矫正开工（待用户确认）。
+
+## 2026-06-03 CST - PPT 模式 S2 透视矫正落地（AGE-86）
+
+完成内容：
+- 新增 `backend/docrestore/processing/slide_rectify.py`：`detect_slide_quad`（Otsu 亮区→最大外轮廓→approxPolyDP 取4角）/ `rectify`（warpPerspective 转正视图 + 顶边上抬 20% 补暗标题栏）/ `rectify_page`（异步入口 `asyncio.to_thread`，落盘 `.rectified/` before/after，失败回退原图不中断）。
+- 模块纯图像处理、不依赖 `PipelineConfig`（解耦）；pipeline 接入（`_ocr_producer` 逐页 hook）留 S5/AGE-89 tasks 4.7。
+- 依赖 `opencv-python-headless` 加进 `pyproject.toml` + 装入 docrestore env（cv2 4.13.0）；cv2 加 mypy override。
+- 单测 `tests/processing/test_slide_rectify.py` 8 例：合成图确定性（检测/角点排序/矫正/小亮块过滤）+ `rectify_page` 落盘与回退；断言从输入派生。
+
+验证：
+- `pytest tests/processing/test_slide_rectify.py`：8 passed。
+- 真图 `test_images/PPT` **9/9 全命中**：1706×1279 屏摄 → ~1200×970 正视图，强透视拉正、标题栏完整、吊顶/观众裁掉（before/after 对照留存 `/tmp/ppt_rectify_evidence`）。
+- processing 全量 284 passed 无回归。
+- commit `01ad20b`（分支 `feature/ppt-restore-mode`）；AGE-86 → Done。
+
+遗留问题：
+- 矫正对当前 9 张屏摄 100% 命中；更复杂场景（下边缘被观众严重遮挡、屏幕强反光）鲁棒性待 S6 全量/更多数据验证。
+- pipeline 接入 + `.rectified/` 打包排除留 S5。
+
+## 2026-06-03 CST - PPT 模式 S3 VL doc_parser 识别验证（AGE-87）
+
+完成内容：
+- 起 PaddleOCR-VL-1.6 vllm-server（`EngineManager.ensure`，启动 ~50s），对 S2 矫正后 3 张真图跑 `doc_parser`，验证 S1 设计 §11-C/§14-D 关键假设。
+- **化学结构裁图覆盖** ✓：化学骨架式/SMILES 反应路径裁成 `images/*.jpg`（HTML img 引用），不误转文字（501 页裁 2 张、503 页裁 11 张）。
+- **公式 LaTeX** ✓：数据表内 kcat 单位 `$1/s$`、`$^{+}$` 转 LaTeX；数据表识别为 HTML table（Entry/Gene/Organism/kcat/EC 共 7 列，EC 号准确）。
+- **阅读序可靠** ✓：标题→正文→图→表→说明顺序正确 → **决策 D 确认：信任 VL 阅读序，不引入 region bbox 排序**（§11-C/§14-D 关闭）。
+
+验证：
+- 3 张矫正图 OCR 成功：raw_text 414/269/2365 字，regions 2/1/11；产出 `{stem}_OCR/result.mmd` + `images/`。
+- GPU 干净释放（server shutdown 无 vllm 孤儿残留）；证据留存 `/tmp/ppt_ocr_out`。
+
+遗留问题：
+- 2.1（PPT OCR 配置确保 vl、不走 code 强制 basic）属 S5 `ocr_effective` 分支代码，留 S5/AGE-89。
+- 本次验证 3 张（化学页 + 数据表页）；全量 9 张及更多版式覆盖在 S6 E2E。
+
+## 2026-06-03 CST - PPT 模式 S4 ppt_renderer 多页保序合并（AGE-88）
+
+完成内容：
+- 新增 `backend/docrestore/output/ppt_renderer.py::render_ppt_document`：单页按 VL 阅读序组装 → 多页按输入文件序合并单 `document.md`，**不跨页去重**（每页独立幻灯片），复用 `Renderer.render` 做图片复制/marker 处理/写盘。
+- 重构 `processing/dedup.py`：抽出 module 级 public `rewrite_image_refs_to_ocr_dir`（图片引用加 `{stem}_OCR` 前缀），`PageDeduplicator._rewrite_image_refs` 委托，文档/PPT 模式共用单一真相源。
+- **修 `output/renderer.py` 图片正则不支持中文/Unicode 文件名 bug**：`[A-Za-z0-9_.]+` → markdown `[^/)]+` / HTML `[^/]+`，文档模式同受益；已记 `known-issues.md`。
+- LLM 轻润色（3.4）移至 S5 `_ppt_pipeline`（render 纯组装）。
+
+验证：
+- 单测 `tests/output/test_ppt_renderer.py` 5 例：保序 / 不跨页去重 / HTML img 重写+复制 / marker 磁盘去内存留 / 分隔线。
+- 回归 tests/output + pipeline + processing/test_dedup **223 passed**（含 renderer 正则改动）。
+- **真实端到端**（S2 矫正 → S3 VL doc_parser → S4 组装）：3 页真实 PageOCR → `document.md` 3840 bytes，保序合并（FGRFP→NeoPathTP→REME）+ 分隔线 + 5 张中文文件名裁图复制 + 数据表 HTML/LaTeX + 化学结构图引用，阅读序正确。
+- commit `0fbd7f6`（分支 `feature/ppt-restore-mode`）。
+
+遗留问题：
+- LLM 轻润色在 S5 `_ppt_pipeline` 接入。
+- 真实验证 3 页；全量 9 页 + 多版式 E2E 在 S6。
+
+## 2026-06-03 CST - PPT 模式 S5 全栈接入（AGE-89）
+
+完成内容：
+- **后端**（commit `13ace55`）：`config` PowerPointRestoreConfig + PipelineConfig.ppt；`schemas` 请求 schema + CreateTaskRequest.ppt；`errors` APIErrorCode.MODE_CONFLICT；`routes` ppt_cfg 合成 + code/ppt 互斥校验；`task_manager` Task.ppt + `database` DB ppt 列 migration（同 code 列机制）；`pipeline` process_tree/process_many/_stream_pipeline 签名加 ppt + `elif ppt_cfg.enable` → `_ppt_pipeline` + `_ocr_producer` 矫正 hook（逐页 rectify_page，page.image_path 改回原图名）+ 新增 `_ppt_pipeline`（保序组装，润色占位）。
+- **前端**（commit `2b12ddd`）：TaskForm codeMode toggle → mode radio 三选一（文档/代码/PPT 互斥）+ PPT 润色开关；useTaskRunner/client ppt 透传；i18n 3-locale；App.css radio 样式。
+- `slide_rectify` ImageBGR 改 `cv2.typing.MatLike`（适配 opencv 4.13 自带 stub）。
+
+验证：
+- 全量 backend mypy **Success（65 files）**；后端 **613 passed** 无回归。
+- 前端 `tsc -b` + eslint 通过；**playwright 视觉验证**：radio 三选一并列、选 PPT 切换描述 + 显示润色开关。
+
+遗留：
+- 4.11 下载打包排除 `.rectified/` 留 S6（点目录，影响小）。
+- LLM 轻润色 `_ppt_pipeline` 占位（开启记 warning 未接入）；完整实现后续。
+- 下一步 S6（AGE-90）：全量 9 图 E2E + 质量门禁 + 文档收尾。
+
+## 2026-06-03 CST - PPT 模式 S6 全量 E2E + 质量门禁（AGE-90，父 AGE-83 闭环）
+
+完成内容：
+- 完整 Pipeline 跑 PPT 模式 on `test_images/PPT` 全 **9 图**（`process_tree(ppt=PowerPointRestoreConfig(enable=True))`，与前端建任务同链路）：9 图屏摄 → 矫正（`.rectified/` 18 张 before/after）→ VL `doc_parser` 识别 → `_ppt_pipeline` 组装。
+- 产出 `document.md` 9636 bytes，**9 页 marker 全保序**（页序 = 输入文件序），14 张裁图复制，无错误；三类内容齐全（文字 + 公式 LaTeX + 化学/表格裁图引用）。
+- 4.11 确认：下载打包白名单仅 `document.md` + `images/**`，`.rectified/` 天然排除，无需改动。
+
+验证：
+- **质量门禁全绿**：backend mypy --strict Success(65) + ruff All passed + typos OK + 后端 613 passed；前端 `tsc -b` + eslint + playwright 视觉验证。
+- GPU shutdown 干净释放（15 MiB）。
+- 父 AGE-83 + S0–S6（AGE-84~90）全部 Done。
+
+遗留：
+- LLM 轻润色 `_ppt_pipeline` 占位（开启记 warning 未接入）；完整实现后续。
+- 英文文档 `docs/en/` PPT 模式同步留后续。
+- **PPT 还原模式 S0–S6 全部完成**；`feature/ppt-restore-mode` 待合并 `dev`。

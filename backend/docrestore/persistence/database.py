@@ -30,6 +30,7 @@ from docrestore.pipeline.config import (
     LLMConfig,
     OCRConfig,
     PIIConfig,
+    PowerPointRestoreConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     ocr          TEXT,
     pii          TEXT,
     code         TEXT,
+    ppt          TEXT,
     error        TEXT,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
@@ -90,6 +92,9 @@ class TaskRow:
     error: str | None
     created_at: str
     updated_at: str
+    #: PPT 模式配置快照（末尾 + 默认 None：dataclass 默认值顺序约束，
+    #: 兼容旧测试/旧行不传该字段）。
+    ppt: PowerPointRestoreConfig | None = None
 
 
 @dataclass
@@ -149,7 +154,7 @@ class TaskDatabase:
         await self._db.execute(_CREATE_RESULTS)
         await self._db.execute(_CREATE_RESULTS_IDX)
 
-        for col in ("llm", "ocr", "pii", "code"):
+        for col in ("llm", "ocr", "pii", "code", "ppt"):
             await self._migrate_add_column("tasks", col, "TEXT")
         await self._migrate_add_column(
             "task_results", "error", "TEXT NOT NULL DEFAULT ''",
@@ -191,18 +196,19 @@ class TaskDatabase:
         ocr: OCRConfig | None = None,
         pii: PIIConfig | None = None,
         code: CodeRestoreConfig | None = None,
+        ppt: PowerPointRestoreConfig | None = None,
         created_at: str | None = None,
     ) -> None:
-        """插入新任务。llm/ocr/pii/code 为完整 Config 快照。"""
+        """插入新任务。llm/ocr/pii/code/ppt 为完整 Config 快照。"""
         db = self._get_db()
         now = created_at or datetime.now().isoformat()
         await db.execute(
             """\
             INSERT INTO tasks
                 (task_id, status, image_dir, output_dir,
-                 llm, ocr, pii, code,
+                 llm, ocr, pii, code, ppt,
                  created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task_id,
                 status,
@@ -212,6 +218,7 @@ class TaskDatabase:
                 ocr.model_dump_json() if ocr is not None else None,
                 pii.model_dump_json() if pii is not None else None,
                 code.model_dump_json() if code is not None else None,
+                ppt.model_dump_json() if ppt is not None else None,
                 now,
                 now,
             ),
@@ -282,7 +289,7 @@ class TaskDatabase:
             """\
             SELECT task_id, status, image_dir, output_dir,
                    llm, ocr, pii, code,
-                   error, created_at, updated_at
+                   error, created_at, updated_at, ppt
             FROM tasks WHERE task_id=?""",
             (task_id,),
         )
@@ -401,6 +408,7 @@ class TaskDatabase:
         ocr_raw = row[5]
         pii_raw = row[6]
         code_raw = row[7]
+        ppt_raw = row[11]
         return TaskRow(
             task_id=row[0],
             status=row[1],
@@ -412,6 +420,10 @@ class TaskDatabase:
             code=(
                 CodeRestoreConfig.model_validate_json(code_raw)
                 if code_raw else None
+            ),
+            ppt=(
+                PowerPointRestoreConfig.model_validate_json(ppt_raw)
+                if ppt_raw else None
             ),
             error=row[8],
             created_at=row[9],
