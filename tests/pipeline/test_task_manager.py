@@ -769,3 +769,43 @@ class TestShutdown:
         # shutdown 不应把 RuntimeError 抛出来
         await mgr.shutdown()
         assert bg.done()
+
+
+class TestLoadPersistedResilience:
+    """#14：单条损坏行不应中断整个历史任务装回。"""
+
+    @pytest.mark.asyncio
+    async def test_corrupt_row_skipped_not_abort(
+        self, tmp_path: Path,
+    ) -> None:
+        """status 非法的损坏行被跳过，先于它的好任务仍正常装回。"""
+        db = TaskDatabase(str(tmp_path / "t.db"))
+        await db.initialize()
+        try:
+            # 坏任务 created_at 更新 → list_tasks(DESC) 先返回、先被处理：
+            # 旧代码会在这里抛 ValueError 中断，把后续好任务全丢。
+            await db.insert_task(
+                task_id="bad00001", status="completed",
+                image_dir="/img", output_dir=str(tmp_path / "b"),
+                created_at="2026-06-04T12:00:00",
+            )
+            await db.insert_task(
+                task_id="good0001", status="completed",
+                image_dir="/img", output_dir=str(tmp_path / "g"),
+                created_at="2026-06-04T10:00:00",
+            )
+            # 把坏任务 status 改成枚举外的值（模拟旧版 / 损坏行）
+            conn = db._get_db()
+            await conn.execute(
+                "UPDATE tasks SET status=? WHERE task_id=?",
+                ("bogus_status", "bad00001"),
+            )
+            await conn.commit()
+
+            mgr = _make_manager(db=db)
+            await mgr.load_persisted_tasks()
+
+            assert mgr.get_task("good0001") is not None  # 好任务装回
+            assert mgr.get_task("bad00001") is None  # 坏任务被跳过
+        finally:
+            await db.close()

@@ -1108,6 +1108,25 @@ pytest 1035 passed（新增 `test_entity_redaction.py` +6 / `test_producer_cance
 **遗留**：#11–#22 共 12 项待修（Milestone 跟踪）。代码模式 `_redact_code_headers` 的检测失败
 fail-closed 未纳入本次（结构不同：头部仅本地 redact，是否经 code_refine 外发待单独评估）。
 
+## 2026-06-04（续）- code-review 第 2 批：持久化韧性（#14/#15）
+
+**背景**：接 #10/#8/#9 后的第 2 批，拣关联紧、风险可控的持久化两项，一个分支收掉。
+
+**修复**：
+- **#14（HIGH，persistence）**：`load_persisted_tasks` 的 try/except 只裹 `get_results`，
+  `TaskStatus(row.status)` / `get_task`（含 config JSON 解析）/ `fromisoformat(created_at)` 全裸奔 →
+  一条损坏/旧版行抛 ValueError 冒出分页循环、该行之后所有任务重启后从 UI 消失。把单条 row
+  解析整体包进 try/except，失败 log + `continue` 跳过坏行。
+- **#15（MEDIUM，persistence）**：`_persist_results` 先 `update_status`(commit) 再
+  `insert_results`(commit) 两次独立事务，崩溃落中间 → "completed 但零结果"不可恢复。`database`
+  加 `complete_task_with_results`（单事务 UPDATE + INSERT 一次 commit），`_persist_results` 改走它；
+  抽 `_normalize_results` 复用。
+
+**验证**：每项补测试（`TestLoadPersistedResilience` 坏行先于好行仍装回好行；`complete_task_with_results`
+原子写 / 空结果各 1）；mypy/ruff/typos 全绿；pytest 1038 passed。合并后 issue 随 dev→main 关闭。
+
+**遗留**：#11/#12/#13/#16/#17/#18/#19/#20/#21/#22 共 10 项待修。
+
 ## 2026-06-04（自查补全）- #25 代码模式 fail-closed（#10 残留）
 
 **背景**：#10 合并后自查发现只覆盖文档 / PPT，**代码模式漏了**——`_redact_code_headers` 实体检测
