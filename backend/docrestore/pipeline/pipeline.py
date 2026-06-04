@@ -908,9 +908,19 @@ class Pipeline:
                     llm, gpu_lock, pii_cfg, controller, _report,
                     quality=quality,
                 )
+        except BaseException:
+            # 消费者异常/取消 → 立即取消仍在跑的 OCR 生产者，避免它把剩余图全部
+            # OCR 完才结束（持 gpu_lock 阻塞 shutdown / 遗弃任务 + GPU 空转）；
+            # 吞掉其 CancelledError 等清理异常，保留消费者原异常向上抛。
+            ocr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await ocr_task
+            raise
         finally:
             unsub_breaker()
-            await ocr_task
+        # 成功路径：生产者已在自身 finally put(None) 收尾、随即结束；这里 await
+        # 让其真实异常（如某页 OCR 失败）浮现为任务失败，而非静默产出截断文档。
+        await ocr_task
 
         # 写质量报告（只读操作，放在 finally 外，shutdown 异常时不写）
         try:
