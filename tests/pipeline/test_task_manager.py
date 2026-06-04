@@ -709,6 +709,27 @@ class TestProgressPubSub:
         assert got.current in {1, 5}
         assert q.empty()
 
+    @pytest.mark.asyncio
+    async def test_subscribe_seeds_current_progress_after_terminal(
+        self,
+    ) -> None:
+        """#16：终结帧已发布后才订阅 → 立即回灌当前进度，不永久阻塞 q.get()。"""
+        mgr = _make_manager()
+        task = mgr.create_task(image_dir="/x")
+
+        # 终结帧只 publish 一次；此刻无订阅者 → 不广播、不缓存到任何队列
+        terminal = TaskProgress(
+            stage="completed", current=1, total=1, percent=100.0,
+        )
+        mgr.publish_progress(task.task_id, terminal)
+
+        # 之后才订阅：旧实现会让客户端永久阻塞在 q.get()；新实现 seed 一帧
+        q = await mgr.subscribe_progress(task.task_id)
+        assert q is not None
+        # 队列已含终结帧，无需等待新的 publish（seed 失败则 get_nowait 抛 QueueEmpty）
+        got = q.get_nowait()
+        assert got.stage == "completed"
+
 
 class TestShutdown:
     """TaskManager.shutdown：cancel 所有运行中任务。"""

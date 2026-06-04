@@ -311,10 +311,16 @@ class TaskManager:
         - task 存在 → 返回一个 `asyncio.Queue(maxsize=1)`，只保留最新进度
         """
         async with self._lock:
-            if task_id not in self._tasks:
+            task = self._tasks.get(task_id)
+            if task is None:
                 return None
             q: asyncio.Queue[TaskProgress] = asyncio.Queue(maxsize=1)
             self._subscribers.setdefault(task_id, set()).add(q)
+            # 立即回灌当前进度快照：终结帧（completed/failed）只 publish 一次、
+            # 不缓存，若客户端在其之后才订阅，q.get() 会永久阻塞。这里 seed 一帧
+            # 让晚到的订阅者立刻拿到最新状态（含终态）并据此退出。
+            if task.progress is not None:
+                q.put_nowait(task.progress)
             return q
 
     async def unsubscribe_progress(
