@@ -236,3 +236,39 @@ async def test_recover_interrupted(tmp_path: Path) -> None:
     assert ok.status == "completed"
 
     await db2.close()
+
+
+async def test_complete_task_with_results_atomic(db: TaskDatabase) -> None:
+    """#15：原子终态——一次调用同时落状态 + 结果（单事务一次 commit）。"""
+    await db.insert_task(
+        task_id="t_atomic", status="processing",
+        image_dir="/img", output_dir="/out",
+    )
+    await db.complete_task_with_results(
+        "t_atomic", "completed",
+        [("/out/document.md", "文档", "")],
+    )
+
+    row = await db.get_task("t_atomic")
+    assert row is not None
+    assert row.status == "completed"
+    results = await db.get_results("t_atomic")
+    assert len(results) == 1
+    assert results[0].doc_title == "文档"
+
+
+async def test_complete_task_with_results_empty(db: TaskDatabase) -> None:
+    """#15：空结果——只更新状态 + error，不插 result 行。"""
+    await db.insert_task(
+        task_id="t_empty", status="processing",
+        image_dir="/img", output_dir="/out",
+    )
+    await db.complete_task_with_results(
+        "t_empty", "failed", [], error="boom",
+    )
+
+    row = await db.get_task("t_empty")
+    assert row is not None
+    assert row.status == "failed"
+    assert row.error == "boom"
+    assert await db.get_results("t_empty") == []

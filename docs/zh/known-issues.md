@@ -202,3 +202,24 @@ limitations under the License.
 - 新增 `LLMCircuitBreaker.on_probe_aborted`：清除 `_probe_in_flight`（不计成功/失败、不触发退避），状态不变，下次调用可重新探测。
 - `_call_llm` 把 rate_limit 获取 + api_call 整段包进 `try`，新增 `except asyncio.CancelledError` 调用 `on_probe_aborted` 后原样上抛，覆盖 `before_call` 之后到 `on_success/on_failure` 之间的全部取消窗口。
 - 回归：`tests/llm/test_circuit_breaker.py` 的 `TestProbeCancellation`（取消后可重探/恢复 CLOSED；并以"不清除即第二次 before_call fail-fast"佐证修复必要）。
+
+## 历史任务还原被单条损坏行中断（#14，已修复 2026-06-04）
+
+现象：
+- `load_persisted_tasks` 的 `try/except` 只裹 `get_results`；`TaskStatus(row.status)`、`get_task`（内部 `LLMConfig.model_validate_json`）、`datetime.fromisoformat(row.created_at)` 全裸奔。
+- 一条旧版/损坏行（status 不在枚举、config JSON 损坏、时间格式异常）抛 `ValueError` 冒出分页 `while` → 该行之后的所有任务重启后从 UI 静默消失。
+
+处理策略：
+- 把单条 row 的解析（`get_task` → `Task(...)`）整体包进 `try/except`，失败 `logger.exception` + `continue` 跳过坏行，不中断整个分页加载。
+- 回归：`tests/pipeline/test_task_manager.py::TestLoadPersistedResilience`（坏行 `created_at` 更新 → DESC 先处理；断言好行仍装回、坏行被跳过）。
+
+## 结果落库非原子，崩溃留下"完成但零结果"（#15，已修复 2026-06-04）
+
+现象：
+- `_persist_results` 先 `update_status('completed')`（commit）再 `insert_results`（commit），两次独立事务。
+- 两 commit 之间进程被杀 → `tasks` 行已是终态、`task_results` 为空；`_recover_interrupted` 只修 pending/processing，无法补救 → 永久"完成但无结果可下载"。
+
+处理策略：
+- `database` 新增 `complete_task_with_results`：单事务内 UPDATE 状态 + 批量 INSERT 结果，一次 commit（崩溃落在 commit 前 → 状态仍是 processing，可被 recover 修复）。
+- `_persist_results` 改走该原子方法；抽 `_normalize_results` 供 `insert_results` 与新方法复用。
+- 注意：单连接 aiosqlite 下并发写仍可能互相提交（更深的隔离问题，不在本条范围）。回归：`tests/persistence/test_database.py`（原子写 / 空结果各 1）。

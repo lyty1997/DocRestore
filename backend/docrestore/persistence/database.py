@@ -254,6 +254,23 @@ class TaskDatabase:
                 兼容旧调用方的三元组，缺省 error 视为空串。
         """
         db = self._get_db()
+        normalized = self._normalize_results(results)
+        await db.executemany(
+            """\
+            INSERT INTO task_results
+                (task_id, output_path, doc_title, doc_dir, error)
+            VALUES (?, ?, ?, ?, ?)""",
+            [(task_id, *r) for r in normalized],
+        )
+        await db.commit()
+
+    @staticmethod
+    def _normalize_results(
+        results: Sequence[
+            tuple[str, str, str] | tuple[str, str, str, str]
+        ],
+    ) -> list[tuple[str, str, str, str]]:
+        """把结果行规整成四元组（兼容旧三元组，缺省 error 视为空串）。"""
         normalized: list[tuple[str, str, str, str]] = []
         for row in results:
             if len(row) == 3:
@@ -262,13 +279,38 @@ class TaskDatabase:
             else:
                 output_path, doc_title, doc_dir, error = row
                 normalized.append((output_path, doc_title, doc_dir, error))
-        await db.executemany(
-            """\
-            INSERT INTO task_results
-                (task_id, output_path, doc_title, doc_dir, error)
-            VALUES (?, ?, ?, ?, ?)""",
-            [(task_id, *r) for r in normalized],
+        return normalized
+
+    async def complete_task_with_results(
+        self,
+        task_id: str,
+        status: str,
+        results: Sequence[
+            tuple[str, str, str] | tuple[str, str, str, str]
+        ],
+        error: str | None = None,
+    ) -> None:
+        """原子写入终态：单事务内 UPDATE 状态 + 批量 INSERT 结果，一次 commit。
+
+        避免 update_status / insert_results 两次独立 commit 之间崩溃 →
+        tasks 行已是终态但 task_results 为空、且 _recover_interrupted 只修
+        pending/processing 无法补救（"完成但零结果"不可恢复下载）。
+        """
+        db = self._get_db()
+        now = datetime.now().isoformat()
+        normalized = self._normalize_results(results)
+        await db.execute(
+            "UPDATE tasks SET status=?, error=?, updated_at=? WHERE task_id=?",
+            (status, error, now, task_id),
         )
+        if normalized:
+            await db.executemany(
+                """\
+                INSERT INTO task_results
+                    (task_id, output_path, doc_title, doc_dir, error)
+                VALUES (?, ?, ?, ?, ?)""",
+                [(task_id, *r) for r in normalized],
+            )
         await db.commit()
 
     async def delete_task(self, task_id: str) -> bool:
