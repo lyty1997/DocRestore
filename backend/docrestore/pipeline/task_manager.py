@@ -160,22 +160,32 @@ class TaskManager:
             for item in listing.tasks:
                 if item.task_id in self._tasks:
                     continue
-                row = await self._db.get_task(item.task_id)
-                if row is None:
+                try:
+                    row = await self._db.get_task(item.task_id)
+                    if row is None:
+                        continue
+                    task = Task(
+                        task_id=row.task_id,
+                        status=TaskStatus(row.status),
+                        image_dir=row.image_dir,
+                        output_dir=row.output_dir,
+                        llm=row.llm,
+                        ocr=row.ocr,
+                        pii=row.pii,
+                        code=row.code,
+                        ppt=row.ppt,
+                        error=row.error,
+                        created_at=datetime.fromisoformat(row.created_at),
+                    )
+                except Exception:
+                    # 单条行损坏（status 不在枚举 / config JSON 损坏 / 时间格式
+                    # 异常）只跳过该任务，不能让它中断整个分页加载、使后续任务
+                    # 重启后全部从 UI 消失。
+                    logger.exception(
+                        "load_persisted_tasks: 跳过损坏任务行 (%s)",
+                        item.task_id,
+                    )
                     continue
-                task = Task(
-                    task_id=row.task_id,
-                    status=TaskStatus(row.status),
-                    image_dir=row.image_dir,
-                    output_dir=row.output_dir,
-                    llm=row.llm,
-                    ocr=row.ocr,
-                    pii=row.pii,
-                    code=row.code,
-                    ppt=row.ppt,
-                    error=row.error,
-                    created_at=datetime.fromisoformat(row.created_at),
-                )
                 # 加载结果元信息 + 从磁盘 fallback markdown
                 try:
                     rows = await self._db.get_results(item.task_id)
@@ -517,13 +527,15 @@ class TaskManager:
         if self._db is None:
             return
         try:
-            await self._db.update_status(task_id, status, error=error)
-            if results:
-                rows = [
-                    (str(r.output_path), r.doc_title, r.doc_dir, r.error)
-                    for r in results
-                ]
-                await self._db.insert_results(task_id, rows)
+            rows = [
+                (str(r.output_path), r.doc_title, r.doc_dir, r.error)
+                for r in results
+            ]
+            # 单事务原子写：状态 + 结果一次 commit，避免两次独立 commit 之间崩溃
+            # 留下"completed/failed 但 task_results 为空"的不可恢复终态。
+            await self._db.complete_task_with_results(
+                task_id, status, rows, error=error,
+            )
         except Exception:
             logger.exception("持久化结果失败: %s (status=%s)", task_id, status)
 
