@@ -1012,16 +1012,26 @@ async def get_source_image(task_id: str, filename: str) -> FileResponse:
         )
 
     def _resolve() -> Path | None:
-        """同步解析并校验图片路径。"""
-        img_dir = Path(task.image_dir)
-        t = (img_dir / filename).resolve()
-        if not t.is_relative_to(img_dir.resolve()):
+        """同步解析并校验图片路径。
+
+        关键（issue #22）：不对拼接路径做 resolve()。服务端源任务的
+        image_dir 是 stage 目录，其中的源图是 `_stage_files` 用 `symlink_to`
+        指向外部真实文件的软链；resolve 跟随软链后落到 image_dir 之外 →
+        包含校验 False → 整个服务端源图预览 404。改为对【未跟随 symlink】
+        的词法拼接路径做越界校验（filename 上方已禁止 `..` 与前导 `/`），
+        再用 `is_file()` 跟随软链确认目标存在。stage 内软链均由本服务创建、
+        指向用户显式选定的图片，放行其目标是安全的。
+        """
+        img_dir = Path(task.image_dir).resolve()
+        candidate = img_dir / filename
+        # 词法包含校验：pathlib `is_relative_to` 不访问 FS、不跟随 symlink
+        if not candidate.is_relative_to(img_dir):
             return None
-        if not t.is_file():
+        if not candidate.is_file():  # 跟随 symlink 判断目标是否存在
             return None
-        if t.suffix.lower() not in _IMAGE_EXTS:
+        if candidate.suffix.lower() not in _IMAGE_EXTS:
             return None
-        return t
+        return candidate
 
     target = await asyncio.to_thread(_resolve)
 

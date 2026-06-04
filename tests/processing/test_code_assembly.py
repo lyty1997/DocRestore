@@ -361,3 +361,50 @@ def test_split_drops_far_left_gutter_crossing_noise() -> None:
     code_texts = [ln.text for ln in code_lines]
     assert "int x = 1;" in code_texts                       # 正常代码保留
     assert all("EXPLORER" not in t for t in code_texts)     # 噪声被丢弃
+
+
+def test_ordered_line_numbers_sorts_by_y_not_misread_value() -> None:
+    """#21：行号被误读成更小值不应按值重排到列顶；按物理 y 序 + 单调修正。"""
+    from docrestore.processing.code_assembly import _ordered_line_numbers
+    from docrestore.processing.ide_layout import LineNumberAnchor
+
+    anchor = LineNumberAnchor(
+        x1_center=110, x1_min=100, x2_max=130, y_top=10, y_bottom=200,
+        line_count=5, num_range=(10, 50), monotonic_ratio=1.0,
+    )
+    # 物理 y 升序 5 行；第 3 行（应 ~30）被 OCR 误读成 "8"
+    lines = [
+        _line((100, 10, 130, 26), "10"),
+        _line((100, 40, 130, 56), "20"),
+        _line((100, 70, 130, 86), "8"),
+        _line((100, 100, 130, 116), "40"),
+        _line((100, 130, 130, 146), "50"),
+    ]
+    out = _ordered_line_numbers(lines, anchor)
+    # 顺序按 y：误读行仍在第 3 位，未跳列顶（旧实现按 int 排序会把 8 排到顶）
+    assert [ln.text for ln, _, _ in out] == ["10", "20", "8", "40", "50"]
+    # 误读 8 ≤ 前值 20 → 单调修正为 21 并标 inferred
+    assert [v for _, v, _ in out] == [10, 20, 21, 40, 50]
+    assert [inf for _, _, inf in out] == [False, False, True, False, False]
+
+
+def test_ordered_line_numbers_handles_unparsable() -> None:
+    """#21：非数字行号（防御性 try/except）不抛 ValueError，按邻值推断并标 inferred。
+
+    NUMERIC_RE 在上游已保证行号纯数字，此处验证 helper 自身对脏输入鲁棒。
+    """
+    from docrestore.processing.code_assembly import _ordered_line_numbers
+    from docrestore.processing.ide_layout import LineNumberAnchor
+
+    anchor = LineNumberAnchor(
+        x1_center=110, x1_min=100, x2_max=130, y_top=10, y_bottom=200,
+        line_count=3, num_range=(10, 30), monotonic_ratio=1.0,
+    )
+    lines = [
+        _line((100, 10, 130, 26), "10"),
+        _line((100, 40, 130, 56), "O"),   # 字母 O：int() 会抛 ValueError
+        _line((100, 70, 130, 86), "30"),
+    ]
+    out = _ordered_line_numbers(lines, anchor)
+    assert [v for _, v, _ in out] == [10, 11, 30]
+    assert [inf for _, _, inf in out] == [False, True, False]
