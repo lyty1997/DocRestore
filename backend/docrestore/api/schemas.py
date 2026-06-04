@@ -36,6 +36,9 @@ class LLMConfigRequest(BaseModel):
     #: 代码模式 LLM 修正策略：``refine``（行数守恒，安全） /
     #: ``rewrite``（允许重排 + 补语法，激进，需更强模型）
     code_refine_mode: str | None = None
+    #: 统一 LLM 精修总开关：文档（分段）/ 代码 / PPT（按页）三模式共用。
+    #: None=不覆盖（用后端默认 True）；False=本任务跳过所有 LLM 精修。
+    enable_refine: bool | None = None
 
 
 class OCRConfigRequest(BaseModel):
@@ -84,6 +87,14 @@ class CodeRestoreConfigRequest(BaseModel):
     context_root: str | None = None
 
 
+class PowerPointRestoreConfigRequest(BaseModel):
+    """PPT 屏摄还原模式配置（请求级覆盖，全可选；None = 用后端默认）"""
+
+    enable: bool | None = None
+    rectify: bool | None = None
+    rectify_save_debug: bool | None = None
+
+
 class CreateTaskRequest(BaseModel):
     """创建任务请求"""
 
@@ -93,6 +104,7 @@ class CreateTaskRequest(BaseModel):
     ocr: OCRConfigRequest | None = None
     pii: PIIConfigRequest | None = None
     code: CodeRestoreConfigRequest | None = None
+    ppt: PowerPointRestoreConfigRequest | None = None
 
 
 class UpdateMarkdownRequest(BaseModel):

@@ -65,6 +65,7 @@ interface UseTaskRunnerReturn {
       model?: string | undefined;
       api_base?: string | undefined;
       api_key?: string | undefined;
+      enable_refine?: boolean | undefined;
     },
     pii?: {
       enable: boolean;
@@ -74,6 +75,7 @@ interface UseTaskRunnerReturn {
     },
     ocr?: { model?: string | undefined; gpu_id?: string | undefined },
     code?: { enable: boolean },
+    ppt?: { enable: boolean },
   ) => void;
   /** 重置到 idle */
   reset: () => void;
@@ -333,6 +335,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
         model?: string | undefined;
         api_base?: string | undefined;
         api_key?: string | undefined;
+        enable_refine?: boolean | undefined;
       },
       pii?: {
         enable: boolean;
@@ -342,6 +345,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
       },
       ocr?: { model?: string | undefined; gpu_id?: string | undefined },
       code?: { enable: boolean },
+      ppt?: { enable: boolean },
     ) => {
       // 重置状态
       cleanup();
@@ -364,6 +368,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
             pii,
             ocr,
             code,
+            ppt,
           });
           if (!isMountedRef.current) return;
           setTaskId(resp.task_id);

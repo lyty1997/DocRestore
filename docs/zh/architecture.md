@@ -86,6 +86,12 @@ DocRestore 将连续拍摄的文档照片还原为格式化的 Markdown 文档�
   ① OCR text_lines → ② IDE 布局/行号列识别 → ③ 代码栏组装
     → ④ 跨页按路径/文件名分组为 SourceFile → ⑤ LLM 字符级精修/修复
     → ⑥ 轻量诊断 → ⑦ 输出 files/、files-index.json 和兼容 Markdown
+
+PPT 模式分支（_ppt_pipeline，见 ppt-mode.md）：
+  ① S2 透视矫正(逐页前处理) → ② VL-1.6 doc_parser 版面识别 + 化学结构裁图
+    → ③ 逐页出队 + 按页 LLM 精修(统一开关 enable_refine，与 OCR 重叠)
+    → ④ 单页保序组装 → ⑤ 多页按原序合并(不去重)
+    → ⑥ 输出 document.md、images/
 ```
 
 详细说明（文档模式）：
@@ -166,6 +172,7 @@ docrestore/
 
 ### 6.3 当前边界与未来扩展
 - 代码模式已支持 IDE 代码照片 → 源文件、来源图片联动、轻量诊断和单文件编辑保存；仍可继续增强函数级切块、项目级依赖图和成熟代码编辑器组件
+- **PPT 还原模式（设计中）**：屏摄幻灯片 → 保序 `document.md`（文字 + 公式 LaTeX + 化学结构裁图），第三消费者分支 `_ppt_pipeline` 与文档/代码模式互斥三选一；S1 设计见 [ppt-mode.md](ppt-mode.md)，OpenSpec 提案 `openspec/changes/add-ppt-restore-mode/`，子任务树 AGE-83
 - PDF 输入支持
 - 前端多文档结果展示已落地基础导航；后续可补真实 fixture 的端到端视觉验证
 

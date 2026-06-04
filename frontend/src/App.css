@@ -2808,6 +2808,26 @@ body {
   line-height: 1.4;
 }
 
+/* 处理模式三选一 radio */
+.mode-radio-group {
+  display: flex;
+  gap: 1.25rem;
+  margin: 0.25rem 0 0.6rem;
+}
+
+.mode-radio-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.mode-radio-option input {
+  cursor: pointer;
+  accent-color: var(--color-primary, #2563eb);
+}
+
 /* Toggle switch */
 .toggle-switch {
   display: inline-flex;

@@ -96,6 +96,18 @@ export const zhCN = {
   "taskForm.codeModeTitle": "IDE 代码模式",
   "taskForm.codeModeDesc":
     "上传 IDE 编辑器截图时启用：输出独立源文件（.cc/.h/.gn/.py/...）到 files/，不再合成单份 Markdown。",
+  // ── 处理模式三选一（文档 / 代码 / PPT 互斥）──
+  "taskForm.modeLabel": "处理模式",
+  "taskForm.mode_doc": "文档模式",
+  "taskForm.mode_code": "代码模式",
+  "taskForm.mode_ppt": "PPT 模式",
+  "taskForm.docModeDesc":
+    "默认模式：文档照片还原为带格式的 Markdown，跨页自动去重合并。",
+  "taskForm.pptModeDesc":
+    "屏摄幻灯片还原为保序 Markdown：自动透视矫正，文字 + 公式（LaTeX），化学结构 / 图表裁剪为图片。",
+  "taskForm.refineTitle": "LLM 精修",
+  "taskForm.refineDesc":
+    "对文档 / 代码 / PPT 所有模式生效：开启则用 LLM 精修识别结果（文档分段、PPT 按页），关闭则只输出 OCR 清洗文本。",
   "taskForm.piiTitle": "脱敏功能",
   "taskForm.piiDesc":
     "开启后自动检测并脱敏手机号、邮箱、身份证号等隐私信息。也可添加自定义敏感词，无需开启即生效。",
@@ -135,6 +147,9 @@ export const zhCN = {
   "progress.failed": "处理失败",
   "progress.llmUnavailable":
     "LLM provider 暂不可用（{model}），已熔断 {cool_down_s}s，相关段级精修降级为原文",
+  "progress.pptPage": "PPT 模式：精修第 {current}/{total} 页",
+  "progress.pptRender": "PPT 模式：组装文档...",
+  "progress.pptDone": "PPT 模式：完成",
 
   // ── 任务结果 ──
   "taskResult.title": "处理结果",
@@ -286,6 +301,7 @@ export const zhCN = {
   "sourcePicker.imageCount": "{count} 张",
 
   // ── API 业务错误（与后端 APIErrorCode 一一对应，code 小写后查 errors.api.<code>）──
+  "errors.api.mode_conflict": "模式冲突：文档 / 代码 / PPT 三选一互斥",
   "errors.api.unauthorized": "缺少或无效的 API Token",
   "errors.api.service_not_initialized": "服务未初始化",
   "errors.api.engine_manager_not_initialized": "OCR 引擎管理器未初始化",

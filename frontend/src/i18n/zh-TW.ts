@@ -289,7 +289,23 @@ export const zhTW: Record<TranslationKey, string> = {
   "sourcePicker.sizeKB": "{size} KB",
   "sourcePicker.imageCount": "{count} 張",
 
+  // ── PPT 模式 i18n（taskForm / progress / errors 集中补充）──
+  "taskForm.modeLabel": "處理模式",
+  "taskForm.mode_doc": "文件模式",
+  "taskForm.mode_code": "程式碼模式",
+  "taskForm.mode_ppt": "PPT 模式",
+  "taskForm.docModeDesc":
+    "預設模式：文件照片還原為帶格式的 Markdown，跨頁自動去重合併。",
+  "taskForm.pptModeDesc":
+    "螢幕拍攝投影片還原為保序 Markdown：自動透視矯正，文字 + 公式（LaTeX），化學結構 / 圖表裁剪為圖片。",
+  "taskForm.refineTitle": "LLM 精修",
+  "taskForm.refineDesc":
+    "對文件 / 程式碼 / PPT 所有模式生效：開啟則用 LLM 精修辨識結果（文件分段、PPT 按頁），關閉則只輸出 OCR 清洗文字。",
+  "progress.pptPage": "PPT 模式：精修第 {current}/{total} 頁",
+  "progress.pptRender": "PPT 模式：組裝文件...",
+  "progress.pptDone": "PPT 模式：完成",
   // ── API 業務錯誤 ──
+  "errors.api.mode_conflict": "模式衝突：文件 / 程式碼 / PPT 三選一互斥",
   "errors.api.unauthorized": "缺少或無效的 API Token",
   "errors.api.service_not_initialized": "服務未初始化",
   "errors.api.engine_manager_not_initialized": "OCR 引擎管理器未初始化",

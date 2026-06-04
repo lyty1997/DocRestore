@@ -78,6 +78,8 @@ export interface LLMConfig {
   model?: string | undefined;
   api_base?: string | undefined;
   api_key?: string | undefined;
+  /** 统一 LLM 精修总开关（文档分段 / 代码 / PPT 按页共用）；省略=后端默认 true */
+  enable_refine?: boolean | undefined;
 }
 
 /** 自定义敏感词条目：word 必填，code 可选（为空时后端回退到默认占位符） */
@@ -96,6 +98,14 @@ export interface PIIConfig {
 export interface CodeRestoreConfig {
   enable: boolean;
 }
+
+/** PPT 屏摄还原模式配置 */
+export interface PowerPointRestoreConfig {
+  enable: boolean;
+}
+
+/** 处理模式三选一 */
+type ProcessingMode = "doc" | "code" | "ppt";
 
 /** OCR 引擎配置 */
 export interface OCRConfig {
@@ -139,6 +149,7 @@ interface TaskFormProps {
     pii?: PIIConfig,
     ocr?: OCRConfig,
     code?: CodeRestoreConfig,
+    ppt?: PowerPointRestoreConfig,
   ) => void;
   readonly disabled: boolean;
 }
@@ -219,8 +230,11 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
     };
   }, []);
 
-  /* AGE-8 IDE 代码模式：勾选后强制 OCR 走 basic pipeline 输出独立源文件 */
-  const [codeMode, setCodeMode] = useState(false);
+  /* 处理模式三选一：doc（默认）/ code（IDE 代码）/ ppt（屏摄幻灯片） */
+  const [mode, setMode] = useState<ProcessingMode>("doc");
+  /* 统一 LLM 精修开关：对所有模式生效（文档分段 / 代码 / PPT 按页）。
+     默认开，保持文档/代码模式既有行为；关闭时所有模式只输出 OCR 清洗结果。 */
+  const [refineEnabled, setRefineEnabled] = useState(true);
 
   /* 脱敏开关 + 敏感词（每条可选独立代号） */
   const [piiEnabled, setPiiEnabled] = useState(false);
@@ -435,13 +449,16 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
 
     /* provider 非默认值（local）也算"显式覆盖"，需要透传给后端 */
     const providerOverridden = llmProvider !== DEFAULT_LLM_PROVIDER;
+    /* refine 关闭时即使无其它覆盖也必须发 llm（携带 enable_refine=false）；
+       开启且无其它覆盖时 llm=undefined，后端用默认 enable_refine=true */
     const llm: LLMConfig | undefined =
-      model || apiBase || apiKey || providerOverridden
+      model || apiBase || apiKey || providerOverridden || !refineEnabled
         ? {
             provider: providerOverridden ? llmProvider : undefined,
             model: model || undefined,
             api_base: apiBase || undefined,
             api_key: apiKey || undefined,
+            enable_refine: refineEnabled,
           }
         : undefined;
 
@@ -456,7 +473,7 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
 
     /* OCR 引擎配置：模型或 GPU 有显式值才传；gpuId="" 表示自动（不覆盖） */
     const codeNeedsPaddleBasic =
-      codeMode && ocrModel.startsWith("paddle-ocr/");
+      mode === "code" && ocrModel.startsWith("paddle-ocr/");
     const hasOcrOverride =
       ocrModel !== DEFAULT_OCR_MODEL ||
       gpuId !== GPU_AUTO_VALUE ||
@@ -469,11 +486,20 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
         }
       : undefined;
 
-    const code: CodeRestoreConfig | undefined = codeMode
-      ? { enable: true }
-      : undefined;
+    const code: CodeRestoreConfig | undefined =
+      mode === "code" ? { enable: true } : undefined;
+    const ppt: PowerPointRestoreConfig | undefined =
+      mode === "ppt" ? { enable: true } : undefined;
 
-    onSubmit(trimmed, outputDir.trim() || undefined, llm, pii, ocr, code);
+    onSubmit(
+      trimmed,
+      outputDir.trim() || undefined,
+      llm,
+      pii,
+      ocr,
+      code,
+      ppt,
+    );
   };
 
   const canSubmit = !disabled && imageDir.trim() !== "";
@@ -708,27 +734,84 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
         )}
       </div>
 
-      {/* AGE-8 IDE 代码模式：截图含 IDE 编辑器代码时启用，输出独立源文件 */}
+      {/* 处理模式三选一：文档 / 代码 / PPT 互斥 */}
       <div className="form-group pii-section">
         <div className="pii-header">
-          <span className="pii-title">{t("taskForm.codeModeTitle")}</span>
-          <label className="toggle-switch" htmlFor="code-mode-toggle">
+          <span className="pii-title">{t("taskForm.modeLabel")}</span>
+        </div>
+        <div className="mode-radio-group">
+          <label className="mode-radio-option" htmlFor="mode-doc">
             <input
-              id="code-mode-toggle"
+              id="mode-doc"
+              type="radio"
+              name="processing-mode"
+              checked={mode === "doc"}
+              onChange={() => {
+                setMode("doc");
+              }}
+              disabled={disabled}
+            />
+            <span>{t("taskForm.mode_doc")}</span>
+          </label>
+          <label className="mode-radio-option" htmlFor="mode-code">
+            <input
+              id="mode-code"
+              type="radio"
+              name="processing-mode"
+              checked={mode === "code"}
+              onChange={() => {
+                setMode("code");
+              }}
+              disabled={disabled}
+            />
+            <span>{t("taskForm.mode_code")}</span>
+          </label>
+          <label className="mode-radio-option" htmlFor="mode-ppt">
+            <input
+              id="mode-ppt"
+              type="radio"
+              name="processing-mode"
+              checked={mode === "ppt"}
+              onChange={() => {
+                setMode("ppt");
+              }}
+              disabled={disabled}
+            />
+            <span>{t("taskForm.mode_ppt")}</span>
+          </label>
+        </div>
+        {mode === "doc" && (
+          <p className="pii-desc">{t("taskForm.docModeDesc")}</p>
+        )}
+        {mode === "code" && (
+          <p className="pii-desc">{t("taskForm.codeModeDesc")}</p>
+        )}
+        {mode === "ppt" && (
+          <p className="pii-desc">{t("taskForm.pptModeDesc")}</p>
+        )}
+      </div>
+
+      {/* 统一 LLM 精修开关：对文档 / 代码 / PPT 三模式均生效 */}
+      <div className="form-group pii-section">
+        <div className="pii-header">
+          <span className="pii-title">{t("taskForm.refineTitle")}</span>
+          <label className="toggle-switch" htmlFor="refine-toggle">
+            <input
+              id="refine-toggle"
               type="checkbox"
-              checked={codeMode}
+              checked={refineEnabled}
               onChange={(e) => {
-                setCodeMode(e.target.checked);
+                setRefineEnabled(e.target.checked);
               }}
               disabled={disabled}
             />
             <span className="toggle-slider" />
             <span className="toggle-label">
-              {codeMode ? t("common.enabled") : t("common.disabled")}
+              {refineEnabled ? t("common.enabled") : t("common.disabled")}
             </span>
           </label>
         </div>
-        <p className="pii-desc">{t("taskForm.codeModeDesc")}</p>
+        <p className="pii-desc">{t("taskForm.refineDesc")}</p>
       </div>
 
       {/* 脱敏功能 */}

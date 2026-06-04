@@ -13,6 +13,7 @@ dependencies = [
     "fastapi>=0.115",
     "litellm>=1.50",
     "numpy>=1.26",
+    "opencv-python-headless>=4.10",
     "Pillow>=10.0",
     "python-multipart>=0.0.9",
     "uvicorn>=0.30",
@@ -91,6 +92,7 @@ module = [
     "litellm.*", "deepseek_ocr2.*",
     "torch.*", "torchvision.*", "transformers.*",
     "paddleocr", "paddleocr.*",
+    "cv2", "cv2.*",
 ]
 ignore_missing_imports = true
 

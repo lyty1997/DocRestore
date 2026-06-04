@@ -81,6 +81,7 @@ from docrestore.pipeline.config import (
     OCRConfig,
     PIIConfig,
     PipelineConfig,
+    PowerPointRestoreConfig,
 )
 from docrestore.pipeline.profiler import (
     MemoryProfiler,
@@ -94,7 +95,10 @@ from docrestore.pipeline.profiler import (
 from docrestore.pipeline.rate_controller import RateController
 from docrestore.privacy.redactor import EntityLexicon, PIIRedactor
 from docrestore.processing.cleaner import OCRCleaner
-from docrestore.processing.dedup import IncrementalMerger
+from docrestore.processing.dedup import (
+    IncrementalMerger,
+    rewrite_image_refs_to_ocr_dir,
+)
 
 
 #: 流式 Pipeline 延迟 PII 实体检测的页面阈值（见 streaming-pipeline §6）。
@@ -317,6 +321,42 @@ def _ocr_config_for_code_mode(
     return base.model_copy(update={"paddle_pipeline": "basic"})
 
 
+def _ocr_config_for_ppt_mode(
+    ocr: OCRConfig | None,
+    default_ocr: OCRConfig,
+) -> OCRConfig | None:
+    """PPT 模式所需的有效 OCR 配置：强制 PaddleOCR-VL。
+
+    官方文档结论：PPT 还原所需输出（带格式 markdown + LaTeX 公式 + 化学结构/
+    图表裁图 + 阅读序）只有 PaddleOCR-VL 端到端产出；basic(PP-OCRv5) 仅纯文本
+    行、PP-StructureV3 无 markdown/无 VLM 语义。故强制 ``paddle_pipeline="vl"``，
+    防止默认或误配 basic 让 PPT 模式静默降级为纯文字拼接（与代码模式强制 basic 对称）。
+
+    底座（请求级 ``ocr`` 或 ``default_ocr``）已是 vl 则原样返回 ``ocr``；
+    否则在底座上 ``model_copy`` 强制 ``paddle_pipeline="vl"``。
+    """
+    base = ocr if ocr is not None else default_ocr
+    if base.paddle_pipeline == "vl":
+        return ocr
+    return base.model_copy(update={"paddle_pipeline": "vl"})
+
+
+def _ocr_config_for_mode(
+    *,
+    code_enabled: bool,
+    ppt_enabled: bool,
+    ocr: OCRConfig | None,
+    default_ocr: OCRConfig,
+) -> OCRConfig | None:
+    """按处理模式选有效 OCR 配置：代码模式强制 basic、PPT 模式强制 vl，
+    文档模式（或都不启用）原样返回请求级 ``ocr``。code/ppt 互斥由 API 层保证。"""
+    if code_enabled:
+        return _ocr_config_for_code_mode(ocr, default_ocr)
+    if ppt_enabled:
+        return _ocr_config_for_ppt_mode(ocr, default_ocr)
+    return ocr
+
+
 def _stitch_final_chunks(chunks: list[str]) -> str:
     """拼接分块 final_refine 的结果。
 
@@ -507,7 +547,11 @@ class Pipeline:
                 )
             await self._ocr_engine.initialize()
 
-        if self._refiner is None and self._config.llm.model:
+        if (
+            self._refiner is None
+            and self._config.llm.model
+            and self._config.llm.enable_refine
+        ):
             self._refiner = self._create_refiner(self._config.llm)
 
     async def process_tree(
@@ -521,6 +565,7 @@ class Pipeline:
         pii: PIIConfig | None = None,
         ocr: OCRConfig | None = None,
         code: CodeRestoreConfig | None = None,
+        ppt: PowerPointRestoreConfig | None = None,
     ) -> list[PipelineResult]:
         """统一入口：处理叶子目录，或多子目录 → warmup cold start 并发。
 
@@ -548,7 +593,7 @@ class Pipeline:
                 ):
                     result = await self.process_many(
                         image_dir, output_dir, on_progress,
-                        llm, gpu_lock, pii, ocr, code=code,
+                        llm, gpu_lock, pii, ocr, code=code, ppt=ppt,
                     )
                     return [result]
 
@@ -568,7 +613,7 @@ class Pipeline:
                 warmup_task = asyncio.create_task(
                     self._process_leaf(
                         0, warmup_leaf, image_dir, output_dir,
-                        on_progress, llm, gpu_lock, pii, ocr, code,
+                        on_progress, llm, gpu_lock, pii, ocr, code, ppt,
                         total=len(leaves_sorted),
                         controller=controller,
                     ),
@@ -588,7 +633,7 @@ class Pipeline:
                     asyncio.create_task(
                         self._process_leaf(
                             i + 1, leaf, image_dir, output_dir,
-                            on_progress, llm, gpu_lock, pii, ocr, code,
+                            on_progress, llm, gpu_lock, pii, ocr, code, ppt,
                             total=len(leaves_sorted),
                             controller=controller,
                         ),
@@ -647,6 +692,7 @@ class Pipeline:
         pii: PIIConfig | None,
         ocr: OCRConfig | None,
         code: CodeRestoreConfig | None,
+        ppt: PowerPointRestoreConfig | None = None,
         *,
         total: int,
         controller: RateController | None = None,
@@ -676,7 +722,7 @@ class Pipeline:
             result = await self.process_many(
                 leaf, sub_output, wrapped_progress,
                 llm, gpu_lock, pii, ocr,
-                code=code,
+                code=code, ppt=ppt,
                 controller=controller,
             )
 
@@ -721,6 +767,7 @@ class Pipeline:
         pii: PIIConfig | None = None,
         ocr: OCRConfig | None = None,
         code: CodeRestoreConfig | None = None,
+        ppt: PowerPointRestoreConfig | None = None,
         controller: RateController | None = None,
     ) -> PipelineResult:
         """单文档流式处理：OCR Producer + Stream Processor。
@@ -740,7 +787,7 @@ class Pipeline:
             with root_stage:
                 return await self._stream_pipeline(
                     image_dir, output_dir, on_progress,
-                    llm, gpu_lock, pii, ocr, code, controller,
+                    llm, gpu_lock, pii, ocr, code, ppt, controller,
                 )
 
     async def _stream_pipeline(
@@ -753,6 +800,7 @@ class Pipeline:
         pii: PIIConfig | None,
         ocr: OCRConfig | None,
         code: CodeRestoreConfig | None,
+        ppt: PowerPointRestoreConfig | None,
         controller: RateController | None,
     ) -> PipelineResult:
         """process_many 的实际实现：启动 OCR Producer + Stream Processor。"""
@@ -810,20 +858,22 @@ class Pipeline:
 
         # 请求级 code 覆盖优先；为 None 时回退到 pipeline 启动配置。
         code_cfg = code if code is not None else self._config.code
-        # 代码模式强制 PaddleOCR basic（产出行级 bbox 的 text_lines）；vl 不产
-        # text_lines，代码模式会因无可组装内容而失败。文档声称启用时自动切 basic
-        # 但此前从未落实——在此统一强制，使任何代码模式请求都生效（B4 H5）。
-        ocr_effective = (
-            _ocr_config_for_code_mode(ocr, self._config.ocr)
-            if code_cfg.enable
-            else ocr
+        # PPT 模式同理（与 code 互斥，由 API 层校验）。
+        ppt_cfg = ppt if ppt is not None else self._config.ppt
+        # 按模式选有效 OCR 配置：代码模式强制 basic（行级 bbox），PPT 模式强制 vl
+        # （只有 PaddleOCR-VL 产 markdown+公式+裁图，见官方文档），文档模式原样。
+        ocr_effective = _ocr_config_for_mode(
+            code_enabled=code_cfg.enable,
+            ppt_enabled=ppt_cfg.enable,
+            ocr=ocr,
+            default_ocr=self._config.ocr,
         )
 
         ocr_task = asyncio.create_task(
             self._ocr_producer(
                 images, output_dir, gpu_lock, page_queue,
                 pages_ref, controller, _report, ocr_effective, pii_cfg,
-                quality=quality,
+                quality=quality, ppt=ppt_cfg,
             ),
             name=f"ocr-producer-{image_dir.name}",
         )
@@ -836,6 +886,13 @@ class Pipeline:
                     page_queue, pages_ref, output_dir,
                     llm, pii_cfg, _report, ocr_effective, code_cfg,
                     quality=quality,
+                )
+            elif ppt_cfg.enable:
+                # PPT 模式：透视矫正在 producer 逐页完成，本分支逐页出队
+                # → 按页精修（开关开时）→ 单页保序组装 document.md（不跨页去重）
+                result = await self._ppt_pipeline(
+                    page_queue, output_dir, _report,
+                    llm=llm, total=len(images), quality=quality,
                 )
             else:
                 result = await self._stream_process(
@@ -890,6 +947,84 @@ class Pipeline:
             )
 
         return breaker.subscribe_open(listener)
+
+    async def _ppt_pipeline(
+        self,
+        page_queue: asyncio.Queue[PageOCR | None],
+        output_dir: Path,
+        report_fn: ReportFn,
+        *,
+        llm: LLMConfig | None,
+        total: int,
+        quality: QualityReport | None = None,
+    ) -> PipelineResult:
+        """PPT 模式分支：逐页 OCR 出队 → 重写图片引用 →（开关开时）按页 LLM
+        精修 → 单页保序组装合并为单个 document.md（不跨页去重）。
+
+        透视矫正在 ``_ocr_producer`` 逐页前处理。**按页精修在出队循环内完成**：
+        精修第 i 页时 producer 可并行 OCR 第 i+1 页（与文档模式段级精修同样的
+        OCR/LLM 重叠）。是否精修由 ``_get_refiner`` 统一开关控制
+        （``llm.enable_refine=False`` → refiner=None → 跳过，回退原始组装）。
+        ``total`` 为预期页数（``len(images)``），仅用于进度与精修上下文。
+        """
+        from docrestore.output.ppt_renderer import render_ppt_document
+
+        refiner = self._get_refiner(llm)
+        llm_cfg = llm if llm is not None else self._config.llm
+        # 复用文档模式段级精修缓存：resume 复用 output_dir 时按页命中
+        cache = LLMCache(
+            output_dir / ".llm_cache", enabled=llm_cfg.enable_cache,
+        )
+
+        ordered_pages: list[PageOCR] = []
+        bodies: list[str] = []
+        idx = 0
+        while True:
+            page = await page_queue.get()
+            if page is None:
+                break
+            # 图片引用先加 OCR 目录前缀（与文档模式同一真相源），精修在其上做
+            body = rewrite_image_refs_to_ocr_dir(page).strip()
+            if refiner is not None:
+                result, _used = await self._refine_segment_with_cache(
+                    refiner, body, idx, total, cache, llm_cfg, quality,
+                )
+                body = result.markdown
+            ordered_pages.append(page)
+            bodies.append(body)
+            report_fn(
+                "ppt_refine", idx + 1, total,
+                f"PPT 模式：第 {idx + 1}/{total} 页",
+                message_key="progress.pptPage",
+                message_params={
+                    "current": str(idx + 1), "total": str(total),
+                },
+            )
+            idx += 1
+
+        if not ordered_pages:
+            msg = "PPT 模式：OCR producer 未产出任何页"
+            raise RuntimeError(msg)
+
+        report_fn(
+            "ppt_render", len(ordered_pages), len(ordered_pages),
+            "PPT 模式：组装文档",
+            message_key="progress.pptRender",
+            message_params={"total": str(len(ordered_pages))},
+        )
+        # 单页保序组装 + 多页按文件序合并 document.md（复用 Renderer）；
+        # bodies 为已重写 + 按页精修结果，render 直接拼装不再重复 rewrite。
+        doc_path, memory_md = await render_ppt_document(
+            ordered_pages, output_dir,
+            output_config=self._config.output,
+            bodies=bodies,
+        )
+        return PipelineResult(
+            output_path=doc_path,
+            markdown=memory_md,
+            images=[r for page in ordered_pages for r in page.regions],
+            warnings=[],
+        )
 
     async def _code_pipeline(  # noqa: C901
         self,
@@ -1303,6 +1438,7 @@ class Pipeline:
         ocr: OCRConfig | None,
         pii_cfg: PIIConfig,
         quality: QualityReport | None = None,
+        ppt: PowerPointRestoreConfig | None = None,
     ) -> None:
         """OCR 生产者：逐张 OCR → 清洗 → 可选 regex-only PII → 入队。
 
@@ -1319,12 +1455,27 @@ class Pipeline:
             )
             for i, img in enumerate(images):
                 t0 = time.perf_counter()
+                # PPT 模式：OCR 前逐页透视矫正（CPU），矫正图喂 OCR；
+                # page.image_path 改回原图，marker / 前端源图匹配用原文件名。
+                ocr_input = img
+                if ppt is not None and ppt.enable and ppt.rectify:
+                    from docrestore.processing.slide_rectify import (
+                        rectify_page,
+                    )
+                    ocr_input = await rectify_page(
+                        img, output_dir,
+                        save_debug=ppt.rectify_save_debug,
+                        debug_dir=ppt.rectify_debug_dir,
+                        top_extend_ratio=ppt.rectify_top_extend_ratio,
+                    )
                 with profiler.stage("ocr.single", stem=img.stem):
                     if gpu_lock is not None:
                         async with gpu_lock:
-                            page = await engine.ocr(img, output_dir)
+                            page = await engine.ocr(ocr_input, output_dir)
                     else:
-                        page = await engine.ocr(img, output_dir)
+                        page = await engine.ocr(ocr_input, output_dir)
+                if ocr_input is not img:
+                    page.image_path = img
                 raw_before_clean = page.raw_text
                 with profiler.stage(
                     "cleaner.page", stem=page.image_path.stem,
@@ -2576,11 +2727,18 @@ class Pipeline:
     ) -> LLMRefiner | None:
         """获取 refiner 实例：llm 非空时按请求快照新建，否则复用默认实例。
 
+        统一精修开关：有效 ``LLMConfig.enable_refine`` 为 False 时直接返回
+        None——文档（分段）/ 代码 / PPT（按页）三模式既有的
+        ``if refiner is None: 跳过`` 回退路径统一生效，无需逐处判断。
+
         llm 非空但 `llm.model` 为空串时返回 None —— 下游调用点已有
         `if refiner is None: 跳过` 的回退路径。否则 `_create_refiner` 会
         把 model="" 塞进去，litellm 调用时对每次都抛 BadRequestError 并
         在 stderr 打"Provider List: https://docs.litellm.ai/docs/providers"。
         """
+        effective = llm if llm is not None else self._config.llm
+        if not effective.enable_refine:
+            return None
         if llm is None:
             return self._refiner
         if not llm.model:

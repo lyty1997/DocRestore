@@ -227,6 +227,11 @@ class LLMConfig(BaseModel):
     timeout_per_1k_chars_s: float = 3.0
     #: 单次 timeout 上限（秒）。防止超长 input 把 timeout 放到天上去。
     timeout_max_s: int = 180
+    #: 统一 LLM 精修总开关：文档（分段）/ 代码 / PPT（按页）三模式共用。
+    #: True=按各模式策略精修；False=跳过所有 LLM 精修，仅输出 OCR 清洗结果。
+    #: 在 ``_get_refiner`` 单点拦截——False 时返回 None，下游各模式既有的
+    #: ``if refiner is None: 跳过`` 回退路径统一生效（无需逐处判断）。
+    enable_refine: bool = True
     enable_final_refine: bool = True  # 分段精修后是否做整篇文档级精修
     # 整篇精修分块：文档超过 final_refine_min_chars 时切成 final_refine_chunks 块
     # 并行调用；块数 ≤1 退化为单次整篇调用。每块按 <!-- page: --> 边界切分。
@@ -357,6 +362,24 @@ class CodeRestoreConfig(BaseModel):
     rescue_max_orphan_pages: int = 3
 
 
+class PowerPointRestoreConfig(BaseModel):
+    """PPT 屏摄照片还原模式配置（AGE-83）。
+
+    enable=True 时启用第三分支 ``_ppt_pipeline``：屏摄照片 → S2 透视矫正
+    （逐页前处理）→ VL-1.6 doc_parser 识别 + 化学结构裁图 → 单页保序组装
+    合并为单个 document.md。与文档 / 代码模式互斥三选一。
+    """
+
+    enable: bool = False
+    #: S2 透视矫正（默认开，S0 结论：屏摄强透视下矫正必需）
+    rectify: bool = True
+    #: 落盘 before/after 对照图到 output_dir/<rectify_debug_dir>（S2 验收证据）
+    rectify_save_debug: bool = True
+    rectify_debug_dir: str = ".rectified"
+    #: 顶边上抬比例，补回常被吊顶 / 暗标题栏遮挡的区域
+    rectify_top_extend_ratio: float = 0.2
+
+
 class PipelineConfig(BaseModel):
     """Pipeline 总配置"""
 
@@ -366,6 +389,7 @@ class PipelineConfig(BaseModel):
     output: OutputConfig = Field(default_factory=OutputConfig)
     pii: PIIConfig = Field(default_factory=PIIConfig)
     code: CodeRestoreConfig = Field(default_factory=CodeRestoreConfig)
+    ppt: PowerPointRestoreConfig = Field(default_factory=PowerPointRestoreConfig)
     db_path: str = "data/docrestore.db"  # SQLite 持久化路径
     debug: bool = True  # 落盘各阶段中间结果到 output_dir/debug/
 
