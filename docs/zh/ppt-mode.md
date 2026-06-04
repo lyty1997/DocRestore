@@ -1,9 +1,9 @@
 # PPT 还原模式设计文档（S1 / AGE-85）
 
-> **状态**：S1 设计已确认（2026-06-03，§14 六项拍板）→ 生成 OpenSpec 中
+> **状态**：S0–S6 全栈已落地并合并 `dev`（详见 progress.md）；S1 设计已确认（2026-06-03，§14 六项拍板）
 > **对应 issue**：父 AGE-83；本文 = AGE-85（S1[design]）；下游 AGE-86(S2) / AGE-87(S3) / AGE-88(S4) / AGE-89(S5) / AGE-90(S6)
 > **上游**：AGE-84（S0 spike）选型结论已落地（VL-1.5→1.6 全面升级合并 `dev`，commit `15faf0f`）
-> **真相源约定**：本文经用户确认后生成 OpenSpec，作为下游 S2–S6 编码唯一真相源；编码时若与实际代码冲突，以代码 + OpenSpec 为准，回头修订本文。
+> **真相源约定**：本文（ppt-mode.md）是 PPT 模式设计真相源（项目已弃用 OpenSpec，统一用 `docs/` 体系）；编码时若与实际代码冲突，以代码为准，回头修订本文。
 
 ---
 
@@ -394,7 +394,7 @@ onSubmit(trimmed, outputDir, llm, pii, ocr, code, ppt);
 | E | 页间分隔 | ✅ **markdown 分隔线 + page marker**（§9） |
 | F | DB migration | ✅ **同 `code` 列机制**，老任务无需手动迁移（§7#7） |
 
-> 6 项已确认（含 B / D 的实测留口）。据此生成 OpenSpec（change proposal + spec deltas），下游 S2–S6 据此细化内部步骤。
+> 6 项已确认（含 B / D 的实测留口），下游 S2–S6 据此细化内部步骤（已全部落地，见 progress.md）。
 
 ---
 
