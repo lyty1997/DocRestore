@@ -210,6 +210,36 @@ async def test_retry_marked_context_does_not_trigger_again() -> None:
     assert len(refiner.calls) == 0
 
 
+@pytest.mark.asyncio
+async def test_ui_noise_retry_hint_self_contained_on_slide() -> None:
+    """slide 路径（is_slide=True）UI 噪音重试：retry_hint 不引用文档版才有的
+    'system 规则 11-13'（slide prompt 无此编号），改为自带删除指令；is_slide
+    透传使重试仍走 slide prompt（回归 review #3）。
+    """
+    refiner = _FakeRefiner([
+        "正文\nPlain Text 复制代码\ncode",  # 首轮（手动调用）
+        "正文\ncode",                        # 重试更干净
+    ])
+    slide_ctx = RefineContext(
+        segment_index=1, total_segments=1,
+        overlap_before="", overlap_after="", is_slide=True,
+    )
+    first = await refiner.refine("raw", slide_ctx)
+
+    await Pipeline._maybe_retry_refine_on_ui_noise(
+        _as_refiner(refiner), "raw", slide_ctx, first, None,
+    )
+
+    assert len(refiner.calls) == 2  # 触发了重试
+    retry_hint = refiner.calls[1].retry_hint
+    # 不再引用 slide prompt 里不存在的"规则 11-13"
+    assert "规则 11" not in retry_hint
+    # 自带删除指令，不依赖 system 规则编号
+    assert "复制代码" in retry_hint
+    # is_slide 透传，重试仍走 slide prompt
+    assert refiner.calls[1].is_slide is True
+
+
 # ---------------- 信号 3: LLM 整页误删注释 → 段级重试 ----------------
 
 

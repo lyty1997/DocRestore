@@ -425,6 +425,36 @@ class TestRetryTask:
         assert new.ppt.enable is True
         assert new.code is None  # .rectified/ 不触发代码模式推断
 
+    @pytest.mark.asyncio
+    async def test_retry_prefers_code_when_both_artifacts_present(
+        self, tmp_path: Path,
+    ) -> None:
+        """旧 output_dir 同时残留 files-index.json 与 .rectified/、且 code/ppt
+        快照都丢失：互斥推断优先代码模式（与 pipeline 调度 code→ppt 顺序一致），
+        不把 code+ppt 同时 enable 传给 create_task（回归 review #4 配套）。
+        """
+        mgr = _make_manager()
+        out = tmp_path / "out"
+        out.mkdir(parents=True)
+        (out / "files-index.json").write_text("{}", encoding="utf-8")
+        (out / ".rectified").mkdir()
+        failed = Task(
+            task_id="legacy-both",
+            status=TaskStatus.FAILED,
+            image_dir="/orig/imgs",
+            output_dir=str(out),
+            code=None,
+            ppt=None,
+        )
+        mgr._tasks[failed.task_id] = failed
+
+        new = await mgr.retry_task(failed.task_id)
+
+        assert isinstance(new, Task)
+        assert new.code is not None
+        assert new.code.enable is True
+        assert new.ppt is None  # 互斥：code 命中 → 不再推断 ppt
+
 
 class TestResumeTask:
     """resume_task 保留 output_dir，并延续代码模式配置"""

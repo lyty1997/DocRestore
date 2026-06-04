@@ -18,6 +18,7 @@ import {
 } from "react";
 
 import { cleanupTasks, deleteTask, listTasks } from "../api/client";
+import { retryUntilSuccess } from "../lib/retry";
 import type { TaskListItem } from "../api/schemas";
 import { useTranslation } from "../i18n";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -102,7 +103,7 @@ export const SidebarTaskList = forwardRef<
   }
 
   const fetchTasks = useCallback(
-    async (pageNum: number, append: boolean) => {
+    async (pageNum: number, append: boolean): Promise<boolean> => {
       setLoading(true);
       try {
         const resp = await listTasks({ page: pageNum, page_size: PAGE_SIZE });
@@ -110,8 +111,10 @@ export const SidebarTaskList = forwardRef<
         setTasks((prev) =>
           sortTasks(append ? [...prev, ...resp.tasks] : resp.tasks),
         );
+        return true;
       } catch {
         /* 静默失败，保留已有列表 */
+        return false;
       } finally {
         setLoading(false);
       }
@@ -119,10 +122,16 @@ export const SidebarTaskList = forwardRef<
     [],
   );
 
-  /** 初次加载 */
-  useEffect(() => {
-    void fetchTasks(1, false);
-  }, [fetchTasks]);
+  /** 初次加载：后端未就绪时退避重试，就绪后自动填充列表，无需重启前端 */
+  useEffect(
+    () =>
+      retryUntilSuccess(async () => {
+        const ok = await fetchTasks(1, false);
+        /* 后端未就绪（fetch 失败）→ 抛出触发退避重试；成功即停止 */
+        if (!ok) throw new Error("task list not ready");
+      }),
+    [fetchTasks],
+  );
 
   /** 暴露 refresh 给父组件 */
   useImperativeHandle(

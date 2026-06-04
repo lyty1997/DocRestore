@@ -107,6 +107,16 @@ class TestBuildRefinePrompt:
         assert "跨页" in REFINE_SYSTEM_PROMPT
         assert "不做跨页去重" in SLIDE_REFINE_SYSTEM_PROMPT
 
+    def test_slide_prompt_has_ui_noise_rule(self) -> None:
+        """slide prompt 含页内 UI 噪音清理规则（代码截图幻灯片的 `复制代码` /
+        工具栏行），使首轮即可清理（回归 review #3）。
+
+        旧 slide prompt 无此规则，又被 UI 噪音重试提示引用"system 规则 11-13"
+        （那是文档版的编号、slide 版没有），导致代码截图幻灯片噪音无人清、
+        重试也无据可依。这里断言 slide prompt 自带该清理规则。
+        """
+        assert "复制代码" in SLIDE_REFINE_SYSTEM_PROMPT
+
 
 class TestParseGaps:
     """parse_gaps 测试"""

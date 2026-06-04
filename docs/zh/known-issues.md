@@ -148,3 +148,22 @@ limitations under the License.
 - `_ocr_config_for_code_mode` / `_ocr_config_for_ppt_mode` 合一为参数化 `_ocr_config_force_pipeline(ocr, default_ocr, pipeline_name)`，两薄封装分别传 basic / vl。
 - 新增 `TaskManager._retry_ppt_config`（对称 `_retry_code_config`）：retry/resume 时 `task.ppt` 为空则用 `output_dir/.rectified/` 推断回 PPT 模式，不再静默退回文档模式。
 - `_ppt_pipeline` 段级缓存 `enabled=enable_cache and (refiner is not None)`：关精修时禁用缓存、不再建空 `.llm_cache/` 目录。
+
+## Vite 代理报错刷屏 + 后端后起前端卡死需重启（review 第三轮，用户报）
+
+现象：后端未就绪时先启动前端 → Vite 终端刷一串 `[vite] http proxy error ... ECONNREFUSED`，且界面长期不可用、必须重启前端才能开始新任务。
+
+根因：
+- Vite 8 对 HTTP 代理错误**无条件**打日志（`node.js` proxyMiddleware；自定义 `server.proxy.configure` 的 error 处理器改不掉，且 Vite 已自行返回 502，浏览器侧拿到的是 502 而非 "Failed to fetch"）——所以改 `vite.config.ts` 无法静音该日志。
+- 前端 `listGpus` / `getOcrStatus`（`TaskForm`）与 `listTasks`（`SidebarTaskList`）三处挂载请求只打一次、失败 `catch {}` 静默放弃，后端随后就绪也不再拉取 → 必须重启前端。
+
+处理策略：
+- 新增 `frontend/src/lib/retry.ts::retryUntilSuccess(task, delaysMs)`：退避重试（默认 1/2/4/8s 末值循环）直到任务成功（不抛异常）即停，effect 卸载时取消挂起重试。
+- 三处挂载 effect 改走它（`fetchTasks` 返回 bool 供重试判定）→ 后端就绪后界面自动恢复、无需重启；代理报错从「瞬间一串 + 永久死」变「少量间隔重试 + 就绪即停」。
+- 注意：Vite 代理日志本身无法在 `vite.config.ts` 静音，只能靠降低请求频率缓解。
+
+## 实体（人名/机构名）脱敏未覆盖主精修与输出（全链路，设计中）
+
+现象（max-effort review #1 复核更正）：开 `redact_person_name`/`redact_org_name` 时，结构化 PII（手机/邮箱/身份证/银行卡）由 producer 正则在入云端前对全模式（含 PPT）脱敏；但 LLM 实体（人名/机构名）词表 `_delayed_pii_detect` 只用于文档模式 gap-fill 重 OCR 片段——**主分段精修 / PPT 按页精修 / 最终输出都未用它**，人名/机构名原样进云端 + 留输出。非 PPT 独有、非某次 diff 引入，属全链路既有缺口。
+
+处理策略（用户拍板「全链路精修前脱敏（流式+输出兜底）」，走设计→OpenSpec→编码）：检测沿用所配置 refiner（积累 N 页后建一次 lexicon），lexicon 应用到 doc 主分段精修入参 + PPT 每页精修入参 + 最终输出兜底（早窗口靠输出兜底覆盖），保持文档流式。约束：LLM 实体检测本身要把文本送 LLM，检测调用仍上云一次——要名字完全不出本机需配 local provider。

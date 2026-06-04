@@ -890,9 +890,11 @@ class TaskManager:
         if task.status != TaskStatus.FAILED:
             return f"任务状态为 {task.status.value}，仅失败任务可重试"
 
-        # 用原任务配置创建新任务
+        # 用原任务配置创建新任务。代码 / PPT 互斥：code 命中时不再推断 ppt，
+        # 避免旧 output_dir 同时残留 files-index.json 与 .rectified/ 时二者都
+        # enable（pipeline 调度按 code→ppt 顺序会静默落到代码模式）。
         code = self._retry_code_config(task)
-        ppt = self._retry_ppt_config(task)
+        ppt = self._retry_ppt_config(task) if code is None else None
         return self.create_task(
             image_dir=task.image_dir,
             llm=task.llm,
@@ -921,8 +923,9 @@ class TaskManager:
         if task.status != TaskStatus.FAILED:
             return f"任务状态为 {task.status.value}，仅失败任务可继续"
 
+        # 同 retry_task：code 命中优先，互斥时不再推断 ppt。
         code = self._retry_code_config(task)
-        ppt = self._retry_ppt_config(task)
+        ppt = self._retry_ppt_config(task) if code is None else None
         return self.create_task(
             image_dir=task.image_dir,
             output_dir=task.output_dir,  # 关键：复用 → OCR cache 命中
@@ -956,10 +959,16 @@ class TaskManager:
     def _retry_ppt_config(task: Task) -> PowerPointRestoreConfig | None:
         """重试/继续时恢复 PPT 模式配置（对称于 ``_retry_code_config``）。
 
-        正常路径直接沿用 ``task.ppt``。兼容旧 bug：历史 retry/resume 曾不转发 ppt，
-        产生 ppt 快照丢失但 output_dir 已有 PPT 产物的任务；此时若 output_dir 存在
-        透视矫正产物目录（``.rectified/``，PPT 分支独有），补一个最小 ppt 配置让重试
-        继续走 PPT 分支，而不是静默退回文档模式。
+        正常路径直接沿用 ``task.ppt``——mode 已随任务持久化在 DB，post-fix 任务
+        恒非 None，不走下面的产物推断。兼容旧 bug：历史 retry/resume 曾不转发
+        ppt，产生 ppt 快照丢失但 output_dir 已有 PPT 产物的任务；此时若 output_dir
+        存在透视矫正产物目录（``.rectified/``，PPT 分支独有），补一个最小 ppt 配置
+        让重试继续走 PPT 分支，而不是静默退回文档模式（命中时打 info 日志）。
+
+        局限（仅影响丢失 ppt 快照的旧任务）：``.rectified/`` 只在 ``rectify=True``
+        且至少一页成功检测到四边形并落盘后才创建，且这里只认默认目录名；旧任务若
+        ``rectify=False`` 或所有页都回退原图，则无此目录、无法判定，仍退回文档模式。
+        新任务靠持久化的 ``task.ppt`` 恒命中正常路径，不受此局限影响。
         """
         if task.ppt is not None:
             return task.ppt
@@ -967,5 +976,9 @@ class TaskManager:
         output_dir = Path(task.output_dir)
         rectify_dir = PowerPointRestoreConfig().rectify_debug_dir
         if (output_dir / rectify_dir).is_dir():
+            logger.info(
+                "任务 %s 丢失 ppt 快照，依据 %s/ 产物推断回 PPT 模式重试",
+                task.task_id, rectify_dir,
+            )
             return PowerPointRestoreConfig(enable=True)
         return None

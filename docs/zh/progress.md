@@ -1040,3 +1040,20 @@ AGE-72 / 探测信号 AGE-73 / 决策策略 AGE-74 / API AGE-75 / 前端 AGE-76�
 遗留：
 - 前端 `TaskProgress` stage 标签未本地化 `ppt_refine`/`ppt_render`/`ppt_page` 仅为次要技术 token 展示（message_key 主文案已本地化），后续顺手再清。
 - 英文文档 `docs/en/` 同步仍留后续。
+
+## 2026-06-04 CST - max-effort code-review 第三轮（复审 52a9f4c+806f7d9）4 修 + 前端韧性
+
+背景：对前两笔未推送提交再跑 max-effort code-review（9 路 finder + 逐条源码核实），修复 4 项并按用户确认处理。
+
+完成内容：
+- **#2 键盘焦点回归**：模式 / Provider 选择器隐藏原生 radio 后无焦点指示（WCAG 2.4.7）。给 `.mode-radio-option` / `.llm-provider-option` 各加 `:focus-within { outline }`，键盘 Tab/方向键导航整框可见。
+- **#3 slide 重试引用不存在规则**：UI 噪音重试提示硬编码「请按 system 规则 11-13」，但 `SLIDE_REFINE_SYSTEM_PROMPT` 只有规则 1-8。修法：slide prompt 新增规则 8（页内 UI 噪音清理：`复制代码`/工具栏行，原规则 8→9）使代码截图幻灯片首轮即清；重试提示去掉规则编号、改自带删除指令（对文档版 11-13 与 slide 版规则 8 都成立）。
+- **#4 `_retry_ppt_config` 兜底**：retry/resume 改 `ppt = _retry_ppt_config(task) if code is None else None`（代码/PPT 互斥，避免旧 output_dir 同时残留两类产物时 code+ppt 同传 create_task）；`.rectified/` 推断命中打 info 日志（不再静默），docstring 写明 `rectify=False`/全回退/自定义目录的局限（仅影响丢快照旧任务，新任务靠持久化 `task.ppt`）。
+- **Vite 报错刷屏 + 卡死需重启（用户报）**：根因 (1) Vite 8 对 HTTP 代理错误无条件打日志（`configure` 改不掉、且已返回 502）；(2) 前端 `listGpus`/`getOcrStatus`/`listTasks` 三处挂载请求只打一次、失败即静默放弃，后端后起也不再拉 → 必须重启前端。修法：新增 `frontend/src/lib/retry.ts::retryUntilSuccess`（退避 1/2/4/8s 末值循环、卸载即停），接入三处挂载 effect → 后端就绪后界面自动恢复、无需重启。
+
+验证：`mypy --strict` Success(66) + `ruff` + `typos` + 前端 `tsc` + `eslint` 全绿；**pytest 1019 passed, 45 skipped**（新增 3 用例：slide UI 规则 / slide 重试提示自洽 / retry 互斥优先 code）。
+
+决策 / 遗留：
+- **review #1（实体脱敏）经复核更正**：「PPT 把人名/机构名送云端」非 PPT 独有——文档模式主精修同样把人名/机构名原样送云端（实体词表只用于 gap-fill）；结构化 PII 已由 producer 正则全模式入云前脱敏。属全链路既有行为、非本 diff 引入。用户拍板「全链路精修前脱敏（流式+输出兜底）」，走设计→OpenSpec→编码单独推进（详见 `known-issues.md`）。
+- #2 焦点态 CSS 未跑 Playwright 截图验证（需起整套栈 + 键盘 Tab），待补。
+- 英文文档 `docs/en/` 同步仍留后续。

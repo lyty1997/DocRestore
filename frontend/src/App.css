@@ -2837,6 +2837,13 @@ body {
   color: var(--color-primary);
 }
 
+/* 原生 radio 视觉隐藏后，焦点环改由 label 的 :focus-within 提供，
+   键盘 Tab/方向键导航时整框可见（补回隐藏 radio 丢掉的焦点指示）。 */
+.mode-radio-option:focus-within {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
 /* 隐藏原生 radio 圆点但保留可聚焦（键盘可达），整框点击 / 染色即选中态 */
 .mode-radio-option input {
   position: absolute;
@@ -3216,6 +3223,12 @@ body {
   border-color: var(--color-primary);
   background: var(--color-primary-glow);
   color: var(--color-primary);
+}
+
+/* 原生 radio 视觉隐藏后，焦点环改由 label 的 :focus-within 提供（键盘可见）。 */
+.llm-provider-option:focus-within {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
 }
 
 /* 去掉原生 radio 小圆点，只用整框背景染色表示选中（保留可聚焦，键盘可达）。 */

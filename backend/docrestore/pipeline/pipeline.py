@@ -2460,8 +2460,8 @@ class Pipeline:
             overlap_after=ctx.overlap_after,
             retry_hint=(
                 f"上一轮输出仍含 {len(first_hits)} 处网页 UI 噪音"
-                f"（如 `{first_hits[0]}`）。请按 system 规则 11-13"
-                "逐行删除所有 `{语言} 复制代码` / 独立 `复制代码` /"
+                f"（如 `{first_hits[0]}`）。请逐行删除所有 "
+                "`{语言} 复制代码` / 独立 `复制代码` /"
                 "以 `▶▼☐` 开头的视觉 UI 行；若留在代码块内，"
                 "剥离后保持代码块闭合。"
             ),
