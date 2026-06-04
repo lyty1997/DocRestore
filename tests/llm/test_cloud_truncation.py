@@ -21,7 +21,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from docrestore.llm.cloud import CloudLLMRefiner, _extract_json_payload
+from docrestore.llm.cloud import (
+    CloudLLMRefiner,
+    _coerce_str_list,
+    _extract_json_payload,
+)
 from docrestore.models import RefineContext
 from docrestore.pipeline.config import LLMConfig
 
@@ -195,3 +199,73 @@ class TestDetectPiiEntitiesJsonParse:
         refiner = CloudLLMRefiner(_make_config())
         with pytest.raises(RuntimeError, match="非 JSON"):
             await refiner.detect_pii_entities("test")
+
+    @pytest.mark.asyncio
+    @patch("docrestore.llm.base.litellm.acompletion")
+    async def test_bare_string_field_not_char_split(
+        self, mock_acompletion: AsyncMock,
+    ) -> None:
+        """#13：person_names 是裸字符串而非数组 → 丢弃，绝不逐字符拆分。
+
+        旧实现 list("Alice") = ['A','l','i','c','e']，下游全局替换会把
+        正文每个字母打碎。修复后裸字符串视为字段缺失，返回空。
+        """
+        raw = '{"person_names": "Alice", "org_names": ["Acme"]}'
+        mock_acompletion.return_value = _make_response(raw, "stop")
+
+        refiner = CloudLLMRefiner(_make_config())
+        persons, orgs = await refiner.detect_pii_entities("test")
+
+        assert persons == []  # 不是 ['A','l','i','c','e']
+        assert orgs == ["Acme"]
+
+    @pytest.mark.asyncio
+    @patch("docrestore.llm.base.litellm.acompletion")
+    async def test_mixed_type_items_filtered(
+        self, mock_acompletion: AsyncMock,
+    ) -> None:
+        """#13：数组内混入 None/数字/空串 → 仅保留去空格后非空的 str。"""
+        raw = (
+            '{"person_names": ["张三", null, 42, "  ", " 李四 "],'
+            ' "org_names": []}'
+        )
+        mock_acompletion.return_value = _make_response(raw, "stop")
+
+        refiner = CloudLLMRefiner(_make_config())
+        persons, orgs = await refiner.detect_pii_entities("test")
+
+        assert persons == ["张三", "李四"]
+        assert orgs == []
+
+    @pytest.mark.asyncio
+    @patch("docrestore.llm.base.litellm.acompletion")
+    async def test_top_level_array_raises(
+        self, mock_acompletion: AsyncMock,
+    ) -> None:
+        """#13：顶层是 JSON 数组而非对象 → RuntimeError（fail-closed）。"""
+        mock_acompletion.return_value = _make_response(
+            '["张三", "李四"]', "stop",
+        )
+        refiner = CloudLLMRefiner(_make_config())
+        with pytest.raises(RuntimeError, match="非对象"):
+            await refiner.detect_pii_entities("test")
+
+
+class TestCoerceStrList:
+    """_coerce_str_list 类型守卫（issue #13）。"""
+
+    def test_bare_string_returns_empty(self) -> None:
+        """裸字符串非 list → 空（绝不逐字符拆分）。"""
+        assert _coerce_str_list("Alice") == []
+
+    def test_non_list_returns_empty(self) -> None:
+        assert _coerce_str_list(None) == []
+        assert _coerce_str_list(42) == []
+        assert _coerce_str_list({"a": 1}) == []
+
+    def test_filters_non_str_and_blank(self) -> None:
+        value: object = ["a", None, 1, "", "  ", " b "]
+        assert _coerce_str_list(value) == ["a", "b"]
+
+    def test_plain_str_list_passthrough(self) -> None:
+        assert _coerce_str_list(["x", "y"]) == ["x", "y"]

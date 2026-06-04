@@ -26,6 +26,12 @@ from docrestore.privacy.patterns import redact_structured_pii
 
 logger = logging.getLogger(__name__)
 
+# 实体替换安全阈值（issue #13）：LLM 偶发幻觉/格式错误会吐出单字、纯标点或
+# 整句作为"实体名"，一旦全局 str.replace 会把正文打碎，且不可逆。
+_MIN_ENTITY_LEN = 2  # 短于此（单字"的"/"人"、单符号）一律跳过
+_HIGH_FREQ_WARN = 50  # 单实体替换次数超此 → 疑似误检，告警（仍执行）
+_LONG_ENTITY_WARN = 64  # 实体长度超此 → 疑似把整句当实体，告警（仍执行）
+
 
 @dataclass(frozen=True)
 class EntityLexicon:
@@ -35,6 +41,17 @@ class EntityLexicon:
     org_names: tuple[str, ...]
 
 
+def _is_safe_entity(name: str) -> bool:
+    """实体名是否可安全用于全局替换。
+
+    过滤会把正文打碎的 LLM 坏输出（issue #13）：空 / 过短（单字单符号）/
+    纯标点。``str.isalnum()`` 对中文/日文等返回 True，故可借它排除纯标点。
+    """
+    if len(name) < _MIN_ENTITY_LEN:
+        return False
+    return any(ch.isalnum() for ch in name)
+
+
 def _replace_entities(
     text: str,
     names: list[str],
@@ -42,18 +59,32 @@ def _replace_entities(
 ) -> tuple[str, int]:
     """按长度降序替换实体名称，返回 (替换后文本, 替换次数)。
 
-    按长度降序排列防止"张三"先于"张三丰"匹配。
+    按长度降序排列防止"张三"先于"张三丰"匹配。跳过空/过短/纯标点实体，
+    对异常高频/超长实体告警，避免 LLM 坏输出全篇误替（issue #13）。
     """
     count = 0
-    # 按长度降序排序，避免短实体先匹配
-    sorted_names = sorted(names, key=len, reverse=True)
+    # 先 strip 再按长度降序，避免短实体先匹配
+    sorted_names = sorted(
+        (n.strip() for n in names), key=len, reverse=True,
+    )
     for name in sorted_names:
-        if not name:
+        if not _is_safe_entity(name):
             continue
         occurrences = text.count(name)
-        if occurrences > 0:
-            text = text.replace(name, placeholder)
-            count += occurrences
+        if occurrences == 0:
+            continue
+        if occurrences > _HIGH_FREQ_WARN:
+            logger.warning(
+                "实体替换次数异常高（%d 次 > %d），疑似 LLM 误检，仍执行：%r",
+                occurrences, _HIGH_FREQ_WARN, name[:40],
+            )
+        if len(name) > _LONG_ENTITY_WARN:
+            logger.warning(
+                "实体长度异常（%d > %d），疑似把整句当实体，仍执行：%r",
+                len(name), _LONG_ENTITY_WARN, name[:80],
+            )
+        text = text.replace(name, placeholder)
+        count += occurrences
     return text, count
 
 
