@@ -358,3 +358,40 @@ class TestCleanupExpiredSessions:
         import shutil
         _sessions.pop(sid, None)
         shutil.rmtree(upload_dir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_cleanup_all_skips_referenced_dir(self) -> None:
+        """#11：shutdown 全量清理跳过被任务引用的 upload_dir，只删未引用的。"""
+        import shutil
+        import tempfile
+        from datetime import datetime
+        from pathlib import Path
+
+        from docrestore.api.upload import (
+            UploadSession,
+            cleanup_all_sessions,
+        )
+
+        ref_dir = Path(tempfile.mkdtemp(prefix="docrestore_test_ref_"))
+        (ref_dir / "a.jpg").write_bytes(b"x")
+        orphan_dir = Path(tempfile.mkdtemp(prefix="docrestore_test_orph_"))
+        (orphan_dir / "b.jpg").write_bytes(b"y")
+        _sessions["ref"] = UploadSession(
+            session_id="ref", upload_dir=ref_dir, created_at=datetime.now(),
+        )
+        _sessions["orphan"] = UploadSession(
+            session_id="orphan", upload_dir=orphan_dir,
+            created_at=datetime.now(),
+        )
+
+        try:
+            cleanup_all_sessions({str(ref_dir)})
+
+            # 被引用目录保留，未引用目录被删
+            assert ref_dir.exists()  # noqa: ASYNC240
+            assert (ref_dir / "a.jpg").exists()  # noqa: ASYNC240
+            assert not orphan_dir.exists()  # noqa: ASYNC240
+        finally:
+            shutil.rmtree(ref_dir, ignore_errors=True)
+            shutil.rmtree(orphan_dir, ignore_errors=True)
+            _sessions.clear()
