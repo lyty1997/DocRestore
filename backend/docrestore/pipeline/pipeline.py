@@ -1015,6 +1015,15 @@ class Pipeline:
                     "\n".join(raw_accum), llm, pii,
                 )
                 pii_done = True
+                if self._should_block_cloud(entity_lexicon, pii):
+                    # fail-closed：检测失败 → 停用按页云端精修，后续页退原文
+                    refiner = None
+                    refining = False
+                    logger.warning(
+                        "PPT 模式 PII 实体检测失败且 block_cloud_on_detect_"
+                        "failure=True：停用云端精修，后续页退原文（不外发"
+                        "人名/机构名）",
+                    )
             if refining:
                 # slide_mode：用 SLIDE_REFINE_SYSTEM_PROMPT，只修格式不跨页去重；
                 # 词表就绪后在送云端精修前脱敏人名/机构名
@@ -1614,6 +1623,9 @@ class Pipeline:
         all_gaps: list[Gap] = []
         entity_lexicon: EntityLexicon | None = None
         pii_entity_done = False
+        # fail-closed：实体检测失败且 block_cloud_on_detect_failure 为真时，停用
+        # 云端精修（refiner→None：后续段/尾段/终结化一律退原文，不外发人名/机构名）。
+        pii_block_cloud = False
 
         with profiler.stage("stream.consume"):
             while True:
@@ -1631,6 +1643,13 @@ class Pipeline:
                         merger, llm, pii_cfg,
                     )
                     pii_entity_done = True
+                    if self._should_block_cloud(entity_lexicon, pii_cfg):
+                        refiner = None
+                        pii_block_cloud = True
+                        logger.warning(
+                            "PII 实体检测失败且 block_cloud_on_detect_failure="
+                            "True：停用云端精修，后续段退原文（不外发人名/机构名）",
+                        )
 
                 segmented_offset, segment_index = (
                     await self._try_extract_and_refine(
@@ -1648,6 +1667,13 @@ class Pipeline:
             entity_lexicon = await self._detect_entities(
                 merger.get_markdown(), llm, pii_cfg,
             )
+            if self._should_block_cloud(entity_lexicon, pii_cfg):
+                refiner = None
+                pii_block_cloud = True
+                logger.warning(
+                    "PII 实体检测失败且 block_cloud_on_detect_failure=True："
+                    "停用云端精修，尾段/终结化退原文（不外发人名/机构名）",
+                )
 
         # 处理剩余文本（最后一段）
         md = merger.get_markdown()
@@ -1696,6 +1722,7 @@ class Pipeline:
             merger, pages_ref, refined_results, all_gaps,
             output_dir, llm, gpu_lock, report_fn, entity_lexicon,
             cache, llm_cfg, quality,
+            block_cloud=pii_block_cloud,
         )
 
     async def _try_extract_and_refine(
@@ -1792,8 +1819,15 @@ class Pipeline:
         cache: LLMCache,
         llm_cfg: LLMConfig,
         quality: QualityReport | None = None,
+        *,
+        block_cloud: bool = False,
     ) -> PipelineResult:
-        """单文档终结化：reassemble → gap fill → final refine → render。"""
+        """单文档终结化：reassemble → gap fill → final refine → render。
+
+        ``block_cloud=True``（PII fail-closed：实体检测失败）时跳过 gap fill 与
+        final refine 两处云端调用，仅做本地 reassemble / 去重 / polish / render，
+        避免把人名 / 机构名外发到云端。
+        """
         profiler = current_profiler()
 
         base = MergedDocument(
@@ -1808,17 +1842,20 @@ class Pipeline:
         )
 
         truncated = False
-        with profiler.stage(
-            "llm.gap_fill_phase", num_gaps=len(all_gaps),
-        ):
-            doc = await self._maybe_fill_gaps(
-                doc, all_gaps, pages_ref, output_dir,
-                llm, gpu_lock, report_fn, entity_lexicon,
-            )
-        with profiler.stage("llm.final_refine"):
-            doc, truncated = await self._do_final_refine(
-                doc, output_dir, llm, report_fn, cache, llm_cfg,
-            )
+        # fail-closed：实体检测失败时跳过 gap fill 与 final refine 两处云端调用，
+        # 仅保留本地组装/去重/polish/render，避免人名/机构名外发到云端。
+        if not block_cloud:
+            with profiler.stage(
+                "llm.gap_fill_phase", num_gaps=len(all_gaps),
+            ):
+                doc = await self._maybe_fill_gaps(
+                    doc, all_gaps, pages_ref, output_dir,
+                    llm, gpu_lock, report_fn, entity_lexicon,
+                )
+            with profiler.stage("llm.final_refine"):
+                doc, truncated = await self._do_final_refine(
+                    doc, output_dir, llm, report_fn, cache, llm_cfg,
+                )
 
         # A-2 信号 4：final_refine 输出仍有重复 H2 → 带提示重做一次
         if not truncated:
@@ -1994,6 +2031,28 @@ class Pipeline:
         return await self._detect_entities(
             merger.get_markdown(), llm, pii_cfg,
         )
+
+    @staticmethod
+    def _should_block_cloud(
+        lexicon: EntityLexicon | None,
+        pii_cfg: PIIConfig,
+    ) -> bool:
+        """实体检测已尝试但失败时，是否按 fail-closed 阻断云端精修。
+
+        仅在「开 PII + 要求人名/机构名脱敏 + 检测返回 None（失败）+
+        ``block_cloud_on_detect_failure`` 为真」时返回 True。
+
+        调用点须保证 detection 已实际尝试过 —— 此处 ``lexicon=None`` 即代表
+        检测失败，而非"早窗口尚未检测"。检测成功（含查无实体的空词表）返回
+        非 None，故不会误判为失败。
+        """
+        if lexicon is not None:
+            return False
+        if not pii_cfg.enable:
+            return False
+        if not (pii_cfg.redact_person_name or pii_cfg.redact_org_name):
+            return False
+        return pii_cfg.block_cloud_on_detect_failure
 
     @staticmethod
     async def _refine_segment_with_cache(

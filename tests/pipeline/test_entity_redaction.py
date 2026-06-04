@@ -50,10 +50,13 @@ class _RecordingRefiner:
     def __init__(
         self,
         entities: tuple[list[str], list[str]] = ([], []),
+        *,
+        raise_on_detect: bool = False,
     ) -> None:
         self.received: list[str] = []
         self.detect_calls = 0
         self._entities = entities
+        self._raise_on_detect = raise_on_detect
 
     async def refine(
         self, text: str, context: RefineContext,
@@ -84,6 +87,9 @@ class _RecordingRefiner:
     ) -> tuple[list[str], list[str]]:
         del text
         self.detect_calls += 1
+        if self._raise_on_detect:
+            msg = "stub：模拟实体检测失败"
+            raise RuntimeError(msg)
         return self._entities
 
 
@@ -251,3 +257,107 @@ async def test_ppt_pii_off_preserves_and_skips_detect(
 
     assert _PERSON in result.markdown  # 未脱敏
     assert stub.detect_calls == 0  # 关 PII → 不调实体检测
+
+
+# ------- fail-closed：检测失败阻断云端（block_cloud_on_detect_failure） -------
+
+
+def test_should_block_cloud_true_on_detect_failure() -> None:
+    """检测失败（lexicon=None）+ 开人名脱敏 + flag=True → 阻断云端。"""
+    cfg = PIIConfig(
+        enable=True, redact_person_name=True,
+        block_cloud_on_detect_failure=True,
+    )
+    assert Pipeline._should_block_cloud(None, cfg) is True
+
+
+def test_should_block_cloud_false_when_flag_off() -> None:
+    """flag=False → 不阻断（保持旧行为）。"""
+    cfg = PIIConfig(
+        enable=True, redact_person_name=True,
+        block_cloud_on_detect_failure=False,
+    )
+    assert Pipeline._should_block_cloud(None, cfg) is False
+
+
+def test_should_block_cloud_false_when_lexicon_present() -> None:
+    """检测成功（非 None，含查无实体的空词表）→ 不阻断。"""
+    cfg = PIIConfig(
+        enable=True, redact_person_name=True,
+        block_cloud_on_detect_failure=True,
+    )
+    empty = EntityLexicon(person_names=(), org_names=())
+    assert Pipeline._should_block_cloud(empty, cfg) is False
+
+
+def test_should_block_cloud_false_when_name_redaction_off() -> None:
+    """未开人名/机构名脱敏 → lexicon=None 属正常（无需 LLM 检测），不算失败。"""
+    cfg = PIIConfig(
+        enable=True, redact_person_name=False, redact_org_name=False,
+        block_cloud_on_detect_failure=True,
+    )
+    assert Pipeline._should_block_cloud(None, cfg) is False
+
+
+@pytest.mark.asyncio
+async def test_ppt_detect_failure_blocks_cloud_when_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PPT：实体检测抛错 + fail-closed → 该页不送云端精修（refine 未收到文本）。"""
+    import docrestore.pipeline.pipeline as pipeline_mod
+
+    # 阈值降到 1：单页即触发实体检测（在按页精修之前），便于断言阻断生效
+    monkeypatch.setattr(pipeline_mod, "_PII_DETECT_THRESHOLD", 1)
+
+    out = tmp_path / "out"
+    pages = [_make_page(out, "p1", f"报告人 {_PERSON} 代表 {_ORG} 发言")]
+    pipe = Pipeline(
+        PipelineConfig(llm=LLMConfig(model="m", enable_cache=False)),
+    )
+    stub = _RecordingRefiner(raise_on_detect=True)
+    pipe.set_refiner(_as_refiner(stub))
+
+    queue = await _queue_of(pages)
+    result = await pipe._ppt_pipeline(
+        queue, out, _report, llm=None, total=1,
+        pii_cfg=PIIConfig(
+            enable=True, redact_person_name=True, redact_org_name=True,
+            block_cloud_on_detect_failure=True,
+        ),
+    )
+
+    assert stub.detect_calls >= 1  # 检测被尝试
+    assert stub.received == []  # 该页未送云端精修（fail-closed 生效）
+    # 名字未外发到云端；输出退原文（仍含名字，但留在本地，未传第三方）
+    assert _PERSON in result.markdown
+
+
+@pytest.mark.asyncio
+async def test_ppt_detect_failure_still_refines_when_flag_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PPT：检测抛错但 flag=False → 仍按页精修（不改旧行为，refine 收到文本）。"""
+    import docrestore.pipeline.pipeline as pipeline_mod
+
+    monkeypatch.setattr(pipeline_mod, "_PII_DETECT_THRESHOLD", 1)
+
+    out = tmp_path / "out"
+    pages = [_make_page(out, "p1", f"报告人 {_PERSON} 发言")]
+    pipe = Pipeline(
+        PipelineConfig(llm=LLMConfig(model="m", enable_cache=False)),
+    )
+    stub = _RecordingRefiner(raise_on_detect=True)
+    pipe.set_refiner(_as_refiner(stub))
+
+    queue = await _queue_of(pages)
+    await pipe._ppt_pipeline(
+        queue, out, _report, llm=None, total=1,
+        pii_cfg=PIIConfig(
+            enable=True, redact_person_name=True,
+            block_cloud_on_detect_failure=False,
+        ),
+    )
+
+    assert stub.detect_calls >= 1
+    # flag=False：检测失败不阻断 → 该页仍送云端精修（旧行为）
+    assert any(_PERSON in r for r in stub.received)
