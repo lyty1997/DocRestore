@@ -234,3 +234,36 @@ class TestGetSourceImage:
         )
         assert resp.status_code == 200
         assert resp.content == b"img_sub/dir/pic.png"
+
+    @pytest.mark.asyncio
+    async def test_serves_symlinked_staged_image(
+        self, api_client: AsyncClient, tmp_path: Path,
+    ) -> None:
+        """#22：image_dir 是 stage 目录、源图是指向外部真实文件的 symlink → 应取到。
+
+        旧实现 `(img_dir/filename).resolve()` 跟随软链落到 image_dir 之外 →
+        包含校验 False → 404，整个服务端源图预览不可用。
+        """
+        assert routes._task_manager is not None
+        # 外部真实文件（在 stage 目录之外）
+        external = tmp_path / "external" / "real.jpg"
+        external.parent.mkdir(parents=True, exist_ok=True)
+        external.write_bytes(b"EXTERNAL_IMG")
+        # stage 目录：用 symlink 指向外部文件（复刻 _stage_files 行为）
+        stage_dir = tmp_path / "stage"
+        stage_dir.mkdir()
+        (stage_dir / "real.jpg").symlink_to(external)
+
+        task = Task(
+            task_id="t-symlink",
+            status=TaskStatus.COMPLETED,
+            image_dir=str(stage_dir),
+            output_dir=str(tmp_path / "out"),
+        )
+        routes._task_manager._tasks[task.task_id] = task
+
+        resp = await api_client.get(
+            "/api/v1/tasks/t-symlink/source-images/real.jpg",
+        )
+        assert resp.status_code == 200
+        assert resp.content == b"EXTERNAL_IMG"

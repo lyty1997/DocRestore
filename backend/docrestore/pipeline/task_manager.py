@@ -57,6 +57,10 @@ class TaskStatus(Enum):
     FAILED = "failed"
 
 
+#: 终态集合：到达后不可再转换（cancel/complete/fail 多路并发的单一真相源，issue #12）
+_TERMINAL_STATUSES = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED})
+
+
 @dataclass
 class Task:
     """任务记录。
@@ -366,6 +370,35 @@ class TaskManager:
             with suppress(asyncio.QueueFull):
                 q.put_nowait(progress)
 
+    async def _finalize(
+        self,
+        task_id: str,
+        new_status: TaskStatus,
+        *,
+        results: list[PipelineResult] | None = None,
+        error: str | None = None,
+    ) -> bool:
+        """串行化终态转换（单一真相源，issue #12）。
+
+        cancel_task 与 run_task（成功 / 取消 / 异常）多路并发写终态时，第一个
+        到达终态的赢、其余放弃，避免"已取消的任务最终 COMPLETED"或"已完成的
+        任务被标 FAILED（结果已落库却显示失败）"。
+
+        已是终态返回 ``False``（本次未生效，调用方应跳过对应持久化/广播）；
+        否则在锁内原子应用 status/results/error 并返回 ``True``。
+        """
+        async with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return False
+            if task.status in _TERMINAL_STATUSES:
+                return False
+            task.status = new_status
+            if results is not None:
+                task.results = results
+            task.error = error
+            return True
+
     async def run_task(self, task_id: str) -> None:
         """PENDING → PROCESSING → pipeline.process_tree() → COMPLETED / FAILED"""
         async with self._lock:
@@ -408,30 +441,35 @@ class TaskManager:
                 logger.warning(
                     "任务 %s 部分失败: %s", task_id, err_msg,
                 )
-                async with self._lock:
-                    task.status = TaskStatus.FAILED
-                    task.results = results
-                    task.error = err_msg
-                await self._persist_results(
-                    task_id, results, status="failed", error=err_msg,
-                )
-                self.publish_progress(
-                    task_id,
-                    TaskProgress(
-                        stage="failed",
-                        current=len(results) - len(failed_docs),
-                        total=len(results),
-                        percent=0.0,
-                        message=err_msg,
-                        # err_msg 本身可能来自后端异常（已是英文/中文混合），
-                        # 前端用 message_key fallback 到 message 原文即可
-                    ),
-                )
+                if await self._finalize(
+                    task_id, TaskStatus.FAILED,
+                    results=results, error=err_msg,
+                ):
+                    await self._persist_results(
+                        task_id, results, status="failed", error=err_msg,
+                    )
+                    self.publish_progress(
+                        task_id,
+                        TaskProgress(
+                            stage="failed",
+                            current=len(results) - len(failed_docs),
+                            total=len(results),
+                            percent=0.0,
+                            message=err_msg,
+                            # err_msg 本身可能来自后端异常（已是英文/中文混合），
+                            # 前端用 message_key fallback 到 message 原文即可
+                        ),
+                    )
                 return
 
-            async with self._lock:
-                task.status = TaskStatus.COMPLETED
-                task.results = results
+            if not await self._finalize(
+                task_id, TaskStatus.COMPLETED, results=results,
+            ):
+                # 已被并发 cancel_task 置为终态 → 不覆盖（单一真相源，issue #12）
+                logger.info(
+                    "任务 %s 完成时已是终态，跳过 COMPLETED 覆盖", task_id,
+                )
+                return
 
             await self._persist_results(
                 task_id, results, status="completed",
@@ -450,57 +488,71 @@ class TaskManager:
             )
         except asyncio.CancelledError:
             logger.info("任务 %s 被取消（应用关闭或用户取消）", task_id)
-            async with self._lock:
-                task.status = TaskStatus.FAILED
-                task.error = "任务取消"
+            # 串行化置终态：若 cancel_task 已抢先标"用户取消"则不覆盖（issue #12）
+            finalized = await self._finalize(
+                task_id, TaskStatus.FAILED, error="任务取消",
+            )
             try:
-                await self._persist_status(
-                    task_id, "failed", error="任务取消",
-                )
-                self.publish_progress(
-                    task_id,
-                    TaskProgress(
-                        stage="failed",
-                        current=0,
-                        total=0,
-                        percent=0.0,
-                        message="任务取消",
-                        message_key="progress.cancelled",
-                    ),
-                )
+                if finalized:
+                    await self._persist_status(
+                        task_id, "failed", error="任务取消",
+                    )
+                    self.publish_progress(
+                        task_id,
+                        TaskProgress(
+                            stage="failed",
+                            current=0,
+                            total=0,
+                            percent=0.0,
+                            message="任务取消",
+                            message_key="progress.cancelled",
+                        ),
+                    )
             except Exception:  # noqa: BLE001 — 关闭阶段不阻断
                 logger.debug("取消后清理未完成", exc_info=True)
         except Exception as exc:
-            # 错误摘要（客户端可见）：类型名 + 截断消息，不含路径/堆栈
-            error_summary = f"{type(exc).__name__}: {str(exc)[:200]}"
-            # 服务端日志始终完整记录
-            logger.exception("任务 %s 处理失败", task_id)
-
-            async with self._lock:
-                task.status = TaskStatus.FAILED
-                task.error = error_summary
-
-            await self._persist_status(task_id, "failed", error=error_summary)
-
-            # debug 模式：完整 traceback 落盘到 output_dir/debug/error.txt
-            if self._pipeline.config.debug:
-                full_tb = traceback.format_exc()
-                await asyncio.to_thread(
-                    _write_debug_error, Path(task.output_dir), full_tb,
-                )
-            self.publish_progress(
-                task_id,
-                TaskProgress(
-                    stage="failed",
-                    current=0,
-                    total=0,
-                    percent=0.0,
-                    message="处理失败",
-                    message_key="progress.failed",
-                ),
-            )
+            await self._handle_unexpected_failure(task_id, task, exc)
         finally:
             self._running_tasks.pop(task_id, None)
+
+    async def _handle_unexpected_failure(
+        self, task_id: str, task: Task, exc: Exception,
+    ) -> None:
+        """run_task 未预期异常收尾：串行化置 FAILED + 持久化 + 广播（issue #12）。
+
+        从 run_task 抽出以降低其圈复杂度；通过 ``_finalize`` 保证并发 cancel
+        已置终态时不覆盖。debug traceback 始终落盘（诊断价值），状态/广播仅在
+        本次抢到终态时执行。
+        """
+        # 错误摘要（客户端可见）：类型名 + 截断消息，不含路径/堆栈
+        error_summary = f"{type(exc).__name__}: {str(exc)[:200]}"
+        # 服务端日志始终完整记录
+        logger.exception("任务 %s 处理失败", task_id)
+
+        finalized = await self._finalize(
+            task_id, TaskStatus.FAILED, error=error_summary,
+        )
+        # debug 模式：完整 traceback 落盘到 output_dir/debug/error.txt
+        if self._pipeline.config.debug:
+            full_tb = traceback.format_exc()
+            await asyncio.to_thread(
+                _write_debug_error, Path(task.output_dir), full_tb,
+            )
+        if not finalized:
+            # 已被并发 cancel_task 置为终态 → 不覆盖状态/广播
+            return
+        await self._persist_status(task_id, "failed", error=error_summary)
+        self.publish_progress(
+            task_id,
+            TaskProgress(
+                stage="failed",
+                current=0,
+                total=0,
+                percent=0.0,
+                message="处理失败",
+                message_key="progress.failed",
+            ),
+        )
 
     async def _persist_status(
         self,
@@ -746,12 +798,17 @@ class TaskManager:
         if bg is not None:
             bg.cancel()
 
-        # 立即更新内存状态（CancelledError handler 可能还没执行）
-        async with self._lock:
-            task.status = TaskStatus.FAILED
-            task.error = "用户取消"
-
-        await self._persist_status(task_id, "failed", error="用户取消")
+        # 串行化置终态：若 run_task 已抢先到终态则不覆盖（单一真相源，issue #12）
+        if await self._finalize(
+            task_id, TaskStatus.FAILED, error="用户取消",
+        ):
+            await self._persist_status(task_id, "failed", error="用户取消")
+            return ""
+        # 已是终态：COMPLETED 说明 run_task 抢先完成、取消失败；FAILED 说明
+        # run_task 的取消/异常 handler 已先置失败，取消实际已生效
+        current = self.get_task(task_id)
+        if current is not None and current.status is TaskStatus.COMPLETED:
+            return f"任务状态为 {current.status.value}，无法取消"
         return ""
 
     async def delete_task(self, task_id: str) -> str | None:

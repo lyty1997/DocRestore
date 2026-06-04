@@ -269,6 +269,50 @@ class TestCancelTask:
         assert bg.cancelled() or bg.done()
 
 
+class TestFinalizeRace:
+    """终态转换串行化（issue #12）：先到终态者赢，杜绝 cancel/complete 双写。"""
+
+    @pytest.mark.asyncio
+    async def test_first_terminal_wins_then_rejects(self) -> None:
+        """第一次到达终态生效，后续转换被拒、状态不被覆盖。"""
+        mgr = _make_manager()
+        mgr._tasks["t"] = Task(
+            task_id="t", status=TaskStatus.PROCESSING,
+            image_dir="x", output_dir="y",
+        )
+        assert await mgr._finalize("t", TaskStatus.COMPLETED) is True
+        assert mgr._tasks["t"].status is TaskStatus.COMPLETED
+        # 后到的 FAILED 被拒
+        assert await mgr._finalize(
+            "t", TaskStatus.FAILED, error="boom",
+        ) is False
+        assert mgr._tasks["t"].status is TaskStatus.COMPLETED
+        assert mgr._tasks["t"].error is None
+
+    @pytest.mark.asyncio
+    async def test_cancelled_not_overwritten_to_completed(self) -> None:
+        """cancel 抢先置 FAILED 后，run_task 成功路径不得改回 COMPLETED。"""
+        mgr = _make_manager()
+        mgr._tasks["t"] = Task(
+            task_id="t", status=TaskStatus.PROCESSING,
+            image_dir="x", output_dir="y",
+        )
+        assert await mgr._finalize(
+            "t", TaskStatus.FAILED, error="用户取消",
+        ) is True
+        # run_task 成功路径试图置 COMPLETED → 被拒
+        assert await mgr._finalize(
+            "t", TaskStatus.COMPLETED, results=[],
+        ) is False
+        assert mgr._tasks["t"].status is TaskStatus.FAILED
+        assert mgr._tasks["t"].error == "用户取消"
+
+    @pytest.mark.asyncio
+    async def test_finalize_missing_task_returns_false(self) -> None:
+        mgr = _make_manager()
+        assert await mgr._finalize("ghost", TaskStatus.COMPLETED) is False
+
+
 class TestDeleteTask:
     """delete_task 三分支"""
 
