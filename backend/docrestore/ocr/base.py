@@ -47,11 +47,15 @@ async def _drain_stream_to_logger(
     log_prefix: str,
     *,
     tail: deque[str] | None = None,
+    on_line: Callable[[str], None] | None = None,
 ) -> None:
     """持续消费 stream，避免 64KB pipe buffer 写满后子进程阻塞在 write()。
 
     - 按行读取 → debug 级别转发到 logger
     - 可选写入 tail（deque maxlen 自动丢头），供进程退出后取最后 N 行诊断
+    - 可选 ``on_line`` 逐行回调：drain 作为 stderr 的**唯一**读者，把行转给上层
+      （如 DeepSeek 初始化进度解析），避免另起协程并发 readline 同一
+      StreamReader 触发 RuntimeError。
     - EOF（readline 返回空 bytes）正常退出；CancelledError 透传
     """
     try:
@@ -62,6 +66,8 @@ async def _drain_stream_to_logger(
             line = raw.decode("utf-8", errors="replace").rstrip()
             if tail is not None:
                 tail.append(line)
+            if on_line is not None:
+                on_line(line)
             logger.debug("%s %s", log_prefix, line)
     except asyncio.CancelledError:
         raise
@@ -144,6 +150,9 @@ class WorkerBackedOCREngine(ABC):
         # worker stderr drain 任务 + 最近 N 行缓冲（供 _raise_worker_exited 取）
         self._stderr_drain_task: asyncio.Task[None] | None = None
         self._stderr_tail: deque[str] = deque(maxlen=200)
+        # 可选 stderr 逐行钩子：drain 是 stderr 唯一读者，子类（如 DeepSeek init
+        # 进度）经它接收行，不再另起协程并发 readline 同一 StreamReader。
+        self._stderr_line_hook: Callable[[str], None] | None = None
 
     @property
     def is_ready(self) -> bool:
@@ -320,9 +329,20 @@ class WorkerBackedOCREngine(ABC):
                     self._process.stderr,
                     f"[{self.engine_name} stderr]",
                     tail=self._stderr_tail,
+                    on_line=self._dispatch_stderr_line,
                 ),
                 name=f"{self.engine_name}-stderr-drain",
             )
+
+    def _dispatch_stderr_line(self, line: str) -> None:
+        """把 drain 读到的每行 stderr 转给当前钩子（如有），异常吞掉不影响 drain。"""
+        hook = self._stderr_line_hook
+        if hook is None:
+            return
+        try:
+            hook(line)
+        except Exception:  # noqa: BLE001 — 钩子异常绝不能拖垮 stderr drain
+            logger.debug("stderr 行钩子异常", exc_info=True)
 
     async def initialize(
         self, on_progress: ProgressFn | None = None,

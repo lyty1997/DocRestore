@@ -1159,3 +1159,24 @@ fail-closed 未纳入本次（结构不同：头部仅本地 redact，是否经 
 队列已 seed 终结帧）；全量 1044 passed。
 
 **遗留**：原始 15 项里待修 8 项：#12 #13 #17 #18 #19 #20 #21 #22。
+
+## 2026-06-04（续）- code-review 第 4 批：OCR worker 传输（#18/#19）+ #17 重判
+
+**修复**：
+- **#18（MEDIUM，ocr）**：DeepSeek init 另起协程 readline 同一 `process.stderr`，与基类 stderr
+  drain 并发读 → `StreamReader` 抛 RuntimeError、init 进度静默失效（潜在 drain 死亡 → pipe 写满
+  挂死）。改单一读者：drain 加可选逐行 `on_line` hook（`_dispatch_stderr_line` 转 `_stderr_line_hook`），
+  `_send_init_command` 装进度解析 hook、finally 摘除；删死代码 `_stream_stderr_progress`。
+- **#19（MEDIUM，ocr）**：`_send_ocr_batch_all` 按 `enumerate(items_raw)` 建 results，worker 返回
+  项数 < chunk 时缺页被悄悄省略 + `ocr_batch` 末尾 `if p in results` 又静默丢 → 返回页列变短、
+  下游索引错位。加 `len(results)==len(chunk)` 硬校验（缺页抛错）+ `ocr_batch` 缺页即抛兜底。
+
+**#17 重判（NOT a clean bug）**：原审"resync 复用 OCR 超时致下一页冻结数分钟、建议改短超时"——
+深读 `_send_command` 发现 `_pending_resync` 是在"命令已发、worker 正在处理"时被取消才置位，残留
+响应会在 worker 完成那次 OCR 时到达；**短超时会过早重启正在干活的 worker**，原建议是错的。当前
+"用 OCR 超时 drain，超时才 restart"是可辩护的权衡（复用热 worker vs 重启 reload 成本）。已在 issue
+#17 记录重判，倾向 wontfix 或仅加可配置中等超时，待用户定。
+
+**验证**：`tests/ocr/test_worker_transmission.py`（drain 逐行 hook / 批量短响应抛错）；全量 1046 passed。
+
+**遗留**：原始 15 项里待修 6 项：#12 #13 #20 #21 #22（+ #17 待定）。

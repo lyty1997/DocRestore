@@ -255,3 +255,33 @@ limitations under the License.
 处理策略：
 - `subscribe_progress` 订阅时若 `task.progress` 非空，立即 `put_nowait` 回灌一帧，让晚到订阅者立刻拿到最新状态（含终态）并据此退出。
 - 回归：`tests/pipeline/test_task_manager.py::TestProgressPubSub::test_subscribe_seeds_current_progress_after_terminal`。
+
+## DeepSeek init 进度并发读同一 stderr 致失效（#18，已修复 2026-06-04）
+
+现象：
+- 基类 `_start_worker_process` 起 stderr drain 读 `process.stderr`；DeepSeek `_send_init_command` 又起协程 `_stream_stderr_progress` 读同一 `StreamReader`。
+- `StreamReader` 不允许并发 `readline()` → RuntimeError，init 进度（vLLM 加载 30-120s）静默失效；若调度反转 drain 死亡 → stderr pipe 写满、worker 阻塞挂死。
+
+处理策略：
+- 单一读者：`_drain_stream_to_logger` 加可选逐行 `on_line` 回调，`_start_worker_process` 传 `self._dispatch_stderr_line`（转当前 `_stderr_line_hook`）。
+- `_send_init_command` 不再起第二个读者，装一个解析进度的逐行 hook、init 结束（成功/异常/取消）即在 finally 摘除；删死代码 `_stream_stderr_progress`。
+- 回归：`tests/ocr/test_worker_transmission.py::test_drain_routes_each_line_to_on_line`。
+
+## DeepSeek 批量 OCR 静默丢页致下游索引错位（#19，已修复 2026-06-04）
+
+现象：
+- `_send_ocr_batch_all` 按 `enumerate(items_raw)` 建 results，worker 返回项数 < 请求 chunk 时缺失页被悄悄省略；`ocr_batch` 末尾 `[results[p] for p in image_paths if p in results]` 又把缺页静默丢掉。
+- 结果：返回的 PageOCR 页列比输入短，下游页索引/去重整体错位。
+
+处理策略：
+- `_send_ocr_batch_all` 加 `len(results)==len(chunk)` 硬校验，缺页抛 RuntimeError（含缺失页名）。
+- `ocr_batch` 末尾改为"缺页即抛"的兜底防线，不再 `if p in results` 静默过滤。
+- 回归：`tests/ocr/test_worker_transmission.py::test_batch_raises_on_missing_pages`。
+
+## resync 复用 OCR 超时（#17，重判为非 bug / 待定）
+
+现象（原审）：某页 OCR 被取消后 `_pending_resync` 置位，下次 `ocr()` 在 `_resync_if_needed` 用 `_get_timeout()`（300s/600s）drain 残留，worker 假死时下一页冻结数分钟。
+
+重判（2026-06-04）：`_pending_resync` 仅在"命令已发、worker 正在处理该 OCR"被取消时置位，残留响应会在 worker 完成那次 OCR 时到达。原建议的"短超时即 restart"会**过早重启正在干活的 worker**、丢弃热进程，是错的。当前"用 OCR 超时 drain、超时才 restart"是可辩护的权衡（复用热 worker vs restart reload 成本）。
+
+处理策略：倾向 wontfix；若要改，只加一个可配置的中等 resync 超时（默认不变），不强制短超时。已在 GitHub issue #17 记录重判，待用户定夺。
