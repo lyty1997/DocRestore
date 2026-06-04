@@ -1054,6 +1054,6 @@ AGE-72 / 探测信号 AGE-73 / 决策策略 AGE-74 / API AGE-75 / 前端 AGE-76�
 验证：`mypy --strict` Success(66) + `ruff` + `typos` + 前端 `tsc` + `eslint` 全绿；**pytest 1019 passed, 45 skipped**（新增 3 用例：slide UI 规则 / slide 重试提示自洽 / retry 互斥优先 code）。
 
 决策 / 遗留：
-- **review #1（实体脱敏）经复核更正**：「PPT 把人名/机构名送云端」非 PPT 独有——文档模式主精修同样把人名/机构名原样送云端（实体词表只用于 gap-fill）；结构化 PII 已由 producer 正则全模式入云前脱敏。属全链路既有行为、非本 diff 引入。用户拍板「全链路精修前脱敏（流式+输出兜底）」，走设计→OpenSpec→编码单独推进（详见 `known-issues.md`）。
+- **review #1（实体脱敏）经复核更正**：「PPT 把人名/机构名送云端」非 PPT 独有——文档模式主精修同样把人名/机构名原样送云端（实体词表只用于 gap-fill）；结构化 PII 已由 producer 正则全模式入云前脱敏。属全链路既有行为、非本 diff 引入。用户拍板「全链路精修前脱敏（流式+输出兜底）」，设计已落 `docs/zh/backend/privacy.md §9`（项目自有文档体系，不走 OpenSpec），待实现。
 - #2 焦点态 CSS 未跑 Playwright 截图验证（需起整套栈 + 键盘 Tab），待补。
 - 英文文档 `docs/en/` 同步仍留后续。

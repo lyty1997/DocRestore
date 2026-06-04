@@ -157,7 +157,49 @@ MergedDocument（合并后）
 - 实体检测：仅在云端模式下可用（LocalLLMRefiner 无此能力）
 - re-OCR 脱敏：缺口补充时的 re-OCR 文本也需要脱敏
 
-## 9. 相关文档
+## 9. 全链路实体脱敏前置（流式版设计 · 待实现）
+
+> §7 的 `redact_for_cloud(MergedDocument)` 是早期**批量版**整篇脱敏路径。当前**流式版** Pipeline 的 PII 脱敏分散在 producer 与精修链路，见本节。来源：max-effort code-review #1 复核（2026-06-04），用户拍板「全链路精修前脱敏（流式 + 输出兜底）」。
+
+### 9.1 流式版现状
+
+- **结构化 PII（正则）**：`_ocr_producer` 对每页 `page.cleaned_text` 调 `redact_regex_only`（手机 / 邮箱 / 身份证 / 银行卡 + 自定义词），**入队前**完成 → 下游全部（分段 / 精修 / 输出 / 全模式含 PPT）都见不到结构化 PII。✅
+- **实体 PII（人名 / 机构名）**：文档模式 `_stream_process` 在积累到 `_PII_DETECT_THRESHOLD` 页后调一次 `_delayed_pii_detect` → `detect_pii_entities` 构建 `EntityLexicon`。
+
+### 9.2 缺口
+
+`EntityLexicon` 目前**只用于 gap-fill 重 OCR 片段**（`_fill_one_gap` 内 `redact_snippet`）。文档主分段精修、PPT 按页精修、最终输出**都未应用它** → 开了 `redact_person_name` / `redact_org_name`，人名 / 机构名仍原样进入云端精修调用、并留在最终输出。属**全链路既有缺口**（文档 + PPT 都中招），非 PPT 独有、非某次提交引入。
+
+### 9.3 设计：流式 + 输出兜底
+
+应用点（复用现成 `redact_snippet(text, lexicon)`，gap-fill 既有路径不动）：
+
+1. **文档主分段**：`_stream_process` 把 `entity_lexicon` 透传到分段精修点，在 `_refine_segment_with_cache` 调用前 `redact_snippet(seg_text, lexicon)`。
+2. **PPT 每页**：`_ppt_pipeline` 签名加 `pii_cfg`，按已收页文本构建 lexicon，每页精修前 `redact_snippet(body, lexicon)`。
+3. **最终输出兜底**：`_finalize_single_doc` 组装末尾 `redact_snippet(final_md, lexicon)`，覆盖 lexicon 就绪前已精修的"早窗口"段；PPT 组装结果同样兜底。
+
+关键约束 / 决策：
+
+- 检测沿用所配置 refiner（不强制本地）；保持文档流式（不收齐全文），早窗口靠输出兜底覆盖。
+- **`detect_pii_entities(text)` 本身要把文本送给 refiner**——若 refiner 是云端，则检测调用本身上云一次。"人名完全不出本机"须配 `provider="local"`（本设计不强制，仅记边界）。
+- `lexicon=None`（未开 name 开关 / 检测失败）→ `redact_snippet(text, None)` 退化为仅正则，零改动、不阻断精修。
+
+### 9.4 验收
+
+- 文档主分段、PPT 每页送精修前：词表内人名 / 机构名已替换。
+- 早窗口已精修段含人名 → 最终 `document.md` 兜底后不含。
+- `pii.enable=False` 或两 name 开关都关 → 精修入参 / 输出与基线完全一致。
+- 检测失败（lexicon=None）→ 仅正则，不抛异常、不阻断。
+
+落地任务（待实现）：
+
+- [ ] `_stream_process` 主分段精修前应用 lexicon（透传 `entity_lexicon`）
+- [ ] `_ppt_pipeline` 接 `pii_cfg` + 建 lexicon + 每页精修前应用
+- [ ] `_finalize_single_doc` 输出兜底（文档 + PPT）
+- [ ] 边界回归：关开关零改动 / 检测失败退化仅正则 / 结构化正则不受影响
+- [ ] 单测随各项落地；`scripts/check_quality.sh` 全绿
+
+## 10. 相关文档
 
 - [数据模型](data-models.md) - `RedactionRecord`, `PIIConfig`
 - [LLM 层](llm.md) - `CloudLLMRefiner.detect_pii_entities()`
