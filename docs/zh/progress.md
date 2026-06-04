@@ -1203,3 +1203,29 @@ fail-closed 未纳入本次（结构不同：头部仅本地 redact，是否经 
 缺 worker 路径，基线即失败）。
 
 **遗留**：原始 15 项里待修 3 项：#12 #21 #22（#17 已 wontfix 关闭）。
+
+## 2026-06-04（续）- code-review 第 6 批（收官）：取消竞态/行号误读/symlink 预览（#12/#21/#22）
+
+**背景**：原始 15 项最后 3 项，修完即满足"全修完再 dev→main"。
+
+**修复**：
+- **#12（MEDIUM，pipeline）**：cancel_task 与 run_task（成功/取消/异常）多路并发写终态、无
+  "终态即终"守卫 → "已取消任务最终 COMPLETED"或"已完成被标 FAILED"。新增单一真相源
+  `_finalize(task_id, status)`（锁内重检，已终态则放弃返回 False），五处终态写全部改走它；
+  抽 `_handle_unexpected_failure` 降 run_task 圈复杂度；cancel_task 在 `_finalize` 失败后重读
+  状态区分 COMPLETED（取消失败）vs FAILED（取消已生效）。
+- **#21（MEDIUM，processing）**：`code_assembly:144` `sorted(key=int(text))` 行号 88 误读成 8 会被
+  排到列顶。复核发现 `NUMERIC_RE=^\d{1,4}$` 已挡 ValueError，真正未修的是误读重排。新增
+  `_ordered_line_numbers`：排序键改 y_top（物理真相，同 ledger `_y_monotonic_outliers` 前提）+
+  int() try/except 兜底 + 单调性修正（读数 ≤ 前值即误读 → prev+1 + inferred）。
+- **#22（HIGH，api）**：`get_source_image` 先 `resolve()` 跟随 symlink 再校验；`_stage_files` 用
+  `symlink_to` 把外部源图软链进 stage 目录 → resolve 落到 image_dir 之外 → 包含校验 False →
+  整个服务端源图预览 404。改为对【未跟随 symlink】的词法拼接路径做越界校验，再用 `is_file()`
+  跟随软链确认目标存在。
+
+**验证**：`TestFinalizeRace`(#12) + `_ordered_line_numbers` 两用例(#21) +
+`test_serves_symlinked_staged_image`(#22)；全量 1067 passed（cv2/deepseek 环境模块除外），
+mypy --strict + ruff + typos 全绿。
+
+**收官**：原始 15 项全部闭环（11 项已修 + #17 wontfix + 自查新增 #25 已修）。dev 满足"全修完"
+条件，下一步合并 dev→main，`Fixes #N` 在默认分支自动关闭 issue。

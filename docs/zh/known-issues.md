@@ -308,3 +308,38 @@ limitations under the License.
 - 保留 0.9 子序列阈值，追加连续性闸门 `contiguous_anchor_ratio=0.5`：用 `find_longest_match().size / len(short)` 要求存在一段足够长的【连续】匹配块作截断锚。
 - 实测：真截断（短=长前缀+少量 OCR 噪声尾）连续块占比 0.727；散点子序列仅 0.083；0.5 闸门两侧裕度充足。
 - 回归：`tests/processing/test_heading_dedup.py::TestDifferentSectionsKept::test_scattered_subsequence_not_merged`（散点子序列两节都保留），并复核既有 `test_truncated_then_complete_keeps_complete` 仍合并。
+
+## 取消 vs 完成竞态致任务终态错乱（#12，已修复 2026-06-04）
+
+现象：
+- `cancel_task` 检查 `status ∈ {PENDING, PROCESSING}` 后于锁内直接写 FAILED；`run_task` 成功路径写 COMPLETED。两路独立无守卫地覆盖终态。
+- `asyncio.Lock` 空闲 acquire 走不挂起快路径，`bg.cancel()` 的 CancelledError 不在此投递；`process_tree` 刚返回与 `cancel_task` 并发 → "已取消的任务最终 COMPLETED"或"已完成的任务被标 FAILED"（结果已落库却显示失败）。
+
+处理策略：
+- 引入单一真相源 `_finalize(task_id, new_status, *, results, error)`：锁内重检，若已是终态（COMPLETED/FAILED）则放弃返回 False，否则原子应用并返回 True。
+- run_task 的成功 / 部分失败 / CancelledError / 未预期异常四路 + cancel_task 全部改走 `_finalize`，先到终态者赢；持久化/广播仅在本次抢到终态时执行。
+- cancel_task 在 `_finalize` 返回 False 后重读状态：COMPLETED → 取消失败返回错误；FAILED → 取消已生效返回成功。
+- 抽 `_handle_unexpected_failure` 降低 run_task 圈复杂度（C901）。
+- 回归：`tests/pipeline/test_task_manager.py::TestFinalizeRace`。
+
+## 代码模式按 OCR 行号排序致误读重排 / 崩溃（#21，已修复 2026-06-04）
+
+现象：
+- `code_assembly.py:144` `sorted(line_no_lines, key=lambda ln: int(ln.text.strip()))`：行号 88 被 OCR 读成 8 → 该行排到列顶并以 line_no=8 进 ledger / 合并，制造大段虚假缺号。
+- 复核：`NUMERIC_RE=^\d{1,4}$`（两端锚定）已保证行号是纯数字，`int()` 在此路径不会抛 ValueError（issue 的崩溃描述属过度推断）；真正未修的是误读值重排。
+
+处理策略：
+- 新增 `_ordered_line_numbers`：① 排序键改 `bbox[1]`（y_top）——照片垂直顺序是物理真相（与 `code_line_ledger._y_monotonic_outliers` 同一前提），误读不重排；② `int()` 包 try/except 防御兜底（日后放宽正则不崩）；③ 单调性修正——读数 ≤ 前一已接受值即误读离群，改 `prev+1` 推断并标 `is_inferred_line_no`。
+- `anchor.num_range` 由同批 OCR 读数派生（可能含离群点），仅用作首行无前值时的下界兜底，不作硬边界。
+- 回归：`tests/processing/test_code_assembly.py::test_ordered_line_numbers_sorts_by_y_not_misread_value` + `test_ordered_line_numbers_handles_unparsable`。
+
+## 服务端源图预览跟随 symlink 后越界校验致全 404（#22，已修复 2026-06-04）
+
+现象：
+- `get_source_image` 用 `(img_dir/filename).resolve()` 跟随软链后再 `is_relative_to(img_dir.resolve())`；但 `_stage_files` 用 `symlink_to` 把服务端源文件软链进 stage 目录、指向外部真实路径。
+- 任何"服务器目录"建的任务：`list_source_images` 能列出软链，但 `get_source_image` resolve 到外部路径 → 包含校验 False → `IMAGE_NOT_FOUND`，整个服务端源图预览不可用。
+
+处理策略：
+- 不对拼接路径 `resolve()`；改对【未跟随 symlink】的词法拼接路径 `img_dir/filename` 做 `is_relative_to` 越界校验（filename 上游已禁 `..` 与前导 `/`），再用 `is_file()` 跟随软链确认目标存在。
+- stage 内软链均由本服务 `_stage_files` 创建、指向用户显式选定且已校验的图片，放行其目标安全。
+- 回归：`tests/api/test_source_images.py::TestGetSourceImage::test_serves_symlinked_staged_image`（既有 `..`/绝对路径穿越用例仍 400）。
