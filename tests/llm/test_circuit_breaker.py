@@ -343,3 +343,50 @@ class TestRegistry:
         with pytest.raises(LLMCircuitOpenError) as exc_info:
             await breaker.before_call()
         assert exc_info.value.model == "deepseek-chat"
+
+
+class TestProbeCancellation:
+    """#9：HALF_OPEN 探测被取消（CancelledError）→ on_probe_aborted 防卡死。"""
+
+    @staticmethod
+    async def _to_half_open(
+        breaker: LLMCircuitBreaker, clock: _FakeClock,
+    ) -> None:
+        """触发 OPEN → 冷却到期 → before_call 进入 HALF_OPEN 并占用探测位。"""
+        for _ in range(3):
+            await breaker.on_failure()
+        # 绑到局部再断言，避免 mypy 把 property 收窄成 OPEN 字面量、
+        # 误判后续 HALF_OPEN 断言"恒不相等"。
+        opened = breaker.state
+        assert opened is CircuitState.OPEN
+        clock.tick(11.0)  # cool_down=10s，>10 即到期
+        await breaker.before_call()
+        assert breaker.state is CircuitState.HALF_OPEN
+
+    async def test_probe_abort_clears_inflight_allows_retry(
+        self, breaker: LLMCircuitBreaker, clock: _FakeClock,
+    ) -> None:
+        """探测被取消 → 清除占位，下次 before_call 不再 fail-fast，可重新探测。"""
+        await self._to_half_open(breaker, clock)
+        await breaker.on_probe_aborted()
+        # 关键：探测位已清除（旧 bug 下 _probe_in_flight 泄漏，此处会抛）
+        await breaker.before_call()
+        assert breaker.state is CircuitState.HALF_OPEN
+
+    async def test_probe_leak_without_abort_wedges(
+        self, breaker: LLMCircuitBreaker, clock: _FakeClock,
+    ) -> None:
+        """佐证修复必要：不清除占位（模拟旧 bug）→ 第二次 before_call fail-fast。"""
+        await self._to_half_open(breaker, clock)
+        with pytest.raises(LLMCircuitOpenError):
+            await breaker.before_call()
+
+    async def test_probe_abort_does_not_count_as_failure(
+        self, breaker: LLMCircuitBreaker, clock: _FakeClock,
+    ) -> None:
+        """取消不计入失败：重新探测成功 → 熔断器关闭恢复。"""
+        await self._to_half_open(breaker, clock)
+        await breaker.on_probe_aborted()
+        await breaker.before_call()  # 重新探测
+        await breaker.on_success()
+        assert breaker.state is CircuitState.CLOSED
