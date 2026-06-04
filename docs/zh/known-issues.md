@@ -223,3 +223,14 @@ limitations under the License.
 - `database` 新增 `complete_task_with_results`：单事务内 UPDATE 状态 + 批量 INSERT 结果，一次 commit（崩溃落在 commit 前 → 状态仍是 processing，可被 recover 修复）。
 - `_persist_results` 改走该原子方法；抽 `_normalize_results` 供 `insert_results` 与新方法复用。
 - 注意：单连接 aiosqlite 下并发写仍可能互相提交（更深的隔离问题，不在本条范围）。回归：`tests/persistence/test_database.py`（原子写 / 空结果各 1）。
+
+## 代码模式不尊重 block_cloud_on_detect_failure（#25 = #10 残留，已修复 2026-06-04）
+
+现象：
+- #10 只让文档 / PPT 模式 fail-closed；自查发现**代码模式**仍漏。
+- `_redact_code_headers` 实体检测失败时只 log、退化成"仅 regex + 自定义词"（header 人名/机构名未脱），且**不向上游返回失败信号**；随后 `_code_pipeline` 把 `src.merged_text` 经 `code_refine` / `code_repair` / `code_audit` 送云端，无 fail-closed 闸门 → 开 PII + 检测失败 + flag 真时仍外发含真实姓名的代码头。
+
+处理策略：
+- `_redact_code_headers` 改返回 `block_cloud: bool`（实体检测**已尝试且失败** + `block_cloud_on_detect_failure` 为真）。
+- `_code_pipeline` 在 `refine_on` 闸门加 `and not pii_block_cloud`，跳过整段 refine / repair / audit 云端循环（退化为不精修的本地输出）。
+- 回归：`tests/pipeline/test_code_pii_header.py::TestRedactCodeHeadersFailClosed`（检测抛错→True / flag 关→False / 检测成功→False / 无 refiner→False）。
