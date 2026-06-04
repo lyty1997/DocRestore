@@ -106,6 +106,30 @@ class TestDifferentSectionsKept:
         assert out.count("## 调试") == 2
         assert removed == []
 
+    def test_scattered_subsequence_not_merged(self) -> None:
+        """#20：短节字符作为散点子序列散落长节（子序列和→1.0）但内容不同。
+
+        旧实现按子序列总和判定 asymm≥0.9 会把短节静默删除（伪 truncated）。
+        修复后要求存在足够长的【连续】匹配块作锚——散点连续块占比极低，
+        两节都应保留。
+        """
+        short_body = "甲乙丙丁戊己庚辛壬癸子丑"  # 12 字
+        # 每字之间插入 filler → short 整体是 long 的有序子序列，但无长连续块
+        long_body = (
+            "甲一乙二丙三丁四戊五己六庚七辛八壬九癸十子甲丑乙"
+            "另有大量与短节无关的补充说明内容把长度继续拉长以触发显著更短判定"
+        )
+        md = (
+            f"## 配置\n{short_body}\n"
+            "## 别节\n无关正文\n"
+            f"## 配置\n{long_body}\n"
+        )
+        out, removed = dedup_h2_sections(md)
+        assert out.count("## 配置") == 2
+        assert removed == []
+        assert short_body in out
+        assert long_body in out
+
     def test_similar_but_not_truncated_kept(self) -> None:
         """同名 H2 + body 共享前缀 + 各自有独有尾部（不是 truncated）→ 保全。
 

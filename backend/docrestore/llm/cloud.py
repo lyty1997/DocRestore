@@ -50,6 +50,28 @@ def _extract_json_payload(raw: str) -> str:
     return text
 
 
+def _coerce_str_list(value: object) -> list[str]:
+    """把 LLM 输出的实体字段强制收窄为 list[str]。
+
+    防 LLM 常见坏形状（issue #13）：
+    - 裸字符串 ``"Alice"`` —— 若直接 ``list(...)`` 会逐字符拆成
+      ``['A','l','i','c','e']``，下游全局替换会把正文每个字母打碎；
+    - 混入 ``None`` / 数字 / 嵌套对象等非字符串项。
+
+    非 list 一律返回空（视为该字段缺失）；list 内仅保留去空格后非空的
+    ``str`` 项。
+    """
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            stripped = item.strip()
+            if stripped:
+                result.append(stripped)
+    return result
+
+
 class CloudLLMRefiner(BaseLLMRefiner):
     """云端 LLM 精修器，额外支持 PII 实体检测。"""
 
@@ -81,10 +103,12 @@ class CloudLLMRefiner(BaseLLMRefiner):
             msg = f"PII 实体检测返回非 JSON: {raw[:200]}"
             raise RuntimeError(msg) from exc
 
-        person_names: list[str] = list(
-            data.get("person_names", []),
-        )
-        org_names: list[str] = list(
-            data.get("org_names", []),
-        )
+        # 顶层必须是对象；返回 list/裸值时按检测失败处理（fail-closed），
+        # 避免 data.get 触发 AttributeError 或漏过类型校验（issue #13）。
+        if not isinstance(data, dict):
+            msg = f"PII 实体检测返回非对象 JSON: {raw[:200]}"
+            raise RuntimeError(msg)
+
+        person_names = _coerce_str_list(data.get("person_names"))
+        org_names = _coerce_str_list(data.get("org_names"))
         return person_names, org_names
