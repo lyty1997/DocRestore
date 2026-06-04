@@ -1315,14 +1315,18 @@ class Pipeline:
         # 3.5 PII：仅对每个 SourceFile 的 leading comment block 脱敏
         # （Copyright / 作者 / 邮箱 / 公司名）。正文 import 路径 / namespace
         # 不动，避免破坏代码语义。
+        pii_block_cloud = False
         if pii_cfg.enable and sources:
-            await self._redact_code_headers(
+            pii_block_cloud = await self._redact_code_headers(
                 sources, pii_cfg, base_refiner_obj,
             )
 
         # 4. 可选 LLM 字符级精修（每个 SourceFile 独立调用，失败回退原文）；
         # 受统一精修开关约束，关精修时跳过（但上面的 PII 头脱敏仍照常执行）。
-        if refine_on and base_refiner_obj is not None:
+        # fail-closed：实体检测失败且 block_cloud_on_detect_failure 为真时，
+        # 跳过整段 refine / repair / audit 云端调用，避免 header 里未脱敏的
+        # 人名/机构名外发（退化为不精修的本地输出）。
+        if refine_on and base_refiner_obj is not None and not pii_block_cloud:
             from docrestore.llm.code_repair import (
                 CodeConsistencyAuditor,
                 DiagnosticCodeRepairer,
@@ -1440,7 +1444,7 @@ class Pipeline:
         sources: list[SourceFile],
         pii_cfg: PIIConfig,
         refiner: BaseLLMRefiner | None,
-    ) -> None:
+    ) -> bool:
         """对每个 SourceFile 的 leading comment block 跑 PII 脱敏（in-place）。
 
         策略：拼接所有非空 header 一次性跑 LLM 实体检测拿全局 lexicon；每个
@@ -1449,12 +1453,16 @@ class Pipeline:
         import 路径或 namespace 字面量。
 
         ``refiner=None`` 时跳过实体检测，仅 regex + 自定义词。
-        实体检测失败 → 仅退化为 regex + 自定义词，不阻断流程。
+
+        返回 ``block_cloud``：实体检测**已尝试且失败** + 配置
+        ``block_cloud_on_detect_failure`` 为真时返回 True，调用方据此跳过后续
+        代码精修的云端调用（fail-closed，避免 header 里未脱敏的人名/机构名经
+        code_refine / repair / audit 外发到云端）。其余情况返回 False。
         """
         from docrestore.privacy.redactor import EntityLexicon, PIIRedactor
 
         if not sources:
-            return
+            return False
 
         headers: list[tuple[int, str, str]] = []  # (idx, header, body)
         for i, src in enumerate(sources):
@@ -1462,13 +1470,14 @@ class Pipeline:
             if header:
                 headers.append((i, header, body))
         if not headers:
-            return
+            return False
 
         redactor = PIIRedactor(pii_cfg)
         lexicon: EntityLexicon | None = None
         needs_lex = (
             pii_cfg.redact_person_name or pii_cfg.redact_org_name
         )
+        detect_failed = False
         if needs_lex and refiner is not None:
             combined = "\n\n".join(h for _, h, _ in headers)
             try:
@@ -1482,10 +1491,14 @@ class Pipeline:
                     "代码模式 PII 头部实体检测失败，仅 regex + 自定义词生效",
                     exc_info=True,
                 )
+                detect_failed = True
 
         for idx, header, body in headers:
             new_header, _records = redactor.redact_snippet(header, lexicon)
             sources[idx].merged_text = new_header + body
+
+        # 检测已尝试且失败 + fail-closed → 通知调用方跳过后续云端精修
+        return detect_failed and pii_cfg.block_cloud_on_detect_failure
 
     async def _resolve_ocr_engine(
         self,
