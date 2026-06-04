@@ -1076,3 +1076,34 @@ AGE-72 / 探测信号 AGE-73 / 决策策略 AGE-74 / API AGE-75 / 前端 AGE-76�
 遗留：
 - #2 焦点态 CSS 仍未 Playwright 截图验证（待补）。
 - 英文文档 `docs/en/` 同步仍留后续。
+
+## 2026-06-04 - code-review max 全量审查 → GitHub issues (#8–#22) + 修复前 3 项（#10/#8/#9）
+
+**背景**：对全项目做 max-effort code-review（9 维度 finder 并行 + 逐条 Read 核验），
+聚焦控制流/数据流的传输中断与异常，确认 15 个真实问题。用户决定从 Linear 切到
+GitHub 管理，已建 issue #8–#22 + Milestone「code-review 修复（控制流/数据流）」
+（severity/area/code-review 标签）。本条为按优先级修复前 3 项（同一异常路径根因簇）。
+
+**修复**：
+- **#10（CRITICAL，privacy）**：`block_cloud_on_detect_failure`（默认 True）声明即死代码、
+  零读取 → 实体检测失败时仍把含人名/机构名的整段送云端。新增 `Pipeline._should_block_cloud`
+  （仅"开 PII + 要求人名/机构名脱敏 + 检测返回 None + flag 真"时阻断），文档模式
+  `_stream_process` 与 PPT 模式 `_ppt_pipeline` 检测失败即置 `refiner=None`，
+  `_finalize_single_doc` 加 keyword-only `block_cloud` 跳过 gap fill + final refine 两处云端调用。
+- **#8（HIGH，中断）**：`_stream_pipeline` 旧 `finally: await ocr_task` 不取消生产者 →
+  消费者提前退出后生产者跑完所有图才结束（阻塞 shutdown / 遗弃任务 / GPU 空转）。改
+  try/except/finally：except 先 `ocr_task.cancel()` 再 suppress await、保留原异常上抛；
+  成功路径保留 try 外 await 让生产者真实异常浮现。
+- **#9（HIGH，异常）**：`_call_llm` 用 `except Exception` 不覆盖 CancelledError →
+  HALF_OPEN 探测被取消时 `_probe_in_flight` 永久泄漏、全局熔断卡死。新增
+  `LLMCircuitBreaker.on_probe_aborted` 清占位（不计成功/失败），`_call_llm` 包 try +
+  `except asyncio.CancelledError` 调用它后原样上抛。
+
+**验证**：每项独立 commit（`Fixes #N`）+ 补测试；mypy/ruff/typos 全绿（PostToolUse + pre-commit）；
+pytest 1035 passed（新增 `test_entity_redaction.py` +6 / `test_producer_cancel.py` +1 /
+`test_circuit_breaker.py` +3）。pipeline 套件 209、llm 套件 139 全过。
+（环境缺失：cv2 未装致 `test_slide_rectify` 收集失败、DeepSeek 路径未配致 3 个 ocr 用例失败，
+均与本次改动无关、修复前同样失败。）
+
+**遗留**：#11–#22 共 12 项待修（Milestone 跟踪）。代码模式 `_redact_code_headers` 的检测失败
+fail-closed 未纳入本次（结构不同：头部仅本地 redact，是否经 code_refine 外发待单独评估）。
