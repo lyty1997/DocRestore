@@ -1107,3 +1107,17 @@ pytest 1035 passed（新增 `test_entity_redaction.py` +6 / `test_producer_cance
 
 **遗留**：#11–#22 共 12 项待修（Milestone 跟踪）。代码模式 `_redact_code_headers` 的检测失败
 fail-closed 未纳入本次（结构不同：头部仅本地 redact，是否经 code_refine 外发待单独评估）。
+
+## 2026-06-04（自查补全）- #25 代码模式 fail-closed（#10 残留）
+
+**背景**：#10 合并后自查发现只覆盖文档 / PPT，**代码模式漏了**——`_redact_code_headers` 实体检测
+失败时只 log 退化成 regex + 自定义词（header 人名/机构名未脱），且不返回失败信号，随后
+`_code_pipeline` 把 `src.merged_text` 经 `code_refine / repair / audit` 送云端、无闸门。建 issue
+**#25** 跟踪并当场补全。
+
+**修复**：`_redact_code_headers` 改返回 `block_cloud: bool`（检测已尝试且失败 + flag 真）；
+`_code_pipeline` 在 refine 闸门加 `and not pii_block_cloud`，跳过整段云端 refine/repair/audit
+（退化为不精修的本地输出）。
+
+**验证**：`tests/pipeline/test_code_pii_header.py::TestRedactCodeHeadersFailClosed` +4
+（检测抛错→True / flag 关→False / 检测成功→False / 无 refiner→False）；全量 1039 passed。
