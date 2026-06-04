@@ -278,10 +278,33 @@ limitations under the License.
 - `ocr_batch` 末尾改为"缺页即抛"的兜底防线，不再 `if p in results` 静默过滤。
 - 回归：`tests/ocr/test_worker_transmission.py::test_batch_raises_on_missing_pages`。
 
-## resync 复用 OCR 超时（#17，重判为非 bug / 待定）
+## resync 复用 OCR 超时（#17，重判为非 bug / wontfix 已关闭 2026-06-04）
 
 现象（原审）：某页 OCR 被取消后 `_pending_resync` 置位，下次 `ocr()` 在 `_resync_if_needed` 用 `_get_timeout()`（300s/600s）drain 残留，worker 假死时下一页冻结数分钟。
 
 重判（2026-06-04）：`_pending_resync` 仅在"命令已发、worker 正在处理该 OCR"被取消时置位，残留响应会在 worker 完成那次 OCR 时到达。原建议的"短超时即 restart"会**过早重启正在干活的 worker**、丢弃热进程，是错的。当前"用 OCR 超时 drain、超时才 restart"是可辩护的权衡（复用热 worker vs restart reload 成本）。
 
-处理策略：倾向 wontfix；若要改，只加一个可配置的中等 resync 超时（默认不变），不强制短超时。已在 GitHub issue #17 记录重判，待用户定夺。
+处理策略：倾向 wontfix；若要改，只加一个可配置的中等 resync 超时（默认不变），不强制短超时。已在 GitHub issue #17 记录重判；用户采纳 wontfix，issue 已关闭（not planned）。
+
+## LLM 实体输出未消毒即全局替换致整篇打碎（#13，已修复 2026-06-04）
+
+现象：
+- 检测侧 `cloud.py::detect_pii_entities` 用 `list(data.get("person_names", []))`：LLM 偶发把字段写成裸字符串 `"Alice"`，`list("Alice")` → `['A','l','i','c','e']`。
+- 替换侧 `redactor.py::_replace_entities` 仅 `if not name: continue`，无最小长度/纯标点校验，对每名全局 `str.replace`。
+- 后果：文档里每个 a/l/i/c/e 被替成占位符；或 LLM 幻觉单字"的"/"人"被全篇替换 → 整篇打碎，且发往云端并作为最终输出，不可逆。
+
+处理策略：
+- 检测侧新增 `_coerce_str_list`：非 list 一律丢弃（裸字符串视为字段缺失），list 内仅留去空格后非空 `str`；顶层非 dict 抛 `RuntimeError`（fail-closed，交由调用方决定是否阻断云端）。
+- 替换侧 `_is_safe_entity`：长度 ≥2 且含至少一个 alnum 字符（`str.isalnum()` 对中文返回 True，借此排除纯标点）；异常高频(>50)/超长(>64)实体记 WARNING 仍执行。
+- 回归：`tests/llm/test_cloud_truncation.py::TestCoerceStrList` + `TestDetectPiiEntitiesJsonParse`（裸串/混类型/顶层数组）；`tests/privacy/test_redactor.py::TestIsSafeEntity` + `TestEntityReplaceSafety`。
+
+## heading 去重子序列总和误删同名异容节（#20，已修复 2026-06-04）
+
+现象：
+- `_should_merge` 的 `truncated_prefix` 路径：`match_size = sum(b.size for b in m2.get_matching_blocks())` 把离散匹配块求和，是有序子序列长度而非连续子串。
+- 两个同标题节（如 `## 参数`）内容确实不同，但短节字符作为有序子序列散落长节里（短文本+共享词时极易达 90%）→ `asymm ≥ 0.9` → 短节被静默删除（reason 误标 `truncated_prefix`）。属"去重删了非重复项"。
+
+处理策略：
+- 保留 0.9 子序列阈值，追加连续性闸门 `contiguous_anchor_ratio=0.5`：用 `find_longest_match().size / len(short)` 要求存在一段足够长的【连续】匹配块作截断锚。
+- 实测：真截断（短=长前缀+少量 OCR 噪声尾）连续块占比 0.727；散点子序列仅 0.083；0.5 闸门两侧裕度充足。
+- 回归：`tests/processing/test_heading_dedup.py::TestDifferentSectionsKept::test_scattered_subsequence_not_merged`（散点子序列两节都保留），并复核既有 `test_truncated_then_complete_keeps_complete` 仍合并。

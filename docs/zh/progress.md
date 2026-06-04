@@ -1180,3 +1180,26 @@ fail-closed 未纳入本次（结构不同：头部仅本地 redact，是否经 
 **验证**：`tests/ocr/test_worker_transmission.py`（drain 逐行 hook / 批量短响应抛错）；全量 1046 passed。
 
 **遗留**：原始 15 项里待修 6 项：#12 #13 #20 #21 #22（+ #17 待定）。
+
+## 2026-06-04（续）- code-review 第 5 批：实体输出消毒（#13）+ heading 去重连续性（#20）+ #17 关闭
+
+**#17 关闭**：用户采纳 wontfix（方案 A），已 `gh issue close 17 --reason "not planned"` 并附重判说明。
+
+**修复**：
+- **#13（HIGH，privacy）**：LLM 实体输出未消毒即全局子串替换 → 整篇被打碎。
+  - 检测侧 `cloud.py` 新增 `_coerce_str_list` 类型守卫：`person_names`/`org_names` 必须是
+    `list[str]`，裸字符串 `"Alice"` 不再 `list()` 逐字符拆成 `['A','l','i','c','e']`；顶层非
+    dict 按检测失败 fail-closed 抛 `RuntimeError`。
+  - 替换侧 `redactor.py` `_replace_entities` 加最小长度(≥2)+非纯标点守卫(`_is_safe_entity`)，
+    跳过单字"的"/纯标点幻觉；异常高频(>50)/超长(>64)实体告警仍执行。
+- **#20（HIGH，processing）**：heading 去重 `_should_merge` 的 `truncated_prefix` 路径用子序列
+  总和判定（散点子序列在短文本+共享词时极易达 0.9）→ 误删内容不同的同标题节。追加连续性
+  闸门 `contiguous_anchor_ratio=0.5`：要求存在一段足够长的【连续】匹配块作截断锚。实测真截断
+  连续块占比 0.727、散点仅 0.083，0.5 闸门两侧裕度充足；旧 0.9 子序列阈值保留不变。
+
+**验证**：`test_cloud_truncation.py`（+裸串不拆字/混类型过滤/顶层数组抛错/`_coerce_str_list` 单测）
++ `test_redactor.py`（+`_is_safe_entity` 阈值/单字·纯标点跳过/2 字名仍替/高频告警）
++ `test_heading_dedup.py`（+散点子序列两节都保留）；全量 1061 passed（3 个 deepseek 失败为环境
+缺 worker 路径，基线即失败）。
+
+**遗留**：原始 15 项里待修 3 项：#12 #21 #22（#17 已 wontfix 关闭）。
