@@ -1057,3 +1057,20 @@ AGE-72 / 探测信号 AGE-73 / 决策策略 AGE-74 / API AGE-75 / 前端 AGE-76�
 - **review #1（实体脱敏）经复核更正**：「PPT 把人名/机构名送云端」非 PPT 独有——文档模式主精修同样把人名/机构名原样送云端（实体词表只用于 gap-fill）；结构化 PII 已由 producer 正则全模式入云前脱敏。属全链路既有行为、非本 diff 引入。用户拍板「全链路精修前脱敏（流式+输出兜底）」，设计已落 `docs/zh/backend/privacy.md §9`（项目自有文档体系，不走 OpenSpec），待实现。
 - #2 焦点态 CSS 未跑 Playwright 截图验证（需起整套栈 + 键盘 Tab），待补。
 - 英文文档 `docs/en/` 同步仍留后续。
+
+## 2026-06-04 CST - #1 全链路实体脱敏前置（流式+输出兜底）落地
+
+背景：max-effort review #1 复核确认人名/机构名实体脱敏只覆盖 gap-fill、未覆盖主精修与输出（全链路缺口）。用户拍板「全链路精修前脱敏（流式+输出兜底）」，设计落 `backend/privacy.md §9`（弃用 OpenSpec）。本条为实现。
+
+完成内容：
+- **核心**：`_refine_segment_with_cache` 加 `redactor`/`entity_lexicon` kwargs，缓存查找前 `redact_snippet`（缓存键用脱敏后文本，resume 一致）；文档主分段与 PPT 按页共用此入口。
+- **助手**：抽 `_detect_entities(text, llm, pii_cfg)`，`_delayed_pii_detect` 委托它；PPT 与短文档兜底复用。
+- **文档模式**：`_stream_process` 建 redactor + 透传 lexicon 到 `_try_extract_and_refine`/尾段；页数不足阈值结尾补建词表；`_finalize_single_doc` render 前对 `doc.markdown` 输出兜底。
+- **PPT 模式**：`_ppt_pipeline` 接 `pii_cfg`，积累页文本到阈值建词表、每页精修前应用，组装前对 `bodies` 输出兜底（覆盖早窗口页）；调度处传 `pii_cfg`。
+- **约束如实保留**：实体检测本身把文本送所配置 refiner（云端则上云一次），要名字完全不出本机需配 local provider。
+
+验证：`mypy --strict` Success(66) + `ruff` + `typos` + 前端 `tsc`+`eslint` 全绿；**pytest 1025 passed, 45 skipped**（新增 `tests/pipeline/test_entity_redaction.py` 6 用例：核心脱敏 / 无词表不改 / 检测开关 ×2 / PPT 输出兜底 / 关脱敏零改动且不调检测）。`privacy.md §9` 标已落地、`known-issues.md` 对应条目标已闭环。
+
+遗留：
+- #2 焦点态 CSS 仍未 Playwright 截图验证（待补）。
+- 英文文档 `docs/en/` 同步仍留后续。

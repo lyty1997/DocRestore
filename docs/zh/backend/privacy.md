@@ -157,7 +157,7 @@ MergedDocument（合并后）
 - 实体检测：仅在云端模式下可用（LocalLLMRefiner 无此能力）
 - re-OCR 脱敏：缺口补充时的 re-OCR 文本也需要脱敏
 
-## 9. 全链路实体脱敏前置（流式版设计 · 待实现）
+## 9. 全链路实体脱敏前置（流式版 · 已落地 2026-06-04）
 
 > §7 的 `redact_for_cloud(MergedDocument)` 是早期**批量版**整篇脱敏路径。当前**流式版** Pipeline 的 PII 脱敏分散在 producer 与精修链路，见本节。来源：max-effort code-review #1 复核（2026-06-04），用户拍板「全链路精修前脱敏（流式 + 输出兜底）」。
 
@@ -191,13 +191,21 @@ MergedDocument（合并后）
 - `pii.enable=False` 或两 name 开关都关 → 精修入参 / 输出与基线完全一致。
 - 检测失败（lexicon=None）→ 仅正则，不抛异常、不阻断。
 
-落地任务（待实现）：
+落地（已实现，2026-06-04）：
 
-- [ ] `_stream_process` 主分段精修前应用 lexicon（透传 `entity_lexicon`）
-- [ ] `_ppt_pipeline` 接 `pii_cfg` + 建 lexicon + 每页精修前应用
-- [ ] `_finalize_single_doc` 输出兜底（文档 + PPT）
-- [ ] 边界回归：关开关零改动 / 检测失败退化仅正则 / 结构化正则不受影响
-- [ ] 单测随各项落地；`scripts/check_quality.sh` 全绿
+- [x] 核心：`_refine_segment_with_cache` 加 `redactor` + `entity_lexicon` kwargs，
+  在缓存查找前 `redact_snippet`（缓存键用脱敏后文本，resume 一致）；文档主分段
+  与 PPT 按页共用此入口。
+- [x] 助手：抽 `_detect_entities(text, llm, pii_cfg)`（`_delayed_pii_detect` 委托它），
+  PPT 与短文档兜底复用。
+- [x] 文档：`_stream_process` 建 `redactor` + 透传 `entity_lexicon` 到
+  `_try_extract_and_refine` 与尾段；页数不足阈值时结尾补建一次词表。
+- [x] PPT：`_ppt_pipeline` 接 `pii_cfg`，积累页文本到阈值建词表、每页精修前应用，
+  组装前对 `bodies` 做输出兜底（覆盖早窗口页）。
+- [x] 输出兜底：`_finalize_single_doc` render 前对 `doc.markdown` 再 `redact_snippet`。
+- [x] 回归：`tests/pipeline/test_entity_redaction.py`（核心脱敏 / 无词表不改 /
+  检测开关 / PPT 输出兜底 / 关脱敏零改动且不调检测）；`check_quality.sh` 全绿
+  （pytest 1025 passed）。
 
 ## 10. 相关文档
 

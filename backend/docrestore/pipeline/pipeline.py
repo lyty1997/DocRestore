@@ -899,7 +899,8 @@ class Pipeline:
                 # → 按页精修（开关开时）→ 单页保序组装 document.md（不跨页去重）
                 result = await self._ppt_pipeline(
                     page_queue, output_dir, _report,
-                    llm=llm, total=len(images), quality=quality,
+                    llm=llm, total=len(images), pii_cfg=pii_cfg,
+                    quality=quality,
                 )
             else:
                 result = await self._stream_process(
@@ -963,6 +964,7 @@ class Pipeline:
         *,
         llm: LLMConfig | None,
         total: int,
+        pii_cfg: PIIConfig | None = None,
         quality: QualityReport | None = None,
     ) -> PipelineResult:
         """PPT 模式分支：逐页 OCR 出队 → 重写图片引用 →（开关开时）按页 LLM
@@ -979,6 +981,13 @@ class Pipeline:
         refiner = self._get_refiner(llm)
         refining = refiner is not None
         llm_cfg = llm if llm is not None else self._config.llm
+        # 实体脱敏：开 PII 时按已收页文本建一次 lexicon，每页送云端精修前替换
+        # 人名/机构名；结构化 PII 已由 producer 入队前正则脱敏。
+        pii = pii_cfg if pii_cfg is not None else PIIConfig()
+        redactor = PIIRedactor(pii) if pii.enable else None
+        entity_lexicon: EntityLexicon | None = None
+        pii_done = False
+        raw_accum: list[str] = []
         # 段级精修缓存（resume 复用 output_dir 时按页命中）；enabled 关联 refiner：
         # 关精修（refiner=None）时禁用 → LLMCache 不建目录，不留空 .llm_cache/。
         cache = LLMCache(
@@ -995,11 +1004,24 @@ class Pipeline:
                 break
             # 图片引用先加 OCR 目录前缀（与文档模式同一真相源），精修在其上做
             body = rewrite_image_refs_to_ocr_dir(page).strip()
+            raw_accum.append(body)
+            # 积累阈值页后建一次实体词表（仅开 name 开关时实际检测，否则 None）
+            if (
+                redactor is not None
+                and not pii_done
+                and len(raw_accum) >= _PII_DETECT_THRESHOLD
+            ):
+                entity_lexicon = await self._detect_entities(
+                    "\n".join(raw_accum), llm, pii,
+                )
+                pii_done = True
             if refining:
-                # slide_mode：用 SLIDE_REFINE_SYSTEM_PROMPT，只修格式不跨页去重
+                # slide_mode：用 SLIDE_REFINE_SYSTEM_PROMPT，只修格式不跨页去重；
+                # 词表就绪后在送云端精修前脱敏人名/机构名
                 result, _used = await self._refine_segment_with_cache(
                     refiner, body, idx, total, cache, llm_cfg, quality,
                     slide_mode=True,
+                    redactor=redactor, entity_lexicon=entity_lexicon,
                 )
                 body = result.markdown
             ordered_pages.append(page)
@@ -1024,6 +1046,18 @@ class Pipeline:
         if not ordered_pages:
             msg = "PPT 模式：OCR producer 未产出任何页"
             raise RuntimeError(msg)
+
+        # 短 PPT 兜底：页数不足阈值时上面未建过词表，这里补建一次（name 开关关 → None）
+        if redactor is not None and not pii_done:
+            entity_lexicon = await self._detect_entities(
+                "\n".join(raw_accum), llm, pii,
+            )
+        # 实体脱敏输出兜底：词表就绪前已精修的早窗口页可能漏掉实体，对组装正文
+        # 再脱敏一遍（已脱敏页为占位符，幂等无副作用）。
+        if entity_lexicon is not None and redactor is not None:
+            bodies = [
+                redactor.redact_snippet(b, entity_lexicon)[0] for b in bodies
+            ]
 
         report_fn(
             "ppt_render", len(ordered_pages), len(ordered_pages),
@@ -1565,6 +1599,9 @@ class Pipeline:
         )
         refiner = self._get_refiner(llm)
         llm_cfg = llm if llm is not None else self._config.llm
+        # 实体脱敏器：开 PII 时复用 lexicon 把人名/机构名替换在送云端精修前
+        # （结构化 PII 已由 producer 入队前正则脱敏）。
+        redactor = PIIRedactor(pii_cfg) if pii_cfg.enable else None
         # LLM 精修缓存：resume 任务复用 output_dir → 直接命中已精修段，省时间
         cache = LLMCache(
             output_dir / ".llm_cache",
@@ -1601,8 +1638,16 @@ class Pipeline:
                         segmented_offset, segment_index,
                         refined_results, all_gaps, report_fn,
                         cache, llm_cfg, quality,
+                        redactor=redactor, entity_lexicon=entity_lexicon,
                     )
                 )
+
+        # 短文档兜底：页数不足阈值时上面循环未建过 lexicon；这里补建一次，
+        # 让尾段脱敏与最终输出兜底拿到词表（仅开 name 开关时实际检测，否则 None）。
+        if pii_cfg.enable and entity_lexicon is None:
+            entity_lexicon = await self._detect_entities(
+                merger.get_markdown(), llm, pii_cfg,
+            )
 
         # 处理剩余文本（最后一段）
         md = merger.get_markdown()
@@ -1619,6 +1664,8 @@ class Pipeline:
                         await self._refine_segment_with_cache(
                             refiner, remaining, segment_index, 0,
                             cache, llm_cfg, quality,
+                            redactor=redactor,
+                            entity_lexicon=entity_lexicon,
                         )
                     )
                 if used_refiner:
@@ -1665,8 +1712,15 @@ class Pipeline:
         cache: LLMCache,
         llm_cfg: LLMConfig,
         quality: QualityReport | None = None,
+        *,
+        redactor: PIIRedactor | None = None,
+        entity_lexicon: EntityLexicon | None = None,
     ) -> tuple[int, int]:
-        """合并器有新文本时按 controller.target L* 尝试切段精修。"""
+        """合并器有新文本时按 controller.target L* 尝试切段精修。
+
+        `redactor` + `entity_lexicon` 透传到段级精修：词表就绪后的分段送云端前
+        脱敏人名/机构名（早窗口段词表未就绪 → 由最终输出兜底覆盖）。
+        """
         profiler = current_profiler()
         md = merger.get_markdown()
         logger.info(
@@ -1696,6 +1750,7 @@ class Pipeline:
                     await self._refine_segment_with_cache(
                         refiner, seg_text, segment_index, 0,
                         cache, llm_cfg, quality,
+                        redactor=redactor, entity_lexicon=entity_lexicon,
                     )
                 )
             elapsed = time.perf_counter() - t0
@@ -1860,6 +1915,17 @@ class Pipeline:
         final_gaps = list(all_gaps)
         final_gaps.extend(extra_gaps)
 
+        # 实体脱敏输出兜底：词表就绪前已精修的"早窗口"段可能漏掉实体，这里对
+        # 组装结果再脱敏一遍（lexicon=None 时跳过；结构化 PII 已在 producer 完成）。
+        if entity_lexicon is not None and self._config.pii.enable:
+            redacted_md, _ = PIIRedactor(self._config.pii).redact_snippet(
+                doc.markdown, entity_lexicon,
+            )
+            if redacted_md != doc.markdown:
+                doc = MergedDocument(
+                    markdown=redacted_md, images=doc.images, gaps=doc.gaps,
+                )
+
         report_fn(
             "render", 1, 1, "渲染输出...",
             message_key="progress.render",
@@ -1887,38 +1953,46 @@ class Pipeline:
             doc_dir="",
         )
 
+    async def _detect_entities(
+        self,
+        text: str,
+        llm: LLMConfig | None,
+        pii_cfg: PIIConfig,
+    ) -> EntityLexicon | None:
+        """对给定文本做一次 LLM 人名/机构名实体检测，返回 EntityLexicon。
+
+        不受精修开关约束（`for_refine=False`）：用户"关精修 + 开脱敏"时仍需 LLM
+        检测人名/机构名（正则只兜手机/邮箱/身份证/银行卡）。未开 name 开关 / 无可用
+        refiner / 检测异常 → 返回 None（调用方判空，退化为仅正则，不阻断精修）。
+        """
+        if not (pii_cfg.redact_person_name or pii_cfg.redact_org_name):
+            return None
+        refiner = self._get_refiner(llm, for_refine=False)
+        if refiner is None:
+            return None
+        try:
+            person_names, org_names = await refiner.detect_pii_entities(text)
+        except Exception:
+            logger.warning("PII 实体检测失败", exc_info=True)
+            return None
+        return EntityLexicon(
+            person_names=tuple(person_names),
+            org_names=tuple(org_names),
+        )
+
     async def _delayed_pii_detect(
         self,
         merger: IncrementalMerger,
         llm: LLMConfig | None,
         pii_cfg: PIIConfig,
     ) -> EntityLexicon | None:
-        """积累到阈值后做一次 LLM 实体检测获取 lexicon。
+        """积累到阈值后做一次 LLM 实体检测获取 lexicon（委托 _detect_entities）。
 
-        成功：返回 EntityLexicon（后续 gap fill 的 re-OCR 文本可复用）；
+        成功：返回 EntityLexicon（gap fill re-OCR + 主分段/输出兜底复用）；
         失败：返回 None，仅靠 regex PII 保护（不阻断云端 LLM 精修）。
         """
-        if not (
-            pii_cfg.redact_person_name or pii_cfg.redact_org_name
-        ):
-            return None
-        # PII 实体检测不受精修开关约束：用户"关精修 + 开脱敏"时仍需 LLM 检测
-        # 人名 / 机构名（正则只兜手机/邮箱/身份证/银行卡）。
-        refiner = self._get_refiner(llm, for_refine=False)
-        if refiner is None:
-            return None
-        try:
-            person_names, org_names = (
-                await refiner.detect_pii_entities(merger.get_markdown())
-            )
-        except Exception:
-            logger.warning(
-                "流式模式 PII 实体检测失败", exc_info=True,
-            )
-            return None
-        return EntityLexicon(
-            person_names=tuple(person_names),
-            org_names=tuple(org_names),
+        return await self._detect_entities(
+            merger.get_markdown(), llm, pii_cfg,
         )
 
     @staticmethod
@@ -1932,6 +2006,8 @@ class Pipeline:
         quality: QualityReport | None = None,
         *,
         slide_mode: bool = False,
+        redactor: PIIRedactor | None = None,
+        entity_lexicon: EntityLexicon | None = None,
     ) -> tuple[RefinedResult, bool]:
         """段级精修带磁盘缓存。返回 `(result, used_refiner)`。
 
@@ -1948,7 +2024,13 @@ class Pipeline:
 
         `slide_mode=True`（PPT 按页精修）：ctx 标记 is_slide → 用 slide prompt
         （不跨页去重），缓存走独立 slide 命名空间，与文档分段缓存互不串味。
+
+        `redactor` + `entity_lexicon` 非空时，先把人名/机构名替换在送云端精修前
+        （缓存键也用脱敏后文本，resume 一致）；`entity_lexicon=None`（早窗口/未开
+        脱敏/检测失败）则跳过——结构化 PII 已由 producer 入队前正则脱敏。
         """
+        if redactor is not None and entity_lexicon is not None:
+            text, _ = redactor.redact_snippet(text, entity_lexicon)
         if cache.enabled:
             cached = cache.get_segment(
                 model=llm_cfg.model,
