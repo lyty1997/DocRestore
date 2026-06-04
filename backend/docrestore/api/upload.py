@@ -472,10 +472,18 @@ async def start_cleanup_task(
     return asyncio.create_task(_loop())
 
 
-def cleanup_all_sessions() -> None:
-    """清理所有上传会话（app shutdown 时调用）。"""
+def cleanup_all_sessions(referenced: set[str] | None = None) -> None:
+    """清理所有上传会话（app shutdown 时调用）。
+
+    `referenced` 提供时跳过仍被任务引用的 upload_dir，避免把已持久化任务的源图
+    在重启时 rmtree 擦掉（resume / retry / 源图预览依赖它，与 TTL 清理同策略）。
+    None 时清全部（旧行为，便于测试）。
+    """
     import shutil
 
+    ref = referenced or set()
     for session in _sessions.values():
+        if str(session.upload_dir) in ref:
+            continue
         shutil.rmtree(session.upload_dir, ignore_errors=True)
     _sessions.clear()

@@ -234,3 +234,24 @@ limitations under the License.
 - `_redact_code_headers` 改返回 `block_cloud: bool`（实体检测**已尝试且失败** + `block_cloud_on_detect_failure` 为真）。
 - `_code_pipeline` 在 `refine_on` 闸门加 `and not pii_block_cloud`，跳过整段 refine / repair / audit 云端循环（退化为不精修的本地输出）。
 - 回归：`tests/pipeline/test_code_pii_header.py::TestRedactCodeHeadersFailClosed`（检测抛错→True / flag 关→False / 检测成功→False / 无 refiner→False）。
+
+## shutdown 全量清理擦掉已持久化任务源图（#11，已修复 2026-06-04）
+
+现象：
+- `cleanup_all_sessions`（app shutdown 调用）无条件 `shutil.rmtree` 每个 upload_dir，无引用跳过；而 TTL 路径 `cleanup_expired_sessions` 专门跳过被任务引用的目录。
+- 完成任务的 `image_dir` 指向某 upload_dir → 优雅重启时被删 → 重启后 resume/retry 对空目录跑、源图预览 404（重新引入 2026-04-23 修过的"烂图 bug"）。
+
+处理策略：
+- `cleanup_all_sessions(referenced=None)` 加可选引用集合，命中的 upload_dir 跳过不删；`None` 时清全部（旧行为，测试用）。
+- `app.py` shutdown 传 `await manager.collect_referenced_image_dirs()`（含内存 + DB 全部终态任务的 image_dir）。
+- 回归：`tests/api/test_upload.py::TestCleanup::test_cleanup_all_skips_referenced_dir`。
+
+## 终结进度帧丢失致 WS 客户端永久阻塞（#16，已修复 2026-06-04）
+
+现象：
+- `publish_progress` 仅当此刻有订阅者才广播；终结帧（completed/failed）只发一次、不缓存；`subscribe_progress` 建空 `Queue(maxsize=1)`、不回灌当前状态。
+- 客户端若在终结帧 publish 之后才订阅（小/缓存任务在 WS 连上前就完成）→ `await q.get()` 再无后续 publish，永久阻塞（WS 循环的状态重检在 `q.get()` 之后救不了）。
+
+处理策略：
+- `subscribe_progress` 订阅时若 `task.progress` 非空，立即 `put_nowait` 回灌一帧，让晚到订阅者立刻拿到最新状态（含终态）并据此退出。
+- 回归：`tests/pipeline/test_task_manager.py::TestProgressPubSub::test_subscribe_seeds_current_progress_after_terminal`。

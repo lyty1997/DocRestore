@@ -1140,3 +1140,22 @@ fail-closed 未纳入本次（结构不同：头部仅本地 redact，是否经 
 
 **验证**：`tests/pipeline/test_code_pii_header.py::TestRedactCodeHeadersFailClosed` +4
 （检测抛错→True / flag 关→False / 检测成功→False / 无 refiner→False）；全量 1039 passed。
+
+## 2026-06-04（续）- code-review 第 3 批：API 生命周期/传输（#11/#16）
+
+**背景**：#10/#8/#9 + #14/#15 + #25 全合并 dev 后继续推进；本批拣 API 侧两项清晰、低风险的
+（shutdown 数据丢失 + WS 终结帧丢失），独立文件、两个 commit 分别闭环。用户决定 review bug
+全修完再合 main。
+
+**修复**：
+- **#11（HIGH，api）**：`cleanup_all_sessions`（shutdown 调用）无条件 rmtree 所有 upload_dir，
+  而 TTL 清理专门跳过被引用目录 → 重启把已持久化任务的源图擦掉。加可选 `referenced` 参数
+  跳过被引用目录；`app.py` shutdown 传 `manager.collect_referenced_image_dirs()`（含所有终态任务）。
+- **#16（MEDIUM，api）**：终结帧只 publish 一次、无订阅者时不缓存，`subscribe_progress` 建空
+  Queue 不回灌 → 客户端在终结帧后订阅则 `q.get()` 永久阻塞。订阅时若 `task.progress` 非空即
+  `put_nowait` 回灌一帧，晚到订阅者立刻拿到终态并退出。
+
+**验证**：`test_upload.py`（被引用目录保留/未引用删除）+ `test_task_manager.py`（终结后订阅 →
+队列已 seed 终结帧）；全量 1044 passed。
+
+**遗留**：原始 15 项里待修 8 项：#12 #13 #17 #18 #19 #20 #21 #22。

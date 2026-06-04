@@ -282,7 +282,10 @@ def create_app(  # noqa: C901
         cleanup_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await cleanup_task
-        cleanup_all_sessions()
+        # 跳过仍被任务引用的 upload_dir：否则重启时把已持久化任务的源图擦掉，
+        # resume/retry 对空目录跑、源图预览 404（与 TTL 清理同一引用跳过策略）。
+        referenced = await manager.collect_referenced_image_dirs()
+        cleanup_all_sessions(referenced)
         await pipeline.shutdown()
         await db.close()
 
