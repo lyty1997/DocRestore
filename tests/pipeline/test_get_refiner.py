@@ -81,3 +81,53 @@ class TestGetRefiner:
         )
         assert cast(Any, result) == "REFINER_INSTANCE"
         create_mock.assert_called_once()
+
+
+class TestRefineGateDecoupledFromPII:
+    """for_refine 开关：enable_refine=False 只关精修，不关 LLM 客户端能力。
+
+    回归（max-effort review #1）：统一精修开关曾放在 _get_refiner 里无条件
+    拦截，导致"关精修 + 开脱敏"时 PII 实体检测（_delayed_pii_detect /
+    代码头脱敏）拿不到 refiner，人名 / 机构名脱敏被精修开关连带关掉、泄漏。
+    修复后精修调用点走 for_refine=True（受 enable_refine 约束），PII 等用途
+    走 for_refine=False（只看 model，不看 enable_refine）。
+    """
+
+    def test_for_refine_true_gated_by_enable_refine(self) -> None:
+        """精修用途：enable_refine=False → None（精修被关）。"""
+        pipe, create_mock = _make_pipeline()
+        result = pipe._get_refiner(
+            LLMConfig(model="openai/glm-5", api_key="k", enable_refine=False),
+        )
+        assert result is None
+        create_mock.assert_not_called()
+
+    def test_for_refine_false_ignores_enable_refine(self) -> None:
+        """PII 用途：enable_refine=False 但 model 有效 → 仍返回客户端。"""
+        pipe, create_mock = _make_pipeline()
+        result = pipe._get_refiner(
+            LLMConfig(model="openai/glm-5", api_key="k", enable_refine=False),
+            for_refine=False,
+        )
+        assert cast(Any, result) == "REFINER_INSTANCE"
+        create_mock.assert_called_once()
+
+    def test_for_refine_false_llm_none_returns_default(self) -> None:
+        """PII 用途 + llm=None：默认配置 enable_refine=False 也返回默认客户端。"""
+        pipe, create_mock = _make_pipeline(default_model="openai/glm-5")
+        cast(Any, pipe)._config = PipelineConfig(
+            llm=LLMConfig(model="openai/glm-5", enable_refine=False),
+        )
+        cast(Any, pipe)._refiner = "DEFAULT"
+        assert cast(Any, pipe._get_refiner(None, for_refine=False)) == "DEFAULT"
+        create_mock.assert_not_called()
+
+    def test_for_refine_true_llm_none_gated(self) -> None:
+        """精修用途 + llm=None：默认配置 enable_refine=False → None。"""
+        pipe, create_mock = _make_pipeline(default_model="openai/glm-5")
+        cast(Any, pipe)._config = PipelineConfig(
+            llm=LLMConfig(model="openai/glm-5", enable_refine=False),
+        )
+        cast(Any, pipe)._refiner = "DEFAULT"
+        assert pipe._get_refiner(None) is None
+        create_mock.assert_not_called()

@@ -136,6 +136,8 @@ async def test_ppt_per_page_refine_applied(tmp_path: Path) -> None:
     assert len(fake.calls) == 2
     assert [c.segment_index for c in fake.calls] == [1, 2]
     assert {c.total_segments for c in fake.calls} == {2}
+    # PPT 走 slide 模式：is_slide=True → 用 SLIDE_REFINE_SYSTEM_PROMPT（不跨页去重）
+    assert all(c.is_slide for c in fake.calls)
     md = result.markdown
     assert md.count(_REFINE_PREFIX) == 2  # 两页都走了精修
     assert "甲页正文ALPHA" in md
@@ -145,7 +147,8 @@ async def test_ppt_per_page_refine_applied(tmp_path: Path) -> None:
 
 
 async def test_ppt_refine_disabled_skips(tmp_path: Path) -> None:
-    """统一开关关（请求级 enable_refine=False）：跳过精修，输出原始组装。"""
+    """统一开关关（请求级 enable_refine=False）：跳过精修、输出原始组装；
+    且不报"精修第 X 页"误导文案、不留空 .llm_cache/ 目录。"""
     out = tmp_path / "out"
     pages = [_make_page(out, "pageA", "甲页正文ALPHA")]
     cfg = PipelineConfig(
@@ -155,13 +158,30 @@ async def test_ppt_refine_disabled_skips(tmp_path: Path) -> None:
     fake = _PerPageRefiner()
     pipeline.set_refiner(_as_refiner(fake))
 
+    keys: list[str] = []
+
+    def _capture(
+        stage: str, current: int, total: int, message: str = "",
+        *, message_key: str = "",
+        message_params: dict[str, str] | None = None,
+    ) -> None:
+        """捕获 message_key，验证关精修时的进度文案。"""
+        del stage, current, total, message, message_params
+        keys.append(message_key)
+
     queue = await _queue_of(pages)
     result = await pipeline._ppt_pipeline(
-        queue, out, _report,
-        llm=LLMConfig(model="stub", enable_refine=False, enable_cache=False),
+        queue, out, _capture,
+        # enable_cache=True 但关精修 → 缓存应被禁用、不建目录
+        llm=LLMConfig(model="stub", enable_refine=False, enable_cache=True),
         total=len(pages),
     )
 
     assert fake.calls == []  # _get_refiner 返回 None，refiner 从未被调用
     assert _REFINE_PREFIX not in result.markdown
     assert "甲页正文ALPHA" in result.markdown  # 原始组装结果
+    # 关精修：报"处理第 X 页"（pptPagePlain），不报"精修第 X 页"（pptPage）
+    assert "progress.pptPagePlain" in keys
+    assert "progress.pptPage" not in keys
+    # 关精修不留空 .llm_cache/ 目录
+    assert not (out / ".llm_cache").exists()

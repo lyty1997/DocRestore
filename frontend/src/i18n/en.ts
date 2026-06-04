@@ -309,8 +309,8 @@ export const en: Record<TranslationKey, string> = {
   "taskForm.refineDesc":
     "Applies to all modes (Document / Code / PPT): when on, refine OCR results with the LLM (document by segment, PPT by page); when off, output cleaned OCR text only.",
   "progress.pptPage": "PPT mode: refining page {current}/{total}",
+  "progress.pptPagePlain": "PPT mode: processing page {current}/{total}",
   "progress.pptRender": "PPT mode: assembling document...",
-  "progress.pptDone": "PPT mode: done",
   // ── API business errors ──
   "errors.api.mode_conflict":
     "Mode conflict: Document / Code / PPT are mutually exclusive",

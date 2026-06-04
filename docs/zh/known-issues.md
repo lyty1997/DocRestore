@@ -122,3 +122,224 @@ limitations under the License.
 - stem 字符类从 `[A-Za-z0-9_.]+` 放宽为排除路径分隔/定界符：markdown 用 `[^/)]+`（排除 `/` `)`），HTML 用 `[^/]+`（排除 `/`），靠后续 `_OCR/images/` 与 `)` / `"` 锚定回溯，兼容任意 Unicode 文件名。
 - 图片引用加 OCR 目录前缀的逻辑抽到 `processing/dedup.py::rewrite_image_refs_to_ocr_dir`（module 级 public），文档模式与 PPT 模式共用，避免规则分叉。
 - 回归：tests/output + tests/pipeline 全通过；真实 3 页中文文件名照片 → `document.md` + 5 张 `{中文stem}_N.jpg` 正确复制。
+
+## 统一 LLM 精修开关不能连带关掉 PII 实体检测
+
+现象：
+- 引入统一 `LLMConfig.enable_refine` 后，把开关拦截点放进 `_get_refiner`（`enable_refine=False` → 返回 None），会同时关掉**非精修**用途的 LLM 客户端——`_delayed_pii_detect`（文档模式人名/机构名检测）与 `_redact_code_headers`（代码头脱敏）都经 `_get_refiner` 取 refiner。
+- 后果：用户“关精修 + 开脱敏”时，正则只兜手机/邮箱/身份证/银行卡，人名/机构名检测被精修开关连带关掉，泄漏到云端 LLM 与输出。属隐私回归（max-effort review 第二轮 #1）。
+
+处理策略：
+- 区分“精修策略”与“LLM 客户端能力”：`_get_refiner(llm, *, for_refine=True)`。精修调用点用默认 `True`（受 `enable_refine` 约束）；PII 等非精修用途显式传 `for_refine=False`（只看 `model` 是否配置，不看 `enable_refine`）。
+- `initialize` 预建 `self._refiner` 不再以 `enable_refine` 为前置条件——它是客户端能力，关精修也要可用。
+- 代码模式 `base_refiner` 用 `for_refine=False` 取（供 PII 头脱敏），字符级精修 / pre-refine 诊断两段另按 `enable_refine` 各自 gate。
+- 通则：凡新增“统一开关”集中拦截某个多用途方法时，先盘点该方法的全部调用点用途，避免把无关功能一并关停。
+
+## PPT 按页精修的 prompt / 角点 / 退化四边形（review 第二轮其余三项）
+
+现象与对策详见 `ppt-mode.md` §15「max-effort code-review 第二轮修复」。要点：
+- PPT 每页独立 → 用 `SLIDE_REFINE_SYSTEM_PROMPT`（**不跨页去重**，否则误删合理重复的标题/页脚），缓存走独立 `slide` 命名空间（按 slide prompt 指纹，不与文档分段缓存串味）。
+- `_order_corners` 改“按 y 排序分上下、组内按 x 分左右”（取代极角 + x+y 锚点）：旋转/强倾斜下标号仍正确，回归断言标号正确而非仅 4 角互异。
+- `rectify` 退化 sliver（任一边 < `_MIN_RECTIFIED_SIDE_PX=16`）回退整张原图，不产 1×N 竹签图喂坏 OCR。
+
+已清理（2026-06-04，原暂缓 5 项全做）：
+- 关精修时改报 `progress.pptPagePlain`「处理第 X 页」（refining 分支控制），不再误报「精修第 X 页」。
+- 删除从不发射的死 i18n 键 `progress.pptDone`（三语）。
+- `_ocr_config_for_code_mode` / `_ocr_config_for_ppt_mode` 合一为参数化 `_ocr_config_force_pipeline(ocr, default_ocr, pipeline_name)`，两薄封装分别传 basic / vl。
+- 新增 `TaskManager._retry_ppt_config`（对称 `_retry_code_config`）：retry/resume 时 `task.ppt` 为空则用 `output_dir/.rectified/` 推断回 PPT 模式，不再静默退回文档模式。
+- `_ppt_pipeline` 段级缓存 `enabled=enable_cache and (refiner is not None)`：关精修时禁用缓存、不再建空 `.llm_cache/` 目录。
+
+## Vite 代理报错刷屏 + 后端后起前端卡死需重启（review 第三轮，用户报）
+
+现象：后端未就绪时先启动前端 → Vite 终端刷一串 `[vite] http proxy error ... ECONNREFUSED`，且界面长期不可用、必须重启前端才能开始新任务。
+
+根因：
+- Vite 8 对 HTTP 代理错误**无条件**打日志（`node.js` proxyMiddleware；自定义 `server.proxy.configure` 的 error 处理器改不掉，且 Vite 已自行返回 502，浏览器侧拿到的是 502 而非 "Failed to fetch"）——所以改 `vite.config.ts` 无法静音该日志。
+- 前端 `listGpus` / `getOcrStatus`（`TaskForm`）与 `listTasks`（`SidebarTaskList`）三处挂载请求只打一次、失败 `catch {}` 静默放弃，后端随后就绪也不再拉取 → 必须重启前端。
+
+处理策略：
+- 新增 `frontend/src/lib/retry.ts::retryUntilSuccess(task, delaysMs)`：退避重试（默认 1/2/4/8s 末值循环）直到任务成功（不抛异常）即停，effect 卸载时取消挂起重试。
+- 三处挂载 effect 改走它（`fetchTasks` 返回 bool 供重试判定）→ 后端就绪后界面自动恢复、无需重启；代理报错从「瞬间一串 + 永久死」变「少量间隔重试 + 就绪即停」。
+- 注意：Vite 代理日志本身无法在 `vite.config.ts` 静音，只能靠降低请求频率缓解。
+
+## 实体（人名/机构名）脱敏未覆盖主精修与输出（全链路，已闭环 2026-06-04）
+
+现象（max-effort review #1 复核更正）：开 `redact_person_name`/`redact_org_name` 时，结构化 PII（手机/邮箱/身份证/银行卡）由 producer 正则在入云端前对全模式（含 PPT）脱敏；但 LLM 实体（人名/机构名）词表 `_delayed_pii_detect` 只用于文档模式 gap-fill 重 OCR 片段——**主分段精修 / PPT 按页精修 / 最终输出都未用它**，人名/机构名原样进云端 + 留输出。非 PPT 独有、非某次 diff 引入，属全链路既有缺口。
+
+处理（**已实现 2026-06-04，设计与落地见 `backend/privacy.md §9`**）：检测沿用所配置 refiner（积累 N 页后建一次 lexicon），lexicon 应用到 doc 主分段精修入参 + PPT 每页精修入参 + 最终输出兜底（早窗口靠输出兜底覆盖），保持文档流式。约束：LLM 实体检测本身要把文本送 LLM，检测调用仍上云一次——要名字完全不出本机需配 local provider。回归：`tests/pipeline/test_entity_redaction.py`（6 用例）。
+
+## block_cloud_on_detect_failure 失效，检测失败仍外发实体（#10，已修复 2026-06-04）
+
+现象：
+- `PIIConfig.block_cloud_on_detect_failure`（默认 True，语义"实体检测失败就不外发"）全 backend 零读取、声明即死代码。
+- LLM 实体检测抛错时 `_detect_entities` 仅 log 并返回 `entity_lexicon=None`，下游照常把含真实人名/机构名的整段送云端精修 → 隐私 fail-closed 承诺从未兑现。
+
+根因：`entity_lexicon is None` 一个信号混淆了三种情形（未开脱敏 / 早窗口未检测 / 检测失败），下游无法区分"失败"并据此阻断。
+
+处理策略：
+- 新增 `Pipeline._should_block_cloud(lexicon, pii_cfg)`：仅"开 PII + 要求人名/机构名脱敏 + 检测返回 None（失败）+ flag 为真"时返回 True；检测成功（含查无实体的空词表）/未开脱敏/早窗口均不误判。
+- 文档模式 `_stream_process`、PPT 模式 `_ppt_pipeline` 的检测点命中失败即置 `refiner=None`（后续段/页退原文）；`_finalize_single_doc` 加 keyword-only `block_cloud`，为真时跳过 gap fill 与 final refine 两处云端调用。
+- 注意：实体检测调用本身仍要把文本送 LLM；本修复阻断的是检测失败后的"后续精修外发"。回归：`test_entity_redaction.py` 的 `_should_block_cloud` 四分支 + PPT fail-closed 阻断/flag 关不阻断。
+
+## OCR 生产者任务在中断时不被取消（#8，已修复 2026-06-04）
+
+现象：
+- `_stream_pipeline` 旧 `finally: await ocr_task` 前缺 `ocr_task.cancel()`，`page_queue` 又是无界队列。
+- 消费者提前退出（用户取消 / shutdown / 内部异常）后，生产者仍持 `gpu_lock` 把剩余图全 OCR 完才结束 → `manager.shutdown()` 阻塞数分钟、取消形同失效、GPU 空转；CancelledError 在途时还可能就地再抛而遗弃仍在跑的生产者。
+
+处理策略：
+- `try` 改 `try/except/finally`：`except BaseException` 先 `ocr_task.cancel()` 再 `suppress(CancelledError, Exception)` await，吞清理异常、保留消费者原异常 `raise`。
+- 成功路径保留 try 外 `await ocr_task`：生产者已在自身 finally `put(None)` 收尾，这里 await 让其真实异常（如某页 OCR 失败）浮现为任务失败，而非静默截断文档。
+- 回归：`tests/pipeline/test_producer_cancel.py`（消费者抛错 → 生产者被取消、未跑完所有图、原异常上抛）。
+
+## 熔断器半开探测被取消时永久卡死（#9，已修复 2026-06-04）
+
+现象：
+- `_call_llm` 用 `except Exception` 捕获，`CancelledError`（BaseException）不被捕获。
+- HALF_OPEN 探测调用被取消（用户取消任务 / shutdown / wait_for 超时）时 `on_success`/`on_failure` 都不执行，`before_call` 设的 `_probe_in_flight` 永久泄漏 → 该 `(model, api_base)` 全局单例熔断器此后每次调用 fail-fast，整进程段级精修退化为原文直到重启。
+
+处理策略：
+- 新增 `LLMCircuitBreaker.on_probe_aborted`：清除 `_probe_in_flight`（不计成功/失败、不触发退避），状态不变，下次调用可重新探测。
+- `_call_llm` 把 rate_limit 获取 + api_call 整段包进 `try`，新增 `except asyncio.CancelledError` 调用 `on_probe_aborted` 后原样上抛，覆盖 `before_call` 之后到 `on_success/on_failure` 之间的全部取消窗口。
+- 回归：`tests/llm/test_circuit_breaker.py` 的 `TestProbeCancellation`（取消后可重探/恢复 CLOSED；并以"不清除即第二次 before_call fail-fast"佐证修复必要）。
+
+## 历史任务还原被单条损坏行中断（#14，已修复 2026-06-04）
+
+现象：
+- `load_persisted_tasks` 的 `try/except` 只裹 `get_results`；`TaskStatus(row.status)`、`get_task`（内部 `LLMConfig.model_validate_json`）、`datetime.fromisoformat(row.created_at)` 全裸奔。
+- 一条旧版/损坏行（status 不在枚举、config JSON 损坏、时间格式异常）抛 `ValueError` 冒出分页 `while` → 该行之后的所有任务重启后从 UI 静默消失。
+
+处理策略：
+- 把单条 row 的解析（`get_task` → `Task(...)`）整体包进 `try/except`，失败 `logger.exception` + `continue` 跳过坏行，不中断整个分页加载。
+- 回归：`tests/pipeline/test_task_manager.py::TestLoadPersistedResilience`（坏行 `created_at` 更新 → DESC 先处理；断言好行仍装回、坏行被跳过）。
+
+## 结果落库非原子，崩溃留下"完成但零结果"（#15，已修复 2026-06-04）
+
+现象：
+- `_persist_results` 先 `update_status('completed')`（commit）再 `insert_results`（commit），两次独立事务。
+- 两 commit 之间进程被杀 → `tasks` 行已是终态、`task_results` 为空；`_recover_interrupted` 只修 pending/processing，无法补救 → 永久"完成但无结果可下载"。
+
+处理策略：
+- `database` 新增 `complete_task_with_results`：单事务内 UPDATE 状态 + 批量 INSERT 结果，一次 commit（崩溃落在 commit 前 → 状态仍是 processing，可被 recover 修复）。
+- `_persist_results` 改走该原子方法；抽 `_normalize_results` 供 `insert_results` 与新方法复用。
+- 注意：单连接 aiosqlite 下并发写仍可能互相提交（更深的隔离问题，不在本条范围）。回归：`tests/persistence/test_database.py`（原子写 / 空结果各 1）。
+
+## 代码模式不尊重 block_cloud_on_detect_failure（#25 = #10 残留，已修复 2026-06-04）
+
+现象：
+- #10 只让文档 / PPT 模式 fail-closed；自查发现**代码模式**仍漏。
+- `_redact_code_headers` 实体检测失败时只 log、退化成"仅 regex + 自定义词"（header 人名/机构名未脱），且**不向上游返回失败信号**；随后 `_code_pipeline` 把 `src.merged_text` 经 `code_refine` / `code_repair` / `code_audit` 送云端，无 fail-closed 闸门 → 开 PII + 检测失败 + flag 真时仍外发含真实姓名的代码头。
+
+处理策略：
+- `_redact_code_headers` 改返回 `block_cloud: bool`（实体检测**已尝试且失败** + `block_cloud_on_detect_failure` 为真）。
+- `_code_pipeline` 在 `refine_on` 闸门加 `and not pii_block_cloud`，跳过整段 refine / repair / audit 云端循环（退化为不精修的本地输出）。
+- 回归：`tests/pipeline/test_code_pii_header.py::TestRedactCodeHeadersFailClosed`（检测抛错→True / flag 关→False / 检测成功→False / 无 refiner→False）。
+
+## shutdown 全量清理擦掉已持久化任务源图（#11，已修复 2026-06-04）
+
+现象：
+- `cleanup_all_sessions`（app shutdown 调用）无条件 `shutil.rmtree` 每个 upload_dir，无引用跳过；而 TTL 路径 `cleanup_expired_sessions` 专门跳过被任务引用的目录。
+- 完成任务的 `image_dir` 指向某 upload_dir → 优雅重启时被删 → 重启后 resume/retry 对空目录跑、源图预览 404（重新引入 2026-04-23 修过的"烂图 bug"）。
+
+处理策略：
+- `cleanup_all_sessions(referenced=None)` 加可选引用集合，命中的 upload_dir 跳过不删；`None` 时清全部（旧行为，测试用）。
+- `app.py` shutdown 传 `await manager.collect_referenced_image_dirs()`（含内存 + DB 全部终态任务的 image_dir）。
+- 回归：`tests/api/test_upload.py::TestCleanup::test_cleanup_all_skips_referenced_dir`。
+
+## 终结进度帧丢失致 WS 客户端永久阻塞（#16，已修复 2026-06-04）
+
+现象：
+- `publish_progress` 仅当此刻有订阅者才广播；终结帧（completed/failed）只发一次、不缓存；`subscribe_progress` 建空 `Queue(maxsize=1)`、不回灌当前状态。
+- 客户端若在终结帧 publish 之后才订阅（小/缓存任务在 WS 连上前就完成）→ `await q.get()` 再无后续 publish，永久阻塞（WS 循环的状态重检在 `q.get()` 之后救不了）。
+
+处理策略：
+- `subscribe_progress` 订阅时若 `task.progress` 非空，立即 `put_nowait` 回灌一帧，让晚到订阅者立刻拿到最新状态（含终态）并据此退出。
+- 回归：`tests/pipeline/test_task_manager.py::TestProgressPubSub::test_subscribe_seeds_current_progress_after_terminal`。
+
+## DeepSeek init 进度并发读同一 stderr 致失效（#18，已修复 2026-06-04）
+
+现象：
+- 基类 `_start_worker_process` 起 stderr drain 读 `process.stderr`；DeepSeek `_send_init_command` 又起协程 `_stream_stderr_progress` 读同一 `StreamReader`。
+- `StreamReader` 不允许并发 `readline()` → RuntimeError，init 进度（vLLM 加载 30-120s）静默失效；若调度反转 drain 死亡 → stderr pipe 写满、worker 阻塞挂死。
+
+处理策略：
+- 单一读者：`_drain_stream_to_logger` 加可选逐行 `on_line` 回调，`_start_worker_process` 传 `self._dispatch_stderr_line`（转当前 `_stderr_line_hook`）。
+- `_send_init_command` 不再起第二个读者，装一个解析进度的逐行 hook、init 结束（成功/异常/取消）即在 finally 摘除；删死代码 `_stream_stderr_progress`。
+- 回归：`tests/ocr/test_worker_transmission.py::test_drain_routes_each_line_to_on_line`。
+
+## DeepSeek 批量 OCR 静默丢页致下游索引错位（#19，已修复 2026-06-04）
+
+现象：
+- `_send_ocr_batch_all` 按 `enumerate(items_raw)` 建 results，worker 返回项数 < 请求 chunk 时缺失页被悄悄省略；`ocr_batch` 末尾 `[results[p] for p in image_paths if p in results]` 又把缺页静默丢掉。
+- 结果：返回的 PageOCR 页列比输入短，下游页索引/去重整体错位。
+
+处理策略：
+- `_send_ocr_batch_all` 加 `len(results)==len(chunk)` 硬校验，缺页抛 RuntimeError（含缺失页名）。
+- `ocr_batch` 末尾改为"缺页即抛"的兜底防线，不再 `if p in results` 静默过滤。
+- 回归：`tests/ocr/test_worker_transmission.py::test_batch_raises_on_missing_pages`。
+
+## resync 复用 OCR 超时（#17，重判为非 bug / wontfix 已关闭 2026-06-04）
+
+现象（原审）：某页 OCR 被取消后 `_pending_resync` 置位，下次 `ocr()` 在 `_resync_if_needed` 用 `_get_timeout()`（300s/600s）drain 残留，worker 假死时下一页冻结数分钟。
+
+重判（2026-06-04）：`_pending_resync` 仅在"命令已发、worker 正在处理该 OCR"被取消时置位，残留响应会在 worker 完成那次 OCR 时到达。原建议的"短超时即 restart"会**过早重启正在干活的 worker**、丢弃热进程，是错的。当前"用 OCR 超时 drain、超时才 restart"是可辩护的权衡（复用热 worker vs restart reload 成本）。
+
+处理策略：倾向 wontfix；若要改，只加一个可配置的中等 resync 超时（默认不变），不强制短超时。已在 GitHub issue #17 记录重判；用户采纳 wontfix，issue 已关闭（not planned）。
+
+## LLM 实体输出未消毒即全局替换致整篇打碎（#13，已修复 2026-06-04）
+
+现象：
+- 检测侧 `cloud.py::detect_pii_entities` 用 `list(data.get("person_names", []))`：LLM 偶发把字段写成裸字符串 `"Alice"`，`list("Alice")` → `['A','l','i','c','e']`。
+- 替换侧 `redactor.py::_replace_entities` 仅 `if not name: continue`，无最小长度/纯标点校验，对每名全局 `str.replace`。
+- 后果：文档里每个 a/l/i/c/e 被替成占位符；或 LLM 幻觉单字"的"/"人"被全篇替换 → 整篇打碎，且发往云端并作为最终输出，不可逆。
+
+处理策略：
+- 检测侧新增 `_coerce_str_list`：非 list 一律丢弃（裸字符串视为字段缺失），list 内仅留去空格后非空 `str`；顶层非 dict 抛 `RuntimeError`（fail-closed，交由调用方决定是否阻断云端）。
+- 替换侧 `_is_safe_entity`：长度 ≥2 且含至少一个 alnum 字符（`str.isalnum()` 对中文返回 True，借此排除纯标点）；异常高频(>50)/超长(>64)实体记 WARNING 仍执行。
+- 回归：`tests/llm/test_cloud_truncation.py::TestCoerceStrList` + `TestDetectPiiEntitiesJsonParse`（裸串/混类型/顶层数组）；`tests/privacy/test_redactor.py::TestIsSafeEntity` + `TestEntityReplaceSafety`。
+
+## heading 去重子序列总和误删同名异容节（#20，已修复 2026-06-04）
+
+现象：
+- `_should_merge` 的 `truncated_prefix` 路径：`match_size = sum(b.size for b in m2.get_matching_blocks())` 把离散匹配块求和，是有序子序列长度而非连续子串。
+- 两个同标题节（如 `## 参数`）内容确实不同，但短节字符作为有序子序列散落长节里（短文本+共享词时极易达 90%）→ `asymm ≥ 0.9` → 短节被静默删除（reason 误标 `truncated_prefix`）。属"去重删了非重复项"。
+
+处理策略：
+- 保留 0.9 子序列阈值，追加连续性闸门 `contiguous_anchor_ratio=0.5`：用 `find_longest_match().size / len(short)` 要求存在一段足够长的【连续】匹配块作截断锚。
+- 实测：真截断（短=长前缀+少量 OCR 噪声尾）连续块占比 0.727；散点子序列仅 0.083；0.5 闸门两侧裕度充足。
+- 回归：`tests/processing/test_heading_dedup.py::TestDifferentSectionsKept::test_scattered_subsequence_not_merged`（散点子序列两节都保留），并复核既有 `test_truncated_then_complete_keeps_complete` 仍合并。
+
+## 取消 vs 完成竞态致任务终态错乱（#12，已修复 2026-06-04）
+
+现象：
+- `cancel_task` 检查 `status ∈ {PENDING, PROCESSING}` 后于锁内直接写 FAILED；`run_task` 成功路径写 COMPLETED。两路独立无守卫地覆盖终态。
+- `asyncio.Lock` 空闲 acquire 走不挂起快路径，`bg.cancel()` 的 CancelledError 不在此投递；`process_tree` 刚返回与 `cancel_task` 并发 → "已取消的任务最终 COMPLETED"或"已完成的任务被标 FAILED"（结果已落库却显示失败）。
+
+处理策略：
+- 引入单一真相源 `_finalize(task_id, new_status, *, results, error)`：锁内重检，若已是终态（COMPLETED/FAILED）则放弃返回 False，否则原子应用并返回 True。
+- run_task 的成功 / 部分失败 / CancelledError / 未预期异常四路 + cancel_task 全部改走 `_finalize`，先到终态者赢；持久化/广播仅在本次抢到终态时执行。
+- cancel_task 在 `_finalize` 返回 False 后重读状态：COMPLETED → 取消失败返回错误；FAILED → 取消已生效返回成功。
+- 抽 `_handle_unexpected_failure` 降低 run_task 圈复杂度（C901）。
+- 回归：`tests/pipeline/test_task_manager.py::TestFinalizeRace`。
+
+## 代码模式按 OCR 行号排序致误读重排 / 崩溃（#21，已修复 2026-06-04）
+
+现象：
+- `code_assembly.py:144` `sorted(line_no_lines, key=lambda ln: int(ln.text.strip()))`：行号 88 被 OCR 读成 8 → 该行排到列顶并以 line_no=8 进 ledger / 合并，制造大段虚假缺号。
+- 复核：`NUMERIC_RE=^\d{1,4}$`（两端锚定）已保证行号是纯数字，`int()` 在此路径不会抛 ValueError（issue 的崩溃描述属过度推断）；真正未修的是误读值重排。
+
+处理策略：
+- 新增 `_ordered_line_numbers`：① 排序键改 `bbox[1]`（y_top）——照片垂直顺序是物理真相（与 `code_line_ledger._y_monotonic_outliers` 同一前提），误读不重排；② `int()` 包 try/except 防御兜底（日后放宽正则不崩）；③ 单调性修正——读数 ≤ 前一已接受值即误读离群，改 `prev+1` 推断并标 `is_inferred_line_no`。
+- `anchor.num_range` 由同批 OCR 读数派生（可能含离群点），仅用作首行无前值时的下界兜底，不作硬边界。
+- 回归：`tests/processing/test_code_assembly.py::test_ordered_line_numbers_sorts_by_y_not_misread_value` + `test_ordered_line_numbers_handles_unparsable`。
+
+## 服务端源图预览跟随 symlink 后越界校验致全 404（#22，已修复 2026-06-04）
+
+现象：
+- `get_source_image` 用 `(img_dir/filename).resolve()` 跟随软链后再 `is_relative_to(img_dir.resolve())`；但 `_stage_files` 用 `symlink_to` 把服务端源文件软链进 stage 目录、指向外部真实路径。
+- 任何"服务器目录"建的任务：`list_source_images` 能列出软链，但 `get_source_image` resolve 到外部路径 → 包含校验 False → `IMAGE_NOT_FOUND`，整个服务端源图预览不可用。
+
+处理策略：
+- 不对拼接路径 `resolve()`；改对【未跟随 symlink】的词法拼接路径 `img_dir/filename` 做 `is_relative_to` 越界校验（filename 上游已禁 `..` 与前导 `/`），再用 `is_file()` 跟随软链确认目标存在。
+- stage 内软链均由本服务 `_stage_files` 创建、指向用户显式选定且已校验的图片，放行其目标安全。
+- 回归：`tests/api/test_source_images.py::TestGetSourceImage::test_serves_symlinked_staged_image`（既有 `..`/绝对路径穿越用例仍 400）。

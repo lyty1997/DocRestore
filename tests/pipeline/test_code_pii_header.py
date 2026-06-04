@@ -195,3 +195,69 @@ class TestRedactCodeHeaders:
         await pipe._redact_code_headers([src], pii_cfg, refiner=None)
         # 无 leading comment → 不应改任何字符
         assert src.merged_text == original
+
+
+class TestRedactCodeHeadersFailClosed:
+    """#25：检测失败 + block_cloud_on_detect_failure → 返回 block_cloud 阻断云端。"""
+
+    @staticmethod
+    def _raising_refiner() -> AsyncMock:
+        refiner = AsyncMock()
+        refiner.detect_pii_entities = AsyncMock(
+            side_effect=RuntimeError("detect boom"),
+        )
+        return refiner
+
+    @pytest.mark.asyncio
+    async def test_detect_failure_returns_block_true(self) -> None:
+        """检测抛错 + flag 默认 True → 返回 True（调用方据此跳过云端精修）。"""
+        src = _build_source("// Copyright 2024 ACME\nint x = 1;\n")
+        pii_cfg = PIIConfig(
+            enable=True, redact_org_name=True,
+            block_cloud_on_detect_failure=True,
+        )
+        pipe = Pipeline.__new__(Pipeline)
+        block = await pipe._redact_code_headers(
+            [src], pii_cfg, refiner=self._raising_refiner(),
+        )
+        assert block is True
+
+    @pytest.mark.asyncio
+    async def test_detect_failure_flag_off_returns_false(self) -> None:
+        """检测抛错但 flag 关 → 返回 False（保持旧行为，不阻断）。"""
+        src = _build_source("// Copyright 2024 ACME\nint x = 1;\n")
+        pii_cfg = PIIConfig(
+            enable=True, redact_org_name=True,
+            block_cloud_on_detect_failure=False,
+        )
+        pipe = Pipeline.__new__(Pipeline)
+        block = await pipe._redact_code_headers(
+            [src], pii_cfg, refiner=self._raising_refiner(),
+        )
+        assert block is False
+
+    @pytest.mark.asyncio
+    async def test_detect_success_returns_false(self) -> None:
+        """检测成功 → 返回 False（不阻断，照常云端精修）。"""
+        src = _build_source("// Copyright 2024 ACME\nint x = 1;\n")
+        pii_cfg = PIIConfig(
+            enable=True, redact_org_name=True,
+            block_cloud_on_detect_failure=True,
+        )
+        refiner = AsyncMock()
+        refiner.detect_pii_entities = AsyncMock(return_value=(["someone"], []))
+        pipe = Pipeline.__new__(Pipeline)
+        block = await pipe._redact_code_headers([src], pii_cfg, refiner=refiner)
+        assert block is False
+
+    @pytest.mark.asyncio
+    async def test_no_refiner_returns_false(self) -> None:
+        """无 refiner（未尝试检测）→ 返回 False。"""
+        src = _build_source("// Copyright 2024 ACME\nint x = 1;\n")
+        pii_cfg = PIIConfig(
+            enable=True, redact_org_name=True,
+            block_cloud_on_detect_failure=True,
+        )
+        pipe = Pipeline.__new__(Pipeline)
+        block = await pipe._redact_code_headers([src], pii_cfg, refiner=None)
+        assert block is False

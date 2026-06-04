@@ -145,6 +145,51 @@ class TestFinalCache:
         assert fin_hit.markdown == "final_out"
 
 
+class TestSlideCache:
+    def test_slide_roundtrip(self, tmp_path: Path) -> None:
+        """slide=True 段缓存 put/get round trip。"""
+        cache = LLMCache(tmp_path / ".llm_cache")
+        cache.put_segment(
+            model="m", api_base="", text="raw",
+            result=_make_result("slide_out"), slide=True,
+        )
+        hit = cache.get_segment(
+            model="m", api_base="", text="raw", slide=True,
+        )
+        assert hit is not None
+        assert hit.markdown == "slide_out"
+
+    def test_slide_and_segment_separate_namespaces(
+        self, tmp_path: Path,
+    ) -> None:
+        """同 text + 同 model：PPT slide 与文档分段缓存各走独立命名空间。
+
+        回归（max-effort review #2 配套）：slide 用 SLIDE_REFINE_SYSTEM_PROMPT，
+        与文档分段 prompt 不同，必须独立 key，否则一页幻灯片可能命中文档段缓存
+        （另一套 prompt 产出）而拿到错误正文。
+        """
+        cache = LLMCache(tmp_path / ".llm_cache")
+        cache.put_segment(
+            model="m", api_base="", text="same",
+            result=_make_result("doc_out"),
+        )
+        cache.put_segment(
+            model="m", api_base="", text="same",
+            result=_make_result("slide_out"), slide=True,
+        )
+        doc_hit = cache.get_segment(model="m", api_base="", text="same")
+        slide_hit = cache.get_segment(
+            model="m", api_base="", text="same", slide=True,
+        )
+        assert doc_hit is not None
+        assert slide_hit is not None
+        assert doc_hit.markdown == "doc_out"
+        assert slide_hit.markdown == "slide_out"
+        # 独立文件前缀，互不覆盖
+        assert list((tmp_path / ".llm_cache").glob("slide_*.json"))
+        assert list((tmp_path / ".llm_cache").glob("seg_*.json"))
+
+
 class TestDisabled:
     def test_disabled_never_hits(self, tmp_path: Path) -> None:
         cache = LLMCache(tmp_path / ".llm_cache", enabled=False)

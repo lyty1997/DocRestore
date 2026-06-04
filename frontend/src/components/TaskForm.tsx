@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getOcrStatus, listGpus, warmupOcrEngine } from "../api/client";
+import { retryUntilSuccess } from "../lib/retry";
 import type { GpuInfo } from "../api/schemas";
 import { useTranslation } from "../i18n";
 import { DirectoryPicker } from "./DirectoryPicker";
@@ -211,24 +212,18 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
     return current.model === target.model && current.gpuId === target.gpuId;
   }, []);
 
-  /* 挂载时拉取 GPU 列表 */
-  useEffect(() => {
-    let cancelled = false;
-    const load = async (): Promise<void> => {
-      try {
+  /* 挂载时拉取 GPU 列表；后端未就绪时退避重试，就绪后自动恢复，无需重启前端。
+     失败序列由 retryUntilSuccess 摊成少量间隔重试而非瞬间猛刷一串错误。 */
+  useEffect(
+    () =>
+      retryUntilSuccess(async (isCancelled) => {
         const resp = await listGpus();
-        if (cancelled) return;
+        if (isCancelled()) return;
         setGpus(resp.gpus);
         setRecommendedGpu(resp.recommended ?? undefined);
-      } catch {
-        /* 后端未更新或离线时安静降级：只保留 "自动" 一项 */
-      }
-    };
-    void load();
-    return (): void => {
-      cancelled = true;
-    };
-  }, []);
+      }),
+    [],
+  );
 
   /* 处理模式三选一：doc（默认）/ code（IDE 代码）/ ppt（屏摄幻灯片） */
   const [mode, setMode] = useState<ProcessingMode>("doc");
@@ -308,13 +303,13 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
     selectedWarmupTargetRef.current = { model: ocrModel, gpuId };
   }, [ocrModel, gpuId]);
 
-  /* 挂载时查询默认引擎预热状态 */
-  useEffect(() => {
-    let cancelled = false;
-    const check = async (): Promise<void> => {
-      try {
+  /* 挂载时查询默认引擎预热状态；后端未就绪时退避重试，就绪后自动恢复。
+     仅挂载时查询，闭包捕获初始 ocrModel/gpuId（默认引擎），符合原意。 */
+  useEffect(
+    () =>
+      retryUntilSuccess(async (isCancelled) => {
         const s = await getOcrStatus();
-        if (cancelled) return;
+        if (isCancelled()) return;
         /* gpuId=""（自动）时，只要模型匹配就认为是已就绪 */
         const gpuMatches = gpuId === GPU_AUTO_VALUE || s.current_gpu === gpuId;
         if (s.current_model === ocrModel && gpuMatches) {
@@ -322,13 +317,9 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
             s.is_ready ? "ready" : (s.is_switching ? "warming" : "idle"),
           );
         }
-      } catch {
-        /* 查询失败不影响使用 */
-      }
-    };
-    void check();
-    return (): void => { cancelled = true; };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- 仅挂载时查询
+      }),
+    [], // eslint-disable-line react-hooks/exhaustive-deps -- 仅挂载时查询
+  );
 
   /* 清理轮询定时器 */
   useEffect(() => {
@@ -740,7 +731,14 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
           <span className="pii-title">{t("taskForm.modeLabel")}</span>
         </div>
         <div className="mode-radio-group">
-          <label className="mode-radio-option" htmlFor="mode-doc">
+          <label
+            className={
+              mode === "doc"
+                ? "mode-radio-option mode-radio-option--active"
+                : "mode-radio-option"
+            }
+            htmlFor="mode-doc"
+          >
             <input
               id="mode-doc"
               type="radio"
@@ -753,7 +751,14 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
             />
             <span>{t("taskForm.mode_doc")}</span>
           </label>
-          <label className="mode-radio-option" htmlFor="mode-code">
+          <label
+            className={
+              mode === "code"
+                ? "mode-radio-option mode-radio-option--active"
+                : "mode-radio-option"
+            }
+            htmlFor="mode-code"
+          >
             <input
               id="mode-code"
               type="radio"
@@ -766,7 +771,14 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
             />
             <span>{t("taskForm.mode_code")}</span>
           </label>
-          <label className="mode-radio-option" htmlFor="mode-ppt">
+          <label
+            className={
+              mode === "ppt"
+                ? "mode-radio-option mode-radio-option--active"
+                : "mode-radio-option"
+            }
+            htmlFor="mode-ppt"
+          >
             <input
               id="mode-ppt"
               type="radio"

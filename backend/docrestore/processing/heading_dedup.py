@@ -100,6 +100,7 @@ def _should_merge(
     *,
     near_identical_threshold: float = 0.98,
     asymmetric_overlap_threshold: float = 0.9,
+    contiguous_anchor_ratio: float = 0.5,
     truncation_length_ratio: float = 0.7,
     ending_check_chars: int = 12,
 ) -> tuple[bool, float, str]:
@@ -109,8 +110,10 @@ def _should_merge(
     - **near_identical**：`SequenceMatcher.ratio() ≥ 0.98` AND 末尾几字符
       相同。两节几乎完全一样的拍照重复才合并；中间区间（0.95-0.98）一
       些"长度相同但局部内容不同"的 false positive 被保留。
-    - **truncated_prefix**：dup 显著短（≤ keeper 70%）+ dup 90% 字符
-      包含在 keeper 里。覆盖"半截 OCR + 后页完整版"。
+    - **truncated_prefix**：dup 显著短（≤ keeper 70%）+ dup 90% 字符（子序列）
+      包含在 keeper 里 + 存在一段 ≥50% 的【连续】匹配块作为截断锚。
+      覆盖"半截 OCR + 后页完整版"；连续性闸门排除"短文本+共享词散点凑
+      够 90% 子序列"的同名异容节误删（issue #20）。
 
     返回 `(should_merge, score, reason)`。
     reason ∈ {"identical", "near_identical", "truncated_prefix", "no_match"}。
@@ -139,7 +142,16 @@ def _should_merge(
         m2 = SequenceMatcher(None, short, long_)
         match_size = sum(b.size for b in m2.get_matching_blocks())
         asymm = match_size / len(short)
-        if asymm >= asymmetric_overlap_threshold:
+        # 子序列总和高只说明"字符大多按序出现过"——短文本 + 共享词散点也能
+        # 轻易达 0.9，会把同名但内容不同的节误删（issue #20）。追加连续性闸门：
+        # 要求存在一段 ≥ contiguous_anchor_ratio 的【连续】匹配块作为截断锚。
+        # 真截断（短 = 长的前缀 + 少量 OCR 噪声尾）连续块占比高，散点则极低。
+        longest = m2.find_longest_match()
+        contiguity = longest.size / len(short)
+        if (
+            asymm >= asymmetric_overlap_threshold
+            and contiguity >= contiguous_anchor_ratio
+        ):
             return True, asymm, "truncated_prefix"
 
     return False, ratio, "no_match"

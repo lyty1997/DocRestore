@@ -29,6 +29,7 @@ import pytest
 from docrestore.processing.slide_rectify import (
     ImageBGR,
     Quad,
+    _MIN_RECTIFIED_SIDE_PX,
     _order_corners,
     detect_slide_quad,
     rectify,
@@ -78,6 +79,42 @@ def test_order_corners_rotated_no_collision() -> None:
         quad.top_left, quad.top_right, quad.bottom_right, quad.bottom_left,
     ]
     assert len(set(corners)) == 4
+
+
+def test_order_corners_rotated_labels_correct() -> None:
+    """中等旋转（20°）矩形：4 角不仅互异，**标号也正确**（回归 review #3）。
+
+    旧的"极角排环 + x+y 最小锚点"在旋转/强倾斜下会把左上锚错位、整圈标号偏移
+    一格（矫正图被整体旋转 90°）。仅断言 4 角互异（如上一用例）发现不了这种
+    标号错位。本用例把已知矩形绕中心旋转 20°、打乱输入序，断言每个标号落到
+    几何上正确的那个角（y 排序分上下、组内分左右的方法对中等旋转标号仍正确）。
+    """
+    rect = np.array(
+        [(100.0, 100.0), (500.0, 100.0), (500.0, 300.0), (100.0, 300.0)],
+        dtype=np.float32,
+    )  # 轴对齐顺序 tl, tr, br, bl
+    center = rect.mean(axis=0)
+    theta = float(np.deg2rad(20.0))
+    rot = np.array(
+        [[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]],
+        dtype=np.float32,
+    )
+    rotated = (rect - center) @ rot.T + center
+    exp_tl, exp_tr, exp_br, exp_bl = (
+        (float(p[0]), float(p[1])) for p in rotated
+    )
+    # 打乱输入序，确保不是靠输入顺序"蒙对"
+    shuffled = rotated[[2, 0, 3, 1]]
+    quad = _order_corners(shuffled)
+
+    def _close(got: tuple[int, int], want: tuple[float, float]) -> bool:
+        # _order_corners 用 int() 截断，容 1px 误差即可
+        return abs(got[0] - want[0]) <= 1 and abs(got[1] - want[1]) <= 1
+
+    assert _close(quad.top_left, exp_tl)
+    assert _close(quad.top_right, exp_tr)
+    assert _close(quad.bottom_right, exp_br)
+    assert _close(quad.bottom_left, exp_bl)
 
 
 def test_detect_finds_trapezoid() -> None:
@@ -136,6 +173,24 @@ def test_rectify_height_single_extend() -> None:
     double = side * (1.0 + ratio) ** 2     # 旧 bug：重复乘
     assert abs(warped.shape[0] - round(expected)) <= 2
     assert abs(warped.shape[0] - round(double)) > 2
+
+
+def test_rectify_fallback_on_sliver_quad() -> None:
+    """近共线 sliver 四边形：rectify 回退原图，不产竹签图喂 OCR（回归 review #4）。
+
+    旧 guard 仅拦 w<=0/h<=0（dim 四舍五入到 0），亚像素~十几像素的 sliver
+    （反光条 / approxPolyDP 退化）会算出 1×N 竹签图被当成矫正结果送进 OCR。
+    新 guard 用 _MIN_RECTIFIED_SIDE_PX 兜底：任一边低于阈值即回退整张原图。
+    """
+    img = _make_slide_image(_TRAPEZOID)
+    narrow = _MIN_RECTIFIED_SIDE_PX // 2  # 必定低于阈值
+    sliver = Quad(
+        top_left=(100, 100), top_right=(100 + narrow, 100),
+        bottom_right=(100 + narrow, 400), bottom_left=(100, 400),
+    )
+    warped = rectify(img, sliver, top_extend_ratio=0.2)
+    # 回退：返回原图本身（形状不变），而非 narrow×N 竹签图
+    assert warped.shape == img.shape
 
 
 async def test_rectify_page_saves_before_after(tmp_path: Path) -> None:

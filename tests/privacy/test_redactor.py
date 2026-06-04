@@ -24,6 +24,8 @@ from docrestore.pipeline.config import CustomWord, PIIConfig
 from docrestore.privacy.redactor import (
     EntityLexicon,
     PIIRedactor,
+    _is_safe_entity,
+    _replace_entities,
 )
 
 
@@ -271,3 +273,64 @@ class TestCustomSensitiveWords:
         by_ph = {r.placeholder: r.count for r in records if r.kind == "custom_word"}
         assert by_ph.get("B") == 1
         assert by_ph.get("A") == 1
+
+
+class TestIsSafeEntity:
+    """_is_safe_entity 阈值（issue #13）。"""
+
+    def test_normal_names_safe(self) -> None:
+        assert _is_safe_entity("李四") is True
+        assert _is_safe_entity("Bo") is True  # 2 字英文名
+
+    def test_too_short_rejected(self) -> None:
+        assert _is_safe_entity("的") is False  # 单字
+        assert _is_safe_entity("X") is False
+
+    def test_pure_punctuation_rejected(self) -> None:
+        assert _is_safe_entity("——") is False
+        assert _is_safe_entity("  ") is False
+
+
+class TestEntityReplaceSafety:
+    """实体替换安全阈值（issue #13）：LLM 坏实体不得打碎正文。"""
+
+    def test_single_char_entity_skipped(self) -> None:
+        """单字幻觉实体（如"的"）跳过，正文不被全篇替换。"""
+        cfg = PIIConfig(enable=True)
+        redactor = PIIRedactor(cfg)
+        lexicon = EntityLexicon(person_names=("的",), org_names=())
+        text = "他的东西和我的一样，目的明确"
+        result, records = redactor.redact_snippet(text, lexicon)
+        assert result == text  # 一字未替
+        assert cfg.person_name_placeholder not in result
+        assert all(r.kind != "person_name" for r in records)
+
+    def test_pure_punctuation_entity_skipped(self) -> None:
+        """纯标点实体跳过，不替换正文标点。"""
+        cfg = PIIConfig(enable=True)
+        redactor = PIIRedactor(cfg)
+        lexicon = EntityLexicon(person_names=("——",), org_names=())
+        text = "标题——副标题"
+        result, _ = redactor.redact_snippet(text, lexicon)
+        assert result == text
+
+    def test_normal_two_char_name_still_replaced(self) -> None:
+        """回归：合法 2 字人名仍正常替换（守卫不过度拦截）。"""
+        cfg = PIIConfig(enable=True)
+        redactor = PIIRedactor(cfg)
+        lexicon = EntityLexicon(person_names=("李四",), org_names=())
+        text = "李四来过"
+        result, _ = redactor.redact_snippet(text, lexicon)
+        assert "李四" not in result
+        assert cfg.person_name_placeholder in result
+
+    def test_high_frequency_entity_warns_but_replaces(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """异常高频实体仍执行替换，但发出告警（issue #13）。"""
+        text = "ab" * 60  # 出现 60 次 > 阈值 50
+        with caplog.at_level("WARNING"):
+            out, count = _replace_entities(text, ["ab"], "X")
+        assert count == 60
+        assert out == "X" * 60
+        assert any("异常高" in r.message for r in caplog.records)

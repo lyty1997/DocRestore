@@ -306,19 +306,33 @@ def _augment_metas_with_code_context(
             ))
 
 
+def _ocr_config_force_pipeline(
+    ocr: OCRConfig | None,
+    default_ocr: OCRConfig,
+    pipeline_name: str,
+) -> OCRConfig | None:
+    """把有效 OCR 配置的 ``paddle_pipeline`` 强制为 ``pipeline_name``。
+
+    底座（请求级 ``ocr`` 或 ``default_ocr``）已是目标 pipeline 则原样返回 ``ocr``
+    （可能为 None=无请求级覆盖）；否则在底座上 ``model_copy`` 强制覆盖。代码模式
+    与 PPT 模式共用，避免两份近乎相同的 force 逻辑各自漂移。
+    """
+    base = ocr if ocr is not None else default_ocr
+    if base.paddle_pipeline == pipeline_name:
+        return ocr
+    return base.model_copy(update={"paddle_pipeline": pipeline_name})
+
+
 def _ocr_config_for_code_mode(
     ocr: OCRConfig | None,
     default_ocr: OCRConfig,
 ) -> OCRConfig | None:
     """代码模式所需的有效 OCR 配置：强制 PaddleOCR basic（产出行级 bbox）。
 
-    底座（请求级 ``ocr`` 或 ``default_ocr``）已是 basic 则原样返回 ``ocr``；
-    否则在底座上 ``model_copy`` 强制 ``paddle_pipeline="basic"``（B4 H5）。
+    basic(PP-OCRv5) 才产 ``text_lines``（行级 bbox）；vl 不产，代码模式会因无可
+    组装内容而失败。统一强制使任何代码模式请求都走 basic（B4 H5）。
     """
-    base = ocr if ocr is not None else default_ocr
-    if base.paddle_pipeline == "basic":
-        return ocr
-    return base.model_copy(update={"paddle_pipeline": "basic"})
+    return _ocr_config_force_pipeline(ocr, default_ocr, "basic")
 
 
 def _ocr_config_for_ppt_mode(
@@ -329,16 +343,10 @@ def _ocr_config_for_ppt_mode(
 
     官方文档结论：PPT 还原所需输出（带格式 markdown + LaTeX 公式 + 化学结构/
     图表裁图 + 阅读序）只有 PaddleOCR-VL 端到端产出；basic(PP-OCRv5) 仅纯文本
-    行、PP-StructureV3 无 markdown/无 VLM 语义。故强制 ``paddle_pipeline="vl"``，
-    防止默认或误配 basic 让 PPT 模式静默降级为纯文字拼接（与代码模式强制 basic 对称）。
-
-    底座（请求级 ``ocr`` 或 ``default_ocr``）已是 vl 则原样返回 ``ocr``；
-    否则在底座上 ``model_copy`` 强制 ``paddle_pipeline="vl"``。
+    行、PP-StructureV3 无 markdown/无 VLM 语义。强制 ``paddle_pipeline="vl"`` 防止
+    默认或误配 basic 让 PPT 静默降级为纯文字拼接（与代码模式强制 basic 对称）。
     """
-    base = ocr if ocr is not None else default_ocr
-    if base.paddle_pipeline == "vl":
-        return ocr
-    return base.model_copy(update={"paddle_pipeline": "vl"})
+    return _ocr_config_force_pipeline(ocr, default_ocr, "vl")
 
 
 def _ocr_config_for_mode(
@@ -547,11 +555,10 @@ class Pipeline:
                 )
             await self._ocr_engine.initialize()
 
-        if (
-            self._refiner is None
-            and self._config.llm.model
-            and self._config.llm.enable_refine
-        ):
+        # 只要配置了 model 就预建 refiner —— 它是"LLM 客户端能力"，PII 实体
+        # 检测 / 代码头脱敏也复用它，不受 enable_refine 影响。是否做精修的策略
+        # 开关在 `_get_refiner(for_refine=True)` 里判 enable_refine，不在这里拦。
+        if self._refiner is None and self._config.llm.model:
             self._refiner = self._create_refiner(self._config.llm)
 
     async def process_tree(
@@ -892,7 +899,8 @@ class Pipeline:
                 # → 按页精修（开关开时）→ 单页保序组装 document.md（不跨页去重）
                 result = await self._ppt_pipeline(
                     page_queue, output_dir, _report,
-                    llm=llm, total=len(images), quality=quality,
+                    llm=llm, total=len(images), pii_cfg=pii_cfg,
+                    quality=quality,
                 )
             else:
                 result = await self._stream_process(
@@ -900,9 +908,19 @@ class Pipeline:
                     llm, gpu_lock, pii_cfg, controller, _report,
                     quality=quality,
                 )
+        except BaseException:
+            # 消费者异常/取消 → 立即取消仍在跑的 OCR 生产者，避免它把剩余图全部
+            # OCR 完才结束（持 gpu_lock 阻塞 shutdown / 遗弃任务 + GPU 空转）；
+            # 吞掉其 CancelledError 等清理异常，保留消费者原异常向上抛。
+            ocr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await ocr_task
+            raise
         finally:
             unsub_breaker()
-            await ocr_task
+        # 成功路径：生产者已在自身 finally put(None) 收尾、随即结束；这里 await
+        # 让其真实异常（如某页 OCR 失败）浮现为任务失败，而非静默产出截断文档。
+        await ocr_task
 
         # 写质量报告（只读操作，放在 finally 外，shutdown 异常时不写）
         try:
@@ -956,6 +974,7 @@ class Pipeline:
         *,
         llm: LLMConfig | None,
         total: int,
+        pii_cfg: PIIConfig | None = None,
         quality: QualityReport | None = None,
     ) -> PipelineResult:
         """PPT 模式分支：逐页 OCR 出队 → 重写图片引用 →（开关开时）按页 LLM
@@ -970,10 +989,20 @@ class Pipeline:
         from docrestore.output.ppt_renderer import render_ppt_document
 
         refiner = self._get_refiner(llm)
+        refining = refiner is not None
         llm_cfg = llm if llm is not None else self._config.llm
-        # 复用文档模式段级精修缓存：resume 复用 output_dir 时按页命中
+        # 实体脱敏：开 PII 时按已收页文本建一次 lexicon，每页送云端精修前替换
+        # 人名/机构名；结构化 PII 已由 producer 入队前正则脱敏。
+        pii = pii_cfg if pii_cfg is not None else PIIConfig()
+        redactor = PIIRedactor(pii) if pii.enable else None
+        entity_lexicon: EntityLexicon | None = None
+        pii_done = False
+        raw_accum: list[str] = []
+        # 段级精修缓存（resume 复用 output_dir 时按页命中）；enabled 关联 refiner：
+        # 关精修（refiner=None）时禁用 → LLMCache 不建目录，不留空 .llm_cache/。
         cache = LLMCache(
-            output_dir / ".llm_cache", enabled=llm_cfg.enable_cache,
+            output_dir / ".llm_cache",
+            enabled=llm_cfg.enable_cache and refining,
         )
 
         ordered_pages: list[PageOCR] = []
@@ -985,17 +1014,48 @@ class Pipeline:
                 break
             # 图片引用先加 OCR 目录前缀（与文档模式同一真相源），精修在其上做
             body = rewrite_image_refs_to_ocr_dir(page).strip()
-            if refiner is not None:
+            raw_accum.append(body)
+            # 积累阈值页后建一次实体词表（仅开 name 开关时实际检测，否则 None）
+            if (
+                redactor is not None
+                and not pii_done
+                and len(raw_accum) >= _PII_DETECT_THRESHOLD
+            ):
+                entity_lexicon = await self._detect_entities(
+                    "\n".join(raw_accum), llm, pii,
+                )
+                pii_done = True
+                if self._should_block_cloud(entity_lexicon, pii):
+                    # fail-closed：检测失败 → 停用按页云端精修，后续页退原文
+                    refiner = None
+                    refining = False
+                    logger.warning(
+                        "PPT 模式 PII 实体检测失败且 block_cloud_on_detect_"
+                        "failure=True：停用云端精修，后续页退原文（不外发"
+                        "人名/机构名）",
+                    )
+            if refining:
+                # slide_mode：用 SLIDE_REFINE_SYSTEM_PROMPT，只修格式不跨页去重；
+                # 词表就绪后在送云端精修前脱敏人名/机构名
                 result, _used = await self._refine_segment_with_cache(
                     refiner, body, idx, total, cache, llm_cfg, quality,
+                    slide_mode=True,
+                    redactor=redactor, entity_lexicon=entity_lexicon,
                 )
                 body = result.markdown
             ordered_pages.append(page)
             bodies.append(body)
+            # 进度文案区分是否真精修：关精修时只是逐页组装，不报"精修"误导用户
             report_fn(
-                "ppt_refine", idx + 1, total,
-                f"PPT 模式：第 {idx + 1}/{total} 页",
-                message_key="progress.pptPage",
+                "ppt_refine" if refining else "ppt_page", idx + 1, total,
+                (
+                    f"PPT 模式：精修第 {idx + 1}/{total} 页" if refining
+                    else f"PPT 模式：处理第 {idx + 1}/{total} 页"
+                ),
+                message_key=(
+                    "progress.pptPage" if refining
+                    else "progress.pptPagePlain"
+                ),
                 message_params={
                     "current": str(idx + 1), "total": str(total),
                 },
@@ -1005,6 +1065,18 @@ class Pipeline:
         if not ordered_pages:
             msg = "PPT 模式：OCR producer 未产出任何页"
             raise RuntimeError(msg)
+
+        # 短 PPT 兜底：页数不足阈值时上面未建过词表，这里补建一次（name 开关关 → None）
+        if redactor is not None and not pii_done:
+            entity_lexicon = await self._detect_entities(
+                "\n".join(raw_accum), llm, pii,
+            )
+        # 实体脱敏输出兜底：词表就绪前已精修的早窗口页可能漏掉实体，对组装正文
+        # 再脱敏一遍（已脱敏页为占位符，幂等无副作用）。
+        if entity_lexicon is not None and redactor is not None:
+            bodies = [
+                redactor.redact_snippet(b, entity_lexicon)[0] for b in bodies
+            ]
 
         report_fn(
             "ppt_render", len(ordered_pages), len(ordered_pages),
@@ -1214,17 +1286,22 @@ class Pipeline:
             if postfix_result.flags:
                 src.flags = list({*src.flags, *postfix_result.flags})
 
-        # 共享一个 refiner：PII 实体检测 + 代码字符级精修都用它
+        # 共享一个 LLM 客户端：PII 实体检测 + 代码字符级精修都用它。用
+        # for_refine=False 取——只要 model 配了就拿到客户端，不受 enable_refine
+        # 影响（否则"关精修 + 开脱敏"会把代码头的人名/邮箱/公司名检测一并关掉）。
+        # 是否做精修单独看 llm_cfg.enable_refine。
         llm_cfg = llm if llm is not None else self._config.llm
+        refine_on = llm_cfg.enable_refine
         base_refiner = (
-            self._get_refiner(llm)
-            if (llm_cfg.model and sources) else None
+            self._get_refiner(llm, for_refine=False)
+            if (llm_cfg.model and sources and (refine_on or pii_cfg.enable))
+            else None
         )
         base_refiner_obj = (
             base_refiner if isinstance(base_refiner, BaseLLMRefiner) else None
         )
         pre_refine_diagnostics_by_path: dict[str, list[CodeDiagnostic]] = {}
-        if base_refiner_obj is not None and sources:
+        if refine_on and base_refiner_obj is not None and sources:
             from docrestore.processing.code_diagnostics import diagnose_source_files
 
             pre_refine_diagnostics = await asyncio.to_thread(
@@ -1238,13 +1315,18 @@ class Pipeline:
         # 3.5 PII：仅对每个 SourceFile 的 leading comment block 脱敏
         # （Copyright / 作者 / 邮箱 / 公司名）。正文 import 路径 / namespace
         # 不动，避免破坏代码语义。
+        pii_block_cloud = False
         if pii_cfg.enable and sources:
-            await self._redact_code_headers(
+            pii_block_cloud = await self._redact_code_headers(
                 sources, pii_cfg, base_refiner_obj,
             )
 
-        # 4. 可选 LLM 字符级精修（每个 SourceFile 独立调用，失败回退原文）
-        if base_refiner_obj is not None:
+        # 4. 可选 LLM 字符级精修（每个 SourceFile 独立调用，失败回退原文）；
+        # 受统一精修开关约束，关精修时跳过（但上面的 PII 头脱敏仍照常执行）。
+        # fail-closed：实体检测失败且 block_cloud_on_detect_failure 为真时，
+        # 跳过整段 refine / repair / audit 云端调用，避免 header 里未脱敏的
+        # 人名/机构名外发（退化为不精修的本地输出）。
+        if refine_on and base_refiner_obj is not None and not pii_block_cloud:
             from docrestore.llm.code_repair import (
                 CodeConsistencyAuditor,
                 DiagnosticCodeRepairer,
@@ -1362,7 +1444,7 @@ class Pipeline:
         sources: list[SourceFile],
         pii_cfg: PIIConfig,
         refiner: BaseLLMRefiner | None,
-    ) -> None:
+    ) -> bool:
         """对每个 SourceFile 的 leading comment block 跑 PII 脱敏（in-place）。
 
         策略：拼接所有非空 header 一次性跑 LLM 实体检测拿全局 lexicon；每个
@@ -1371,12 +1453,16 @@ class Pipeline:
         import 路径或 namespace 字面量。
 
         ``refiner=None`` 时跳过实体检测，仅 regex + 自定义词。
-        实体检测失败 → 仅退化为 regex + 自定义词，不阻断流程。
+
+        返回 ``block_cloud``：实体检测**已尝试且失败** + 配置
+        ``block_cloud_on_detect_failure`` 为真时返回 True，调用方据此跳过后续
+        代码精修的云端调用（fail-closed，避免 header 里未脱敏的人名/机构名经
+        code_refine / repair / audit 外发到云端）。其余情况返回 False。
         """
         from docrestore.privacy.redactor import EntityLexicon, PIIRedactor
 
         if not sources:
-            return
+            return False
 
         headers: list[tuple[int, str, str]] = []  # (idx, header, body)
         for i, src in enumerate(sources):
@@ -1384,13 +1470,14 @@ class Pipeline:
             if header:
                 headers.append((i, header, body))
         if not headers:
-            return
+            return False
 
         redactor = PIIRedactor(pii_cfg)
         lexicon: EntityLexicon | None = None
         needs_lex = (
             pii_cfg.redact_person_name or pii_cfg.redact_org_name
         )
+        detect_failed = False
         if needs_lex and refiner is not None:
             combined = "\n\n".join(h for _, h, _ in headers)
             try:
@@ -1404,10 +1491,14 @@ class Pipeline:
                     "代码模式 PII 头部实体检测失败，仅 regex + 自定义词生效",
                     exc_info=True,
                 )
+                detect_failed = True
 
         for idx, header, body in headers:
             new_header, _records = redactor.redact_snippet(header, lexicon)
             sources[idx].merged_text = new_header + body
+
+        # 检测已尝试且失败 + fail-closed → 通知调用方跳过后续云端精修
+        return detect_failed and pii_cfg.block_cloud_on_detect_failure
 
     async def _resolve_ocr_engine(
         self,
@@ -1540,6 +1631,9 @@ class Pipeline:
         )
         refiner = self._get_refiner(llm)
         llm_cfg = llm if llm is not None else self._config.llm
+        # 实体脱敏器：开 PII 时复用 lexicon 把人名/机构名替换在送云端精修前
+        # （结构化 PII 已由 producer 入队前正则脱敏）。
+        redactor = PIIRedactor(pii_cfg) if pii_cfg.enable else None
         # LLM 精修缓存：resume 任务复用 output_dir → 直接命中已精修段，省时间
         cache = LLMCache(
             output_dir / ".llm_cache",
@@ -1552,6 +1646,9 @@ class Pipeline:
         all_gaps: list[Gap] = []
         entity_lexicon: EntityLexicon | None = None
         pii_entity_done = False
+        # fail-closed：实体检测失败且 block_cloud_on_detect_failure 为真时，停用
+        # 云端精修（refiner→None：后续段/尾段/终结化一律退原文，不外发人名/机构名）。
+        pii_block_cloud = False
 
         with profiler.stage("stream.consume"):
             while True:
@@ -1569,6 +1666,13 @@ class Pipeline:
                         merger, llm, pii_cfg,
                     )
                     pii_entity_done = True
+                    if self._should_block_cloud(entity_lexicon, pii_cfg):
+                        refiner = None
+                        pii_block_cloud = True
+                        logger.warning(
+                            "PII 实体检测失败且 block_cloud_on_detect_failure="
+                            "True：停用云端精修，后续段退原文（不外发人名/机构名）",
+                        )
 
                 segmented_offset, segment_index = (
                     await self._try_extract_and_refine(
@@ -1576,7 +1680,22 @@ class Pipeline:
                         segmented_offset, segment_index,
                         refined_results, all_gaps, report_fn,
                         cache, llm_cfg, quality,
+                        redactor=redactor, entity_lexicon=entity_lexicon,
                     )
+                )
+
+        # 短文档兜底：页数不足阈值时上面循环未建过 lexicon；这里补建一次，
+        # 让尾段脱敏与最终输出兜底拿到词表（仅开 name 开关时实际检测，否则 None）。
+        if pii_cfg.enable and entity_lexicon is None:
+            entity_lexicon = await self._detect_entities(
+                merger.get_markdown(), llm, pii_cfg,
+            )
+            if self._should_block_cloud(entity_lexicon, pii_cfg):
+                refiner = None
+                pii_block_cloud = True
+                logger.warning(
+                    "PII 实体检测失败且 block_cloud_on_detect_failure=True："
+                    "停用云端精修，尾段/终结化退原文（不外发人名/机构名）",
                 )
 
         # 处理剩余文本（最后一段）
@@ -1594,6 +1713,8 @@ class Pipeline:
                         await self._refine_segment_with_cache(
                             refiner, remaining, segment_index, 0,
                             cache, llm_cfg, quality,
+                            redactor=redactor,
+                            entity_lexicon=entity_lexicon,
                         )
                     )
                 if used_refiner:
@@ -1624,6 +1745,7 @@ class Pipeline:
             merger, pages_ref, refined_results, all_gaps,
             output_dir, llm, gpu_lock, report_fn, entity_lexicon,
             cache, llm_cfg, quality,
+            block_cloud=pii_block_cloud,
         )
 
     async def _try_extract_and_refine(
@@ -1640,8 +1762,15 @@ class Pipeline:
         cache: LLMCache,
         llm_cfg: LLMConfig,
         quality: QualityReport | None = None,
+        *,
+        redactor: PIIRedactor | None = None,
+        entity_lexicon: EntityLexicon | None = None,
     ) -> tuple[int, int]:
-        """合并器有新文本时按 controller.target L* 尝试切段精修。"""
+        """合并器有新文本时按 controller.target L* 尝试切段精修。
+
+        `redactor` + `entity_lexicon` 透传到段级精修：词表就绪后的分段送云端前
+        脱敏人名/机构名（早窗口段词表未就绪 → 由最终输出兜底覆盖）。
+        """
         profiler = current_profiler()
         md = merger.get_markdown()
         logger.info(
@@ -1671,6 +1800,7 @@ class Pipeline:
                     await self._refine_segment_with_cache(
                         refiner, seg_text, segment_index, 0,
                         cache, llm_cfg, quality,
+                        redactor=redactor, entity_lexicon=entity_lexicon,
                     )
                 )
             elapsed = time.perf_counter() - t0
@@ -1712,8 +1842,15 @@ class Pipeline:
         cache: LLMCache,
         llm_cfg: LLMConfig,
         quality: QualityReport | None = None,
+        *,
+        block_cloud: bool = False,
     ) -> PipelineResult:
-        """单文档终结化：reassemble → gap fill → final refine → render。"""
+        """单文档终结化：reassemble → gap fill → final refine → render。
+
+        ``block_cloud=True``（PII fail-closed：实体检测失败）时跳过 gap fill 与
+        final refine 两处云端调用，仅做本地 reassemble / 去重 / polish / render，
+        避免把人名 / 机构名外发到云端。
+        """
         profiler = current_profiler()
 
         base = MergedDocument(
@@ -1728,17 +1865,20 @@ class Pipeline:
         )
 
         truncated = False
-        with profiler.stage(
-            "llm.gap_fill_phase", num_gaps=len(all_gaps),
-        ):
-            doc = await self._maybe_fill_gaps(
-                doc, all_gaps, pages_ref, output_dir,
-                llm, gpu_lock, report_fn, entity_lexicon,
-            )
-        with profiler.stage("llm.final_refine"):
-            doc, truncated = await self._do_final_refine(
-                doc, output_dir, llm, report_fn, cache, llm_cfg,
-            )
+        # fail-closed：实体检测失败时跳过 gap fill 与 final refine 两处云端调用，
+        # 仅保留本地组装/去重/polish/render，避免人名/机构名外发到云端。
+        if not block_cloud:
+            with profiler.stage(
+                "llm.gap_fill_phase", num_gaps=len(all_gaps),
+            ):
+                doc = await self._maybe_fill_gaps(
+                    doc, all_gaps, pages_ref, output_dir,
+                    llm, gpu_lock, report_fn, entity_lexicon,
+                )
+            with profiler.stage("llm.final_refine"):
+                doc, truncated = await self._do_final_refine(
+                    doc, output_dir, llm, report_fn, cache, llm_cfg,
+                )
 
         # A-2 信号 4：final_refine 输出仍有重复 H2 → 带提示重做一次
         if not truncated:
@@ -1835,6 +1975,17 @@ class Pipeline:
         final_gaps = list(all_gaps)
         final_gaps.extend(extra_gaps)
 
+        # 实体脱敏输出兜底：词表就绪前已精修的"早窗口"段可能漏掉实体，这里对
+        # 组装结果再脱敏一遍（lexicon=None 时跳过；结构化 PII 已在 producer 完成）。
+        if entity_lexicon is not None and self._config.pii.enable:
+            redacted_md, _ = PIIRedactor(self._config.pii).redact_snippet(
+                doc.markdown, entity_lexicon,
+            )
+            if redacted_md != doc.markdown:
+                doc = MergedDocument(
+                    markdown=redacted_md, images=doc.images, gaps=doc.gaps,
+                )
+
         report_fn(
             "render", 1, 1, "渲染输出...",
             message_key="progress.render",
@@ -1862,37 +2013,69 @@ class Pipeline:
             doc_dir="",
         )
 
+    async def _detect_entities(
+        self,
+        text: str,
+        llm: LLMConfig | None,
+        pii_cfg: PIIConfig,
+    ) -> EntityLexicon | None:
+        """对给定文本做一次 LLM 人名/机构名实体检测，返回 EntityLexicon。
+
+        不受精修开关约束（`for_refine=False`）：用户"关精修 + 开脱敏"时仍需 LLM
+        检测人名/机构名（正则只兜手机/邮箱/身份证/银行卡）。未开 name 开关 / 无可用
+        refiner / 检测异常 → 返回 None（调用方判空，退化为仅正则，不阻断精修）。
+        """
+        if not (pii_cfg.redact_person_name or pii_cfg.redact_org_name):
+            return None
+        refiner = self._get_refiner(llm, for_refine=False)
+        if refiner is None:
+            return None
+        try:
+            person_names, org_names = await refiner.detect_pii_entities(text)
+        except Exception:
+            logger.warning("PII 实体检测失败", exc_info=True)
+            return None
+        return EntityLexicon(
+            person_names=tuple(person_names),
+            org_names=tuple(org_names),
+        )
+
     async def _delayed_pii_detect(
         self,
         merger: IncrementalMerger,
         llm: LLMConfig | None,
         pii_cfg: PIIConfig,
     ) -> EntityLexicon | None:
-        """积累到阈值后做一次 LLM 实体检测获取 lexicon。
+        """积累到阈值后做一次 LLM 实体检测获取 lexicon（委托 _detect_entities）。
 
-        成功：返回 EntityLexicon（后续 gap fill 的 re-OCR 文本可复用）；
+        成功：返回 EntityLexicon（gap fill re-OCR + 主分段/输出兜底复用）；
         失败：返回 None，仅靠 regex PII 保护（不阻断云端 LLM 精修）。
         """
-        if not (
-            pii_cfg.redact_person_name or pii_cfg.redact_org_name
-        ):
-            return None
-        refiner = self._get_refiner(llm)
-        if refiner is None:
-            return None
-        try:
-            person_names, org_names = (
-                await refiner.detect_pii_entities(merger.get_markdown())
-            )
-        except Exception:
-            logger.warning(
-                "流式模式 PII 实体检测失败", exc_info=True,
-            )
-            return None
-        return EntityLexicon(
-            person_names=tuple(person_names),
-            org_names=tuple(org_names),
+        return await self._detect_entities(
+            merger.get_markdown(), llm, pii_cfg,
         )
+
+    @staticmethod
+    def _should_block_cloud(
+        lexicon: EntityLexicon | None,
+        pii_cfg: PIIConfig,
+    ) -> bool:
+        """实体检测已尝试但失败时，是否按 fail-closed 阻断云端精修。
+
+        仅在「开 PII + 要求人名/机构名脱敏 + 检测返回 None（失败）+
+        ``block_cloud_on_detect_failure`` 为真」时返回 True。
+
+        调用点须保证 detection 已实际尝试过 —— 此处 ``lexicon=None`` 即代表
+        检测失败，而非"早窗口尚未检测"。检测成功（含查无实体的空词表）返回
+        非 None，故不会误判为失败。
+        """
+        if lexicon is not None:
+            return False
+        if not pii_cfg.enable:
+            return False
+        if not (pii_cfg.redact_person_name or pii_cfg.redact_org_name):
+            return False
+        return pii_cfg.block_cloud_on_detect_failure
 
     @staticmethod
     async def _refine_segment_with_cache(
@@ -1903,6 +2086,10 @@ class Pipeline:
         cache: LLMCache,
         llm_cfg: LLMConfig,
         quality: QualityReport | None = None,
+        *,
+        slide_mode: bool = False,
+        redactor: PIIRedactor | None = None,
+        entity_lexicon: EntityLexicon | None = None,
     ) -> tuple[RefinedResult, bool]:
         """段级精修带磁盘缓存。返回 `(result, used_refiner)`。
 
@@ -1916,12 +2103,22 @@ class Pipeline:
         `quality` 非 None 时，每次实际 refine 调用后写入 LLM 段级质量信号
         （截断 / 回退到原文 / UI 噪音残留）。缓存命中路径不写信号，
         避免历史重放污染当次任务的质量报告。
+
+        `slide_mode=True`（PPT 按页精修）：ctx 标记 is_slide → 用 slide prompt
+        （不跨页去重），缓存走独立 slide 命名空间，与文档分段缓存互不串味。
+
+        `redactor` + `entity_lexicon` 非空时，先把人名/机构名替换在送云端精修前
+        （缓存键也用脱敏后文本，resume 一致）；`entity_lexicon=None`（早窗口/未开
+        脱敏/检测失败）则跳过——结构化 PII 已由 producer 入队前正则脱敏。
         """
+        if redactor is not None and entity_lexicon is not None:
+            text, _ = redactor.redact_snippet(text, entity_lexicon)
         if cache.enabled:
             cached = cache.get_segment(
                 model=llm_cfg.model,
                 api_base=llm_cfg.api_base,
                 text=text,
+                slide=slide_mode,
             )
             if cached is not None:
                 logger.info(
@@ -1937,6 +2134,7 @@ class Pipeline:
             total_segments=total,
             overlap_before="",
             overlap_after="",
+            is_slide=slide_mode,
         )
         try:
             result = await refiner.refine(text, ctx)
@@ -1995,6 +2193,7 @@ class Pipeline:
             api_base=llm_cfg.api_base,
             text=text,
             result=result,
+            slide=slide_mode,
         )
         return result, True
 
@@ -2189,6 +2388,7 @@ class Pipeline:
             overlap_before="",
             overlap_after="",
             retry_hint=ctx.retry_hint,
+            is_slide=ctx.is_slide,
         )
         sub_results: list[RefinedResult] = []
         for sub_text in halves:
@@ -2305,6 +2505,7 @@ class Pipeline:
                 "请完整保留输入全部内容，只修复 Markdown 格式，"
                 "不要省略、总结或提前结束。"
             ),
+            is_slide=ctx.is_slide,
         )
         try:
             retry_result = await refiner.refine(text, retry_ctx)
@@ -2366,6 +2567,7 @@ class Pipeline:
                 "但必须保留每个 page marker 后的有效正文和所有图片引用；"
                 "只允许删除逐字重复的句子，不允许整页删除或添加解释性注释。"
             ),
+            is_slide=ctx.is_slide,
         )
         try:
             retry_result = await refiner.refine(text, retry_ctx)
@@ -2422,11 +2624,12 @@ class Pipeline:
             overlap_after=ctx.overlap_after,
             retry_hint=(
                 f"上一轮输出仍含 {len(first_hits)} 处网页 UI 噪音"
-                f"（如 `{first_hits[0]}`）。请按 system 规则 11-13"
-                "逐行删除所有 `{语言} 复制代码` / 独立 `复制代码` /"
+                f"（如 `{first_hits[0]}`）。请逐行删除所有 "
+                "`{语言} 复制代码` / 独立 `复制代码` /"
                 "以 `▶▼☐` 开头的视觉 UI 行；若留在代码块内，"
                 "剥离后保持代码块闭合。"
             ),
+            is_slide=ctx.is_slide,
         )
         try:
             retry_result = await refiner.refine(text, retry_ctx)
@@ -2724,12 +2927,20 @@ class Pipeline:
     def _get_refiner(
         self,
         llm: LLMConfig | None,
+        *,
+        for_refine: bool = True,
     ) -> LLMRefiner | None:
         """获取 refiner 实例：llm 非空时按请求快照新建，否则复用默认实例。
 
-        统一精修开关：有效 ``LLMConfig.enable_refine`` 为 False 时直接返回
-        None——文档（分段）/ 代码 / PPT（按页）三模式既有的
-        ``if refiner is None: 跳过`` 回退路径统一生效，无需逐处判断。
+        ``for_refine`` 区分两类用途，避免"精修开关"误伤"LLM 客户端能力"：
+        - ``True``（默认，所有精修调用点）：受统一精修开关约束，有效
+          ``LLMConfig.enable_refine`` 为 False 时直接返回 None —— 文档（分段）
+          / 代码 / PPT（按页）三模式既有的 ``if refiner is None: 跳过`` 回退
+          路径统一生效，改这一处即可关停所有模式的精修。
+        - ``False``（PII 实体检测 / 代码头脱敏等非精修用途）：**不看**
+          enable_refine，只要配置了 model 就返回客户端。否则用户"关精修但开
+          脱敏"时，基于 LLM 的人名 / 机构名检测会被精修开关连带关掉，
+          导致正则兜不住的隐私（人名 / 公司名）泄漏到云端 / 输出。
 
         llm 非空但 `llm.model` 为空串时返回 None —— 下游调用点已有
         `if refiner is None: 跳过` 的回退路径。否则 `_create_refiner` 会
@@ -2737,7 +2948,7 @@ class Pipeline:
         在 stderr 打"Provider List: https://docs.litellm.ai/docs/providers"。
         """
         effective = llm if llm is not None else self._config.llm
-        if not effective.enable_refine:
+        if for_refine and not effective.enable_refine:
             return None
         if llm is None:
             return self._refiner

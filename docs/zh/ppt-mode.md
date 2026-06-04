@@ -1,9 +1,9 @@
 # PPT 还原模式设计文档（S1 / AGE-85）
 
-> **状态**：S1 设计已确认（2026-06-03，§14 六项拍板）→ 生成 OpenSpec 中
+> **状态**：S0–S6 全栈已落地并合并 `dev`（详见 progress.md）；S1 设计已确认（2026-06-03，§14 六项拍板）
 > **对应 issue**：父 AGE-83；本文 = AGE-85（S1[design]）；下游 AGE-86(S2) / AGE-87(S3) / AGE-88(S4) / AGE-89(S5) / AGE-90(S6)
 > **上游**：AGE-84（S0 spike）选型结论已落地（VL-1.5→1.6 全面升级合并 `dev`，commit `15faf0f`）
-> **真相源约定**：本文经用户确认后生成 OpenSpec，作为下游 S2–S6 编码唯一真相源；编码时若与实际代码冲突，以代码 + OpenSpec 为准，回头修订本文。
+> **真相源约定**：本文（ppt-mode.md）是 PPT 模式设计真相源（项目已弃用 OpenSpec，统一用 `docs/` 体系）；编码时若与实际代码冲突，以代码为准，回头修订本文。
 
 ---
 
@@ -394,7 +394,7 @@ onSubmit(trimmed, outputDir, llm, pii, ocr, code, ppt);
 | E | 页间分隔 | ✅ **markdown 分隔线 + page marker**（§9） |
 | F | DB migration | ✅ **同 `code` 列机制**，老任务无需手动迁移（§7#7） |
 
-> 6 项已确认（含 B / D 的实测留口）。据此生成 OpenSpec（change proposal + spec deltas），下游 S2–S6 据此细化内部步骤。
+> 6 项已确认（含 B / D 的实测留口），下游 S2–S6 据此细化内部步骤（已全部落地，见 progress.md）。
 
 ---
 
@@ -436,3 +436,34 @@ PPT 模式不再单独设功能**。
    改"相对质心极角升序排环 + x+y 最小者为左上锚点"，保证 4 角互异。
 
 各项均带回归测试，质量门禁全绿（pytest 1001 passed）。
+
+### max-effort code-review 第二轮修复（2026-06-03，复审上一轮提交，用户确认 4 项）
+
+复审上一轮提交（统一精修 + 首轮 4 修）的 diff，再发现并修复 4 项：
+
+1. **统一精修开关误伤 PII 检测（隐私回归，最高优先级）**：`enable_refine` 的拦截点放在
+   `_get_refiner` 里无条件返回 `None`，但该方法**也**给 PII 实体检测（`_delayed_pii_detect`）
+   与代码头脱敏（`_redact_code_headers`）供 LLM 客户端。导致"关精修 + 开脱敏"时，正则兜不住的
+   人名 / 机构名检测被精修开关连带关掉、泄漏到云端。**修法**：`_get_refiner(llm, *, for_refine=True)`
+   ——精修调用点用默认 `True`（受 `enable_refine` 约束），PII 等非精修用途用 `for_refine=False`
+   （只看 `model`，不看 `enable_refine`）；`initialize` 不再用 `enable_refine` 预建 refiner（它是
+   "客户端能力"，非精修策略）；代码模式 `base_refiner` 改 `for_refine=False` 取，pre-refine 诊断 +
+   字符级精修两段显式按 `enable_refine` 各自 gate，PII 头脱敏照常。
+2. **PPT 复用文档"跨页去重"prompt**：`_refine_segment_with_cache` 用 `REFINE_SYSTEM_PROMPT`，含
+   "跨页重复页眉/页脚去重"等指令；PPT 每页独立、模型只看单页无从判断跨页重复，强行去重会误删
+   合理重复的标题 / 页脚 / 母版元素。**修法**：新增 `SLIDE_REFINE_SYSTEM_PROMPT`（只修格式、保留
+   公式与裁图引用、**不做跨页去重**）；`RefineContext.is_slide` 标记 → `build_refine_prompt` 选
+   slide prompt；`_refine_segment_with_cache(slide_mode=True)` 透传，PPT 出队循环传 `slide_mode=True`；
+   4 处截断 / 重试 ctx 一并带 `is_slide`；缓存新增独立 `slide` 命名空间（按 slide prompt 指纹，不与
+   文档分段缓存串味）。
+3. **`_order_corners` 旋转误标（取代上一轮的极角 + x+y 锚点）**：上一轮的"极角排环 + x+y 最小
+   锚点"虽修了塌缩，但旋转 / 强倾斜下会把左上锚错位、整圈标号偏移一格（矫正图整体旋转 90°）。
+   **改为**"按 y 排序分上下两组、组内按 x 分左右"：对透视梯形（屏摄主畸变）天然稳健、中等旋转
+   标号仍正确、每点恰好分配一次仍保证 4 角互异。回归测试断言**标号正确**（不只 4 角互异）。
+4. **`rectify` 退化 sliver 兜底太弱**：旧 guard 仅拦 `w<=0 / h<=0`（四舍五入到 0），亚像素~十几
+   像素的近共线 sliver（反光条 / approxPolyDP 退化）会算出 1×N 竹签图喂坏 OCR。**修法**：新增
+   `_MIN_RECTIFIED_SIDE_PX=16`，任一边低于阈值即回退整张原图（同"检测不到四边形回退原图"契约）。
+
+各项均带回归测试；质量门禁全绿（mypy --strict / ruff / typos / pytest 1011 passed）。余下低优先级
+review 项（关精修仍报"精修第 X 页"进度文案、`progress.pptDone` 死键、`_ocr_config_*` 克隆、retry
+无 PPT 兜底等）记入 `known-issues.md` 择期清理。

@@ -105,6 +105,46 @@ def assemble_columns(
     return columns
 
 
+def _ordered_line_numbers(
+    line_no_lines: list[TextLine],
+    anchor: LineNumberAnchor,
+) -> list[tuple[TextLine, int, bool]]:
+    """按物理 y 序解析行号并修正 OCR 误读离群值。
+
+    返回 ``(line, line_no, is_inferred)`` 列表，按 ``bbox`` 顶部 y 升序。
+
+    要点（issue #21）：
+    - **排序键用 y_top 而非 OCR 读数**：单字误读（如 88→8）只是把 label 读错，
+      不应把整行重排到列顶。照片的垂直顺序才是物理真相——与
+      ``code_line_ledger._y_monotonic_outliers`` 同一前提。
+    - **int() 包 try/except**：当前 ``NUMERIC_RE=^\\d{1,4}$`` 已保证行号是纯数字、
+      不会抛 ValueError，此处仍兜底，避免日后放宽正则时崩溃。
+    - **单调性修正**：编辑器行号随 y 严格递增；某行读数 ≤ 前一已接受值即误读
+      离群，改用 ``prev+1`` 推断并标 inferred，避免误读值污染 ledger / 合并。
+      ``anchor.num_range`` 由同一批 OCR 读数派生（可能含离群点，见
+      ``_detect_line_number_gaps`` 注释），故仅用作首行无前值时的下界兜底。
+    """
+    ordered = sorted(line_no_lines, key=lambda ln: ln.bbox[1])
+    fallback_lo = anchor.num_range[0]
+    result: list[tuple[TextLine, int, bool]] = []
+    prev: int | None = None
+    for ln in ordered:
+        parsed: int | None
+        try:
+            parsed = int(ln.text.strip())
+        except ValueError:
+            parsed = None
+        inferred = False
+        if parsed is None or (prev is not None and parsed <= prev):
+            value = prev + 1 if prev is not None else fallback_lo
+            inferred = True
+        else:
+            value = parsed
+        result.append((ln, value, inferred))
+        prev = value
+    return result
+
+
 def _assemble_one_column(
     idx: int,
     anchor: LineNumberAnchor,
@@ -139,10 +179,11 @@ def _assemble_one_column(
         line_no_lines, code_lines, y_tolerance,
     )
 
-    # 5. 构造 CodeLine 列表（按行号排序）
+    # 5. 构造 CodeLine 列表（按物理 y 序，行号误读不重排——见 _ordered_line_numbers）
     assembled: list[CodeLine] = []
-    for ln_no_line in sorted(line_no_lines, key=lambda ln: int(ln.text.strip())):
-        line_no = int(ln_no_line.text.strip())
+    for ln_no_line, line_no, inferred_no in _ordered_line_numbers(
+        line_no_lines, anchor,
+    ):
         codes = paired.get(id(ln_no_line), [])
         if not codes:
             assembled.append(CodeLine(
@@ -150,7 +191,7 @@ def _assemble_one_column(
                 text=cfg.empty_line_placeholder or "",
                 indent=0,
                 bbox=None,
-                is_inferred_line_no=False,
+                is_inferred_line_no=inferred_no,
             ))
             continue
         # 多 code line 同 y → 按 x1 排序拼接（OCR 把一行切多段）
@@ -172,7 +213,7 @@ def _assemble_one_column(
             text=joined_text,
             indent=indent,
             bbox=merged_bbox,
-            is_inferred_line_no=False,
+            is_inferred_line_no=inferred_no,
         ))
 
     # 6. 处理 unpaired 代码 line（行号缺失 → 用 y 推断行号插入）

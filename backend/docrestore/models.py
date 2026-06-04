@@ -111,6 +111,10 @@ class RefineContext:
     #: 重试提示：A-2 选择性重跑时注入的额外指令，提醒 LLM 上一轮具体
     #: 漏掉/错做的事（如"还有 3 处 UI 噪音未清"），空=无重试提示。
     retry_hint: str = ""
+    #: PPT 按页精修标记：True 时 build_refine_prompt 选 SLIDE_REFINE_SYSTEM_PROMPT
+    #: ——只修格式、保留公式/图片引用，**不做跨页去重**（每页独立，模型只看单页
+    #: 无从判断"跨页重复"，强行去重会误删合理重复的标题/页脚）。默认 False=文档分段。
+    is_slide: bool = False
 
 
 @dataclass

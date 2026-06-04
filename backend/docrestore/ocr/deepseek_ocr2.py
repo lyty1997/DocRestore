@@ -161,24 +161,25 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
         init_cmd: dict[str, object],
         on_progress: ProgressFn | None,
     ) -> dict[str, object]:
-        """并发读 stderr 推送初始化进度（vLLM 加载耗时长）。"""
-        stop_event = asyncio.Event()
-        stderr_task = asyncio.create_task(
-            self._stream_stderr_progress(stop_event, on_progress),
-            name="deepseek-stderr-progress",
-        )
+        """init 期间经基类 stderr drain 的逐行 hook 推送进度（vLLM 加载耗时长）。
+
+        历史 bug：另起协程 readline 同一 ``process.stderr``，与基类 stderr drain
+        并发读 → ``StreamReader`` 抛 RuntimeError，init 进度静默失效（且潜在 drain
+        死亡 → stderr pipe 写满挂死）。改为复用 drain 这唯一读者：装一个逐行 hook
+        解析进度，init 结束（成功/异常/取消）即在 finally 摘除。
+        """
+        def _on_line(line: str) -> None:
+            if on_progress is None:
+                return
+            msg = _extract_stderr_message(line)
+            if msg is not None:
+                on_progress(msg)
+
+        self._stderr_line_hook = _on_line
         try:
-            resp = await self._send_command(init_cmd)
+            return await self._send_command(init_cmd)
         finally:
-            # 先 set 让 drain 自然退出；再 cancel 兜底（drain 可能卡在
-            # wait_for readline 的 0.5s 间隙内，cancel 立即打断）；最后
-            # gather 等它完全退出，避免 initialize 被 cancel 时 stderr
-            # 任务残留，worker pipe buffer 继续堆积。
-            stop_event.set()
-            stderr_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await stderr_task
-        return resp
+            self._stderr_line_hook = None
 
     async def _terminate_process(self) -> None:
         """向整个进程组发送信号，清理 vLLM 子进程。"""
@@ -278,7 +279,16 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
             )
             results.update(processed)
 
-        return [results[p] for p in image_paths if p in results]
+        # 不静默丢页：每张输入图都必须有结果，否则返回的页列比输入短、下游索引
+        # 错位。缺失即抛（_send_ocr_batch_all 已逐 chunk 校验，这里是兜底防线）。
+        missing = [p for p in image_paths if p not in results]
+        if missing:
+            names = ", ".join(p.name for p in missing[:5])
+            msg = (
+                f"{self.engine_name} 批量 OCR 缺失 {len(missing)} 页（如 {names}）"
+            )
+            raise RuntimeError(msg)
+        return [results[p] for p in image_paths]
 
     async def _send_ocr_batch_with_oom_retry(
         self,
@@ -368,6 +378,16 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
             results[image_path] = self._parse_single_result(
                 item, image_path, fallback_ocr_dir,
             )
+
+        # 拒绝静默丢页：worker 返回项数少于请求（items_raw 偏短 / 含非 dict 项）
+        # 时，缺失页若被悄悄省略，下游会按更短的页列错位索引。这里硬校验。
+        if len(results) != len(chunk):
+            missing = [p.name for p in chunk if p not in results]
+            msg = (
+                f"DeepSeek-OCR-2 batch 返回 {len(results)}/{len(chunk)} 页，"
+                f"缺失 {missing[:5]}：worker 响应与请求页数不一致"
+            )
+            raise RuntimeError(msg)
 
         return results
 
@@ -461,30 +481,3 @@ class DeepSeekOCR2Engine(WorkerBackedOCREngine):
             ))
 
         return regions
-
-    async def _stream_stderr_progress(
-        self,
-        stop: asyncio.Event,
-        on_progress: ProgressFn | None,
-    ) -> None:
-        """后台持续读取 worker stderr，提取进度推送给前端。"""
-        if self._process is None or self._process.stderr is None:
-            return
-        stderr = self._process.stderr
-        while not stop.is_set():
-            try:
-                raw = await asyncio.wait_for(
-                    stderr.readline(), timeout=0.5,
-                )
-            except TimeoutError:
-                continue
-            except (OSError, asyncio.IncompleteReadError, RuntimeError):
-                break
-            if not raw:
-                break
-            line = raw.decode("utf-8", errors="replace").rstrip()
-            logger.debug("[deepseek-stderr] %s", line)
-            if on_progress is not None:
-                msg = _extract_stderr_message(line)
-                if msg is not None:
-                    on_progress(msg)

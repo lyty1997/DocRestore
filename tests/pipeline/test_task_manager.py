@@ -36,7 +36,10 @@ import pytest
 
 from docrestore.models import PipelineResult, TaskProgress
 from docrestore.persistence.database import TaskDatabase, TaskRow
-from docrestore.pipeline.config import CodeRestoreConfig
+from docrestore.pipeline.config import (
+    CodeRestoreConfig,
+    PowerPointRestoreConfig,
+)
 from docrestore.pipeline.task_manager import Task, TaskManager, TaskStatus
 
 
@@ -266,6 +269,50 @@ class TestCancelTask:
         assert bg.cancelled() or bg.done()
 
 
+class TestFinalizeRace:
+    """终态转换串行化（issue #12）：先到终态者赢，杜绝 cancel/complete 双写。"""
+
+    @pytest.mark.asyncio
+    async def test_first_terminal_wins_then_rejects(self) -> None:
+        """第一次到达终态生效，后续转换被拒、状态不被覆盖。"""
+        mgr = _make_manager()
+        mgr._tasks["t"] = Task(
+            task_id="t", status=TaskStatus.PROCESSING,
+            image_dir="x", output_dir="y",
+        )
+        assert await mgr._finalize("t", TaskStatus.COMPLETED) is True
+        assert mgr._tasks["t"].status is TaskStatus.COMPLETED
+        # 后到的 FAILED 被拒
+        assert await mgr._finalize(
+            "t", TaskStatus.FAILED, error="boom",
+        ) is False
+        assert mgr._tasks["t"].status is TaskStatus.COMPLETED
+        assert mgr._tasks["t"].error is None
+
+    @pytest.mark.asyncio
+    async def test_cancelled_not_overwritten_to_completed(self) -> None:
+        """cancel 抢先置 FAILED 后，run_task 成功路径不得改回 COMPLETED。"""
+        mgr = _make_manager()
+        mgr._tasks["t"] = Task(
+            task_id="t", status=TaskStatus.PROCESSING,
+            image_dir="x", output_dir="y",
+        )
+        assert await mgr._finalize(
+            "t", TaskStatus.FAILED, error="用户取消",
+        ) is True
+        # run_task 成功路径试图置 COMPLETED → 被拒
+        assert await mgr._finalize(
+            "t", TaskStatus.COMPLETED, results=[],
+        ) is False
+        assert mgr._tasks["t"].status is TaskStatus.FAILED
+        assert mgr._tasks["t"].error == "用户取消"
+
+    @pytest.mark.asyncio
+    async def test_finalize_missing_task_returns_false(self) -> None:
+        mgr = _make_manager()
+        assert await mgr._finalize("ghost", TaskStatus.COMPLETED) is False
+
+
 class TestDeleteTask:
     """delete_task 三分支"""
 
@@ -394,6 +441,64 @@ class TestRetryTask:
         assert new.code is not None
         assert new.code.enable is True
 
+    @pytest.mark.asyncio
+    async def test_retry_infers_legacy_ppt_mode_from_rectified(
+        self, tmp_path: Path,
+    ) -> None:
+        """旧 retry 丢 ppt 但 output_dir 有 .rectified/ → 推断回 PPT 模式。
+
+        回归（review 第二轮配套）：对称于 code 模式的 files-index.json 推断，
+        PPT 用透视矫正产物目录 .rectified/ 作为模式信号，避免静默退回文档模式。
+        """
+        mgr = _make_manager()
+        out = tmp_path / "out"
+        (out / ".rectified").mkdir(parents=True)
+        failed = Task(
+            task_id="legacy-ppt",
+            status=TaskStatus.FAILED,
+            image_dir="/orig/imgs",
+            output_dir=str(out),
+            ppt=None,
+        )
+        mgr._tasks[failed.task_id] = failed
+
+        new = await mgr.retry_task(failed.task_id)
+
+        assert isinstance(new, Task)
+        assert new.ppt is not None
+        assert new.ppt.enable is True
+        assert new.code is None  # .rectified/ 不触发代码模式推断
+
+    @pytest.mark.asyncio
+    async def test_retry_prefers_code_when_both_artifacts_present(
+        self, tmp_path: Path,
+    ) -> None:
+        """旧 output_dir 同时残留 files-index.json 与 .rectified/、且 code/ppt
+        快照都丢失：互斥推断优先代码模式（与 pipeline 调度 code→ppt 顺序一致），
+        不把 code+ppt 同时 enable 传给 create_task（回归 review #4 配套）。
+        """
+        mgr = _make_manager()
+        out = tmp_path / "out"
+        out.mkdir(parents=True)
+        (out / "files-index.json").write_text("{}", encoding="utf-8")
+        (out / ".rectified").mkdir()
+        failed = Task(
+            task_id="legacy-both",
+            status=TaskStatus.FAILED,
+            image_dir="/orig/imgs",
+            output_dir=str(out),
+            code=None,
+            ppt=None,
+        )
+        mgr._tasks[failed.task_id] = failed
+
+        new = await mgr.retry_task(failed.task_id)
+
+        assert isinstance(new, Task)
+        assert new.code is not None
+        assert new.code.enable is True
+        assert new.ppt is None  # 互斥：code 命中 → 不再推断 ppt
+
 
 class TestResumeTask:
     """resume_task 保留 output_dir，并延续代码模式配置"""
@@ -438,6 +543,25 @@ class TestResumeTask:
         assert new.output_dir == failed.output_dir
         assert new.code is not None
         assert new.code.enable is True
+
+    @pytest.mark.asyncio
+    async def test_resume_preserves_ppt_config(self) -> None:
+        """resume 直接沿用已持久化的 task.ppt（正常路径，无需产物推断）。"""
+        mgr = _make_manager()
+        failed = Task(
+            task_id="failed-ppt",
+            status=TaskStatus.FAILED,
+            image_dir="/orig/imgs",
+            output_dir="/orig/out",
+            ppt=PowerPointRestoreConfig(enable=True),
+        )
+        mgr._tasks[failed.task_id] = failed
+
+        new = await mgr.resume_task(failed.task_id)
+
+        assert isinstance(new, Task)
+        assert new.output_dir == failed.output_dir
+        assert new.ppt == failed.ppt
 
 
 class TestListTasksInMemory:
@@ -629,6 +753,27 @@ class TestProgressPubSub:
         assert got.current in {1, 5}
         assert q.empty()
 
+    @pytest.mark.asyncio
+    async def test_subscribe_seeds_current_progress_after_terminal(
+        self,
+    ) -> None:
+        """#16：终结帧已发布后才订阅 → 立即回灌当前进度，不永久阻塞 q.get()。"""
+        mgr = _make_manager()
+        task = mgr.create_task(image_dir="/x")
+
+        # 终结帧只 publish 一次；此刻无订阅者 → 不广播、不缓存到任何队列
+        terminal = TaskProgress(
+            stage="completed", current=1, total=1, percent=100.0,
+        )
+        mgr.publish_progress(task.task_id, terminal)
+
+        # 之后才订阅：旧实现会让客户端永久阻塞在 q.get()；新实现 seed 一帧
+        q = await mgr.subscribe_progress(task.task_id)
+        assert q is not None
+        # 队列已含终结帧，无需等待新的 publish（seed 失败则 get_nowait 抛 QueueEmpty）
+        got = q.get_nowait()
+        assert got.stage == "completed"
+
 
 class TestShutdown:
     """TaskManager.shutdown：cancel 所有运行中任务。"""
@@ -689,3 +834,43 @@ class TestShutdown:
         # shutdown 不应把 RuntimeError 抛出来
         await mgr.shutdown()
         assert bg.done()
+
+
+class TestLoadPersistedResilience:
+    """#14：单条损坏行不应中断整个历史任务装回。"""
+
+    @pytest.mark.asyncio
+    async def test_corrupt_row_skipped_not_abort(
+        self, tmp_path: Path,
+    ) -> None:
+        """status 非法的损坏行被跳过，先于它的好任务仍正常装回。"""
+        db = TaskDatabase(str(tmp_path / "t.db"))
+        await db.initialize()
+        try:
+            # 坏任务 created_at 更新 → list_tasks(DESC) 先返回、先被处理：
+            # 旧代码会在这里抛 ValueError 中断，把后续好任务全丢。
+            await db.insert_task(
+                task_id="bad00001", status="completed",
+                image_dir="/img", output_dir=str(tmp_path / "b"),
+                created_at="2026-06-04T12:00:00",
+            )
+            await db.insert_task(
+                task_id="good0001", status="completed",
+                image_dir="/img", output_dir=str(tmp_path / "g"),
+                created_at="2026-06-04T10:00:00",
+            )
+            # 把坏任务 status 改成枚举外的值（模拟旧版 / 损坏行）
+            conn = db._get_db()
+            await conn.execute(
+                "UPDATE tasks SET status=? WHERE task_id=?",
+                ("bogus_status", "bad00001"),
+            )
+            await conn.commit()
+
+            mgr = _make_manager(db=db)
+            await mgr.load_persisted_tasks()
+
+            assert mgr.get_task("good0001") is not None  # 好任务装回
+            assert mgr.get_task("bad00001") is None  # 坏任务被跳过
+        finally:
+            await db.close()

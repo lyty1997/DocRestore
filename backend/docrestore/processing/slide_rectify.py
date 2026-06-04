@@ -46,6 +46,10 @@ ImageBGR: TypeAlias = MatLike
 _APPROX_EPSILON_RATIO = 0.02
 #: 候选四边形面积至少占全图比例，过滤掉小亮斑（反光点 / logo）
 _MIN_AREA_RATIO = 0.2
+#: 矫正结果任一边的最小像素数。低于此视为退化四边形（近共线 sliver / 反光条），
+#: 透视变换会产出 1×N 之类的"竹签图"喂给 OCR；此时回退原图。正常幻灯片矫正
+#: 结果都是数百像素，16px 既能拦下退化 sliver，又绝不会误伤真实幻灯片。
+_MIN_RECTIFIED_SIDE_PX = 16
 
 
 @dataclass(frozen=True)
@@ -78,23 +82,27 @@ def _dist(a: NDArray[np.float32], b: NDArray[np.float32]) -> float:
 def _order_corners(pts: NDArray[np.float32]) -> Quad:
     """把任意顺序的 4 个角点排成 左上 / 右上 / 右下 / 左下。
 
-    按各点相对质心的极角升序排环（图像坐标 y 向下时，升序恰好是
-    左上 → 右上 → 右下 → 左下 的顺时针环序），再以 x+y 最小者为左上锚点
-    循环对齐。相比旧的"x+y 最小=左上 / y-x 最小=右上"启发式，本法对旋转 /
-    强倾斜四边形也不会把两角塌到同一点——每点极角唯一 ⇒ 4 角必互异，
-    避免 getPerspectiveTransform 因重复点得到奇异矩阵、产出乱图。
+    先按 y 排序分上下两组（y 最小的两点是上边、最大的两点是下边），组内再
+    按 x 分左右：上组左=左上、右=右上，下组左=左下、右=右下。每点恰好分配
+    一次 ⇒ 4 角必互异——既避免旧的"x+y 最小=左上 / y-x 最小=右上"启发式
+    把同一点同时判成两角而塌缩（→ getPerspectiveTransform 奇异矩阵、产出乱
+    图），也修掉"极角排环 + x+y 锚点"在旋转 / 强倾斜下把左上锚错位、整圈标号
+    偏移一格的问题（曾让矫正图整体旋转 90°）。
+
+    该法对透视梯形（keystone，屏摄主畸变）天然稳健，对中等旋转也不误标；
+    仅当旋转大到使某下角的 y 升过某上角才会失准（正常握持拍摄不会到此程度，
+    且那种朝向无法仅凭几何恢复）。
     """
-    center = pts.mean(axis=0)
-    angles = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
-    ordered = pts[np.argsort(angles)]
-    # 极角环序已是 左上→右上→右下→左下，旋到 x+y 最小者（最靠左上）为起点
-    tl_pos = int(np.argmin(ordered.sum(axis=1)))
-    ordered = np.roll(ordered, -tl_pos, axis=0)
+    by_y = pts[np.argsort(pts[:, 1], kind="stable")]
+    top = by_y[:2]
+    bottom = by_y[2:]
+    tl, tr = top[np.argsort(top[:, 0], kind="stable")]
+    bl, br = bottom[np.argsort(bottom[:, 0], kind="stable")]
     return Quad(
-        top_left=(int(ordered[0][0]), int(ordered[0][1])),
-        top_right=(int(ordered[1][0]), int(ordered[1][1])),
-        bottom_right=(int(ordered[2][0]), int(ordered[2][1])),
-        bottom_left=(int(ordered[3][0]), int(ordered[3][1])),
+        top_left=(int(tl[0]), int(tl[1])),
+        top_right=(int(tr[0]), int(tr[1])),
+        bottom_right=(int(br[0]), int(br[1])),
+        bottom_left=(int(bl[0]), int(bl[1])),
     )
 
 
@@ -153,7 +161,9 @@ def rectify(
     width = max(_dist(tr, tl), _dist(br, bl))
     height = max(_dist(bl, tl), _dist(br, tr)) * (1.0 + top_extend_ratio)
     w, h = int(round(width)), int(round(height))
-    if w <= 0 or h <= 0:
+    # 退化四边形（近共线 sliver）会算出极小的一边 → 透视变换出竹签图喂坏 OCR；
+    # 任一边低于阈值即回退原图（与"检测不到四边形回退原图"同一契约）。
+    if w < _MIN_RECTIFIED_SIDE_PX or h < _MIN_RECTIFIED_SIDE_PX:
         return image_bgr
     dst = np.array(
         [[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=np.float32,
