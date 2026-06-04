@@ -180,6 +180,17 @@ class LLMCircuitBreaker:
                     self._model,
                 )
 
+    async def on_probe_aborted(self) -> None:
+        """探测调用被取消（CancelledError，既非成功也非失败）回调。
+
+        清除 HALF_OPEN 的 ``_probe_in_flight`` 占位，避免 before_call 设了探测位
+        但调用被取消、on_success/on_failure 都没跑，导致熔断器永久卡在
+        HALF_OPEN（此后每次调用都 fail-fast）。取消不是 provider 失败，故不计入
+        滑动窗口、不触发退避；状态保持不变，下次调用可重新探测。
+        """
+        async with self._lock:
+            self._probe_in_flight = False
+
     async def on_failure(self) -> None:
         """调用失败回调。"""
         async with self._lock:

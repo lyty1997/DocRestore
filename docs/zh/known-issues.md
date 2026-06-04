@@ -167,3 +167,38 @@ limitations under the License.
 现象（max-effort review #1 复核更正）：开 `redact_person_name`/`redact_org_name` 时，结构化 PII（手机/邮箱/身份证/银行卡）由 producer 正则在入云端前对全模式（含 PPT）脱敏；但 LLM 实体（人名/机构名）词表 `_delayed_pii_detect` 只用于文档模式 gap-fill 重 OCR 片段——**主分段精修 / PPT 按页精修 / 最终输出都未用它**，人名/机构名原样进云端 + 留输出。非 PPT 独有、非某次 diff 引入，属全链路既有缺口。
 
 处理（**已实现 2026-06-04，设计与落地见 `backend/privacy.md §9`**）：检测沿用所配置 refiner（积累 N 页后建一次 lexicon），lexicon 应用到 doc 主分段精修入参 + PPT 每页精修入参 + 最终输出兜底（早窗口靠输出兜底覆盖），保持文档流式。约束：LLM 实体检测本身要把文本送 LLM，检测调用仍上云一次——要名字完全不出本机需配 local provider。回归：`tests/pipeline/test_entity_redaction.py`（6 用例）。
+
+## block_cloud_on_detect_failure 失效，检测失败仍外发实体（#10，已修复 2026-06-04）
+
+现象：
+- `PIIConfig.block_cloud_on_detect_failure`（默认 True，语义"实体检测失败就不外发"）全 backend 零读取、声明即死代码。
+- LLM 实体检测抛错时 `_detect_entities` 仅 log 并返回 `entity_lexicon=None`，下游照常把含真实人名/机构名的整段送云端精修 → 隐私 fail-closed 承诺从未兑现。
+
+根因：`entity_lexicon is None` 一个信号混淆了三种情形（未开脱敏 / 早窗口未检测 / 检测失败），下游无法区分"失败"并据此阻断。
+
+处理策略：
+- 新增 `Pipeline._should_block_cloud(lexicon, pii_cfg)`：仅"开 PII + 要求人名/机构名脱敏 + 检测返回 None（失败）+ flag 为真"时返回 True；检测成功（含查无实体的空词表）/未开脱敏/早窗口均不误判。
+- 文档模式 `_stream_process`、PPT 模式 `_ppt_pipeline` 的检测点命中失败即置 `refiner=None`（后续段/页退原文）；`_finalize_single_doc` 加 keyword-only `block_cloud`，为真时跳过 gap fill 与 final refine 两处云端调用。
+- 注意：实体检测调用本身仍要把文本送 LLM；本修复阻断的是检测失败后的"后续精修外发"。回归：`test_entity_redaction.py` 的 `_should_block_cloud` 四分支 + PPT fail-closed 阻断/flag 关不阻断。
+
+## OCR 生产者任务在中断时不被取消（#8，已修复 2026-06-04）
+
+现象：
+- `_stream_pipeline` 旧 `finally: await ocr_task` 前缺 `ocr_task.cancel()`，`page_queue` 又是无界队列。
+- 消费者提前退出（用户取消 / shutdown / 内部异常）后，生产者仍持 `gpu_lock` 把剩余图全 OCR 完才结束 → `manager.shutdown()` 阻塞数分钟、取消形同失效、GPU 空转；CancelledError 在途时还可能就地再抛而遗弃仍在跑的生产者。
+
+处理策略：
+- `try` 改 `try/except/finally`：`except BaseException` 先 `ocr_task.cancel()` 再 `suppress(CancelledError, Exception)` await，吞清理异常、保留消费者原异常 `raise`。
+- 成功路径保留 try 外 `await ocr_task`：生产者已在自身 finally `put(None)` 收尾，这里 await 让其真实异常（如某页 OCR 失败）浮现为任务失败，而非静默截断文档。
+- 回归：`tests/pipeline/test_producer_cancel.py`（消费者抛错 → 生产者被取消、未跑完所有图、原异常上抛）。
+
+## 熔断器半开探测被取消时永久卡死（#9，已修复 2026-06-04）
+
+现象：
+- `_call_llm` 用 `except Exception` 捕获，`CancelledError`（BaseException）不被捕获。
+- HALF_OPEN 探测调用被取消（用户取消任务 / shutdown / wait_for 超时）时 `on_success`/`on_failure` 都不执行，`before_call` 设的 `_probe_in_flight` 永久泄漏 → 该 `(model, api_base)` 全局单例熔断器此后每次调用 fail-fast，整进程段级精修退化为原文直到重启。
+
+处理策略：
+- 新增 `LLMCircuitBreaker.on_probe_aborted`：清除 `_probe_in_flight`（不计成功/失败、不触发退避），状态不变，下次调用可重新探测。
+- `_call_llm` 把 rate_limit 获取 + api_call 整段包进 `try`，新增 `except asyncio.CancelledError` 调用 `on_probe_aborted` 后原样上抛，覆盖 `before_call` 之后到 `on_success/on_failure` 之间的全部取消窗口。
+- 回归：`tests/llm/test_circuit_breaker.py` 的 `TestProbeCancellation`（取消后可重探/恢复 CLOSED；并以"不清除即第二次 before_call fail-fast"佐证修复必要）。

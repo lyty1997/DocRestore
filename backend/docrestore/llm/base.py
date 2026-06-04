@@ -282,30 +282,38 @@ class BaseLLMRefiner:
             raise
 
         wait_start = time.monotonic()
-        async with self._rate_limit():
-            wait_s = time.monotonic() - wait_start
-            prof.record_external("llm.sem_wait", wait_s, model=model)
-            call_start = time.monotonic()
-            status = "ok"
-            try:
-                with prof.stage(
-                    "llm.api_call", model=model, input_chars=msg_chars,
-                ):
-                    response = await litellm.acompletion(**kwargs)
-            except Exception:
-                status = "error"
-                await breaker.on_failure()
-                raise
-            else:
-                await breaker.on_success()
-                return response
-            finally:
-                call_s = time.monotonic() - call_start
-                _timing_logger.info(
-                    "llm_call model=%s status=%s wait_s=%.3f call_s=%.3f "
-                    "input_chars=%d",
-                    model, status, wait_s, call_s, msg_chars,
-                )
+        # before_call 在 HALF_OPEN 会置 _probe_in_flight=True。从这里到
+        # on_success/on_failure 之间任何 CancelledError（rate_limit 获取 /
+        # api_call 期间被取消）都必须清除探测占位，否则熔断器永久卡在 HALF_OPEN。
+        try:
+            async with self._rate_limit():
+                wait_s = time.monotonic() - wait_start
+                prof.record_external("llm.sem_wait", wait_s, model=model)
+                call_start = time.monotonic()
+                status = "ok"
+                try:
+                    with prof.stage(
+                        "llm.api_call", model=model, input_chars=msg_chars,
+                    ):
+                        response = await litellm.acompletion(**kwargs)
+                except Exception:
+                    status = "error"
+                    await breaker.on_failure()
+                    raise
+                else:
+                    await breaker.on_success()
+                    return response
+                finally:
+                    call_s = time.monotonic() - call_start
+                    _timing_logger.info(
+                        "llm_call model=%s status=%s wait_s=%.3f call_s=%.3f "
+                        "input_chars=%d",
+                        model, status, wait_s, call_s, msg_chars,
+                    )
+        except asyncio.CancelledError:
+            # 取消不是 provider 失败：清除半开探测占位，原样上抛。
+            await breaker.on_probe_aborted()
+            raise
 
     async def refine(
         self, raw_markdown: str, context: RefineContext,
