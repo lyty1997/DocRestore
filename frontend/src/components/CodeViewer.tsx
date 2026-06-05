@@ -472,6 +472,16 @@ export function CodeViewer({
     [content, selectedEntry, selectedImages],
   );
 
+  // A：整文件一次性分词后缓存。键取 content + 语言 + 路径（均为基本值，
+  // selectedEntry 每渲染换引用但字段值稳定），避免无关重渲染时重复切词。
+  const tokenizedLines = useMemo(() => {
+    const language = selectedEntry?.language;
+    const path = selectedEntry?.path ?? "";
+    return splitEditorLines(content).map((line) =>
+      tokenizeCodeLine(line, language, path),
+    );
+  }, [content, selectedEntry?.language, selectedEntry?.path]);
+
   usePreviewScrollSync(
     codeScrollEl,
     imageScrollEl,
@@ -493,8 +503,10 @@ export function CodeViewer({
   const dirty = editing && draftContent !== content;
   const activeDiagnostic = editing ? liveDiagnostic : selectedEntry?.diagnostic;
   const activeLines = editing ? draftLines : contentLines;
+  // B：visibleDiagnostics 只在编辑面板渲染，只读模式算它是 O(N·D) 空转。
+  // 仅编辑态才做整文件诊断扫描。
   const visibleDiagnostics =
-    selectedEntry === undefined || selectedPath === undefined
+    !editing || selectedEntry === undefined || selectedPath === undefined
       ? []
       : visibleDiagnosticsForContent(
           selectedEntry,
@@ -884,11 +896,7 @@ export function CodeViewer({
                               "code-line-code" + lineDiagnosticClass
                             }
                           >
-                            {tokenizeCodeLine(
-                              line,
-                              selectedEntry.language,
-                              selectedEntry.path,
-                            ).map((token, tokenIndex) => (
+                            {(tokenizedLines[lineIndex] ?? []).map((token, tokenIndex) => (
                               <span
                                 key={`${lineIndex.toString()}-${tokenIndex.toString()}`}
                                 className={`code-token code-token-${token.kind}`}

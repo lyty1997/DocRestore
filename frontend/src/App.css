@@ -3744,6 +3744,10 @@ body {
   display: grid;
   grid-template-columns: 4.25rem minmax(0, 1fr);
   min-width: max-content;
+  /* C：视口外行跳过 layout/paint；auto 关键字渲染过一次后记住真实尺寸，
+     contain-intrinsic-size 给未渲染行一个占位高度（≈行高），保证滚动条准确。 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 1.55em;
 }
 
 .code-line:hover {
