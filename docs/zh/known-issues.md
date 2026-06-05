@@ -408,12 +408,20 @@ URL 内联 `user:pass@` + sk-/ghp_/AKIA/JWT 已知格式），补上密码/用�
 已脱敏 → `reassembled.md` / `final_refined.md` dump 与 `.llm_cache`（按 enable_cache，非
 debug-gated）对早窗口段也不再留人名明文。红绿验证：`tests/pipeline/test_pii_early_window.py`。
 
+**已修 3（2026-06-06，commit 21f72cc）——代码模式正文 PII**：`_redact_code_headers`
+改名 `_redact_code_pii`，正文也脱敏——header 走 `redact_snippet`（regex + 实体 + 自定义词），
+正文走 `redact_regex_only`（结构化 PII + 凭据/token + 自定义词，**不做实体脱敏**以保 import
+路径 / namespace / 标识符）。实测硬编码 password/sk-token/URL 凭据/正文邮箱/电话均在送云端
+refine/repair/audit 前脱掉，`Zhang_counter` 等 name-like 标识符不动。取舍：凭据 KV 在正文里
+可能误伤 `password=<expr>` 右侧（`redact_credential` 可关）。回归：`test_code_pii_header.py`。
+
 **未修遗留（已知，另排期）**：
 1. **人名/机构名检测调用曝光**：实体检测必须把文本给 LLM 才能认（用云端 provider 时即外发一次）。
    早窗口段精修曝光已修；彻底规避检测曝光需本地 NER / 本地检测 provider。用户已认可"上云前完全
    脱敏不现实，能拦多少拦多少"。
-2. **代码模式正文**：`_redact_code_headers` 只脱前导注释 header，代码正文（行级 bbox 组装）
-   未覆盖 → 正文里的敏感信息会上云。文档/PPT 模式不受此影响。
+2. **代码模式正文里的人名/机构名**：正文只做 regex/凭据/自定义词脱敏，**不做实体脱敏**（实体检测
+   会把变量名/namespace 当人名误替换，AGE-50）。故正文注释里的人名/机构名仍可能上云。header 的
+   人名/机构名已脱。
 3. **磁盘留底（landmine B，剩余）**：检测**输入**性质的 dump —— `debug/merged_raw.md` 与
    `debug/*_cleaned.md`（producer 输出，实体检测前）—— 仍含人名明文，但**仅默认 `debug=True`
    时落盘**（用户关 debug 即无此留底）。`reassembled/final_refined` 与 `.llm_cache` 已被「已修 2」

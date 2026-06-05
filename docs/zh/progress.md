@@ -1333,3 +1333,20 @@ debug/cache 实体脱敏前留底（landmine B）。均另排期。
 （门控单测 + 文档/PPT 早窗口集成）。tests/pipeline+privacy+output+api+llm 全量 555 passed。
 
 **遗留**：人名/机构名检测调用本身仍上云一次（LLM 检测固有，需本地 NER 才能免）；代码模式正文未脱。
+
+## 2026-06-06（续）- 代码模式正文 PII 脱敏（commit 21f72cc）
+
+**问题**：代码正文（行级 bbox 组装，绕过 producer 的 cleaned_text 脱敏）里的敏感信息会随
+code_refine/repair/audit 外发云端；此前只脱前导注释 header。
+
+**修复**：`_redact_code_headers` 改名 `_redact_code_pii`，分 header/body 差异化处理——header 走
+`redact_snippet`（regex + 实体 lexicon + 自定义词），正文走 `redact_regex_only`（结构化 PII +
+凭据/token + 自定义词，**不做实体脱敏**以保 import 路径/namespace/标识符不被误伤，AGE-50）。
+无 header 文件也照常脱正文；fail-closed 不变。
+
+**验证**：端到端实测——硬编码 `password="..."` / `sk-token` / URL 内联凭据 / 正文邮箱 / 电话均脱掉，
+`#include` 路径与 `Zhang_counter` 等 name-like 标识符不动。`test_code_pii_header.py` 翻转正文邮箱
+断言 + 新增正文凭据/标识符用例；全量 835 passed（cv2 模块除外）。
+
+**取舍/遗留**：凭据 KV 在正文里可能误伤 `password=<expr>` 右侧表达式（宁多勿漏，`redact_credential`
+可关）；正文注释里的人名/机构名仍可能上云（正文不做实体脱敏）。
