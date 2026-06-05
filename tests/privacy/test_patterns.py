@@ -175,3 +175,93 @@ class TestCustomPlaceholder:
         result, records = redact_structured_pii(text, cfg)
         assert "[PHONE]" in result
         assert records[0].placeholder == "[PHONE]"
+
+
+class TestCredentialRedaction:
+    """凭据 / token 检测（label 锚定 + URL 内联 + 已知格式）"""
+
+    def test_password_kv_keeps_label_redacts_value(self) -> None:
+        """password=value 只替换 value、保留 label"""
+        cfg = PIIConfig(enable=True)
+        result, records = redact_structured_pii(
+            "数据库 password=Secr3t!Pass 连接", cfg,
+        )
+        assert "Secr3t!Pass" not in result
+        assert "password=" in result
+        assert cfg.credential_placeholder in result
+        assert any(r.kind == "credential" for r in records)
+
+    def test_various_labels(self) -> None:
+        """passwd/pwd/token/api_key/secret_key/用户名/账号 等 label 全命中"""
+        cfg = PIIConfig(enable=True)
+        for text in (
+            "passwd: hunter2",
+            "pwd=abcDEF",
+            "token: someopaquevalue",
+            "api_key=ABCdef123456",
+            "secret_key = mysecretval",
+            "用户名：zhangsan",
+            "账号: 6217000010001",
+        ):
+            result, _ = redact_structured_pii(text, cfg)
+            assert cfg.credential_placeholder in result, text
+
+    def test_full_width_colon_and_quoted_value(self) -> None:
+        """全角冒号分隔 + 引号包裹 value"""
+        cfg = PIIConfig(enable=True)
+        r1, _ = redact_structured_pii("密码：MyP@ss123", cfg)
+        assert "MyP@ss123" not in r1
+        r2, _ = redact_structured_pii('password = "my secret pass"', cfg)
+        assert "my secret pass" not in r2
+
+    def test_url_basic_auth(self) -> None:
+        """URL 内联 user:pass@ 凭据，保留 scheme 与 host"""
+        cfg = PIIConfig(enable=True)
+        result, _ = redact_structured_pii(
+            "克隆 https://admin:p4ssw0rd@git.example.com/repo.git", cfg,
+        )
+        assert "admin:p4ssw0rd" not in result
+        assert "git.example.com" in result
+        assert cfg.credential_placeholder in result
+
+    def test_known_token_formats(self) -> None:
+        """sk-/ghp_/AKIA/JWT 无需 label 也命中"""
+        cfg = PIIConfig(enable=True)
+        for text in (
+            "sk-abcdefghijklmnopqrstuvwxyz0123",
+            "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123",
+            "AKIAIOSFODNN7EXAMPLE",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVm",
+        ):
+            result, _ = redact_structured_pii(text, cfg)
+            assert cfg.credential_placeholder in result, text
+
+    def test_password_digit_value_not_misclassified_as_phone(self) -> None:
+        """password=<11位数字> 归凭据而非手机号（凭据先行处理）"""
+        cfg = PIIConfig(enable=True)
+        result, records = redact_structured_pii("password=13800001111", cfg)
+        assert "13800001111" not in result
+        kinds = [r.kind for r in records]
+        assert "credential" in kinds
+        assert "phone" not in kinds
+
+    def test_toggle_off(self) -> None:
+        """redact_credential=False 时不替换"""
+        cfg = PIIConfig(enable=True, redact_credential=False)
+        result, records = redact_structured_pii("password=Secr3t", cfg)
+        assert "Secr3t" in result
+        assert not any(r.kind == "credential" for r in records)
+
+    def test_no_false_positive_on_technical_text(self) -> None:
+        """技术正文不应被误伤：裸 key/user/token 词、非凭据 KV 保持原样"""
+        cfg = PIIConfig(enable=True)
+        for text in (
+            "key features of the system",
+            "user manual and user space",
+            "token bucket rate limiter",
+            "CONFIG_DDR_FREQ=2133",
+            "the public key is shared here",
+        ):
+            result, records = redact_structured_pii(text, cfg)
+            assert result == text, f"误伤: {text!r} -> {result!r}"
+            assert not any(r.kind == "credential" for r in records)

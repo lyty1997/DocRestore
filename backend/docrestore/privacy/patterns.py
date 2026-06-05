@@ -56,6 +56,35 @@ _BANK_CARD_RE = re.compile(
     r"(?!\d)"
 )
 
+# 凭据键值对：label 锚定（password=/token:/账号: 等），只替换 value、保留 label。
+# label 全锚定，避免误伤普通词；value 支持引号包裹，未包裹时止于空白/引号/分隔符。
+# 不收纳裸 ``key``/``user``（"key features"/"user manual" 等高频正文误报）。
+_CRED_KV_RE = re.compile(
+    r"(?P<key>password|passwd|pwd|secret(?:[_-]?key)?|api[_-]?key|access[_-]?key"
+    r"|token|username|account|密码|口令|私钥|密钥|用户名|账号|账户)"
+    r"(?P<sep>\s*[:：=]\s*)"
+    r"""(?P<val>"[^"\n]*"|'[^'\n]*'|[^\s'";,&]+)""",
+    re.IGNORECASE,
+)
+
+# URL 内联凭据：scheme://user:pass@host —— 替换 user:pass，保留 scheme 和 @host。
+_URL_CRED_RE = re.compile(
+    r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)"
+    r"(?P<cred>[^/\s:@]+:[^/\s:@]+)@"
+)
+
+# 已知高置信 token 格式（无需 label）：OpenAI sk- / GitHub gh?_ / AWS AKIA / JWT。
+# 前置非字母数字断言防止匹配到 ``task-xxxx`` 之类词内子串。
+_TOKEN_FORMAT_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])"
+    r"(?:"
+    r"sk-[A-Za-z0-9]{20,}"
+    r"|gh[pousr]_[A-Za-z0-9]{20,}"
+    r"|AKIA[0-9A-Z]{16}"
+    r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+    r")"
+)
+
 
 def _normalize_digits(raw: str) -> str:
     """去掉空格和短横线，只保留数字和 Xx。"""
@@ -93,60 +122,45 @@ def redact_structured_pii(
 ) -> tuple[str, list[RedactionRecord]]:
     """正则替换结构化 PII，返回 (脱敏文本, 记录列表)。
 
-    处理顺序：身份证 → 邮箱 → 手机号 → 银行卡。
-    已替换位置用占位符标记，后续模式不会匹配到占位符。
+    处理顺序：凭据/token → 身份证 → 邮箱 → 手机号 → 银行卡。凭据先行避免
+    ``password=13800001111`` 的值被当手机号等误分类；已替换位置为占位符，
+    后续模式不会再匹配到。
     """
     records: list[RedactionRecord] = []
 
-    # 1. 身份证号
-    if config.redact_id_card:
-        text, count = _replace_id_card(text, config)
-        if count > 0:
-            records.append(
-                RedactionRecord(
-                    kind="id_card",
-                    method="regex",
-                    placeholder=config.id_card_placeholder,
-                    count=count,
-                )
-            )
+    # (是否启用, 替换函数 (text, config) -> (text, count), 记录 kind, 占位符)
+    steps = (
+        (
+            config.redact_credential, _replace_credentials,
+            "credential", config.credential_placeholder,
+        ),
+        (
+            config.redact_id_card, _replace_id_card,
+            "id_card", config.id_card_placeholder,
+        ),
+        (
+            config.redact_email, _replace_email,
+            "email", config.email_placeholder,
+        ),
+        (
+            config.redact_phone, _replace_phone,
+            "phone", config.phone_placeholder,
+        ),
+        (
+            config.redact_bank_card, _replace_bank_card,
+            "bank_card", config.bank_card_placeholder,
+        ),
+    )
 
-    # 2. 邮箱
-    if config.redact_email:
-        text, count = _replace_email(text, config)
+    for enabled, replace_fn, kind, placeholder in steps:
+        if not enabled:
+            continue
+        text, count = replace_fn(text, config)
         if count > 0:
             records.append(
                 RedactionRecord(
-                    kind="email",
-                    method="regex",
-                    placeholder=config.email_placeholder,
-                    count=count,
-                )
-            )
-
-    # 3. 手机号
-    if config.redact_phone:
-        text, count = _replace_phone(text, config)
-        if count > 0:
-            records.append(
-                RedactionRecord(
-                    kind="phone",
-                    method="regex",
-                    placeholder=config.phone_placeholder,
-                    count=count,
-                )
-            )
-
-    # 4. 银行卡号
-    if config.redact_bank_card:
-        text, count = _replace_bank_card(text, config)
-        if count > 0:
-            records.append(
-                RedactionRecord(
-                    kind="bank_card",
-                    method="regex",
-                    placeholder=config.bank_card_placeholder,
-                    count=count,
+                    kind=kind, method="regex",
+                    placeholder=placeholder, count=count,
                 )
             )
 
@@ -215,4 +229,38 @@ def _replace_bank_card(
         return config.bank_card_placeholder
 
     text = _BANK_CARD_RE.sub(_repl, text)
+    return text, count
+
+
+def _replace_credentials(
+    text: str, config: PIIConfig,
+) -> tuple[str, int]:
+    """替换凭据：label 锚定键值对 + URL 内联凭据 + 已知 token 格式。
+
+    键值对只替换 value、保留 label；URL 只替换 user:pass；token 整段替换。
+    顺序：先键值对（避免其 value 吞掉后续替换出的占位符），再 URL，再 token。
+    """
+    count = 0
+
+    def _kv_repl(m: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        return (
+            f"{m.group('key')}{m.group('sep')}"
+            f"{config.credential_placeholder}"
+        )
+
+    def _url_repl(m: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        return f"{m.group('scheme')}{config.credential_placeholder}@"
+
+    def _token_repl(_m: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        return config.credential_placeholder
+
+    text = _CRED_KV_RE.sub(_kv_repl, text)
+    text = _URL_CRED_RE.sub(_url_repl, text)
+    text = _TOKEN_FORMAT_RE.sub(_token_repl, text)
     return text, count

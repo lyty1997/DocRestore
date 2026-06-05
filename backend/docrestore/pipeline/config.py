@@ -289,6 +289,11 @@ class PIIConfig(BaseModel):
     redact_email: bool = True
     redact_id_card: bool = True
     redact_bank_card: bool = True
+    #: 凭据 / token（label 锚定的 password=/token=/账号: 键值对 + URL 内联
+    #: user:pass@ + sk-/ghp_/AKIA/JWT 已知格式）。在 producer 入队前的正则层执行
+    #: → 上云端精修与落盘前就抹掉，覆盖正则原本兜不到的密码/用户名/账号/token。
+    #: 偏向"宁多勿漏"（over-redact 安全），技术文档误报高时可关此项。
+    redact_credential: bool = True
 
     # 实体 PII（LLM）
     redact_person_name: bool = True
@@ -299,6 +304,7 @@ class PIIConfig(BaseModel):
     email_placeholder: str = "[邮箱]"
     id_card_placeholder: str = "[身份证号]"
     bank_card_placeholder: str = "[银行卡号]"
+    credential_placeholder: str = "[凭据]"
     person_name_placeholder: str = "[人名]"
     org_name_placeholder: str = "[机构名]"
 
