@@ -166,6 +166,101 @@ class TestNormalizeWhitespace:
         assert result == text
 
 
+class TestCollapseDegenerateRuns:
+    """退化重复折叠测试（OCR 撞二进制 / 内存 dump 产生的短单元超长重复行）。"""
+
+    def test_collapses_long_two_char_run(
+        self, cleaner: OCRCleaner
+    ) -> None:
+        """2 字符单元重复数千次的超长行被折叠，行首上下文保留。"""
+        prefix = 'src=0xabc "'
+        garbage = "wm" * 4000  # 8000 字符退化重复
+        line = prefix + garbage
+        result = cleaner.collapse_degenerate_runs(line)
+        # 折叠后远短于原文
+        assert len(result) < 100
+        # 行首上下文（变量名 / 地址）保留
+        assert prefix in result
+        # 不再含原始超长游程
+        assert garbage not in result
+        # 留下可见折叠标记
+        assert "折叠" in result
+
+    def test_collapses_hex_zero_dump(
+        self, cleaner: OCRCleaner
+    ) -> None:
+        """单字符（``0``）超长重复（内存 dump 常见）被折叠。"""
+        line = "0" * 200
+        result = cleaner.collapse_degenerate_runs(line)
+        assert len(result) < len(line)
+        assert "折叠" in result
+
+    def test_short_repeat_below_threshold_kept(
+        self, cleaner: OCRCleaner
+    ) -> None:
+        """短于阈值的重复（偶发 OCR 抖动）不动，避免误伤。"""
+        text = "wm" * 9  # 18 字符 < 60
+        assert cleaner.collapse_degenerate_runs(text) == text
+
+    def test_markdown_dividers_preserved(
+        self, cleaner: OCRCleaner
+    ) -> None:
+        """纯分隔符单元的超长重复（markdown 下划线 / 代码 banner）不折叠。"""
+        for divider in ("=" * 80, "#" * 80, "-" * 80, "*" * 80):
+            assert cleaner.collapse_degenerate_runs(divider) == divider
+
+    def test_normal_prose_and_code_unchanged(
+        self, cleaner: OCRCleaner
+    ) -> None:
+        """正常中文正文 / 代码标识符不受影响。"""
+        prose = "这是一段正常的中文文档内容，包含技术细节说明与分析。" * 3
+        code = "int Zhang_counter = 0; // namespace acme third_party/x"
+        assert cleaner.collapse_degenerate_runs(prose) == prose
+        assert cleaner.collapse_degenerate_runs(code) == code
+
+    def test_run_confined_to_single_line(
+        self, cleaner: OCRCleaner
+    ) -> None:
+        """折叠不跨行：游程只在所在行内收缩，相邻正常行完整保留。"""
+        good_above = "上一行正常内容"
+        good_below = "下一行正常内容"
+        text = f"{good_above}\n{'mu' * 2000}\n{good_below}"
+        result = cleaner.collapse_degenerate_runs(text)
+        assert good_above in result
+        assert good_below in result
+        assert "mu" * 2000 not in result
+        # 仍是三行结构
+        assert len(result.splitlines()) == 3
+
+    @pytest.mark.asyncio
+    async def test_clean_collapses_degenerate_page(
+        self, cleaner: OCRCleaner
+    ) -> None:
+        """clean() 端到端：含退化重复行的页被折叠，正文与图片引用保留。"""
+        prefix = 'pui8Src=0x3fcc792000 "'
+        raw = (
+            "## 调试 backtrace\n\n"
+            "正常分析文字内容。\n\n"
+            f"{prefix}{'wm' * 5000}\n\n"
+            '<div><img src="images/2.jpg" alt="Image" /></div>\n'
+        )
+        page = PageOCR(
+            image_path=Path("/img/test.jpg"),
+            image_size=(1603, 1720),
+            raw_text=raw,
+        )
+        result = await cleaner.clean(page)
+        cleaned = result.cleaned_text
+        # 退化游程消失
+        assert "wm" * 5000 not in cleaned
+        # 整页清洗后长度被极大压缩（原始 1 万+ → 数百）
+        assert len(cleaned) < 500
+        # 正文标题、dump 上下文、图片引用都保留
+        assert "调试 backtrace" in cleaned
+        assert "pui8Src=0x3fcc792000" in cleaned
+        assert "images/2.jpg" in cleaned
+
+
 class TestClean:
     """clean() 集成测试"""
 
