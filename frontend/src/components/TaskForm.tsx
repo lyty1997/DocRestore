@@ -497,6 +497,84 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
 
   return (
     <div className="task-form">
+      {/* 处理模式三选一：文档 / 代码 / PPT 互斥 */}
+      <div className="form-group pii-section">
+        <div className="pii-header">
+          <span className="pii-title">{t("taskForm.modeLabel")}</span>
+        </div>
+        <div className="mode-radio-group">
+          <label
+            className={
+              mode === "doc"
+                ? "mode-radio-option mode-radio-option--active"
+                : "mode-radio-option"
+            }
+            htmlFor="mode-doc"
+          >
+            <input
+              id="mode-doc"
+              type="radio"
+              name="processing-mode"
+              checked={mode === "doc"}
+              onChange={() => {
+                setMode("doc");
+              }}
+              disabled={disabled}
+            />
+            <span>{t("taskForm.mode_doc")}</span>
+          </label>
+          <label
+            className={
+              mode === "code"
+                ? "mode-radio-option mode-radio-option--active"
+                : "mode-radio-option"
+            }
+            htmlFor="mode-code"
+          >
+            <input
+              id="mode-code"
+              type="radio"
+              name="processing-mode"
+              checked={mode === "code"}
+              onChange={() => {
+                setMode("code");
+              }}
+              disabled={disabled}
+            />
+            <span>{t("taskForm.mode_code")}</span>
+          </label>
+          <label
+            className={
+              mode === "ppt"
+                ? "mode-radio-option mode-radio-option--active"
+                : "mode-radio-option"
+            }
+            htmlFor="mode-ppt"
+          >
+            <input
+              id="mode-ppt"
+              type="radio"
+              name="processing-mode"
+              checked={mode === "ppt"}
+              onChange={() => {
+                setMode("ppt");
+              }}
+              disabled={disabled}
+            />
+            <span>{t("taskForm.mode_ppt")}</span>
+          </label>
+        </div>
+        {mode === "doc" && (
+          <p className="pii-desc">{t("taskForm.docModeDesc")}</p>
+        )}
+        {mode === "code" && (
+          <p className="pii-desc">{t("taskForm.codeModeDesc")}</p>
+        )}
+        {mode === "ppt" && (
+          <p className="pii-desc">{t("taskForm.pptModeDesc")}</p>
+        )}
+      </div>
+
       {/* 统一来源选择：本地上传 / 服务器浏览 */}
       <div className="form-group">
         <label>{t("taskForm.sourceLabel")}</label>
@@ -603,6 +681,29 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
         <p className="ocr-engine-hint">
           {isOcrEngineValue(ocrModel) ? t(OCR_ENGINE_KEYS[ocrModel].desc) : ""}
         </p>
+      </div>
+
+      {/* 统一 LLM 精修开关：对文档 / 代码 / PPT 三模式均生效 */}
+      <div className="form-group pii-section">
+        <div className="pii-header">
+          <span className="pii-title">{t("taskForm.refineTitle")}</span>
+          <label className="toggle-switch" htmlFor="refine-toggle">
+            <input
+              id="refine-toggle"
+              type="checkbox"
+              checked={refineEnabled}
+              onChange={(e) => {
+                setRefineEnabled(e.target.checked);
+              }}
+              disabled={disabled}
+            />
+            <span className="toggle-slider" />
+            <span className="toggle-label">
+              {refineEnabled ? t("common.enabled") : t("common.disabled")}
+            </span>
+          </label>
+        </div>
+        <p className="pii-desc">{t("taskForm.refineDesc")}</p>
       </div>
 
       {/* LLM 配置 */}
@@ -723,107 +824,6 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
             </p>
           </div>
         )}
-      </div>
-
-      {/* 处理模式三选一：文档 / 代码 / PPT 互斥 */}
-      <div className="form-group pii-section">
-        <div className="pii-header">
-          <span className="pii-title">{t("taskForm.modeLabel")}</span>
-        </div>
-        <div className="mode-radio-group">
-          <label
-            className={
-              mode === "doc"
-                ? "mode-radio-option mode-radio-option--active"
-                : "mode-radio-option"
-            }
-            htmlFor="mode-doc"
-          >
-            <input
-              id="mode-doc"
-              type="radio"
-              name="processing-mode"
-              checked={mode === "doc"}
-              onChange={() => {
-                setMode("doc");
-              }}
-              disabled={disabled}
-            />
-            <span>{t("taskForm.mode_doc")}</span>
-          </label>
-          <label
-            className={
-              mode === "code"
-                ? "mode-radio-option mode-radio-option--active"
-                : "mode-radio-option"
-            }
-            htmlFor="mode-code"
-          >
-            <input
-              id="mode-code"
-              type="radio"
-              name="processing-mode"
-              checked={mode === "code"}
-              onChange={() => {
-                setMode("code");
-              }}
-              disabled={disabled}
-            />
-            <span>{t("taskForm.mode_code")}</span>
-          </label>
-          <label
-            className={
-              mode === "ppt"
-                ? "mode-radio-option mode-radio-option--active"
-                : "mode-radio-option"
-            }
-            htmlFor="mode-ppt"
-          >
-            <input
-              id="mode-ppt"
-              type="radio"
-              name="processing-mode"
-              checked={mode === "ppt"}
-              onChange={() => {
-                setMode("ppt");
-              }}
-              disabled={disabled}
-            />
-            <span>{t("taskForm.mode_ppt")}</span>
-          </label>
-        </div>
-        {mode === "doc" && (
-          <p className="pii-desc">{t("taskForm.docModeDesc")}</p>
-        )}
-        {mode === "code" && (
-          <p className="pii-desc">{t("taskForm.codeModeDesc")}</p>
-        )}
-        {mode === "ppt" && (
-          <p className="pii-desc">{t("taskForm.pptModeDesc")}</p>
-        )}
-      </div>
-
-      {/* 统一 LLM 精修开关：对文档 / 代码 / PPT 三模式均生效 */}
-      <div className="form-group pii-section">
-        <div className="pii-header">
-          <span className="pii-title">{t("taskForm.refineTitle")}</span>
-          <label className="toggle-switch" htmlFor="refine-toggle">
-            <input
-              id="refine-toggle"
-              type="checkbox"
-              checked={refineEnabled}
-              onChange={(e) => {
-                setRefineEnabled(e.target.checked);
-              }}
-              disabled={disabled}
-            />
-            <span className="toggle-slider" />
-            <span className="toggle-label">
-              {refineEnabled ? t("common.enabled") : t("common.disabled")}
-            </span>
-          </label>
-        </div>
-        <p className="pii-desc">{t("taskForm.refineDesc")}</p>
       </div>
 
       {/* 脱敏功能 */}
