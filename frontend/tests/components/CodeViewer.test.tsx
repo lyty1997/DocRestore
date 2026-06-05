@@ -494,4 +494,51 @@ describe("CodeViewer", () => {
     expect(screen.queryByLabelText("编辑代码文件内容")).toBeNull();
     expect(screen.getByText("2").className).toContain("code-token-number");
   });
+
+  it("超大文件只渲染可视窗口的行（行级虚拟化）", async () => {
+    const lineCount = 2000;
+    const bigContent = Array.from(
+      { length: lineCount },
+      (_, i) => `int v${i.toString()} = ${i.toString()};`,
+    ).join("\n");
+
+    renderViewer(
+      [
+        {
+          path: "src/big.cc",
+          filename: "big.cc",
+          language: "cpp",
+          source_pages: ["page1.col0"],
+          source_page_ranges: [
+            { page: "page1.col0", start_line: 1, end_line: lineCount },
+          ],
+          line_count: lineCount,
+          line_no_range: [1, lineCount],
+          flags: [],
+        },
+      ],
+      bigContent,
+    );
+
+    await screen.findByText("src/big.cc");
+    await waitFor(() => {
+      expect(document.querySelector(".code-content-text")).not.toBeNull();
+    });
+
+    // 虚拟化：DOM 中实际渲染的 .code-line 远少于总行数 2000。
+    await waitFor(() => {
+      const rendered = document.querySelectorAll(".code-line").length;
+      expect(rendered).toBeGreaterThan(0);
+      expect(rendered).toBeLessThan(100);
+    });
+
+    // 下方 spacer 用大高度占位，保证滚动条比例与总行数一致。
+    const spacers = [
+      ...document.querySelectorAll<HTMLElement>(".code-virtual-spacer"),
+    ];
+    const maxSpacer = Math.max(
+      ...spacers.map((el) => Number.parseFloat(el.style.height) || 0),
+    );
+    expect(maxSpacer).toBeGreaterThan(1000);
+  });
 });

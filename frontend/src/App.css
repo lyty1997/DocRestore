@@ -3889,8 +3889,23 @@ body {
   color: #4e5a66;
 }
 
+/* D：行级虚拟化的内层容器。position:relative 给锚点 overlay 定位基准；
+   min-width:max-content 让横向滚动范围跟随当前可视最宽行。 */
+.code-virtual-inner {
+  position: relative;
+  min-width: max-content;
+}
+
+/* spacer 撑起视口外行的高度，保证滚动条比例与总行数一致。 */
+.code-virtual-spacer {
+  width: 100%;
+}
+
 .code-content-text .code-page-anchor {
-  display: block;
+  /* 锚点改为绝对定位 overlay（top 由 JS 按 lineIndex*rowH 内联给出），
+     与窗口化的行解耦，始终存在于 DOM 供 useScrollSync 量测。 */
+  position: absolute;
+  left: 0;
   height: 0;
   margin: 0;
   padding: 0;

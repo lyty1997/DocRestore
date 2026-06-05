@@ -12,7 +12,6 @@
  */
 
 import {
-  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -33,6 +32,7 @@ import type {
   FilesIndexEntry,
 } from "../api/schemas";
 import { tokenizeCodeLine } from "../features/task/codeSyntax";
+import { computeLineWindow } from "../features/task/lineWindow";
 import {
   type SourceImageListItem,
   imageNameToPageKey,
@@ -325,6 +325,11 @@ function filterAcceptedDiagnostics(
   );
 }
 
+/** 行级虚拟化：视口上下各额外渲染的缓冲行数，防快速滚动露白 */
+const CODE_OVERSCAN = 8;
+/** 行高实测前的默认估值（font-size 0.85rem × line-height 1.55 ≈ 21px） */
+const DEFAULT_CODE_ROW_HEIGHT = 21;
+
 export function CodeViewer({
   taskId,
   allSourceImages,
@@ -356,6 +361,10 @@ export function CodeViewer({
   const [codeScrollEl, setCodeScrollEl] = useState<HTMLDivElement>();
   const [imageScrollEl, setImageScrollEl] = useState<HTMLDivElement>();
   const editGutterRef = useRef<HTMLDivElement>(null);
+  // D：行级虚拟化的滚动位置 / 视口高度 / 实测行高。
+  const [codeScrollTop, setCodeScrollTop] = useState(0);
+  const [codeViewportH, setCodeViewportH] = useState(800);
+  const [codeRowH, setCodeRowH] = useState(DEFAULT_CODE_ROW_HEIGHT);
 
   const loadIndex = useCallback(async () => {
     setIndexLoading(true);
@@ -492,13 +501,62 @@ export function CodeViewer({
       selectedImages.length > 0,
   );
 
-  const anchorsByLine = new Map<number, CodePageAnchor[]>();
-  for (const anchor of codePageAnchors) {
-    const anchors = anchorsByLine.get(anchor.lineIndex) ?? [];
-    anchors.push(anchor);
-    anchorsByLine.set(anchor.lineIndex, anchors);
-  }
+  // D：跟踪 code 容器滚动位置与视口高度（rAF 节流），驱动可视窗口。
+  useEffect(() => {
+    const el = codeScrollEl;
+    if (el === undefined) return;
+    setCodeViewportH(el.clientHeight);
+    setCodeScrollTop(el.scrollTop);
+    let rafId: number | undefined;
+    const onScroll = (): void => {
+      if (rafId !== undefined) return;
+      rafId = globalThis.requestAnimationFrame(() => {
+        rafId = undefined;
+        setCodeScrollTop(el.scrollTop);
+      });
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    const observer = new globalThis.ResizeObserver(() => {
+      setCodeViewportH(el.clientHeight);
+    });
+    observer.observe(el);
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      observer.disconnect();
+      if (rafId !== undefined) globalThis.cancelAnimationFrame(rafId);
+    };
+  }, [codeScrollEl]);
+
+  // 实测行高纠偏：源码行单行不换行、行高均匀，取首个 .code-line 真实高度。
+  useEffect(() => {
+    const el = codeScrollEl;
+    if (el === undefined) return;
+    const sample = el.querySelector<HTMLElement>(".code-line");
+    if (sample === null) return;
+    const measured = sample.getBoundingClientRect().height;
+    if (measured > 0) {
+      setCodeRowH((prev) => (Math.abs(prev - measured) > 0.5 ? measured : prev));
+    }
+  }, [codeScrollEl, content, codeViewportH]);
+
+  // 切换文件 / 容器重挂载时回到顶部，避免沿用上一文件的滚动位置。
+  useEffect(() => {
+    setCodeScrollTop(0);
+    if (codeScrollEl !== undefined) codeScrollEl.scrollTop = 0;
+  }, [selectedPath, codeScrollEl]);
+
   const contentLines = splitEditorLines(content);
+  // D：只读视图的可视行窗口（仅渲染 [start, end)，上下用 spacer 占位）。
+  const totalCodeLines = contentLines.length;
+  const codeWindow = computeLineWindow(
+    codeScrollTop,
+    codeViewportH,
+    codeRowH,
+    totalCodeLines,
+    CODE_OVERSCAN,
+  );
+  const codeTopSpacer = codeWindow.start * codeRowH;
+  const codeBottomSpacer = Math.max(0, (totalCodeLines - codeWindow.end) * codeRowH);
   const draftLines = splitEditorLines(draftContent);
   const dirty = editing && draftContent !== content;
   const activeDiagnostic = editing ? liveDiagnostic : selectedEntry?.diagnostic;
@@ -854,61 +912,72 @@ export function CodeViewer({
                 ref={(el) => { setCodeScrollEl(el ?? undefined); }}
                 className="code-content-text"
               >
-                {selectedEntry !== undefined &&
-                  contentLines.map((line, lineIndex) => {
-                    const rawLineItems = diagnosticItemsForLine(
-                      selectedEntry,
-                      lineIndex,
-                    );
-                    const lineItems = filterAcceptedDiagnostics(
-                      rawLineItems,
-                      line,
-                      taskId,
-                      selectedEntry.path,
-                      acceptedDiagnosticKeys,
-                    );
-                    const lineDiagnosticClass = diagnosticClass(lineItems);
-                    const lineTitle = diagnosticTitle(lineItems);
-                    return (
-                      <Fragment key={lineIndex}>
-                        {(anchorsByLine.get(lineIndex) ?? []).map((anchor) => (
-                          <span
-                            key={anchor.sourcePage}
-                            data-page={anchor.pageKey}
-                            className="code-page-anchor"
-                          />
-                        ))}
-                        <div
-                          className={
-                            "code-line" + lineDiagnosticClass
-                          }
-                          data-line={displayLineNumber(
-                            selectedEntry,
-                            lineIndex,
-                          )}
-                          title={lineTitle}
-                        >
-                          <span className="code-line-number">
-                            {displayLineNumber(selectedEntry, lineIndex)}
-                          </span>
-                          <code
-                            className={
-                              "code-line-code" + lineDiagnosticClass
-                            }
+                {selectedEntry !== undefined && (
+                  <div className="code-virtual-inner">
+                    {/* 锚点 overlay：所有 page 锚点绝对定位在 lineIndex*rowH，
+                        与窗口化的行解耦，保证 useScrollSync 始终量得到锚点。 */}
+                    {codePageAnchors.map((anchor) => (
+                      <span
+                        key={anchor.sourcePage}
+                        data-page={anchor.pageKey}
+                        className="code-page-anchor"
+                        style={{ top: `${(anchor.lineIndex * codeRowH).toString()}px` }}
+                      />
+                    ))}
+                    <div
+                      className="code-virtual-spacer"
+                      style={{ height: `${codeTopSpacer.toString()}px` }}
+                      aria-hidden="true"
+                    />
+                    {contentLines
+                      .slice(codeWindow.start, codeWindow.end)
+                      .map((line, offset) => {
+                        const lineIndex = codeWindow.start + offset;
+                        const rawLineItems = diagnosticItemsForLine(
+                          selectedEntry,
+                          lineIndex,
+                        );
+                        const lineItems = filterAcceptedDiagnostics(
+                          rawLineItems,
+                          line,
+                          taskId,
+                          selectedEntry.path,
+                          acceptedDiagnosticKeys,
+                        );
+                        const lineDiagnosticClass = diagnosticClass(lineItems);
+                        const lineTitle = diagnosticTitle(lineItems);
+                        return (
+                          <div
+                            key={lineIndex}
+                            className={"code-line" + lineDiagnosticClass}
+                            data-line={displayLineNumber(selectedEntry, lineIndex)}
+                            title={lineTitle}
                           >
-                            {(tokenizedLines[lineIndex] ?? []).map((token, tokenIndex) => (
-                              <span
-                                key={`${lineIndex.toString()}-${tokenIndex.toString()}`}
-                                className={`code-token code-token-${token.kind}`}
-                              >
-                                {token.text}
-                              </span>
-                            ))}
-                          </code>
-                        </div>
-                      </Fragment>
-                    );
-                  })}
+                            <span className="code-line-number">
+                              {displayLineNumber(selectedEntry, lineIndex)}
+                            </span>
+                            <code
+                              className={"code-line-code" + lineDiagnosticClass}
+                            >
+                              {(tokenizedLines[lineIndex] ?? []).map((token, tokenIndex) => (
+                                <span
+                                  key={`${lineIndex.toString()}-${tokenIndex.toString()}`}
+                                  className={`code-token code-token-${token.kind}`}
+                                >
+                                  {token.text}
+                                </span>
+                              ))}
+                            </code>
+                          </div>
+                        );
+                      })}
+                    <div
+                      className="code-virtual-spacer"
+                      style={{ height: `${codeBottomSpacer.toString()}px` }}
+                      aria-hidden="true"
+                    />
+                  </div>
+                )}
               </div>
             )}
           </>
