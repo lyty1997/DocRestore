@@ -1350,3 +1350,26 @@ code_refine/repair/audit 外发云端；此前只脱前导注释 header。
 
 **取舍/遗留**：凭据 KV 在正文里可能误伤 `password=<expr>` 右侧表达式（宁多勿漏，`redact_credential`
 可关）；正文注释里的人名/机构名仍可能上云（正文不做实体脱敏）。
+
+## 2026-06-06（续）- OCR 退化重复行致 token 爆炸 + 尾页消失（修复）
+
+**现象**：处理约 150 帧拍摄的内部文档（含 GDB 内存 dump 截图）时精修烧掉 28M+ token、后端刷屏
+`finish_reason=length` + `段 6 截断递归到达上限`，且 100+ 张插图最终只剩 6 页 12 张、尾页整段丢失。
+
+**根因（单一）**：OCR 把内存 dump 字节串（`pui8Src=0x... "..."`）识别成 `wm`/`nt`/`mu` 等 1–4 字符
+短单元重复成百上千次的退化行（清洗后单行 8093 字符）。这一行既让 LLM 陷入重复生成直到截断、触发
+depth-3 二分递归重试（→ token 爆炸），又因截断吞掉段内后续 page marker 导致 `reassembled.md` 只剩
+8 个 marker（07564–07570）、`merged_raw.md` 仍有全 152 个 → 尾页 07571–07715 连内容带图全丢。
+旧清洗漏掉：`remove_repetitions` 只比段落级相似度、`remove_garbage` 只删非可读字符，`wm` 全字母放行。
+
+**修复（root cause）**：`OCRCleaner` 新增 `collapse_degenerate_runs`，逐页清洗最前折叠短单元超长重复
+（`(.{1,4}?)\1{8,}` + 60 字符阈值），giant line 进 merger/segmenter/refine 前消失。守卫：纯分隔符单元
+（`-=*#_~|+.`）的 `====`/`####`/`----` 不折叠、短于 60 字符不动；线性匹配无灾难性回溯。
+
+**验证**：真实垃圾页 18217→2225 字符（最长行 8093→227，dump 上下文保留）；7 例红绿单测；性能 128K
+退化行→47 字符 5.6ms；processing+pipeline 511 passed、全量 1091 passed（3 个 DeepSeek 失败为本机
+未配 python 路径的预存环境问题，与改动无关）。
+
+**遗留（另排期）**：折叠只覆盖"短单元重复"；非重复超长单行（minified JS/base64）仍可能触发同款尾页
+丢失，彻底兜底需 segment 层按字符硬切 + reassemble 做"页 marker 数 merged_raw vs reassembled"守卫。
+本样本 giant line 唯一来源即退化重复（次长行仅 229 字符），故折叠已完全覆盖，硬切守卫不急做。

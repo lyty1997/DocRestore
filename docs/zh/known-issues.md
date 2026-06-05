@@ -426,3 +426,47 @@ refine/repair/audit 前脱掉，`Zhang_counter` 等 name-like 标识符不动。
    `debug/*_cleaned.md`（producer 输出，实体检测前）—— 仍含人名明文，但**仅默认 `debug=True`
    时落盘**（用户关 debug 即无此留底）。`reassembled/final_refined` 与 `.llm_cache` 已被「已修 2」
    清掉早窗口人名。彻底补法：PII 开启时关 debug 或对检测输入 dump 也延迟到脱敏后。
+
+## OCR 退化重复行致 token 爆炸 + 文档尾页整段消失（已修复 2026-06-06）
+
+**现象**：处理一份约 150 帧拍摄的内部文档（chromium 零拷贝优化，正文含 GDB backtrace /
+内存 dump 截图）时，① 精修阶段烧掉 **28M+ token**，后端刷屏
+`LLM 输出因 token 上限被截断（finish_reason=length）` + `段 6 截断递归到达上限 depth=3，回退到原文`；
+② 原本 100+ 张插图的文档最终只剩 **6 页 12 张图**，尾页内容整段丢失。
+
+**根因（单一）**：OCR 撞上内存 dump 的不可读字节串（`pui8Src=0x3fcc792000 "..."`）时产生
+**退化重复幻觉**——把字节识别成 `wm`/`nt`/`mu`/`00` 这类 1–4 字符短单元，重复成百上千次，
+清洗后仍是**单行 8093 字符**。这一行同时引爆两个症状：
+- **token 爆炸**：喂给云端 LLM 精修 → 模型陷入同款 `wm` 重复生成直到 `finish_reason=length`
+  截断 → 触发 `_maybe_retry_on_truncation` 二分递归（depth=3），多段叠加 → 28M token。
+- **尾页消失**：含 giant line 的段精修时 LLM 把 token 耗在垃圾上、走不到段内后续的
+  page marker 就截断；截断恢复未能完整保住尾部 → `reassembled.md`（= join(refined_results)）
+  只剩 8 个 page marker（DSC07564–07570），而 `merged_raw.md` 仍有全部 152 个。
+  逐级放大佐证：清洗 8093 → merged 28117 → reassembled 126069 字符（LLM 每过一手又多生成）。
+
+**为何旧清洗漏掉**：`remove_repetitions` 只按**空行分段**比对相邻段落相似度（管不了单行内重复）；
+`remove_garbage` 只删**连续非可读字符**（CJK/ASCII 字母数字属"可读"，明确保留）。`wm`/`nt` 全是
+ASCII 字母 → 两道防线都放行。
+
+**修复（commit 见下）**：`OCRCleaner` 新增 `collapse_degenerate_runs`，在逐页清洗**最前**就地
+折叠短单元（≤4 字符）超长重复游程（`DEGENERATE_RUN_RE = (.{1,4}?)\1{8,}`，真正阈值由
+`DEGENERATE_RUN_MIN_CHARS=60` 在回调按字符数把关），保留行首上下文 + 留可见折叠标记。
+giant line 在进 merger/segmenter/refine 前消失 → 三个症状同源消除。
+- **误伤守卫**：纯分隔符单元（`DEGENERATE_DIVIDER_CHARS = -=*#_~|+.` 与空白）的重复不折叠，
+  保护 markdown 下划线 `====` / 代码 banner `####` / 分隔线 `----`；短于 60 字符的重复不动。
+- **性能/安全**：反向引用游程线性匹配无灾难性回溯（实测 128K 退化行 → 47 字符仅 5.6ms，
+  50K 随机串 / 56K 正常文档原样不动 < 6ms）。
+- **实测**：真实垃圾页 `DSC07570_cleaned.md` 18217 → 2225 字符（降 88%），最长行 8093 → 227，
+  dump 上下文 `...pui8Src=0x3fcc792000 "ntntnt…` 可读保留。
+- **红绿验证**：`tests/processing/test_cleaner.py::TestCollapseDegenerateRuns`（7 例：真实 2 字符游程 /
+  十六进制 0 / 阈值下不动 / markdown 分隔符保护 / 正文代码不动 / 不跨行 / clean() 端到端）。
+
+**残留风险（未修，另排期）**：折叠只针对"短单元重复"。若未来出现**非重复**的超长单行
+（如 50KB minified JS / base64 blob），仍可能触发同款"段截断吞尾页"。彻底兜底需在 segment 层
+加按字符数硬切 + reassemble 阶段做"页 marker 数 merged_raw vs reassembled"守卫（缺失即从
+merged_raw 补回尾部）。本文档场景里 giant line 唯一来源就是退化重复（次长行仅 229 字符），
+故折叠已完全覆盖；硬切守卫留待真有非重复巨行需求时再做，避免过度工程。
+
+**顺带观测（未处理，非本次范围）**：该样本正文里 `scp ... qiangming@30.21.162.200`（用户名@IP）
+与源 URL `aliyuque.antfin.com/theadiotsw/...`（内部 Yuque + 作者 handle）属 PII，但
+`user@host`（无密码）不被现有凭据 regex（`user:pass@host`）命中，URL 作者 handle 也未脱。
