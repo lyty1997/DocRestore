@@ -358,3 +358,29 @@ limitations under the License.
 - `useTaskRunner` 两条完成路径（轮询 `handlePollResponse` + WS 关闭兜底）统一改为「先 `await fetchResult(tid)` 再 `setStatus("completed")`」，保证状态翻 completed 时 `allResults` 已就绪，`TaskResult` 首挂载即拿到数据。
 - 历史详情 `TaskDetail` 走 `useTaskProgress` + 自持 reactive `docResults`（`getTaskResults → setDocResults` 直传），本就不受该竞态影响，无需改动。
 - 通用经验：凡"挂载时一次性吃 props + key 重挂载"的展示组件，其数据必须在「门控状态翻终态之前」就位，否则同 key 下的迟到数据永远进不来。
+
+## 文档/PPT 预览左右同步滚动在水合后失效（已修复 2026-06-05）
+
+现象：
+- 文档模式、PPT 模式的"原图 ↔ markdown"左右同步滚动不跟随；代码模式同步滚动正常。
+
+根因：
+- 文档/PPT 同步滚动靠 markdown 里的 `<!-- page: 文件名 -->` 标记（前端 `injectPageAnchors`
+  转成右栏 `[data-page]` 锚点，`useScrollSync` 按它对齐）。
+- `Renderer.render` 按设计把磁盘 `document.md` 剥除 marker（下载/交付版），带 marker 的"预览版"
+  只通过返回值留在内存（`PipelineResult.markdown`）。
+- 任务一旦从 DB **水合**（后端重启 / 看历史任务），`task_manager.load_persisted_tasks` 用
+  `_read_text_or_empty(document.md)` 从磁盘**剥除版**重读 markdown → 右栏零锚点 →
+  `getCenterPagePosition` 返回 undefined → 同步滚动静默失效。
+- 代码模式锚点来自 `files-index.json` 的 `source_page_ranges`（落盘持久化），水合后仍在，
+  故只有文档/PPT 中招。证据链：`debug/merged_raw.md`(10) → `reassembled.md`(9) →
+  `final_refined.md`(9) → `document.md`(0)，marker 在落盘那步被剥光。
+
+处理策略：
+- `Renderer.render` 额外落一份带 marker 的 sidecar `.document.anchored.md`（PPT 经同一 render
+  路径自动覆盖）；`document.md` 仍剥除版。
+- 水合新增 `_read_hydration_markdown`：优先读 sidecar（带锚点），缺失/空时回退 `document.md`。
+- 编辑保存 `update_result_markdown` 同步刷新 sidecar，防"已渲染文档的旧 sidecar 未更新"。
+- 下载 zip / assets 接口均不含 sidecar（dot 前缀 + 白名单只放 `document.md`），下载保持干净。
+- 老任务（无 sidecar）需重跑生成；或用 `debug/final_refined.md` 经渲染器同款图片重写回填
+  sidecar，并以 `strip_page_markers(sidecar)==document.md` 为逐字符等价守卫（不等则跳过重跑）。

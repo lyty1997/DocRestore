@@ -1270,3 +1270,24 @@ clean HEAD 同样失败：查询 `#code-mode-toggle` 在 mock source 前置下�
 
 **遗留**：① Phase2 视觉跟手/锚点对齐需用真实代码模式任务人工复核（无代码模式测试数据，jsdom 无布局）；
 ② 既有 `TaskForm` 用例 `#code-mode-toggle` 失败待单独排查（与本次无关）。
+
+## 2026-06-05（续）- 修复文档/PPT 预览同步滚动水合后失效（commit 26ed7a3）
+
+**现象**：文档/PPT 模式"原图↔markdown"左右同步滚动不跟随，代码模式正常。用户疑为前端虚拟化
+回归——已排除（文档/PPT 不挂载 CodeViewer，CSS 仅作用 .code-*，同步链路文件零改动）。
+
+**根因（后端持久化缺口）**：同步滚动靠 markdown 的 `<!-- page -->` 标记→右栏 `[data-page]` 锚点。
+`document.md` 落盘按设计剥除 marker（下载版），带 marker 版只在内存。任务从 DB 水合（重启/历史）
+时从磁盘剥除版重读 → 锚点全失。代码模式锚点来自 files-index.json（持久化）故不受影响。
+证据链：merged_raw(10)→reassembled(9)→final_refined(9)→document.md(0)。
+
+**修复**：`Renderer.render` 额外落带 marker sidecar `.document.anchored.md`（PPT 同路径覆盖）；
+水合 `_read_hydration_markdown` 优先读 sidecar 回退 document.md；编辑保存同步刷新 sidecar；
+下载/assets 不含 sidecar。详见 known-issues.md 同名条目。
+
+**验证**：新增 6 例单测（renderer 落 sidecar/strip + 水合优先/回退/空）；tests/output+pipeline+api
+全量 363 passed。用真实产物 backfill：3/6 文档子目录逐字符等价回填成功，3 个 mismatch 安全跳过、
+PPT 无 final_refined 源——这几个需重跑。
+
+**遗留**：① 老任务无 sidecar，需重跑或 backfill（PPT 无 backfill 源）；② 后端已水合在内存的任务需
+重启才会经新 reader 读到 backfill 的 sidecar。
