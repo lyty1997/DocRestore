@@ -343,3 +343,18 @@ limitations under the License.
 - 不对拼接路径 `resolve()`；改对【未跟随 symlink】的词法拼接路径 `img_dir/filename` 做 `is_relative_to` 越界校验（filename 上游已禁 `..` 与前导 `/`），再用 `is_file()` 跟随软链确认目标存在。
 - stage 内软链均由本服务 `_stage_files` 创建、指向用户显式选定且已校验的图片，放行其目标安全。
 - 回归：`tests/api/test_source_images.py::TestGetSourceImage::test_serves_symlinked_staged_image`（既有 `..`/绝对路径穿越用例仍 400）。
+
+## 新建任务完成后预览空白，需切历史记录再回来才刷出（已修复 2026-06-05）
+
+现象：
+- 新建任务页任务跑完，结果区 `TaskResult` 卡在"暂无可用结果"；进一次历史记录详情再切回新建任务页，预览才正常出现。
+
+根因（前端时序竞态）：
+- `TaskResult` 刻意采用"挂载时一次性吃 props"模式（`useState(() => [...initialResults])`），靠 App 的 `key={taskId}` 重挂载来刷新；`taskId` 在结果到达前就已确定、不会变。
+- 但 `useTaskRunner` 完成路径顺序是「先 `setStatus("completed")` 再 `await fetchResult`」：状态一翻，App 立即挂载 `TaskResult`，此刻 `allResults` 仍是 `[]` → 组件吃到空数组；随后结果到达，`taskId` 未变不重挂载 → 永远停在空态。
+- 切到历史详情会让 `isCreateMode` 翻 false 卸载 `TaskResult`，切回时以已填充的 `allResults` 重挂载 → 误以为"绕一圈能修好"。
+
+处理策略：
+- `useTaskRunner` 两条完成路径（轮询 `handlePollResponse` + WS 关闭兜底）统一改为「先 `await fetchResult(tid)` 再 `setStatus("completed")`」，保证状态翻 completed 时 `allResults` 已就绪，`TaskResult` 首挂载即拿到数据。
+- 历史详情 `TaskDetail` 走 `useTaskProgress` + 自持 reactive `docResults`（`getTaskResults → setDocResults` 直传），本就不受该竞态影响，无需改动。
+- 通用经验：凡"挂载时一次性吃 props + key 重挂载"的展示组件，其数据必须在「门控状态翻终态之前」就位，否则同 key 下的迟到数据永远进不来。

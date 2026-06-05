@@ -170,10 +170,13 @@ export function useTaskRunner(): UseTaskRunnerReturn {
 
       switch (resp.status) {
         case "completed": {
-          setStatus("completed");
           cleanup();
           setPollingEnabled(false);
+          // 必须先拉到结果再翻 completed：TaskResult 以 useState 初值一次性
+          // 吃 props（key=taskId 不变不会重挂载），若 status 先翻、allResults
+          // 仍为空，组件会卡在"暂无可用结果"直到换页重挂载。
           await fetchResult(tid);
+          setStatus("completed");
           break;
         }
         case "failed": {
@@ -285,9 +288,11 @@ export function useTaskRunner(): UseTaskRunnerReturn {
 
             switch (resp.status) {
               case "completed": {
-                setStatus("completed");
                 cleanup();
+                // 同 handlePollResponse：先拉结果再翻 completed，避免
+                // TaskResult 以空 allResults 挂载后卡在"暂无可用结果"。
                 await fetchResult(tid);
+                setStatus("completed");
                 break;
               }
               case "failed": {

@@ -1229,3 +1229,20 @@ mypy --strict + ruff + typos 全绿。
 
 **收官**：原始 15 项全部闭环（11 项已修 + #17 wontfix + 自查新增 #25 已修）。dev 满足"全修完"
 条件，下一步合并 dev→main，`Fixes #N` 在默认分支自动关闭 issue。
+
+## 2026-06-05 - 修复：新建任务完成后预览空白（需切历史再回来才出）
+
+**现象**：新建任务跑完，结果区卡在"暂无可用结果"，进一次历史详情再切回才刷出预览。
+
+**根因**：前端时序竞态。`TaskResult` 用"挂载时一次性吃 props + `key={taskId}` 重挂载"模式刷新，
+而 `useTaskRunner` 完成路径先 `setStatus("completed")`（App 立即挂载 `TaskResult`，此刻
+`allResults` 仍为 `[]`）再 `await fetchResult`；taskId 不变 → 迟到的结果永远进不来。切历史会卸载
+组件，回来时以已填充数据重挂载，故"绕一圈能好"。
+
+**修复**：`useTaskRunner` 两条完成路径（轮询 + WS 关闭兜底）统一改为「先 `await fetchResult` 再
+`setStatus("completed")`」。历史详情 `TaskDetail` 走 reactive `docResults`，本就不受影响、未改。
+
+**验证**：用户确认修复生效；`npm run typecheck` + `eslint` 全绿。详见 known-issues.md 同名条目。
+
+**遗留**：无（`useTaskRunner` 完成时序无现成测试桩，为一行排序修复新搭 WS+fetch mock 属过度工程，
+未加）。
