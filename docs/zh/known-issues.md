@@ -467,6 +467,24 @@ giant line 在进 merger/segmenter/refine 前消失 → 三个症状同源消除
 merged_raw 补回尾部）。本文档场景里 giant line 唯一来源就是退化重复（次长行仅 229 字符），
 故折叠已完全覆盖；硬切守卫留待真有非重复巨行需求时再做，避免过度工程。
 
-**顺带观测（未处理，非本次范围）**：该样本正文里 `scp ... qiangming@30.21.162.200`（用户名@IP）
-与源 URL `aliyuque.antfin.com/theadiotsw/...`（内部 Yuque + 作者 handle）属 PII，但
-`user@host`（无密码）不被现有凭据 regex（`user:pass@host`）命中，URL 作者 handle 也未脱。
+**顺带发现并已修（user@host + 内部 URL 脱敏，2026-06-06）**：该样本正文里
+`scp ... qiangming@30.21.162.200`（用户名@IP）与源 URL `aliyuque.antfin.com/theadiotsw/...`
+（内部 Yuque + 作者 handle）属 PII，但 `user@host`（无密码）不被凭据 regex（`user:pass@host`）
+命中、URL 作者 handle 也未脱。已在 `privacy/patterns.py` 新增两个结构化检测器并接入
+`redact_structured_pii` 表驱动 steps（文档/代码模式上云前的 `redact_regex_only` 自动覆盖）：
+
+- **`_HOST_TARGET_RE`（`redact_host`，默认开，占位 `[主机地址]`）**：脱 `user@IPv4` 与
+  `user@单 label 主机名`，user（常含人名）一起脱。**只接 IP 与无点主机名**——带点 FQDN /
+  邮箱域名（`user@a.b.com`）交邮箱步骤，主机名分支末尾 `(?![A-Za-z0-9.-])` lookahead 拦住
+  FQDN 前缀，避免关掉 `redact_email` 时把 `user@domain.com` 误切成 `[主机地址].com`。
+  邮箱 step 先于 host，吃掉带 TLD 的 `user@domain.tld`。
+- **`_URL_LIKE_RE`（`redact_internal_url`，默认开，占位 `[内部链接]`）**：私有/回环 IP
+  （`ipaddress.is_private/is_loopback`）的 URL **零配置即脱**；host 命中
+  `sensitive_url_domains` 后缀（用户配 `antfin.com` 即覆盖语雀）的 URL 整条（含路径里的
+  作者 handle / 文档 ID）脱。**非私有 / 非配置域名的公网链接（github/stackoverflow）原样保留**
+  （回调 `m.group(0)`），不误伤。支持无 scheme 裸域名（OCR 文档常无 `http://`）。
+
+误伤守卫验证：`@staticmethod`/`@提及`/`@types/node`/`config.json`/`v1.2.3` 全不动；邮箱仍走
+邮箱步骤占位 `[邮箱]`。红绿：`tests/privacy/test_patterns.py::TestHostTargetRedaction`（6 例）
++ `TestInternalUrlRedaction`（8 例）。**遗留**：`user@FQDN` 在关 `redact_email` 时既不被邮箱也
+不被 host 脱（边缘，用户主动关 email 即选择保留邮箱形态）；裸公网 IP（非 user@、非 URL）不脱。

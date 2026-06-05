@@ -1373,3 +1373,31 @@ depth-3 二分递归重试（→ token 爆炸），又因截断吞掉段内后�
 **遗留（另排期）**：折叠只覆盖"短单元重复"；非重复超长单行（minified JS/base64）仍可能触发同款尾页
 丢失，彻底兜底需 segment 层按字符硬切 + reassemble 做"页 marker 数 merged_raw vs reassembled"守卫。
 本样本 giant line 唯一来源即退化重复（次长行仅 229 字符），故折叠已完全覆盖，硬切守卫不急做。
+
+## 2026-06-06（续）- user@host + 内部 URL 纳入上云前脱敏
+
+**背景**：排查上一条 OCR 退化 bug 时顺带发现样本含 `scp ... qiangming@30.21.162.200`（用户名@IP）
+与内部平台 URL `aliyuque.antfin.com/theadiotsw/...`（作者 handle + 文档 ID），既有脱敏链路漏掉。
+用户确认纳入；两处决策：内部 URL=私有 IP 自动脱 + 可配置域名后缀；user@host=IP 与主机名都脱。
+
+**实现**（`privacy/patterns.py` 新增两个结构化检测器，接入 `redact_structured_pii` 表驱动 steps；
+文档/代码模式上云前的 `redact_regex_only` 自动获得）：
+- `_HOST_TARGET_RE`（`redact_host`，`[主机地址]`）：`user@IPv4` + `user@单 label 主机名`，user
+  含人名一起脱。**只接 IP 与无点主机名**，带点 FQDN/邮箱域名交邮箱步骤（lookahead
+  `(?![A-Za-z0-9.-])` 拦 FQDN 前缀），避免关 email 时把 `user@a.com` 误切成 `[主机地址].com`。
+- `_URL_LIKE_RE`（`redact_internal_url`，`[内部链接]`）：私有/回环 IP 的 URL 零配置即脱；host 命中
+  `sensitive_url_domains` 后缀（配 `antfin.com` 覆盖语雀）的整条 URL 脱；公网链接原样保留。
+- 顺序：credential → id_card → email → **host** → phone → bank_card → **internal_url**（email 先于
+  host 吃带 TLD 的 user@domain.tld；host 先于 url 把 user@IP 整体脱掉）。
+- 新增 `PIIConfig`：`redact_host`/`redact_internal_url`（默认开）、`host_placeholder`/
+  `internal_url_placeholder`、`sensitive_url_domains: list[str]`（默认空）。
+
+**修了一处自引回归**：host 主机名分支初版收 FQDN，导致关 `redact_email` 时 `user@example.com` 被
+切成 `[主机地址].com`，碰挂既有 `test_email_disabled`。改为只接单 label + lookahead 后修复。
+
+**验证**：`TestHostTargetRedaction`（6 例）+ `TestInternalUrlRedaction`（8 例）红绿；误伤守卫
+（`@staticmethod`/`@提及`/`@types/node`/`config.json`/`v1.2.3`/公网链接）全过；全量 1105 passed
+（排除 cv2 + 预存环境失败的 DeepSeek）。
+
+**遗留**：`user@FQDN` 在关 email 时既不被邮箱也不被 host 脱（边缘，关 email 即选择保留）；裸公网 IP
+（非 user@、非 URL 形态）不脱；内部 URL 的公网平台域名需用户显式配 `sensitive_url_domains` 才生效。
