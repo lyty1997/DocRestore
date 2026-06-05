@@ -394,20 +394,27 @@ limitations under the License.
 | 手机/邮箱/身份证/银行卡 | regex | ✅ producer 逐页 `redact_regex_only`（`pipeline.py:1587`）入队前 |
 | **密码/用户名/账号/token** | **regex（本次新增）** | ✅ 同上，走 `redact_structured_pii` step-0 凭据检测器 |
 | 自定义敏感词 | 精确匹配 | ✅ 同上，连本地 debug/cache 都不留明文 |
-| 人名/机构名 | LLM `detect_pii_entities` | ⚠️ 部分：检测调用本身把文本发云端（LLM 检测固有）+ 早窗口（前 5 页 / ≤5 页短文档）段精修在词表就绪前外发；仅后续段 + 最终输出脱敏 |
+| 人名/机构名 | LLM `detect_pii_entities` | ⚠️ 部分：**早窗口已修**（词表就绪前不送云端）；仅剩检测调用本身把文本发云端（LLM 检测固有） |
 
-**已修（2026-06-06，commit 1e4a68a）**：新增凭据/token regex 检测器（label 锚定 KV +
+**已修 1（2026-06-06，commit 1e4a68a）**：新增凭据/token regex 检测器（label 锚定 KV +
 URL 内联 `user:pass@` + sk-/ghp_/AKIA/JWT 已知格式），补上密码/用户名/账号/token 的空缺。
 因在 producer 入队前的正则层执行，上云与落盘前即抹掉。偏向宁多勿漏，技术正文不误伤，
 `redact_credential` 默认开可关。
 
+**已修 2（2026-06-06，commit 51f0b38）——早窗口防泄漏**：开 PII 且要求实体脱敏时
+（`_entity_redaction_pending`），实体词表就绪前只攒页不送云端精修，就绪后一次性追平
+（文档 `_stream_process` 用 `try_extract` 追平；PPT `_ppt_pipeline` 用 pending 缓存 +
+`_finish_page` 闭包追平）。代价是词表就绪前的"先攒后发"流式延迟。**附带收益**：分段送云端前
+已脱敏 → `reassembled.md` / `final_refined.md` dump 与 `.llm_cache`（按 enable_cache，非
+debug-gated）对早窗口段也不再留人名明文。红绿验证：`tests/pipeline/test_pii_early_window.py`。
+
 **未修遗留（已知，另排期）**：
-1. **人名/机构名云端曝光**：实体检测必须把文本给 LLM 才能认（用云端 provider 时即外发）；
-   且早窗口/短文档的段精修在词表建好前就发了。彻底规避需本地 NER / 本地检测 provider，
-   或"先攒够页检测出词表再开始云端精修"（牺牲流式延迟）。用户已认可"上云前完全脱敏不现实"。
+1. **人名/机构名检测调用曝光**：实体检测必须把文本给 LLM 才能认（用云端 provider 时即外发一次）。
+   早窗口段精修曝光已修；彻底规避检测曝光需本地 NER / 本地检测 provider。用户已认可"上云前完全
+   脱敏不现实，能拦多少拦多少"。
 2. **代码模式正文**：`_redact_code_headers` 只脱前导注释 header，代码正文（行级 bbox 组装）
    未覆盖 → 正文里的敏感信息会上云。文档/PPT 模式不受此影响。
-3. **磁盘留底（landmine B）**：`debug/*.md`（默认 `debug=True`）和 `.llm_cache/*.json` 写在
-   **实体脱敏之前**（`renderer`/dump 早于 `pipeline.py:1980`），故人名/机构名以未脱敏形态留在
-   本地磁盘（结构化 PII + 凭据 + 自定义词不受影响，它们在 producer 已脱）。补法：实体脱敏提前到
-   dump/cache 前，或 PII 开启时不落 debug / cache 存脱敏后版本。
+3. **磁盘留底（landmine B，剩余）**：检测**输入**性质的 dump —— `debug/merged_raw.md` 与
+   `debug/*_cleaned.md`（producer 输出，实体检测前）—— 仍含人名明文，但**仅默认 `debug=True`
+   时落盘**（用户关 debug 即无此留底）。`reassembled/final_refined` 与 `.llm_cache` 已被「已修 2」
+   清掉早窗口人名。彻底补法：PII 开启时关 debug 或对检测输入 dump 也延迟到脱敏后。

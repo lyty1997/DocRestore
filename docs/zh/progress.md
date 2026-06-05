@@ -1313,3 +1313,23 @@ sk-key/用户名/账号/自定义词全中，token bucket/CONFIG_X=Y 不误伤�
 
 **遗留**（known-issues 已记）：人名/机构名云端曝光（需本地 NER/先检测后精修）；代码模式正文未脱；
 debug/cache 实体脱敏前留底（landmine B）。均另排期。
+
+## 2026-06-06（续）- PII 早窗口防泄漏（commit 51f0b38）
+
+**问题**：流式/PPT 在实体词表（人名/机构名）建好前就把早窗口分段/页送云端精修 → 前 ~5 页
+（或 ≤5 页短文档全部）的人名/机构名在脱敏前外发。
+
+**修复**：开 PII 且要求实体脱敏时（新增 `_entity_redaction_pending` 门控），词表就绪前只攒页不送
+云端，就绪后一次性追平：
+- 文档 `_stream_process`：循环内按门控跳过 `_try_extract_and_refine`，检测后（含短文档兜底）补一次
+  `try_extract` 追平（drain 全部已切分段，幂等）。
+- PPT `_ppt_pipeline`：抽 `_finish_page` 闭包，早窗口页入 `pending` 缓存，阈值/短文档检测后统一追平；
+  fail-closed 检测失败则推迟页退原文。
+
+**附带收益**：分段送云端前已脱敏 → `reassembled/final_refined` dump 与 `.llm_cache` 对早窗口段也不再
+留人名明文。磁盘留底只剩 `merged_raw/cleaned`（检测输入，默认 debug 才落盘）。
+
+**验证**：红绿——禁用门控时 doc+ppt 用例均失败（refine 收到原始人名），开启则过；新增 3 例
+（门控单测 + 文档/PPT 早窗口集成）。tests/pipeline+privacy+output+api+llm 全量 555 passed。
+
+**遗留**：人名/机构名检测调用本身仍上云一次（LLM 检测固有，需本地 NER 才能免）；代码模式正文未脱。
