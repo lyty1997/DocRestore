@@ -384,3 +384,30 @@ limitations under the License.
 - 下载 zip / assets 接口均不含 sidecar（dot 前缀 + 白名单只放 `document.md`），下载保持干净。
 - 老任务（无 sidecar）需重跑生成；或用 `debug/final_refined.md` 经渲染器同款图片重写回填
   sidecar，并以 `strip_page_markers(sidecar)==document.md` 为逐字符等价守卫（不等则跳过重跑）。
+
+## PII 脱敏链路审计：上云端精修前能拦什么（2026-06-06）
+
+结论（"上 LLM 精修前是否脱敏"）：
+
+| 类别 | 检测器 | 上云端精修前去掉？ |
+|---|---|---|
+| 手机/邮箱/身份证/银行卡 | regex | ✅ producer 逐页 `redact_regex_only`（`pipeline.py:1587`）入队前 |
+| **密码/用户名/账号/token** | **regex（本次新增）** | ✅ 同上，走 `redact_structured_pii` step-0 凭据检测器 |
+| 自定义敏感词 | 精确匹配 | ✅ 同上，连本地 debug/cache 都不留明文 |
+| 人名/机构名 | LLM `detect_pii_entities` | ⚠️ 部分：检测调用本身把文本发云端（LLM 检测固有）+ 早窗口（前 5 页 / ≤5 页短文档）段精修在词表就绪前外发；仅后续段 + 最终输出脱敏 |
+
+**已修（2026-06-06，commit 1e4a68a）**：新增凭据/token regex 检测器（label 锚定 KV +
+URL 内联 `user:pass@` + sk-/ghp_/AKIA/JWT 已知格式），补上密码/用户名/账号/token 的空缺。
+因在 producer 入队前的正则层执行，上云与落盘前即抹掉。偏向宁多勿漏，技术正文不误伤，
+`redact_credential` 默认开可关。
+
+**未修遗留（已知，另排期）**：
+1. **人名/机构名云端曝光**：实体检测必须把文本给 LLM 才能认（用云端 provider 时即外发）；
+   且早窗口/短文档的段精修在词表建好前就发了。彻底规避需本地 NER / 本地检测 provider，
+   或"先攒够页检测出词表再开始云端精修"（牺牲流式延迟）。用户已认可"上云前完全脱敏不现实"。
+2. **代码模式正文**：`_redact_code_headers` 只脱前导注释 header，代码正文（行级 bbox 组装）
+   未覆盖 → 正文里的敏感信息会上云。文档/PPT 模式不受此影响。
+3. **磁盘留底（landmine B）**：`debug/*.md`（默认 `debug=True`）和 `.llm_cache/*.json` 写在
+   **实体脱敏之前**（`renderer`/dump 早于 `pipeline.py:1980`），故人名/机构名以未脱敏形态留在
+   本地磁盘（结构化 PII + 凭据 + 自定义词不受影响，它们在 producer 已脱）。补法：实体脱敏提前到
+   dump/cache 前，或 PII 开启时不落 debug / cache 存脱敏后版本。

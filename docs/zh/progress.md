@@ -1291,3 +1291,25 @@ PPT 无 final_refined 源——这几个需重跑。
 
 **遗留**：① 老任务无 sidecar，需重跑或 backfill（PPT 无 backfill 源）；② 后端已水合在内存的任务需
 重启才会经新 reader 读到 backfill 的 sidecar。
+
+## 2026-06-06 - PII 脱敏链路审计 + 新增凭据/token 检测器
+
+**审计**：逐链路确认"上云端 LLM 精修前脱了什么"。结构化（手机/邮箱/身份证/银行卡）与自定义词由
+producer 逐页 `redact_regex_only` 入队前脱掉，✅ 不上云、连 debug/cache 都干净。人名/机构名靠 LLM
+检测，⚠️ 检测调用本身 + 早窗口/短文档段精修会外发（"完全脱敏不现实"，用户认可）。详见
+known-issues.md「PII 脱敏链路审计」。
+
+**小修**：新建任务表单重排（commit f6ce85b）——模式选择置顶、LLM 精修开关与配置相邻；浏览器截图
+验证布局正确。
+
+**主修（commit 1e4a68a）**：补上密码/用户名/账号/token 的检测空缺——`redact_structured_pii` 新增
+step-0 凭据检测器（label 锚定 KV + URL 内联 user:pass@ + sk-/ghp_/AKIA/JWT），走 producer 正则层
+→ 上云前、落盘前即抹掉。偏向宁多勿漏、技术正文不误伤，`redact_credential` 默认开可关。
+表驱动重构 `redact_structured_pii` 降圈复杂度。
+
+**验证**：新增 9 例凭据单测（正例 + 误报守卫）；`redact_regex_only` 端到端验证（密码/URL 凭据/
+sk-key/用户名/账号/自定义词全中，token bucket/CONFIG_X=Y 不误伤）；tests/privacy+pipeline+output+api
+全量 406 passed。
+
+**遗留**（known-issues 已记）：人名/机构名云端曝光（需本地 NER/先检测后精修）；代码模式正文未脱；
+debug/cache 实体脱敏前留底（landmine B）。均另排期。
