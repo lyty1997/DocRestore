@@ -1246,3 +1246,27 @@ mypy --strict + ruff + typos 全绿。
 
 **遗留**：无（`useTaskRunner` 完成时序无现成测试桩，为一行排序修复新搭 WS+fetch mock 属过度工程，
 未加）。
+
+## 2026-06-05（续）- 代码模式预览加载提速（A+B+C+D 两阶段）
+
+**问题**：代码模式打开上千行源文件要好几秒。根因不在 fetch（纯 text()），而在 CodeViewer
+只读视图整文件一次性渲染、每个语法 token 一个 `<span>`、分词写在 render 里无缓存 →
+1000 行 ≈ 1.5w DOM 节点一次性 layout/paint。设计见 `docs/zh/frontend/code-viewer-perf.md`。
+
+**Phase1（commit 2ca4e16，低风险无布局变更）**：
+- A：`useMemo` 缓存整文件分词（key=content+language+path）；
+- B：`visibleDiagnostics` 仅编辑态计算（只读不再 O(N·D) 空转）；
+- C：`.code-line` 加 `content-visibility:auto`，浏览器跳过视口外行 layout/paint。
+
+**Phase2（commit 688c7dd，行级虚拟化）**：
+- 纯函数 `computeLineWindow`（features/task/lineWindow.ts）算可视行区间 + overscan，8 例单测；
+- 固定行高 + 上下 spacer 只渲染可视窗口；page 锚点改绝对定位 overlay 与窗口解耦，
+  始终在 DOM 供 `useScrollSync` 量测；rowH 挂载实测纠偏；切文件回顶；rAF 节流 + ResizeObserver；
+- jsdom 无 ResizeObserver → 新增 `tests/setup.ts` 桩 + vitest `setupFiles`；
+  CodeViewer 新增虚拟化用例（2000 行只渲染 <100 行 + 大 spacer）。
+
+**验证**：typecheck + eslint 全绿；vitest 76 passed（仅 `TaskForm.test.tsx` 1 例为**既有无关失败**，
+clean HEAD 同样失败：查询 `#code-mode-toggle` 在 mock source 前置下不渲染）。
+
+**遗留**：① Phase2 视觉跟手/锚点对齐需用真实代码模式任务人工复核（无代码模式测试数据，jsdom 无布局）；
+② 既有 `TaskForm` 用例 `#code-mode-toggle` 失败待单独排查（与本次无关）。
