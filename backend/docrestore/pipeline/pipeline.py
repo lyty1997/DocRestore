@@ -1334,12 +1334,12 @@ class Pipeline:
                     diagnostic.path, [],
                 ).append(diagnostic)
 
-        # 3.5 PII：仅对每个 SourceFile 的 leading comment block 脱敏
-        # （Copyright / 作者 / 邮箱 / 公司名）。正文 import 路径 / namespace
-        # 不动，避免破坏代码语义。
+        # 3.5 PII：每个 SourceFile 脱敏——header 全量（regex + 实体 + 自定义词），
+        # 正文 regex（结构化 PII + 凭据/token）+ 自定义词但不做实体脱敏（避免误伤
+        # import 路径 / namespace / 标识符）。送云端 refine/repair/audit 前完成。
         pii_block_cloud = False
         if pii_cfg.enable and sources:
-            pii_block_cloud = await self._redact_code_headers(
+            pii_block_cloud = await self._redact_code_pii(
                 sources, pii_cfg, base_refiner_obj,
             )
 
@@ -1461,47 +1461,46 @@ class Pipeline:
             ],
         )
 
-    async def _redact_code_headers(
+    async def _redact_code_pii(
         self,
         sources: list[SourceFile],
         pii_cfg: PIIConfig,
         refiner: BaseLLMRefiner | None,
     ) -> bool:
-        """对每个 SourceFile 的 leading comment block 跑 PII 脱敏（in-place）。
+        """对每个 SourceFile 脱敏（in-place），送云端 refine/repair/audit 前执行。
 
-        策略：拼接所有非空 header 一次性跑 LLM 实体检测拿全局 lexicon；每个
-        header 再分别跑 ``redact_snippet`` 做 regex + lexicon + 自定义敏感词。
-        ``person_names`` / ``org_names`` 来自 header 文本，不会污染正文里的
-        import 路径或 namespace 字面量。
+        分 header / body 两段差异化处理（``_split_leading_comment`` 切分）：
+        - **leading comment header**：``redact_snippet`` = regex（结构化 PII +
+          凭据/token）+ 实体 lexicon（人名/机构名）+ 自定义词。lexicon 只从所有
+          非空 header 拼接检测，``person_names`` / ``org_names`` 来自注释，不会
+          污染正文标识符。
+        - **正文 body**：``redact_regex_only`` = regex（结构化 PII + 凭据/token）
+          + 自定义词，**不做实体脱敏**——避免把 import 路径 / namespace / 变量名
+          误当人名/机构名替换（AGE-50）。凭据 KV（``password=<expr>``）在正文里
+          可能误伤右侧表达式，属"宁多勿漏"取舍，``redact_credential`` 可关。
 
-        ``refiner=None`` 时跳过实体检测，仅 regex + 自定义词。
+        无 header 的文件也照常脱正文。``refiner=None`` 时跳过实体检测，仅 regex +
+        自定义词。
 
-        返回 ``block_cloud``：实体检测**已尝试且失败** + 配置
-        ``block_cloud_on_detect_failure`` 为真时返回 True，调用方据此跳过后续
-        代码精修的云端调用（fail-closed，避免 header 里未脱敏的人名/机构名经
-        code_refine / repair / audit 外发到云端）。其余情况返回 False。
+        返回 ``block_cloud``：实体检测**已尝试且失败** + ``block_cloud_on_detect_
+        failure`` 为真时返回 True，调用方据此跳过后续代码精修的云端调用
+        （fail-closed，避免 header 里未脱敏的人名/机构名外发）。其余返回 False。
         """
         from docrestore.privacy.redactor import EntityLexicon, PIIRedactor
 
         if not sources:
             return False
 
-        headers: list[tuple[int, str, str]] = []  # (idx, header, body)
-        for i, src in enumerate(sources):
-            header, body = _split_leading_comment(src.merged_text)
-            if header:
-                headers.append((i, header, body))
-        if not headers:
-            return False
-
         redactor = PIIRedactor(pii_cfg)
+        # 每个文件切出 (header, body)，header + body == merged_text
+        split = [_split_leading_comment(s.merged_text) for s in sources]
+
+        # 实体检测仅用所有非空 header 拼接（来源限注释，不取正文标识符）
         lexicon: EntityLexicon | None = None
-        needs_lex = (
-            pii_cfg.redact_person_name or pii_cfg.redact_org_name
-        )
         detect_failed = False
-        if needs_lex and refiner is not None:
-            combined = "\n\n".join(h for _, h, _ in headers)
+        needs_lex = pii_cfg.redact_person_name or pii_cfg.redact_org_name
+        combined = "\n\n".join(h for h, _ in split if h)
+        if needs_lex and refiner is not None and combined:
             try:
                 person, org = await refiner.detect_pii_entities(combined)
                 lexicon = EntityLexicon(
@@ -1515,9 +1514,12 @@ class Pipeline:
                 )
                 detect_failed = True
 
-        for idx, header, body in headers:
-            new_header, _records = redactor.redact_snippet(header, lexicon)
-            sources[idx].merged_text = new_header + body
+        for i, (header, body) in enumerate(split):
+            new_header = (
+                redactor.redact_snippet(header, lexicon)[0] if header else ""
+            )
+            new_body, _ = redactor.redact_regex_only(body)
+            sources[i].merged_text = new_header + new_body
 
         # 检测已尝试且失败 + fail-closed → 通知调用方跳过后续云端精修
         return detect_failed and pii_cfg.block_cloud_on_detect_failure

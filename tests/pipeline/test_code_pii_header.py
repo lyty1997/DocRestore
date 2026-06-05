@@ -10,7 +10,8 @@
 
 覆盖：
   - ``_split_leading_comment``：跨语言注释块识别，无注释直通
-  - ``_redact_code_headers``：header 内邮箱被替换、正文 import/namespace 不动
+  - ``_redact_code_pii``：header 全量脱敏 + 正文 regex（结构化 PII + 凭据/token）
+    与自定义词脱敏，但不做实体脱敏（import 路径 / namespace / 标识符不动）
 """
 
 from __future__ import annotations
@@ -100,7 +101,7 @@ class TestSplitLeadingComment:
 
 
 def _build_source(merged_text: str, path: str = "x/foo.cc") -> SourceFile:
-    """构造最小 SourceFile 用于 _redact_code_headers 测试。"""
+    """构造最小 SourceFile 用于 _redact_code_pii 测试。"""
     pc = PageColumn(
         page_stem="page00001",
         column_index=0,
@@ -131,26 +132,47 @@ def _build_source(merged_text: str, path: str = "x/foo.cc") -> SourceFile:
     )
 
 
-class TestRedactCodeHeaders:
-    """端到端：header 邮箱被替换、正文 import 不动。"""
+class TestRedactCodePii:
+    """端到端：header 全量脱敏 + 正文 regex/凭据脱敏，import/标识符不动。"""
 
     @pytest.mark.asyncio
-    async def test_email_in_header_redacted_body_intact(self) -> None:
+    async def test_email_redacted_in_header_and_body(self) -> None:
+        """header 与正文里的结构化 PII（邮箱）都脱敏；import 路径不被误伤。"""
         src = _build_source(
             "// Copyright 2024 ACME\n"
             "// Author: alice@acme.com\n"
             "\n"
             "#include \"third_party/acme/headers.h\"\n"
-            "// runtime contact: bob@acme.com (in body — must NOT be touched)\n",
+            "// runtime contact: bob@acme.com\n",
         )
         pii_cfg = PIIConfig(enable=True)
-        pipe = Pipeline.__new__(Pipeline)  # 跳过 __init__；只测 _redact_code_headers
-        await pipe._redact_code_headers([src], pii_cfg, refiner=None)
-        # header 邮箱 → 占位符
+        pipe = Pipeline.__new__(Pipeline)  # 跳过 __init__；只测 _redact_code_pii
+        await pipe._redact_code_pii([src], pii_cfg, refiner=None)
+        # header 与正文邮箱都 → 占位符（正文走 redact_regex_only）
         assert "alice@acme.com" not in src.merged_text
-        # body 邮箱保留（不脱敏正文）+ import 路径保留
-        assert "bob@acme.com" in src.merged_text
+        assert "bob@acme.com" not in src.merged_text
+        # import 路径不被结构化 regex 误伤
         assert "third_party/acme/headers.h" in src.merged_text
+
+    @pytest.mark.asyncio
+    async def test_body_credential_redacted_identifier_intact(self) -> None:
+        """正文里的硬编码凭据/token 被脱敏；变量名/namespace 等标识符不动。"""
+        src = _build_source(
+            "// header\n"
+            'const char* password = "hunter2secret";\n'
+            'std::string apikey = "sk-abcdefghijklmnopqrstuvwxyz0123";\n'
+            "namespace acme { int Zhang = 1; }\n",
+        )
+        pii_cfg = PIIConfig(enable=True)
+        pipe = Pipeline.__new__(Pipeline)
+        await pipe._redact_code_pii([src], pii_cfg, refiner=None)
+        # 凭据值 / token 被替换
+        assert "hunter2secret" not in src.merged_text
+        assert "sk-abcdefghijklmnopqrstuvwxyz0123" not in src.merged_text
+        assert pii_cfg.credential_placeholder in src.merged_text
+        # 正文不做实体脱敏（无 lexicon）：namespace / 变量名保留（AGE-50）
+        assert "namespace acme" in src.merged_text
+        assert "Zhang" in src.merged_text
 
     @pytest.mark.asyncio
     async def test_lexicon_only_from_headers(self) -> None:
@@ -166,7 +188,7 @@ class TestRedactCodeHeaders:
             return_value=([], ["XuanTie"]),
         )
         pipe = Pipeline.__new__(Pipeline)
-        await pipe._redact_code_headers([src], pii_cfg, refiner=refiner)
+        await pipe._redact_code_pii([src], pii_cfg, refiner=refiner)
         # header XuanTie 被替换
         assert "Copyright 2024 XuanTie" not in src.merged_text
         # body import 路径里的 xuantie_ext 不动（lexicon 只跑在 header 上）
@@ -179,7 +201,7 @@ class TestRedactCodeHeaders:
         pii_cfg = PIIConfig(enable=False)
         # enable=False 时调用方过滤，但本方法 defensive：不应崩
         pipe = Pipeline.__new__(Pipeline)
-        await pipe._redact_code_headers([src], pii_cfg, refiner=None)
+        await pipe._redact_code_pii([src], pii_cfg, refiner=None)
         # 即使 enable=False 走到这里，redact_snippet 仍按 regex 替换
         # （这里只验证不抛异常；调用方过滤是 _code_pipeline 的职责）
         assert isinstance(src.merged_text, str)
@@ -187,17 +209,17 @@ class TestRedactCodeHeaders:
         del original  # 避免 unused
 
     @pytest.mark.asyncio
-    async def test_no_header_skips(self) -> None:
+    async def test_no_header_no_pii_unchanged(self) -> None:
+        """无 leading comment 且正文无 PII → 不应改任何字符（正文 regex 空转）。"""
         src = _build_source("int x = 1;\nint y = 2;\n")
         original = src.merged_text
         pii_cfg = PIIConfig(enable=True)
         pipe = Pipeline.__new__(Pipeline)
-        await pipe._redact_code_headers([src], pii_cfg, refiner=None)
-        # 无 leading comment → 不应改任何字符
+        await pipe._redact_code_pii([src], pii_cfg, refiner=None)
         assert src.merged_text == original
 
 
-class TestRedactCodeHeadersFailClosed:
+class TestRedactCodePiiFailClosed:
     """#25：检测失败 + block_cloud_on_detect_failure → 返回 block_cloud 阻断云端。"""
 
     @staticmethod
@@ -217,7 +239,7 @@ class TestRedactCodeHeadersFailClosed:
             block_cloud_on_detect_failure=True,
         )
         pipe = Pipeline.__new__(Pipeline)
-        block = await pipe._redact_code_headers(
+        block = await pipe._redact_code_pii(
             [src], pii_cfg, refiner=self._raising_refiner(),
         )
         assert block is True
@@ -231,7 +253,7 @@ class TestRedactCodeHeadersFailClosed:
             block_cloud_on_detect_failure=False,
         )
         pipe = Pipeline.__new__(Pipeline)
-        block = await pipe._redact_code_headers(
+        block = await pipe._redact_code_pii(
             [src], pii_cfg, refiner=self._raising_refiner(),
         )
         assert block is False
@@ -247,7 +269,7 @@ class TestRedactCodeHeadersFailClosed:
         refiner = AsyncMock()
         refiner.detect_pii_entities = AsyncMock(return_value=(["someone"], []))
         pipe = Pipeline.__new__(Pipeline)
-        block = await pipe._redact_code_headers([src], pii_cfg, refiner=refiner)
+        block = await pipe._redact_code_pii([src], pii_cfg, refiner=refiner)
         assert block is False
 
     @pytest.mark.asyncio
@@ -259,5 +281,5 @@ class TestRedactCodeHeadersFailClosed:
             block_cloud_on_detect_failure=True,
         )
         pipe = Pipeline.__new__(Pipeline)
-        block = await pipe._redact_code_headers([src], pii_cfg, refiner=None)
+        block = await pipe._redact_code_pii([src], pii_cfg, refiner=None)
         assert block is False
