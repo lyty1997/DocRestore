@@ -14,12 +14,14 @@
 
 """结构化 PII 正则检测与替换
 
-处理顺序：身份证 → 邮箱 → 手机号 → 银行卡
-（避免 18 位身份证被银行卡候选吞掉）
+处理顺序：凭据/token → 身份证 → 邮箱 → user@host 连接目标 → 手机号
+→ 银行卡 → 内部 URL（避免 18 位身份证被银行卡候选吞掉；邮箱先于 host
+吃掉带 TLD 的 user@domain.tld，host 只接 IP 与无 TLD 主机名残留）。
 """
 
 from __future__ import annotations
 
+import ipaddress
 import re
 
 from docrestore.models import RedactionRecord
@@ -85,6 +87,58 @@ _TOKEN_FORMAT_RE = re.compile(
     r")"
 )
 
+# user@host 连接目标（scp/ssh/rsync 目标，无 scheme / 无 password）。user 常含
+# 人名（如 qiangming@host），整体脱。只接两类：user@IPv4、user@单 label 主机名
+# （无点）。**带点的 FQDN / 邮箱域名（user@a.b.com）一律不收**——交给邮箱步骤；
+# 这样即便用户关掉 redact_email，user@domain.com 也不会被 host 误切成
+# [主机地址].com。主机名分支末尾 lookahead 拦住 FQDN 前缀；lookbehind 排除
+# @/./-/词字符，避免匹配 a.b@c 中段或路径内片段。
+_HOST_TARGET_RE = re.compile(
+    r"(?<![\w@./-])"
+    r"[A-Za-z0-9_][A-Za-z0-9._-]*@"
+    r"(?:"
+    r"\d{1,3}(?:\.\d{1,3}){3}"                      # IPv4
+    r"|[A-Za-z][A-Za-z0-9-]*(?![A-Za-z0-9.-])"      # 单 label 主机名（无 TLD）
+    r")"
+    r"(?::\d{1,5})?"                               # 可选端口
+)
+
+# 内部 URL：私有内网 IP（10/172.16-31/192.168/127）的 URL 一律脱；host 命中
+# sensitive_url_domains（用户配置后缀，如 antfin.com）的也脱。支持无 scheme 的
+# 裸域名（OCR 文档常无 http://）。回调按 host 判定，非私有 / 非敏感域名原样保留，
+# 不误伤公网链接。host 域名分支要求 ≥1 个点（FQDN），避免吞普通词。
+_URL_LIKE_RE = re.compile(
+    r"(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*://)?"
+    r"(?P<host>"
+    r"\d{1,3}(?:\.\d{1,3}){3}"
+    r"|[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+"
+    r")"
+    r"(?::\d{1,5})?"
+    r"(?:[/?#][^\s\"'<>)）】\]]*)?"
+)
+
+
+def _host_matches_domains(host: str, domains: list[str]) -> bool:
+    """host 等于某敏感域名或为其子域（大小写无关的后缀匹配）。"""
+    host_l = host.lower().rstrip(".")
+    for raw in domains:
+        d = raw.strip().lower().lstrip(".")
+        if not d:
+            continue
+        if host_l == d or host_l.endswith("." + d):
+            return True
+    return False
+
+
+def _is_internal_ip(host: str) -> bool:
+    """host 是私有 / 回环 IPv4 地址。非 IP 形态返回 False。"""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback
+
 
 def _normalize_digits(raw: str) -> str:
     """去掉空格和短横线，只保留数字和 Xx。"""
@@ -122,9 +176,11 @@ def redact_structured_pii(
 ) -> tuple[str, list[RedactionRecord]]:
     """正则替换结构化 PII，返回 (脱敏文本, 记录列表)。
 
-    处理顺序：凭据/token → 身份证 → 邮箱 → 手机号 → 银行卡。凭据先行避免
-    ``password=13800001111`` 的值被当手机号等误分类；已替换位置为占位符，
-    后续模式不会再匹配到。
+    处理顺序：凭据/token → 身份证 → 邮箱 → user@host → 手机号 → 银行卡
+    → 内部 URL。凭据先行避免 ``password=13800001111`` 的值被当手机号等误分类；
+    邮箱先于 host，吃掉带 TLD 的 ``user@domain.tld``（host 只接 IP 与无 TLD 主机名
+    残留）；内部 URL 最后，host step 已先把 ``user@IP`` 整体脱掉。已替换位置为
+    占位符，后续模式不会再匹配到。
     """
     records: list[RedactionRecord] = []
 
@@ -143,12 +199,20 @@ def redact_structured_pii(
             "email", config.email_placeholder,
         ),
         (
+            config.redact_host, _replace_host,
+            "host", config.host_placeholder,
+        ),
+        (
             config.redact_phone, _replace_phone,
             "phone", config.phone_placeholder,
         ),
         (
             config.redact_bank_card, _replace_bank_card,
             "bank_card", config.bank_card_placeholder,
+        ),
+        (
+            config.redact_internal_url, _replace_internal_url,
+            "internal_url", config.internal_url_placeholder,
         ),
     )
 
@@ -263,4 +327,41 @@ def _replace_credentials(
     text = _CRED_KV_RE.sub(_kv_repl, text)
     text = _URL_CRED_RE.sub(_url_repl, text)
     text = _TOKEN_FORMAT_RE.sub(_token_repl, text)
+    return text, count
+
+
+def _replace_host(
+    text: str, config: PIIConfig,
+) -> tuple[str, int]:
+    """替换 user@host 连接目标（user@IP / user@主机名），整体含 user 一并脱。"""
+    count = 0
+
+    def _repl(_m: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        return config.host_placeholder
+
+    text = _HOST_TARGET_RE.sub(_repl, text)
+    return text, count
+
+
+def _replace_internal_url(
+    text: str, config: PIIConfig,
+) -> tuple[str, int]:
+    """替换内部 URL：私有 IP 的 URL + host 命中敏感域名后缀的 URL。
+
+    非私有 / 非敏感域名的 URL 原样保留（回调返回 ``m.group(0)``），不误伤公网链接。
+    """
+    count = 0
+    domains = config.sensitive_url_domains
+
+    def _repl(m: re.Match[str]) -> str:
+        nonlocal count
+        host = m.group("host")
+        if _is_internal_ip(host) or _host_matches_domains(host, domains):
+            count += 1
+            return config.internal_url_placeholder
+        return m.group(0)
+
+    text = _URL_LIKE_RE.sub(_repl, text)
     return text, count

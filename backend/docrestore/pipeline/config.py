@@ -294,6 +294,12 @@ class PIIConfig(BaseModel):
     #: → 上云端精修与落盘前就抹掉，覆盖正则原本兜不到的密码/用户名/账号/token。
     #: 偏向"宁多勿漏"（over-redact 安全），技术文档误报高时可关此项。
     redact_credential: bool = True
+    #: user@host 连接目标（scp/ssh/rsync 目标，user 常含人名）。user@IP 与
+    #: user@主机名都脱；邮箱步骤先吃掉带 TLD 的 user@domain.tld。宁多勿漏，可关。
+    redact_host: bool = True
+    #: 内部 URL：私有内网 IP（10/172.16-31/192.168/127）的 URL 一律脱；host 命中
+    #: sensitive_url_domains 后缀的也脱。非私有 / 非配置域名的公网链接不动。
+    redact_internal_url: bool = True
 
     # 实体 PII（LLM）
     redact_person_name: bool = True
@@ -305,12 +311,19 @@ class PIIConfig(BaseModel):
     id_card_placeholder: str = "[身份证号]"
     bank_card_placeholder: str = "[银行卡号]"
     credential_placeholder: str = "[凭据]"
+    host_placeholder: str = "[主机地址]"
+    internal_url_placeholder: str = "[内部链接]"
     person_name_placeholder: str = "[人名]"
     org_name_placeholder: str = "[机构名]"
 
     # 自定义敏感词（用户指定，每项可选代号）
     custom_sensitive_words: list[CustomWord] = Field(default_factory=list)
     custom_words_placeholder: str = "[敏感词]"
+
+    #: 内部 URL 敏感域名后缀（如 ``antfin.com``）。host 等于或为其子域的 URL
+    #: 整体脱成 internal_url_placeholder（大小写无关）。空列表时仅私有 IP 的 URL
+    #: 被脱。配置后即覆盖如 ``aliyuque.antfin.com/...`` 这类公网内部平台链接。
+    sensitive_url_domains: list[str] = Field(default_factory=list)
 
     # 实体检测失败时阻断云端调用（保证不外泄）
     block_cloud_on_detect_failure: bool = True

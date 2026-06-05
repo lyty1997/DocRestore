@@ -265,3 +265,140 @@ class TestCredentialRedaction:
             result, records = redact_structured_pii(text, cfg)
             assert result == text, f"误伤: {text!r} -> {result!r}"
             assert not any(r.kind == "credential" for r in records)
+
+
+class TestHostTargetRedaction:
+    """user@host 连接目标脱敏（user@IP / user@主机名，user 含人名一起脱）。"""
+
+    def test_user_at_ip_redacted(self) -> None:
+        """scp 目标 user@IP 整体脱，user（人名）也不残留。"""
+        cfg = PIIConfig(enable=True)
+        text = "scp perf.sample qiangming@30.21.162.200:/Users/x/perf"
+        result, records = redact_structured_pii(text, cfg)
+        assert "qiangming@30.21.162.200" not in result
+        assert "qiangming" not in result.split(":/")[0]  # user 一起脱
+        assert cfg.host_placeholder in result
+        assert any(r.kind == "host" for r in records)
+
+    def test_user_at_hostname_redacted(self) -> None:
+        """无 TLD 主机名形态 user@buildbox 也脱。"""
+        cfg = PIIConfig(enable=True)
+        text = "ssh deploy@buildbox 部署服务"
+        result, records = redact_structured_pii(text, cfg)
+        assert "deploy@buildbox" not in result
+        assert cfg.host_placeholder in result
+        assert any(r.kind == "host" for r in records)
+
+    def test_email_takes_precedence_over_host(self) -> None:
+        """带 TLD 的 user@domain.tld 由邮箱步骤先脱（占位符是邮箱，非主机）。"""
+        cfg = PIIConfig(enable=True)
+        text = "联系 alice@acme.com 获取权限"
+        result, records = redact_structured_pii(text, cfg)
+        assert "alice@acme.com" not in result
+        assert cfg.email_placeholder in result
+        assert any(r.kind == "email" for r in records)
+        assert not any(r.kind == "host" for r in records)
+
+    def test_at_mention_not_redacted(self) -> None:
+        """@提及 / 装饰器 / npm scope（@ 前无 user）不误伤。"""
+        cfg = PIIConfig(enable=True)
+        for text in (
+            "cc @qiangming 看一下",
+            "@staticmethod\n@property",
+            "npm install @types/node",
+        ):
+            result, _ = redact_structured_pii(text, cfg)
+            assert result == text, f"误伤: {text!r} -> {result!r}"
+
+    def test_email_off_keeps_fqdn_but_redacts_single_label(self) -> None:
+        """关 redact_email：user@FQDN（邮箱形态）保留，user@单 label 仍脱。
+
+        host step 不收带点 FQDN（交邮箱步骤），避免把 user@a.com 误切成
+        [主机地址].com；单 label 主机名无歧义照常脱。
+        """
+        cfg = PIIConfig(enable=True, redact_email=False)
+        kept, _ = redact_structured_pii("发到 user@example.com", cfg)
+        assert "user@example.com" in kept
+        red, records = redact_structured_pii("ssh root@devbox", cfg)
+        assert "root@devbox" not in red
+        assert any(r.kind == "host" for r in records)
+
+    def test_toggle_off(self) -> None:
+        """redact_host=False 时 user@IP 保留（非私有 IP，不被 URL 步骤碰）。"""
+        cfg = PIIConfig(enable=True, redact_host=False)
+        text = "scp x user1@30.21.162.200:/tmp/a"
+        result, records = redact_structured_pii(text, cfg)
+        assert "user1@30.21.162.200" in result
+        assert not any(r.kind == "host" for r in records)
+
+
+class TestInternalUrlRedaction:
+    """内部 URL 脱敏：私有 IP 的 URL（零配置）+ 配置域名后缀的 URL。"""
+
+    def test_private_ip_url_redacted(self) -> None:
+        """私有内网 IP 的 URL 零配置即脱。"""
+        cfg = PIIConfig(enable=True)
+        text = "访问 http://192.168.1.1/admin 后台"
+        result, records = redact_structured_pii(text, cfg)
+        assert "192.168.1.1" not in result
+        assert cfg.internal_url_placeholder in result
+        assert any(r.kind == "internal_url" for r in records)
+
+    def test_private_ip_10_with_port(self) -> None:
+        """10 段私有 IP 带端口/路径整体脱。"""
+        cfg = PIIConfig(enable=True)
+        text = "http://10.21.33.5:8080/dashboard"
+        result, _ = redact_structured_pii(text, cfg)
+        assert result == cfg.internal_url_placeholder
+
+    def test_loopback_redacted(self) -> None:
+        """回环地址 127.0.0.1 视为内部。"""
+        cfg = PIIConfig(enable=True)
+        text = "本地服务 http://127.0.0.1:3000 调试"
+        result, _ = redact_structured_pii(text, cfg)
+        assert "127.0.0.1" not in result
+        assert cfg.internal_url_placeholder in result
+
+    def test_configured_domain_redacted(self) -> None:
+        """host 命中配置的敏感域名后缀 → 整条 URL（含路径）脱。"""
+        cfg = PIIConfig(enable=True, sensitive_url_domains=["antfin.com"])
+        text = "见 aliyuque.antfin.com/theadiotsw/linuxsdk/abc#meeting"
+        result, records = redact_structured_pii(text, cfg)
+        assert "antfin.com" not in result
+        assert "theadiotsw" not in result  # 路径里的作者 handle 一起脱
+        assert cfg.internal_url_placeholder in result
+        assert any(r.kind == "internal_url" for r in records)
+
+    def test_subdomain_match(self) -> None:
+        """配置 antfin.com 时其子域 wiki.antfin.com 也命中。"""
+        cfg = PIIConfig(enable=True, sensitive_url_domains=["antfin.com"])
+        text = "http://wiki.antfin.com/page/123"
+        result, _ = redact_structured_pii(text, cfg)
+        assert result == cfg.internal_url_placeholder
+
+    def test_public_url_preserved(self) -> None:
+        """非私有 / 非配置域名的公网链接不动。"""
+        cfg = PIIConfig(enable=True, sensitive_url_domains=["antfin.com"])
+        for text in (
+            "https://github.com/torvalds/linux 开源",
+            "参考 stackoverflow.com 上的答案",
+            "config.json v1.2.3 已发布",
+        ):
+            result, records = redact_structured_pii(text, cfg)
+            assert result == text, f"误伤: {text!r} -> {result!r}"
+            assert not any(r.kind == "internal_url" for r in records)
+
+    def test_unconfigured_domain_preserved(self) -> None:
+        """默认空域名列表时，公网内部平台域名不脱（须显式配置才生效）。"""
+        cfg = PIIConfig(enable=True)
+        text = "见 aliyuque.antfin.com/theadiotsw/abc"
+        result, _ = redact_structured_pii(text, cfg)
+        assert result == text
+
+    def test_toggle_off(self) -> None:
+        """redact_internal_url=False 时私有 IP URL 不脱。"""
+        cfg = PIIConfig(enable=True, redact_internal_url=False)
+        text = "http://192.168.1.1/admin"
+        result, records = redact_structured_pii(text, cfg)
+        assert "192.168.1.1" in result
+        assert not any(r.kind == "internal_url" for r in records)
