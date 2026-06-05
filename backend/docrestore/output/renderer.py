@@ -28,6 +28,23 @@ import aiofiles
 from docrestore.models import MergedDocument
 from docrestore.pipeline.config import OutputConfig
 
+#: 带 page marker 的"预览版"markdown sidecar 文件名。
+#: ``document.md`` 是剥除版（下载/交付，用户不看 HTML 注释）；本 sidecar 保留
+#: ``<!-- page: xxx -->`` 标记，供任务从 DB 水合后前端仍能定位左右同步滚动锚点
+#: （水合会从磁盘重读 markdown，若只有剥除版 document.md 则锚点全失）。
+#: dot 前缀=内部文件，不进下载 zip（zip 只收 document.md + images/）。
+ANCHORED_DOCUMENT_FILENAME = ".document.anchored.md"
+
+
+def strip_page_markers(markdown: str) -> str:
+    """剥除 ``<!-- page: xxx -->`` 页边界标记并归并多余空行。
+
+    生成"下载版"document.md：用户下载不需要看到内部 HTML 注释锚点。
+    只在被删 marker 周围（3+ 连续换行处）归并空行，不影响正文其它留白。
+    """
+    stripped = re.sub(r"<!--\s*page:\s*[^>]*-->\n?", "", markdown)
+    return re.sub(r"\n{3,}", "\n\n", stripped).strip() + "\n"
+
 
 class Renderer:
     """将精修后的文档渲染为最终输出文件"""
@@ -70,19 +87,22 @@ class Renderer:
         ).strip() + "\n"
 
         # 磁盘版：去掉 page markers（下载用户不需要看到 HTML 注释）
-        markdown_for_disk = re.sub(
-            r"<!--\s*page:\s*[^>]*-->\n?", "", markdown_with_markers,
-        )
-        markdown_for_disk = re.sub(
-            r"\n{3,}", "\n\n", markdown_for_disk,
-        ).strip() + "\n"
+        markdown_for_disk = strip_page_markers(markdown_with_markers)
 
-        # 写入 document.md（剥除版）
+        # 写入 document.md（剥除版，下载/交付用）
         doc_path = output_dir / "document.md"
         async with aiofiles.open(
             doc_path, "w", encoding="utf-8"
         ) as f:
             await f.write(markdown_for_disk)
+
+        # 写入带 marker 的预览版 sidecar：任务从 DB 水合后前端仍能拿到
+        # <!-- page --> 锚点做左右同步滚动（document.md 已剥除，水合会读它）。
+        anchored_path = output_dir / ANCHORED_DOCUMENT_FILENAME
+        async with aiofiles.open(
+            anchored_path, "w", encoding="utf-8"
+        ) as f:
+            await f.write(markdown_with_markers)
 
         return doc_path, markdown_with_markers
 

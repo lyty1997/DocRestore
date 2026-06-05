@@ -35,12 +35,18 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from docrestore.models import PipelineResult, TaskProgress
+from docrestore.output.renderer import ANCHORED_DOCUMENT_FILENAME
 from docrestore.persistence.database import TaskDatabase, TaskRow
 from docrestore.pipeline.config import (
     CodeRestoreConfig,
     PowerPointRestoreConfig,
 )
-from docrestore.pipeline.task_manager import Task, TaskManager, TaskStatus
+from docrestore.pipeline.task_manager import (
+    Task,
+    TaskManager,
+    TaskStatus,
+    _read_hydration_markdown,
+)
 
 
 def _make_manager(
@@ -874,3 +880,37 @@ class TestLoadPersistedResilience:
             assert mgr.get_task("bad00001") is None  # 坏任务被跳过
         finally:
             await db.close()
+
+
+class TestHydrationMarkdown:
+    """水合 markdown 读取：优先带 marker 的 sidecar，回退 document.md。"""
+
+    def test_prefers_anchored_sidecar(self, tmp_path: Path) -> None:
+        """有 sidecar 时读它——保住文档/PPT 左右同步滚动的 page 锚点。"""
+        doc = tmp_path / "document.md"
+        doc.write_text("# 剥除版\n正文\n", encoding="utf-8")
+        sidecar = tmp_path / ANCHORED_DOCUMENT_FILENAME
+        sidecar.write_text(
+            "<!-- page: p1.jpg -->\n# 带锚点\n正文\n", encoding="utf-8",
+        )
+        out = _read_hydration_markdown(doc)
+        assert "<!-- page: p1.jpg -->" in out
+
+    def test_falls_back_to_document_when_no_sidecar(
+        self, tmp_path: Path
+    ) -> None:
+        """无 sidecar（老任务）时回退 document.md，不报错。"""
+        doc = tmp_path / "document.md"
+        doc.write_text("# 只有剥除版\n", encoding="utf-8")
+        out = _read_hydration_markdown(doc)
+        assert "# 只有剥除版" in out
+
+    def test_falls_back_when_sidecar_empty(self, tmp_path: Path) -> None:
+        """sidecar 存在但为空时回退 document.md（避免水合出空文档）。"""
+        doc = tmp_path / "document.md"
+        doc.write_text("# 正文\n", encoding="utf-8")
+        (tmp_path / ANCHORED_DOCUMENT_FILENAME).write_text(
+            "", encoding="utf-8",
+        )
+        out = _read_hydration_markdown(doc)
+        assert "# 正文" in out

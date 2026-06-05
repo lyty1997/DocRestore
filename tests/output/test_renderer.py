@@ -21,8 +21,25 @@ from pathlib import Path
 import pytest
 
 from docrestore.models import MergedDocument
-from docrestore.output.renderer import Renderer
+from docrestore.output.renderer import (
+    ANCHORED_DOCUMENT_FILENAME,
+    Renderer,
+    strip_page_markers,
+)
 from docrestore.pipeline.config import OutputConfig
+
+
+def test_strip_page_markers_removes_only_markers() -> None:
+    """strip_page_markers 只剥 page marker，正文与其它留白保留。"""
+    md = (
+        "<!-- page: a.jpg -->\n# 标题\n\n正文段\n"
+        "<!-- page: b.jpg -->\n结尾段"
+    )
+    out = strip_page_markers(md)
+    assert "<!-- page:" not in out
+    assert "# 标题" in out
+    assert "正文段" in out
+    assert "结尾段" in out
 
 
 @pytest.fixture
@@ -54,6 +71,37 @@ class TestRenderer:
         assert "# 标题" in content
         assert "正文内容" in content
         assert "更多内容" in content
+
+    @pytest.mark.asyncio
+    async def test_writes_anchored_sidecar_with_markers(
+        self, renderer: Renderer, tmp_path: Path
+    ) -> None:
+        """落带 marker 的 sidecar 供水合：document.md 剥除版、sidecar 保留版。
+
+        前端文档/PPT 左右同步滚动靠 markdown 里的 <!-- page --> 锚点；任务从 DB
+        水合后会从磁盘重读 markdown，若只有剥除版 document.md 则锚点全失。
+        """
+        doc = MergedDocument(
+            markdown=(
+                "<!-- page: page1.jpg -->\n"
+                "# 标题\n\n正文A\n"
+                "<!-- page: page2.jpg -->\n正文B"
+            )
+        )
+        doc_path, returned = await renderer.render(doc, tmp_path)
+
+        # document.md：剥除版（下载/交付）
+        assert "<!-- page:" not in doc_path.read_text(encoding="utf-8")
+
+        # sidecar：带 marker（水合锚点）
+        sidecar = tmp_path / ANCHORED_DOCUMENT_FILENAME
+        assert sidecar.is_file()
+        anchored = sidecar.read_text(encoding="utf-8")
+        assert "<!-- page: page1.jpg -->" in anchored
+        assert "<!-- page: page2.jpg -->" in anchored
+
+        # 返回的内存版同样带 marker（新任务即时预览用）
+        assert "<!-- page: page1.jpg -->" in returned
 
     @pytest.mark.asyncio
     async def test_renders_plain_content(

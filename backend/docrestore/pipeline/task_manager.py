@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from docrestore.models import PipelineResult, TaskProgress
+from docrestore.output.renderer import ANCHORED_DOCUMENT_FILENAME
 from docrestore.pipeline.config import (
     CodeRestoreConfig,
     LLMConfig,
@@ -99,6 +100,21 @@ def _read_text_or_empty(path: Path) -> str:
     except OSError:
         logger.warning("load_persisted_tasks: 读取 markdown 失败 (%s)", path)
         return ""
+
+
+def _read_hydration_markdown(output_path: Path) -> str:
+    """水合任务结果时读取 markdown：优先带 marker 的预览版 sidecar。
+
+    ``document.md`` 是剥除 page marker 的下载版，水合后直接读它会让前端文档/PPT
+    左右同步滚动失去 ``[data-page]`` 锚点。故优先读同目录下的
+    ``.document.anchored.md``（含 marker），缺失/空时回退 ``document.md``。
+    """
+    sidecar = output_path.with_name(ANCHORED_DOCUMENT_FILENAME)
+    if sidecar.is_file():
+        text = _read_text_or_empty(sidecar)
+        if text:
+            return text
+    return _read_text_or_empty(output_path)
 
 
 def _write_debug_error(output_dir: Path, content: str) -> None:
@@ -202,7 +218,7 @@ class TaskManager:
                 for r in rows:
                     output_path = Path(r.output_path)
                     markdown = await asyncio.to_thread(
-                        _read_text_or_empty, output_path,
+                        _read_hydration_markdown, output_path,
                     )
                     task.results.append(PipelineResult(
                         output_path=output_path,
@@ -714,13 +730,19 @@ class TaskManager:
 
         result = task.results[result_index]
 
-        # 写回磁盘
+        # 写回磁盘：document.md 保持前端原样（既有行为，不改归一化）；同时
+        # 同步更新带 marker 的 sidecar，避免"已渲染文档有旧 sidecar、编辑后却没
+        # 刷新"→ 水合读到旧内容。前端编辑器经 markdownRoundtrip 往返保留 page
+        # anchor，故两份通常都含 marker；不含时也只是退化为无锚点，不串内容。
         import aiofiles
 
         async with aiofiles.open(result.output_path, "w", encoding="utf-8") as f:
             await f.write(markdown)
+        anchored_path = result.output_path.with_name(ANCHORED_DOCUMENT_FILENAME)
+        async with aiofiles.open(anchored_path, "w", encoding="utf-8") as f:
+            await f.write(markdown)
 
-        # 更新内存
+        # 更新内存（保留 marker，供当前前端会话继续同步滚动）
         result.markdown = markdown
 
         return None
