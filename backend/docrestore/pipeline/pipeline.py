@@ -966,7 +966,7 @@ class Pipeline:
 
         return breaker.subscribe_open(listener)
 
-    async def _ppt_pipeline(
+    async def _ppt_pipeline(  # noqa: C901
         self,
         page_queue: asyncio.Queue[PageOCR | None],
         output_dir: Path,
@@ -1007,7 +1007,34 @@ class Pipeline:
 
         ordered_pages: list[PageOCR] = []
         bodies: list[str] = []
+        pending: list[int] = []  # 早窗口推迟精修的页在 bodies 中的下标
         idx = 0
+
+        async def _finish_page(bi: int) -> None:
+            """精修 bodies[bi]（refining 时，送云端前用就绪词表脱敏人名/机构名）
+            并报进度。闭包读 refiner/refining/entity_lexicon 调用时的当前值。"""
+            if refining:
+                # slide_mode：用 SLIDE_REFINE_SYSTEM_PROMPT，只修格式不跨页去重
+                result, _used = await self._refine_segment_with_cache(
+                    refiner, bodies[bi], bi, total, cache, llm_cfg, quality,
+                    slide_mode=True,
+                    redactor=redactor, entity_lexicon=entity_lexicon,
+                )
+                bodies[bi] = result.markdown
+            # 进度文案区分是否真精修：关精修时只是逐页组装，不报"精修"误导用户
+            report_fn(
+                "ppt_refine" if refining else "ppt_page", bi + 1, total,
+                (
+                    f"PPT 模式：精修第 {bi + 1}/{total} 页" if refining
+                    else f"PPT 模式：处理第 {bi + 1}/{total} 页"
+                ),
+                message_key=(
+                    "progress.pptPage" if refining
+                    else "progress.pptPagePlain"
+                ),
+                message_params={"current": str(bi + 1), "total": str(total)},
+            )
+
         while True:
             page = await page_queue.get()
             if page is None:
@@ -1034,32 +1061,14 @@ class Pipeline:
                         "failure=True：停用云端精修，后续页退原文（不外发"
                         "人名/机构名）",
                     )
-            if refining:
-                # slide_mode：用 SLIDE_REFINE_SYSTEM_PROMPT，只修格式不跨页去重；
-                # 词表就绪后在送云端精修前脱敏人名/机构名
-                result, _used = await self._refine_segment_with_cache(
-                    refiner, body, idx, total, cache, llm_cfg, quality,
-                    slide_mode=True,
-                    redactor=redactor, entity_lexicon=entity_lexicon,
-                )
-                body = result.markdown
             ordered_pages.append(page)
             bodies.append(body)
-            # 进度文案区分是否真精修：关精修时只是逐页组装，不报"精修"误导用户
-            report_fn(
-                "ppt_refine" if refining else "ppt_page", idx + 1, total,
-                (
-                    f"PPT 模式：精修第 {idx + 1}/{total} 页" if refining
-                    else f"PPT 模式：处理第 {idx + 1}/{total} 页"
-                ),
-                message_key=(
-                    "progress.pptPage" if refining
-                    else "progress.pptPagePlain"
-                ),
-                message_params={
-                    "current": str(idx + 1), "total": str(total),
-                },
-            )
+            # 早窗口防泄漏：要求实体脱敏且词表未就绪 → 推迟本页精修，避免人名/
+            # 机构名在检测完成前外发；词表就绪后统一追平。
+            if pii_done or not self._entity_redaction_pending(pii):
+                await _finish_page(idx)
+            else:
+                pending.append(idx)
             idx += 1
 
         if not ordered_pages:
@@ -1071,6 +1080,19 @@ class Pipeline:
             entity_lexicon = await self._detect_entities(
                 "\n".join(raw_accum), llm, pii,
             )
+            pii_done = True
+            if self._should_block_cloud(entity_lexicon, pii):
+                refiner = None
+                refining = False
+                logger.warning(
+                    "PPT 模式 PII 实体检测失败且 block_cloud_on_detect_failure="
+                    "True：停用云端精修，推迟页退原文（不外发人名/机构名）",
+                )
+
+        # 早窗口推迟的页：词表就绪后统一精修（送云端前用词表脱敏人名/机构名）
+        for bi in pending:
+            await _finish_page(bi)
+
         # 实体脱敏输出兜底：词表就绪前已精修的早窗口页可能漏掉实体，对组装正文
         # 再脱敏一遍（已脱敏页为占位符，幂等无副作用）。
         if entity_lexicon is not None and redactor is not None:
@@ -1674,15 +1696,20 @@ class Pipeline:
                             "True：停用云端精修，后续段退原文（不外发人名/机构名）",
                         )
 
-                segmented_offset, segment_index = (
-                    await self._try_extract_and_refine(
-                        merger, extractor, refiner, controller,
-                        segmented_offset, segment_index,
-                        refined_results, all_gaps, report_fn,
-                        cache, llm_cfg, quality,
-                        redactor=redactor, entity_lexicon=entity_lexicon,
+                # 早窗口防泄漏：要求实体脱敏时，词表就绪前只攒页不送云端精修，
+                # 避免人名/机构名在检测完成前外发；词表就绪后下一次调用一次性追平。
+                if pii_entity_done or not self._entity_redaction_pending(
+                    pii_cfg
+                ):
+                    segmented_offset, segment_index = (
+                        await self._try_extract_and_refine(
+                            merger, extractor, refiner, controller,
+                            segmented_offset, segment_index,
+                            refined_results, all_gaps, report_fn,
+                            cache, llm_cfg, quality,
+                            redactor=redactor, entity_lexicon=entity_lexicon,
+                        )
                     )
-                )
 
         # 短文档兜底：页数不足阈值时上面循环未建过 lexicon；这里补建一次，
         # 让尾段脱敏与最终输出兜底拿到词表（仅开 name 开关时实际检测，否则 None）。
@@ -1697,6 +1724,19 @@ class Pipeline:
                     "PII 实体检测失败且 block_cloud_on_detect_failure=True："
                     "停用云端精修，尾段/终结化退原文（不外发人名/机构名）",
                 )
+
+        # 早窗口推迟的分段：词表就绪后在此一次性追平（短文档 / 检测后才首次精修）。
+        # ≥阈值文档循环内已追平，此处 try_extract 直接返回 None，幂等无副作用。
+        if self._entity_redaction_pending(pii_cfg):
+            segmented_offset, segment_index = (
+                await self._try_extract_and_refine(
+                    merger, extractor, refiner, controller,
+                    segmented_offset, segment_index,
+                    refined_results, all_gaps, report_fn,
+                    cache, llm_cfg, quality,
+                    redactor=redactor, entity_lexicon=entity_lexicon,
+                )
+            )
 
         # 处理剩余文本（最后一段）
         md = merger.get_markdown()
@@ -2076,6 +2116,18 @@ class Pipeline:
         if not (pii_cfg.redact_person_name or pii_cfg.redact_org_name):
             return False
         return pii_cfg.block_cloud_on_detect_failure
+
+    @staticmethod
+    def _entity_redaction_pending(pii_cfg: PIIConfig) -> bool:
+        """是否需要 LLM 实体（人名/机构名）脱敏 —— 决定早窗口是否推迟云端精修。
+
+        True 时：实体词表（lexicon）就绪前不送任何分段/页去云端精修，避免人名/
+        机构名在检测完成前外发（结构化 PII / 凭据 / 自定义词已由 producer 入队前
+        正则脱敏，不受影响）。代价是词表就绪前的"先攒后发"流式延迟。
+        """
+        return pii_cfg.enable and (
+            pii_cfg.redact_person_name or pii_cfg.redact_org_name
+        )
 
     @staticmethod
     async def _refine_segment_with_cache(
