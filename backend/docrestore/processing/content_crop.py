@@ -25,7 +25,9 @@ MVP：只检测左右边界、纵向取整高。详见 ``docs/zh/doc-content-cro
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -142,3 +144,73 @@ def compute_crop_box(image_bgr: ImageBGR) -> tuple[int, int] | None:
     if ratio > _SKIP_RATIO or ratio < _MIN_RATIO:
         return None
     return box
+
+
+def _crop_sync(
+    image_path: Path,
+    output_dir: Path,
+    *,
+    save_debug: bool,
+    debug_dir: str,
+) -> Path:
+    """``crop_page`` 的同步实现（在 to_thread 中运行）。
+
+    返回供下游 OCR 使用的图片路径：裁剪成功 → 裁剪图路径；任何失败 / 跳过 → 原图路径。
+    """
+    image = cv2.imread(str(image_path))
+    if image is None:
+        logger.warning("正文裁剪读图失败，回退原图：%s", image_path)
+        return image_path
+    box = compute_crop_box(image)
+    if box is None:
+        logger.info(
+            "未检测到可裁剪正文区（已裁剪 / 无侧栏 / 检测不可靠），回退原图：%s",
+            image_path.name,
+        )
+        return image_path
+    x0, x1 = box
+    cropped = image[:, x0:x1]  # MVP：纵向取整高
+    crop_dir = output_dir / debug_dir
+    stem = image_path.stem
+    suffix = image_path.suffix or ".jpg"
+    after_path = crop_dir / f"{stem}_crop{suffix}"
+    # 落盘段整体兜底：mkdir / imwrite 可能抛 OSError 或 cv2.error，统一回退原图，
+    # 兑现"任何失败回退原图、不中断下游 OCR"契约（与 slide_rectify 一致）。
+    try:
+        crop_dir.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(after_path), cropped):
+            logger.warning("裁剪图写盘失败，回退原图：%s", image_path.name)
+            return image_path
+        if save_debug:
+            vis = image.copy()
+            cv2.rectangle(
+                vis, (x0, 0), (x1, image.shape[0] - 1), (0, 0, 255), 6,
+            )
+            cv2.imwrite(str(crop_dir / f"{stem}_box{suffix}"), vis)
+    except (OSError, cv2.error):
+        logger.warning(
+            "裁剪图落盘异常，回退原图：%s", image_path.name, exc_info=True,
+        )
+        return image_path
+    return after_path
+
+
+async def crop_page(
+    image_path: Path,
+    output_dir: Path,
+    *,
+    save_debug: bool = True,
+    debug_dir: str = ".content_crop",
+) -> Path:
+    """逐页正文裁剪异步入口。OpenCV 阻塞调用走 to_thread，不阻塞事件循环。
+
+    任何失败（读图失败 / 检测不可靠 / 已裁剪跳过 / 写盘失败）都回退原图路径，
+    保证下游 OCR 不中断。返回供 OCR 使用的图片路径。
+    """
+    return await asyncio.to_thread(
+        _crop_sync,
+        image_path,
+        output_dir,
+        save_debug=save_debug,
+        debug_dir=debug_dir,
+    )

@@ -14,6 +14,8 @@ cv2 缺失时整文件跳过（与 slide_rectify 测试一致）。
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -25,6 +27,7 @@ from cv2.typing import MatLike  # noqa: E402
 from docrestore.processing.content_crop import (  # noqa: E402
     _runs,
     compute_crop_box,
+    crop_page,
     detect_content_lr,
 )
 
@@ -112,3 +115,35 @@ class TestComputeCropBox:
     def test_blank_skipped(self) -> None:
         """检测失败 → 跳过 None。"""
         assert compute_crop_box(np.full((400, 600, 3), 255, np.uint8)) is None
+
+
+class TestCropPage:
+    """crop_page 异步入口：裁剪落盘 / 失败 / 跳过都回退原图。"""
+
+    @pytest.mark.asyncio
+    async def test_three_column_crops(self, tmp_path: Path) -> None:
+        """有侧栏：落盘裁剪图并返回其路径，裁剪图比原图窄。"""
+        src = tmp_path / "doc.jpg"
+        cv2.imwrite(str(src), _make_three_column())
+        out = await crop_page(src, tmp_path, save_debug=False)
+        assert out != src
+        cropped = cv2.imread(str(out))
+        assert cropped is not None
+        assert cropped.shape[1] < 1280
+
+    @pytest.mark.asyncio
+    async def test_full_width_returns_original(self, tmp_path: Path) -> None:
+        """无侧栏（已裁剪）：回退原图路径。"""
+        src = tmp_path / "cropped.jpg"
+        cv2.imwrite(str(src), _make_full_width())
+        out = await crop_page(src, tmp_path, save_debug=False)
+        assert out == src
+
+    @pytest.mark.asyncio
+    async def test_missing_file_returns_original(
+        self, tmp_path: Path,
+    ) -> None:
+        """读图失败：回退原图路径。"""
+        src = tmp_path / "nonexist.jpg"
+        out = await crop_page(src, tmp_path, save_debug=False)
+        assert out == src

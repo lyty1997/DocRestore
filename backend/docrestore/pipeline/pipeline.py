@@ -77,6 +77,7 @@ from docrestore.ocr.engine_manager import EngineManager
 from docrestore.output.renderer import Renderer
 from docrestore.pipeline.config import (
     CodeRestoreConfig,
+    ContentCropConfig,
     LLMConfig,
     OCRConfig,
     PIIConfig,
@@ -881,6 +882,11 @@ class Pipeline:
                 images, output_dir, gpu_lock, page_queue,
                 pages_ref, controller, _report, ocr_effective, pii_cfg,
                 quality=quality, ppt=ppt_cfg,
+                content_crop=(
+                    self._config.content_crop
+                    if not code_cfg.enable and not ppt_cfg.enable
+                    else None
+                ),
             ),
             name=f"ocr-producer-{image_dir.name}",
         )
@@ -1554,6 +1560,7 @@ class Pipeline:
         pii_cfg: PIIConfig,
         quality: QualityReport | None = None,
         ppt: PowerPointRestoreConfig | None = None,
+        content_crop: ContentCropConfig | None = None,
     ) -> None:
         """OCR 生产者：逐张 OCR → 清洗 → 可选 regex-only PII → 入队。
 
@@ -1570,8 +1577,9 @@ class Pipeline:
             )
             for i, img in enumerate(images):
                 t0 = time.perf_counter()
-                # PPT 模式：OCR 前逐页透视矫正（CPU），矫正图喂 OCR；
-                # page.image_path 改回原图，marker / 前端源图匹配用原文件名。
+                # OCR 前逐页前处理（CPU）：PPT 模式透视矫正 / 文档模式正文区裁剪
+                # （二选一，模式互斥）。处理后图喂 OCR；page.image_path 改回原图，
+                # marker / 前端源图按原文件名匹配。任何失败都回退原图，不中断 OCR。
                 ocr_input = img
                 if ppt is not None and ppt.enable and ppt.rectify:
                     from docrestore.processing.slide_rectify import (
@@ -1582,6 +1590,15 @@ class Pipeline:
                         save_debug=ppt.rectify_save_debug,
                         debug_dir=ppt.rectify_debug_dir,
                         top_extend_ratio=ppt.rectify_top_extend_ratio,
+                    )
+                elif content_crop is not None and content_crop.enable:
+                    from docrestore.processing.content_crop import (
+                        crop_page,
+                    )
+                    ocr_input = await crop_page(
+                        img, output_dir,
+                        save_debug=content_crop.save_debug,
+                        debug_dir=content_crop.debug_dir,
                     )
                 with profiler.stage("ocr.single", stem=img.stem):
                     if gpu_lock is not None:

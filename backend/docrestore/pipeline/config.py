@@ -399,6 +399,20 @@ class PowerPointRestoreConfig(BaseModel):
     rectify_top_extend_ratio: float = 0.2
 
 
+class ContentCropConfig(BaseModel):
+    """文档模式正文区裁剪配置（仅文档模式生效）。
+
+    屏摄文档照片含左导航 / 右大纲 / 顶部 UI；文档模式无行号锚定，这些会污染正文 OCR。
+    enable=True 时在 OCR 前自动检测正文主列、裁掉左右侧栏；已裁剪 / 无侧栏图自动跳过
+    （恒等放行），对历史已人工裁剪的图无害。详见 ``docs/zh/doc-content-crop.md``。
+    """
+
+    enable: bool = True
+    #: 落盘裁剪图与检测框对照到 output_dir/<debug_dir>（验收证据 + 前端预览源）。
+    save_debug: bool = True
+    debug_dir: str = ".content_crop"
+
+
 class PipelineConfig(BaseModel):
     """Pipeline 总配置"""
 
@@ -409,6 +423,7 @@ class PipelineConfig(BaseModel):
     pii: PIIConfig = Field(default_factory=PIIConfig)
     code: CodeRestoreConfig = Field(default_factory=CodeRestoreConfig)
     ppt: PowerPointRestoreConfig = Field(default_factory=PowerPointRestoreConfig)
+    content_crop: ContentCropConfig = Field(default_factory=ContentCropConfig)
     db_path: str = "data/docrestore.db"  # SQLite 持久化路径
     debug: bool = True  # 落盘各阶段中间结果到 output_dir/debug/
 
