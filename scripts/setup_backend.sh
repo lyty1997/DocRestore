@@ -117,6 +117,16 @@ main() {
     log "安装项目依赖: [dev]"
     conda run -n "$CONDA_ENV" pip install -e ".[dev]"
 
+    # 验证 OpenCV(cv2)：pyproject 已声明 opencv-python-headless（透视矫正 / 文档正文
+    # 区裁剪等 OCR 前 CV 预处理依赖），但早于其加入时创建的旧环境不会自带，缺失即补装。
+    log "验证 OpenCV (cv2) ..."
+    if conda run -n "$CONDA_ENV" python -c "import cv2" 2>/dev/null; then
+        log "cv2 已就绪"
+    else
+        log "cv2 缺失，补装 opencv-python-headless ..."
+        conda run -n "$CONDA_ENV" pip install "opencv-python-headless>=4.10"
+    fi
+
     echo ""
     echo -e "${CYAN}=========================================="
     echo " 安装完成！"
