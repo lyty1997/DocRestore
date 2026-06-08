@@ -95,6 +95,36 @@ class PowerPointRestoreConfigRequest(BaseModel):
     rectify_save_debug: bool | None = None
 
 
+class CropBox(BaseModel):
+    """正文裁剪框（像素坐标，原图坐标系；左上 (x0,y0) 右下 (x1,y1)）。"""
+
+    x0: int
+    y0: int
+    x1: int
+    y1: int
+
+
+class CropDetectRequest(BaseModel):
+    """裁剪框检测请求：对 image_dir 下每张图给建议正文区框。"""
+
+    image_dir: str
+
+
+class CropDetectItem(BaseModel):
+    """单张图检测结果。box=None 表示无需裁剪（已裁剪 / 无侧栏 / 检测失败）。"""
+
+    name: str
+    width: int
+    height: int
+    box: CropBox | None = None
+
+
+class CropDetectResponse(BaseModel):
+    """裁剪框检测响应。"""
+
+    images: list[CropDetectItem]
+
+
 class CreateTaskRequest(BaseModel):
     """创建任务请求"""
 
@@ -105,6 +135,9 @@ class CreateTaskRequest(BaseModel):
     pii: PIIConfigRequest | None = None
     code: CodeRestoreConfigRequest | None = None
     ppt: PowerPointRestoreConfigRequest | None = None
+    #: 正文裁剪框（图名 → 框，原图坐标系）。提供时创建任务前按框预裁剪图片再跑，
+    #: content_crop 的已裁剪判据会自动跳过、不二次裁。None=不预裁、走自动检测。
+    crop_boxes: dict[str, CropBox] | None = None
 
 
 class UpdateMarkdownRequest(BaseModel):

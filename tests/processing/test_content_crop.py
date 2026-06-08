@@ -26,8 +26,10 @@ from cv2.typing import MatLike  # noqa: E402
 
 from docrestore.processing.content_crop import (  # noqa: E402
     _runs,
+    apply_crop_boxes,
     compute_crop_box,
     crop_page,
+    detect_boxes_for_dir,
     detect_content_lr,
 )
 
@@ -147,3 +149,44 @@ class TestCropPage:
         src = tmp_path / "nonexist.jpg"
         out = await crop_page(src, tmp_path, save_debug=False)
         assert out == src
+
+
+class TestCropHelpers:
+    """S4 后端 API 辅助：目录建议框检测 + 就地预裁剪。"""
+
+    def test_detect_boxes_for_dir(self, tmp_path: Path) -> None:
+        """有侧栏图给框（纵向整高）、无侧栏图给 None。"""
+        cv2.imwrite(str(tmp_path / "threecol.jpg"), _make_three_column())
+        cv2.imwrite(str(tmp_path / "fullwidth.jpg"), _make_full_width())
+        by_name = {n: box for n, _w, _h, box in detect_boxes_for_dir(tmp_path)}
+        assert by_name["fullwidth.jpg"] is None  # 无侧栏 → 跳过
+        box = by_name["threecol.jpg"]
+        assert box is not None
+        assert box[1] == 0  # 纵向整高：y0=0
+        assert box[3] == 900  # y1=h
+        assert box[0] > 200  # 排除左导航
+        assert box[2] < 1080  # 排除右大纲
+
+    def test_apply_crop_boxes_inplace(self, tmp_path: Path) -> None:
+        """就地按框裁剪、覆盖原图。"""
+        src = tmp_path / "img.jpg"
+        cv2.imwrite(str(src), _make_three_column())  # 1280x900
+        apply_crop_boxes(tmp_path, {"img.jpg": (300, 0, 900, 900)})
+        out = cv2.imread(str(src))
+        assert out is not None
+        assert out.shape[1] == 600  # 裁到 x[300,900]=600 宽
+        assert out.shape[0] == 900  # 整高不变
+
+    def test_apply_crop_boxes_skips_traversal(self, tmp_path: Path) -> None:
+        """越界路径（../）被路径穿越守卫跳过，不处理外部文件。"""
+        outside = tmp_path.parent / "docrestore_evil_probe.jpg"
+        cv2.imwrite(str(outside), _make_three_column())
+        try:
+            apply_crop_boxes(
+                tmp_path, {"../docrestore_evil_probe.jpg": (0, 0, 50, 50)},
+            )
+            out = cv2.imread(str(outside))
+            assert out is not None
+            assert out.shape[1] == 1280  # 未被裁剪
+        finally:
+            outside.unlink(missing_ok=True)

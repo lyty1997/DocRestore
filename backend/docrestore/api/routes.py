@@ -39,6 +39,10 @@ from docrestore.api.schemas import (
     BrowseDirsResponse,
     CodeDiagnosticResponse,
     CreateTaskRequest,
+    CropBox,
+    CropDetectItem,
+    CropDetectRequest,
+    CropDetectResponse,
     CustomSensitiveWord,
     DiagnoseCodeFileRequest,
     DirEntry,
@@ -69,6 +73,10 @@ from docrestore.pipeline.config import (
     OCRConfig,
     PIIConfig,
     PowerPointRestoreConfig,
+)
+from docrestore.processing.content_crop import (
+    apply_crop_boxes,
+    detect_boxes_for_dir,
 )
 
 if TYPE_CHECKING:
@@ -348,6 +356,48 @@ async def list_tasks(
     )
 
 
+@router.post("/crop/detect", response_model=CropDetectResponse)
+async def detect_crop_boxes(req: CropDetectRequest) -> CropDetectResponse:
+    """检测 image_dir 下每张图的建议正文裁剪框（供前端"裁剪预览 + 微调"）。
+
+    box=None 表示该图无需裁剪（已裁剪 / 无侧栏 / 检测失败），前端可不画框。
+    """
+    image_dir = Path(req.image_dir)
+    if not await asyncio.to_thread(image_dir.is_dir):
+        raise ApiBusinessError(
+            APIErrorCode.IMAGE_NOT_FOUND, 404, "图片目录不存在",
+        )
+    raw = await asyncio.to_thread(detect_boxes_for_dir, image_dir)
+    return CropDetectResponse(
+        images=[
+            CropDetectItem(
+                name=name,
+                width=w,
+                height=h,
+                box=(
+                    None
+                    if box is None
+                    else CropBox(x0=box[0], y0=box[1], x1=box[2], y1=box[3])
+                ),
+            )
+            for name, w, h, box in raw
+        ],
+    )
+
+
+async def _apply_requested_crop(req: CreateTaskRequest) -> None:
+    """前端"裁剪预览 + 微调"确认的框 → 创建任务前就地预裁剪图片（覆盖原图）。
+
+    content_crop 的已裁剪判据会自动跳过、不二次裁；放建任务前做避免框穿过 pipeline/DB。
+    """
+    if not req.crop_boxes:
+        return
+    crop_boxes = {
+        name: (b.x0, b.y0, b.x1, b.y1) for name, b in req.crop_boxes.items()
+    }
+    await asyncio.to_thread(apply_crop_boxes, Path(req.image_dir), crop_boxes)
+
+
 @router.post("/tasks", response_model=TaskResponse)
 async def create_task(
     req: CreateTaskRequest,
@@ -406,6 +456,9 @@ async def create_task(
             APIErrorCode.MODE_CONFLICT, 400,
             "代码模式与 PPT 模式不能同时启用",
         )
+
+    # 前端"裁剪预览 + 微调"确认的框：创建任务前就地预裁剪图片，跑裁剪后的图。
+    await _apply_requested_crop(req)
 
     task = manager.create_task(
         image_dir=req.image_dir,

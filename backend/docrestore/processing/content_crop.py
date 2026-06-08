@@ -214,3 +214,61 @@ async def crop_page(
         save_debug=save_debug,
         debug_dir=debug_dir,
     )
+
+
+#: 支持的图片扩展名（小写比较，兼容 .JPG/.jpg）。
+_IMAGE_EXTS = (".jpg", ".jpeg", ".png")
+#: 检测框 (x0, y0, x1, y1)，原图像素坐标系。
+CropBoxTuple = tuple[int, int, int, int]
+
+
+def detect_boxes_for_dir(
+    image_dir: Path,
+) -> list[tuple[str, int, int, CropBoxTuple | None]]:
+    """对 image_dir 下每张图检测建议正文框（MVP 纵向整高）。
+
+    返回 ``[(相对名, 宽, 高, (x0,y0,x1,y1) | None), ...]``；box=None 表示无需裁剪
+    （已裁剪 / 无侧栏 / 检测失败）。供前端"裁剪预览 + 拖拽微调"取建议框。
+    """
+    items: list[tuple[str, int, int, CropBoxTuple | None]] = []
+    for p in sorted(image_dir.rglob("*")):
+        if not p.is_file() or p.suffix.lower() not in _IMAGE_EXTS:
+            continue
+        img = cv2.imread(str(p))
+        if img is None:
+            continue
+        h, w = img.shape[:2]
+        box = compute_crop_box(img)
+        rel = str(p.relative_to(image_dir))
+        items.append(
+            (rel, w, h, None if box is None else (box[0], 0, box[1], h)),
+        )
+    return items
+
+
+def apply_crop_boxes(
+    image_dir: Path,
+    boxes: dict[str, CropBoxTuple],
+) -> None:
+    """按 boxes（图名 → (x0,y0,x1,y1)）**就地**裁剪 image_dir 的图（覆盖原图）。
+
+    只处理 boxes 里有框的图（裁剪后覆盖写回），其余图不动。裁剪后的图 content_crop
+    自动检测会判为"已裁剪"跳过、不二次裁。读图失败 / 越界路径的图保持原样不动。
+    """
+    root = image_dir.resolve()
+    for rel, box in boxes.items():
+        p = (image_dir / rel).resolve()
+        # 路径穿越防护：必须落在 image_dir 内
+        if root not in p.parents:
+            continue
+        if not p.is_file() or p.suffix.lower() not in _IMAGE_EXTS:
+            continue
+        img = cv2.imread(str(p))
+        if img is None:
+            continue
+        h, w = img.shape[:2]
+        x0 = max(0, min(box[0], w - 1))
+        y0 = max(0, min(box[1], h - 1))
+        x1 = max(x0 + 1, min(box[2], w))
+        y1 = max(y0 + 1, min(box[3], h))
+        cv2.imwrite(str(p), img[y0:y1, x0:x1])
