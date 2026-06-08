@@ -1448,3 +1448,24 @@ warp。`PowerPointRestoreConfig.rectify_max_skew_deg`；`_ocr_producer` 透传�
 
 **关键教训**：VL 切图粒度对"内容相对尺度"敏感——裁小/放大内容会触发更细的结构切分。改变 OCR 输入
 图（矫正/裁剪/缩放）时要警惕这点。
+
+## 2026-06-08~09 - content_crop S4 后端 API + S5 前端裁剪预览微调（半自动闭环）
+
+**S4（commit ee22b1a）**：`POST /crop/detect`（detect_boxes_for_dir 复用 compute_crop_box 给每张图
+建议框，纵向整高 (x0,0,x1,h)，box=null=无需裁剪）；`CreateTaskRequest.crop_boxes`（图名→框）建任务前
+`_apply_requested_crop` 就地预裁剪（apply_crop_boxes 覆盖原图，路径穿越守卫）——跑裁剪后的图，
+content_crop 已裁剪判据自动跳过不二次裁，**无需把框穿过 pipeline/DB**。`GET /crop/image` 按 image_dir+
+名取图供前端预览（SourcePicker 只给路径不给上传会话，故需此端点）。
+
+**S5（commit b0a6082 + e09186b）**：方案 A（OCR 前确认）。`CropEditor` 可拖拽(移动)/8 手柄缩放的框
+（原图像素坐标 + 显示等比缩放 + 框外压暗 + setPointerCapture）；`CropPanel` 拉 detect→逐图微调→上报框；
+`TaskForm` 文档模式 + 已选源时显示开关 + 面板，提交把框作为 crop_boxes 传后端；useTaskRunner/client
+透传 + getCropImageUrl；i18n 三语 crop.*；CSS。修预存失败（模式选择器重排把 #code-mode-toggle 改
+#mode-code 测试没同步）。
+
+**验证**：CropEditor 渲染单测 2 例（框百分比定位 + 8 手柄）、detect/apply/路径穿越 3 例；前端 77 passed、
+后端全量通过。**交互拖拽的视觉验证需完整栈（后端 + 上传），留待实测**。
+
+**content_crop 全链路收尾**：S1 检测算法 → S2 已裁剪跳过 → S3 producer 自动裁剪（默认开）→ S4 检测
+API + 预裁剪 → S5 前端预览微调。文档模式默认自动裁正文区去左右栏污染；用户可手动微调框。阶段 2
+（上下边界精修 / 多平台 / 透视叠加）留后续。
