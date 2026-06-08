@@ -1590,6 +1590,7 @@ class Pipeline:
                         save_debug=ppt.rectify_save_debug,
                         debug_dir=ppt.rectify_debug_dir,
                         top_extend_ratio=ppt.rectify_top_extend_ratio,
+                        max_skew_deg=ppt.rectify_max_skew_deg,
                     )
                 elif content_crop is not None and content_crop.enable:
                     from docrestore.processing.content_crop import (

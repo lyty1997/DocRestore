@@ -29,8 +29,11 @@ import pytest
 from docrestore.processing.slide_rectify import (
     ImageBGR,
     Quad,
+    _MAX_SKEW_DEG,
     _MIN_RECTIFIED_SIDE_PX,
+    _mask_surroundings,
     _order_corners,
+    _quad_skew,
     detect_slide_quad,
     rectify,
     rectify_page,
@@ -246,3 +249,50 @@ async def test_rectify_page_on_real_ppt(tmp_path: Path) -> None:
         assert (rectified / f"{src.stem}_before{src.suffix}").exists()
     else:  # 检测失败回退原图
         assert result == src
+
+
+def test_quad_skew_near_zero_for_rectangle() -> None:
+    """正矩形四边形偏斜 ≈ 0°。"""
+    rect = Quad((0, 0), (100, 0), (100, 80), (0, 80))
+    assert _quad_skew(rect) < 1.0
+
+
+def test_quad_skew_high_for_trapezoid() -> None:
+    """明显透视的梯形偏斜 > 阈值（应走 warp 分支）。"""
+    trap = Quad(_TRAPEZOID[0], _TRAPEZOID[1], _TRAPEZOID[2], _TRAPEZOID[3])
+    assert _quad_skew(trap) > _MAX_SKEW_DEG
+
+
+def test_mask_surroundings_keeps_size_blacks_outside() -> None:
+    """遮黑周边：保持原尺寸，框内像素保留、框外置黑（不裁小、不缩放）。"""
+    img = np.full((200, 300, 3), 255, dtype=np.uint8)
+    quad = Quad((100, 60), (200, 60), (200, 140), (100, 140))
+    out = _mask_surroundings(img, quad, top_extend_ratio=0.0)
+    assert out.shape == img.shape
+    assert int(out[100, 150].mean()) == 255  # 框内保留
+    assert int(out[10, 10].mean()) == 0       # 框外置黑
+
+
+@pytest.mark.asyncio
+async def test_rectify_page_low_skew_masks_keeps_size(tmp_path: Path) -> None:
+    """近正视幻灯片：走遮黑分支，输出图与原图同尺寸（未 warp 缩放）。"""
+    corners = [(120, 100), (480, 104), (478, 700), (122, 696)]
+    img = _make_slide_image(corners, size=(800, 600))
+    src = tmp_path / "frontal.jpg"
+    cv2.imwrite(str(src), img)
+    out = await rectify_page(src, tmp_path / "o", save_debug=False)
+    res = cv2.imread(str(out))
+    assert res is not None
+    assert res.shape[:2] == img.shape[:2]  # 同尺寸 = 遮黑、未 warp
+
+
+@pytest.mark.asyncio
+async def test_rectify_page_high_skew_warps(tmp_path: Path) -> None:
+    """强透视幻灯片：走 warp 分支，输出去畸变矩形，尺寸 ≠ 原图。"""
+    img = _make_slide_image(_TRAPEZOID, size=(600, 800))
+    src = tmp_path / "skew.jpg"
+    cv2.imwrite(str(src), img)
+    out = await rectify_page(src, tmp_path / "o", save_debug=False)
+    res = cv2.imread(str(out))
+    assert res is not None
+    assert res.shape[:2] != img.shape[:2]
