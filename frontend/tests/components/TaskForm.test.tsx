@@ -64,7 +64,7 @@ describe("TaskForm", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "mock source" }));
-    const toggle = document.querySelector<HTMLInputElement>("#code-mode-toggle");
+    const toggle = document.querySelector<HTMLInputElement>("#mode-code");
     if (toggle === null) {
       throw new Error("找不到代码模式开关");
     }
@@ -82,6 +82,8 @@ describe("TaskForm", () => {
         paddle_pipeline: "basic",
       },
       { enable: true },
+      undefined,
+      undefined,
     );
   });
 });

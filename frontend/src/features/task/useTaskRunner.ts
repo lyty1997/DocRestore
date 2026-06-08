@@ -12,6 +12,7 @@ import {
 } from "../../api/client";
 import {
   TaskProgressSchema,
+  type CropBox,
   type TaskResultResponse,
 } from "../../api/schemas";
 import { fromUnknown, type LocalizedError } from "../../i18n";
@@ -76,6 +77,7 @@ interface UseTaskRunnerReturn {
     ocr?: { model?: string | undefined; gpu_id?: string | undefined },
     code?: { enable: boolean },
     ppt?: { enable: boolean },
+    cropBoxes?: Record<string, CropBox>,
   ) => void;
   /** 重置到 idle */
   reset: () => void;
@@ -351,6 +353,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
       ocr?: { model?: string | undefined; gpu_id?: string | undefined },
       code?: { enable: boolean },
       ppt?: { enable: boolean },
+      cropBoxes?: Record<string, CropBox>,
     ) => {
       // 重置状态
       cleanup();
@@ -374,6 +377,7 @@ export function useTaskRunner(): UseTaskRunnerReturn {
             ocr,
             code,
             ppt,
+            crop_boxes: cropBoxes,
           });
           if (!isMountedRef.current) return;
           setTaskId(resp.task_id);

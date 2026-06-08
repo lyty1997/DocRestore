@@ -237,6 +237,14 @@ export async function createTask(
   return handleResponse(response, CreateTaskResponseSchema);
 }
 
+/** 裁剪预览取图 URL（带认证 token）：从 image_dir 按相对名取一张图 */
+export function getCropImageUrl(imageDir: string, name: string): string {
+  return appendTokenToUrl(
+    `${API_BASE}/crop/image?image_dir=${encodeURIComponent(imageDir)}` +
+      `&name=${encodeURIComponent(name)}`,
+  );
+}
+
 /** 检测 image_dir 下每张图的建议正文裁剪框（供"裁剪预览 + 拖拽微调"） */
 export async function detectCropBoxes(
   imageDir: string,

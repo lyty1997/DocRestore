@@ -385,6 +385,26 @@ async def detect_crop_boxes(req: CropDetectRequest) -> CropDetectResponse:
     )
 
 
+def _resolve_crop_image(image_dir: str, name: str) -> Path | None:
+    """解析 image_dir + 相对名为安全路径；越界 / 非文件返回 None。"""
+    root = Path(image_dir).resolve()
+    target = (root / name).resolve()
+    if root not in target.parents or not target.is_file():
+        return None
+    return target
+
+
+@router.get("/crop/image")
+async def get_crop_image(image_dir: str, name: str) -> FileResponse:
+    """从 image_dir 按相对名取一张图（供前端裁剪预览显示）。带路径穿越防护。"""
+    target = await asyncio.to_thread(_resolve_crop_image, image_dir, name)
+    if target is None:
+        raise ApiBusinessError(
+            APIErrorCode.IMAGE_NOT_FOUND, 404, "图片不存在",
+        )
+    return FileResponse(target)
+
+
 async def _apply_requested_crop(req: CreateTaskRequest) -> None:
     """前端"裁剪预览 + 微调"确认的框 → 创建任务前就地预裁剪图片（覆盖原图）。
 

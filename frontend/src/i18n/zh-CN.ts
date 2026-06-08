@@ -54,6 +54,13 @@ export const zhCN = {
   "taskList.deleteFailed": "删除失败",
   "taskList.clearFinishedResult": "已删除 {ok} 个，失败 {fail} 个",
 
+  // ── 文档正文裁剪（content_crop）──
+  "crop.toggle": "手动调整正文裁剪框（去左右栏 / 页眉）",
+  "crop.hint": "拖动方框移动、拖四周手柄缩放，框住正文区；不开则自动裁剪。",
+  "crop.detecting": "检测建议裁剪框中…",
+  "crop.detectFailed": "裁剪框检测失败，将退回自动裁剪",
+  "crop.noneToCrop": "未检测到需裁剪的图（已是正文 / 无侧栏）",
+
   // ── 任务表单 ──
   "taskForm.sourceLabel": "图片来源",
   "taskForm.outputDirLabel": "输出目录",

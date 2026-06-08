@@ -59,6 +59,13 @@ export const en: Record<TranslationKey, string> = {
   "taskList.deleteFailed": "Delete failed",
   "taskList.clearFinishedResult": "Deleted {ok}, failed {fail}",
 
+  // ── Content crop ──
+  "crop.toggle": "Manually adjust content crop box (remove side columns / header)",
+  "crop.hint": "Drag the box to move, drag handles to resize; auto-crop is used when off.",
+  "crop.detecting": "Detecting suggested crop boxes…",
+  "crop.detectFailed": "Crop detection failed; falling back to auto-crop",
+  "crop.noneToCrop": "No images need cropping (already content / no side columns)",
+
   // ── Task form ──
   "taskForm.sourceLabel": "Image Source",
   "taskForm.outputDirLabel": "Output Directory",

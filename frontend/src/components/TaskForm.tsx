@@ -6,8 +6,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getOcrStatus, listGpus, warmupOcrEngine } from "../api/client";
 import { retryUntilSuccess } from "../lib/retry";
-import type { GpuInfo } from "../api/schemas";
+import type { CropBox, GpuInfo } from "../api/schemas";
 import { useTranslation } from "../i18n";
+import { CropPanel } from "./CropPanel";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { SourcePicker } from "./SourcePicker";
 
@@ -151,6 +152,7 @@ interface TaskFormProps {
     ocr?: OCRConfig,
     code?: CodeRestoreConfig,
     ppt?: PowerPointRestoreConfig,
+    cropBoxes?: Record<string, CropBox>,
   ) => void;
   readonly disabled: boolean;
 }
@@ -227,6 +229,8 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
 
   /* 处理模式三选一：doc（默认）/ code（IDE 代码）/ ppt（屏摄幻灯片） */
   const [mode, setMode] = useState<ProcessingMode>("doc");
+  const [cropEnabled, setCropEnabled] = useState(false);
+  const [cropBoxes, setCropBoxes] = useState<Record<string, CropBox>>({});
   /* 统一 LLM 精修开关：对所有模式生效（文档分段 / 代码 / PPT 按页）。
      默认开，保持文档/代码模式既有行为；关闭时所有模式只输出 OCR 清洗结果。 */
   const [refineEnabled, setRefineEnabled] = useState(true);
@@ -490,6 +494,7 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
       ocr,
       code,
       ppt,
+      mode === "doc" && cropEnabled ? cropBoxes : undefined,
     );
   };
 
@@ -583,6 +588,32 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
           disabled={disabled}
         />
       </div>
+
+      {/* 文档模式正文裁剪：开关 + 拖拽微调面板（仅文档模式 + 已选源时显示） */}
+      {mode === "doc" && imageDir.trim() !== "" && (
+        <div className="form-group">
+          <label className="crop-toggle">
+            <input
+              type="checkbox"
+              checked={cropEnabled}
+              onChange={(event) => {
+                const on = event.target.checked;
+                setCropEnabled(on);
+                if (!on) {
+                  setCropBoxes({});
+                }
+              }}
+              disabled={disabled}
+            />
+            {t("crop.toggle")}
+          </label>
+          <CropPanel
+            imageDir={imageDir}
+            enabled={cropEnabled}
+            onBoxesChange={setCropBoxes}
+          />
+        </div>
+      )}
 
       {/* 输出目录 */}
       <div className="form-group">
