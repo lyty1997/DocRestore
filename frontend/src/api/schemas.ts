@@ -287,3 +287,27 @@ export type FilesIndexEntry = z.infer<typeof FilesIndexEntrySchema>;
 /** files-index.json 整个数组 */
 export const FilesIndexSchema = z.array(FilesIndexEntrySchema);
 export type FilesIndex = z.infer<typeof FilesIndexSchema>;
+
+/** 正文裁剪框（原图像素坐标，左上 x0,y0 右下 x1,y1） */
+export const CropBoxSchema = z.object({
+  x0: z.number(),
+  y0: z.number(),
+  x1: z.number(),
+  y1: z.number(),
+});
+export type CropBox = z.infer<typeof CropBoxSchema>;
+
+/** 单张图裁剪框检测结果；box=null 表示无需裁剪（已裁剪 / 无侧栏 / 检测失败） */
+export const CropDetectItemSchema = z.object({
+  name: z.string(),
+  width: z.number(),
+  height: z.number(),
+  box: CropBoxSchema.nullable(),
+});
+export type CropDetectItem = z.infer<typeof CropDetectItemSchema>;
+
+/** POST /crop/detect 响应 */
+export const CropDetectResponseSchema = z.object({
+  images: z.array(CropDetectItemSchema),
+});
+export type CropDetectResponse = z.infer<typeof CropDetectResponseSchema>;

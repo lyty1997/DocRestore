@@ -23,6 +23,7 @@ import {
   OcrStatusResponseSchema,
   OcrWarmupResponseSchema,
   GpuListResponseSchema,
+  CropDetectResponseSchema,
   type ActionResponse,
   type BrowseDirsResponse,
   type CreateTaskResponse,
@@ -43,6 +44,8 @@ import {
   type OcrStatusResponse,
   type OcrWarmupResponse,
   type GpuListResponse,
+  type CropBox,
+  type CropDetectResponse,
 } from "./schemas";
 import { appendTokenToUrl, getAuthHeaders, loadApiToken } from "./auth";
 
@@ -79,6 +82,8 @@ interface CreateTaskBody {
   ppt?: {
     enable: boolean;
   } | undefined;
+  /** 正文裁剪框（图名→框）：前端"裁剪预览+微调"确认后填，建任务前预裁剪 */
+  crop_boxes?: Record<string, CropBox> | undefined;
 }
 
 /** 合并认证 header 与自定义 header */
@@ -230,6 +235,18 @@ export async function createTask(
     body: JSON.stringify(body),
   });
   return handleResponse(response, CreateTaskResponseSchema);
+}
+
+/** 检测 image_dir 下每张图的建议正文裁剪框（供"裁剪预览 + 拖拽微调"） */
+export async function detectCropBoxes(
+  imageDir: string,
+): Promise<CropDetectResponse> {
+  const response = await fetch(`${API_BASE}/crop/detect`, {
+    method: "POST",
+    headers: apiHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ image_dir: imageDir }),
+  });
+  return handleResponse(response, CropDetectResponseSchema);
 }
 
 /** 查询任务状态 */
