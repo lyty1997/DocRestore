@@ -2294,11 +2294,21 @@ body {
   display: inline-block;
 }
 
+/* EditorContent 包裹层（Tiptap 在 .wysiwyg-editor 与 .ProseMirror 之间插入的
+   div）：它才是 80vh flex 列里的直接子项，必须由它承担滚动。否则 flex:1 落在
+   非直接子项 .ProseMirror 上不生效，包裹层按内容撑满整篇 → 被 .wysiwyg-editor
+   的 overflow:hidden 裁掉、无滚动条（长 PPT 文档只露第一屏，无法下滑）。
+   min-height:0 让其能在 flex 容器内收缩到 80vh 以下从而触发滚动。 */
+.wysiwyg-editor-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 /* 编辑区：Word 文档纸面观感 —— 较宽行距 / 衬线字体 / 偏白底 */
 .wysiwyg-editor .tiptap.wysiwyg-prose,
 .wysiwyg-editor .ProseMirror.wysiwyg-prose {
-  flex: 1;
-  overflow-y: auto;
+  box-sizing: border-box;
   padding: 1.5rem 2rem;
   background: var(--color-surface);
   color: var(--color-text-primary);

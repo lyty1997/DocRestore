@@ -488,3 +488,26 @@ merged_raw 补回尾部）。本文档场景里 giant line 唯一来源就是退
 邮箱步骤占位 `[邮箱]`。红绿：`tests/privacy/test_patterns.py::TestHostTargetRedaction`（6 例）
 + `TestInternalUrlRedaction`（8 例）。**遗留**：`user@FQDN` 在关 `redact_email` 时既不被邮箱也
 不被 host 脱（边缘，用户主动关 email 即选择保留邮箱形态）；裸公网 IP（非 user@、非 URL）不脱。
+
+## 编辑模式（Tiptap）长文档只显示第一屏、无法下滑（2026-06-09，已修）
+
+**现象**：PPT 编辑模式只能显示/编辑第一页内容，鼠标无法向下滚动看后续页（文档模式因正文常较短未暴露）。
+
+**根因**：CSS flex 链断在 Tiptap 的 `<EditorContent>` 包裹层。`.wysiwyg-editor`（`height:80vh;
+display:flex; flex-direction:column; overflow:hidden`）下，滚动样式 `flex:1; overflow-y:auto`
+原本加在 `.ProseMirror` 上——但 `.ProseMirror` 不是 `.wysiwyg-editor` 的**直接**子项，中间隔着
+`<EditorContent>` 渲染的一个**无样式 div** 包裹层。该包裹层是真正的 flex 直接子项，默认
+`flex:0 1 auto` + `display:block`，按内容撑满整篇文档高度；`.ProseMirror` 的 `flex:1` 因父级非
+flex 容器而失效、`overflow-y:auto` 因自身高度=内容高度而不触发。包裹层超出 80vh 的部分被
+`.wysiwyg-editor` 的 `overflow:hidden` 裁掉且无滚动条 → 只露第一屏。
+
+**浏览器实测证据**（最小复刻 60 段、editor 可视 ~390px）：修前包裹层 7725px、裁掉 7333px、
+`scrollable=false`；修后包裹层成为滚动容器、可滚到底、末段可见。
+
+**修复**：给 `<EditorContent className="wysiwyg-editor-content">`，CSS 让**包裹层**承担滚动
+（`flex:1; min-height:0; overflow-y:auto`；`min-height:0` 让其能在 flex 容器内收缩到 80vh 以下从而
+触发滚动），`.ProseMirror` 改为自然高度 + `min-height:100%`（短文档仍填满可点区域）。
+
+**教训**：给第三方组件（Tiptap/EditorContent 等）做 flex 滚动布局时，确认 `flex`/`overflow`
+落在**真正的直接子项**上——组件常在你的容器与内容之间插一层无样式包裹 div，样式加错层级会
+静默失效。

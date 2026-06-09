@@ -307,7 +307,7 @@ export function MarkdownWysiwygEditor({
             : () => { setShowFigureDialog(true); }
         }
       />
-      <EditorContent editor={editor} />
+      <EditorContent editor={editor} className="wysiwyg-editor-content" />
       {showFigureDialog && taskId !== undefined && (
         <FigureCropDialog
           taskId={taskId}
