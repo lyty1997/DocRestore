@@ -123,6 +123,38 @@ describe("FigureCropDialog", () => {
     expect(screen.queryByText(/自动选中/)).toBeNull();
   });
 
+  it("切到四角校正模式确认 → cropFigure 带 quad（非 box）", async () => {
+    const { onConfirm } = renderDialog();
+    await screen.findByRole("combobox");
+    const [firstImg] = document.querySelectorAll("img");
+    if (firstImg === undefined) throw new Error("测量图未渲染");
+    fireEvent.load(firstImg);
+
+    const user = userEvent.setup();
+    // 切到「四角校正」
+    await user.click(await screen.findByText("四角校正"));
+    const confirmBtn = await screen.findByText("裁剪并插入");
+    await waitFor(() => {
+      expect(confirmBtn.hasAttribute("disabled")).toBe(false);
+    });
+    await user.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(cropFigureMock).toHaveBeenCalledTimes(1);
+    });
+    const body = cropFigureMock.mock.calls[0]?.[1];
+    // quad 模式：带 quad、不带 box
+    expect(body?.quad).toBeDefined();
+    expect(body?.box).toBeUndefined();
+    // quad 四角键齐全
+    expect(Object.keys(body?.quad ?? {}).toSorted()).toEqual(
+      ["bl", "br", "tl", "tr"],
+    );
+    await waitFor(() => {
+      expect(onConfirm).toHaveBeenCalledWith("images/manual_1.jpg");
+    });
+  });
+
   it("源图加载出尺寸后确认 → 调用 cropFigure 并回调 asset_path", async () => {
     const { onConfirm } = renderDialog();
     await screen.findByRole("combobox");

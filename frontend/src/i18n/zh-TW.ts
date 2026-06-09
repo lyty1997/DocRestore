@@ -236,6 +236,9 @@ export const zhTW: Record<TranslationKey, string> = {
   "figureCrop.noSources": "沒有可用的原圖",
   "figureCrop.sourceLabel": "原圖",
   "figureCrop.fromCursorPage": "已自動選中游標所在頁的原圖，可在上方下拉切換",
+  "figureCrop.modeRect": "矩形裁剪",
+  "figureCrop.modeQuad": "四角校正",
+  "figureCrop.quadHint": "把 4 個角點分別拖到插圖的左上 / 右上 / 右下 / 左下角，確認後自動旋轉 + 透視校正為正視圖。",
   "figureCrop.confirm": "裁剪並插入",
   "figureCrop.submitting": "裁剪中…",
 
@@ -341,6 +344,7 @@ export const zhTW: Record<TranslationKey, string> = {
   "errors.api.read_failed": "讀取失敗：{reason}",
   "errors.api.invalid_filename": "非法檔名",
   "errors.api.markdown_update_failed": "儲存失敗：{reason}",
+  "errors.api.invalid_crop_region": "裁剪區域無效（缺少或退化的框 / 四角點）",
   "errors.api.upload_session_not_found": "上傳會話不存在",
   "errors.api.upload_session_completed": "會話已完成，無法繼續操作",
   "errors.api.upload_session_no_files": "會話中無檔案",

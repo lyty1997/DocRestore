@@ -104,6 +104,26 @@ class CropBox(BaseModel):
     y1: int
 
 
+class CropPoint(BaseModel):
+    """单个角点（原图像素坐标系）。"""
+
+    x: int
+    y: int
+
+
+class CropQuad(BaseModel):
+    """四角点（原图像素坐标系），顺序即角色：左上 / 右上 / 右下 / 左下。
+
+    供编辑模式"四角校正"：用户放 4 个角点框住倾斜 / 透视变形的插图，后端按此
+    顺序透视变换矫正为正视矩形（顺序由前端固定角色手柄保证，后端不重排）。
+    """
+
+    tl: CropPoint
+    tr: CropPoint
+    br: CropPoint
+    bl: CropPoint
+
+
 class CropDetectRequest(BaseModel):
     """裁剪框检测请求：对 image_dir 下每张图给建议正文区框。"""
 
@@ -126,12 +146,18 @@ class CropDetectResponse(BaseModel):
 
 
 class CropFigureRequest(BaseModel):
-    """编辑模式手动重截插图请求：从某张源图按框裁一块，存进文档 images/。"""
+    """编辑模式手动重截插图请求：从某张源图裁一块，存进文档 images/。
+
+    ``box`` / ``quad`` 二选一：``quad`` 优先（四角透视校正），否则用 ``box``
+    （矩形裁剪）；两者皆空由路由报 400。
+    """
 
     #: 源图相对名（相对 task.image_dir，来自 source-images 列表）。
     source_filename: str
-    #: 裁剪框（源图像素坐标系）。
-    box: CropBox
+    #: 矩形裁剪框（源图像素坐标系）；与 quad 二选一。
+    box: CropBox | None = None
+    #: 四角校正点（源图像素坐标系）；提供时优先透视矫正，与 box 二选一。
+    quad: CropQuad | None = None
     #: 多文档时目标文档子目录（存进 output_dir/{doc_dir}/images/）；
     #: 单文档省略或空串 = 根 output_dir/images/。
     doc_dir: str | None = None

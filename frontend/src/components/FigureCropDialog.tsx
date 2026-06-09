@@ -10,13 +10,27 @@
 import { useEffect, useState } from "react";
 
 import { cropFigure, getSourceImageUrl, listSourceImages } from "../api/client";
-import type { CropBox } from "../api/schemas";
+import type { CropBox, CropQuad } from "../api/schemas";
 import { useTranslation } from "../i18n";
 import { CropEditor } from "./CropEditor";
+import { QuadCropEditor } from "./QuadCropEditor";
 
 interface NaturalSize {
   readonly width: number;
   readonly height: number;
+}
+
+/** 裁剪模式：矩形框 / 四角透视校正。 */
+type CropMode = "rect" | "quad";
+
+/** 由矩形框生成初始四角（左上/右上/右下/左下）。 */
+function boxToQuad(box: CropBox): CropQuad {
+  return {
+    tl: { x: box.x0, y: box.y0 },
+    tr: { x: box.x1, y: box.y0 },
+    br: { x: box.x1, y: box.y1 },
+    bl: { x: box.x0, y: box.y1 },
+  };
 }
 
 interface FigureCropDialogProps {
@@ -73,6 +87,8 @@ export function FigureCropDialog({
   const [selected, setSelected] = useState<string>("");
   const [natural, setNatural] = useState<NaturalSize | undefined>();
   const [box, setBox] = useState<CropBox | undefined>();
+  const [quad, setQuad] = useState<CropQuad | undefined>();
+  const [mode, setMode] = useState<CropMode>("rect");
   const [loadingList, setLoadingList] = useState<boolean>(true);
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [error, setError] = useState<string | undefined>();
@@ -106,6 +122,7 @@ export function FigureCropDialog({
     setSelected(name);
     setNatural(undefined);
     setBox(undefined);
+    setQuad(undefined);
     setAutoMatched(false);
   };
 
@@ -115,19 +132,34 @@ export function FigureCropDialog({
     const h = img.naturalHeight;
     if (w <= 0 || h <= 0) return;
     setNatural({ width: w, height: h });
-    // 初始框：居中 60%，用户再微调框住插图
+    // 初始框：居中 60%，用户再微调框住插图；四角同步用框的角初始化
     const bw = Math.round(w * 0.6);
     const bh = Math.round(h * 0.6);
     const x0 = Math.round((w - bw) / 2);
     const y0 = Math.round((h - bh) / 2);
-    setBox({ x0, y0, x1: x0 + bw, y1: y0 + bh });
+    const initBox: CropBox = { x0, y0, x1: x0 + bw, y1: y0 + bh };
+    setBox(initBox);
+    setQuad(boxToQuad(initBox));
+  };
+
+  // 切模式：进四角校正时用当前矩形框作初始四角（用户在此基础上把角拖到插图实际四角）
+  const switchMode = (next: CropMode): void => {
+    if (next === "quad" && box !== undefined) setQuad(boxToQuad(box));
+    setMode(next);
   };
 
   const onSubmit = (): void => {
-    if (selected === "" || box === undefined) return;
+    if (selected === "") return;
+    // 当前模式所需区域未就绪则不提交（quad 模式要 quad，rect 模式要 box）
+    if (mode === "quad" ? quad === undefined : box === undefined) return;
     setSubmitting(true);
     setError(undefined);
-    cropFigure(taskId, { source_filename: selected, box, doc_dir: docDir })
+    // body 字段 box/quad 均可选；上面的守卫保证当前模式对应字段已就绪
+    const body =
+      mode === "quad"
+        ? { source_filename: selected, quad, doc_dir: docDir }
+        : { source_filename: selected, box, doc_dir: docDir };
+    cropFigure(taskId, body)
       .then((res) => {
         onConfirm(res.asset_path);
       })
@@ -137,7 +169,9 @@ export function FigureCropDialog({
       });
   };
 
-  const ready = natural !== undefined && box !== undefined;
+  const ready =
+    natural !== undefined
+    && (mode === "quad" ? quad !== undefined : box !== undefined);
 
   return (
     <div className="figure-crop-overlay" role="dialog" aria-modal="true">
@@ -184,22 +218,54 @@ export function FigureCropDialog({
           <p className="figure-crop-auto">{t("figureCrop.fromCursorPage")}</p>
         )}
 
+        {sources.length > 0 && (
+          <div className="figure-crop-mode" role="group">
+            <button
+              type="button"
+              className={`toggle-btn ${mode === "rect" ? "active" : ""}`}
+              onClick={() => { switchMode("rect"); }}
+            >
+              {t("figureCrop.modeRect")}
+            </button>
+            <button
+              type="button"
+              className={`toggle-btn ${mode === "quad" ? "active" : ""}`}
+              onClick={() => { switchMode("quad"); }}
+            >
+              {t("figureCrop.modeQuad")}
+            </button>
+          </div>
+        )}
+
+        {mode === "quad" && sources.length > 0 && (
+          <p className="figure-crop-hint">{t("figureCrop.quadHint")}</p>
+        )}
+
         {selected !== "" && (
           <div className="figure-crop-canvas">
-            {/* 测量用隐藏图：拿原图自然尺寸后才渲染 CropEditor */}
+            {/* 测量用隐藏图：拿原图自然尺寸后才渲染编辑器 */}
             <img
               src={getSourceImageUrl(taskId, selected)}
               alt=""
               style={{ display: "none" }}
               onLoad={onImgLoad}
             />
-            {ready && (
+            {ready && mode === "rect" && box !== undefined && (
               <CropEditor
                 imageUrl={getSourceImageUrl(taskId, selected)}
                 naturalWidth={natural.width}
                 naturalHeight={natural.height}
                 box={box}
                 onChange={setBox}
+              />
+            )}
+            {ready && mode === "quad" && quad !== undefined && (
+              <QuadCropEditor
+                imageUrl={getSourceImageUrl(taskId, selected)}
+                naturalWidth={natural.width}
+                naturalHeight={natural.height}
+                quad={quad}
+                onChange={setQuad}
               />
             )}
           </div>

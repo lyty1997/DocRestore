@@ -94,6 +94,91 @@ class TestCropFigure:
         assert (out_dir / "doc-1" / "images" / "manual_1.jpg").is_file()
 
     @pytest.mark.asyncio
+    async def test_quad_rectifies_into_images(
+        self, api_client: AsyncClient, tmp_path: Path,
+    ) -> None:
+        """四角校正：传 quad → 透视矫正落 manual_1.jpg，返回相对引用。"""
+        _img, out_dir = _inject_task("t-quad", tmp_path)
+        resp = await api_client.post(
+            "/api/v1/tasks/t-quad/crop-figure",
+            json={
+                "source_filename": "page.jpg",
+                # 轻微透视的四边形（左上/右上/右下/左下），源图 w=600 h=400
+                "quad": {
+                    "tl": {"x": 50, "y": 40},
+                    "tr": {"x": 330, "y": 30},
+                    "br": {"x": 340, "y": 250},
+                    "bl": {"x": 40, "y": 240},
+                },
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["asset_path"] == "images/manual_1.jpg"
+        saved = cv2.imread(str(out_dir / "images" / "manual_1.jpg"))
+        assert saved is not None
+        assert saved.shape[0] > 0
+        assert saved.shape[1] > 0
+
+    @pytest.mark.asyncio
+    async def test_quad_takes_priority_over_box(
+        self, api_client: AsyncClient, tmp_path: Path,
+    ) -> None:
+        """同时传 box 和 quad 时 quad 优先（透视矫正路径）。"""
+        _img, out_dir = _inject_task("t-both", tmp_path)
+        resp = await api_client.post(
+            "/api/v1/tasks/t-both/crop-figure",
+            json={
+                "source_filename": "page.jpg",
+                "box": {"x0": 0, "y0": 0, "x1": 600, "y1": 400},
+                "quad": {
+                    "tl": {"x": 50, "y": 40},
+                    "tr": {"x": 330, "y": 30},
+                    "br": {"x": 340, "y": 250},
+                    "bl": {"x": 40, "y": 240},
+                },
+            },
+        )
+        assert resp.status_code == 200
+        saved = cv2.imread(str(out_dir / "images" / "manual_1.jpg"))
+        assert saved is not None
+        # quad 优先 → 尺寸来自四边形（≈280×210），明显小于 box 全图 600×400
+        assert saved.shape[1] < 600
+
+    @pytest.mark.asyncio
+    async def test_400_when_neither_box_nor_quad(
+        self, api_client: AsyncClient, tmp_path: Path,
+    ) -> None:
+        """box 与 quad 都缺 → 400。"""
+        _inject_task("t-noregion", tmp_path)
+        resp = await api_client.post(
+            "/api/v1/tasks/t-noregion/crop-figure",
+            json={"source_filename": "page.jpg"},
+        )
+        assert resp.status_code == 400
+        assert "缺少裁剪区域" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_400_on_degenerate_quad(
+        self, api_client: AsyncClient, tmp_path: Path,
+    ) -> None:
+        """退化四边形（近共线）→ 400（区域无效，不是 404 源图缺失）。"""
+        _inject_task("t-degen", tmp_path)
+        resp = await api_client.post(
+            "/api/v1/tasks/t-degen/crop-figure",
+            json={
+                "source_filename": "page.jpg",
+                "quad": {
+                    "tl": {"x": 10, "y": 10},
+                    "tr": {"x": 12, "y": 10},
+                    "br": {"x": 12, "y": 11},
+                    "bl": {"x": 10, "y": 11},
+                },
+            },
+        )
+        assert resp.status_code == 400
+        assert "退化" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
     async def test_404_when_task_missing(
         self, api_client: AsyncClient,
     ) -> None:

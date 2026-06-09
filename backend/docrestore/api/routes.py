@@ -45,6 +45,7 @@ from docrestore.api.schemas import (
     CropDetectResponse,
     CropFigureRequest,
     CropFigureResponse,
+    CropQuad,
     CustomSensitiveWord,
     DiagnoseCodeFileRequest,
     DirEntry,
@@ -77,7 +78,9 @@ from docrestore.pipeline.config import (
     PowerPointRestoreConfig,
 )
 from docrestore.processing.content_crop import (
+    DegenerateQuadError,
     apply_crop_boxes,
+    crop_quad_to_images,
     crop_region_to_images,
     detect_boxes_for_dir,
 )
@@ -418,6 +421,42 @@ def _validate_doc_dir(doc_dir: str | None) -> str | None:
     return doc_dir
 
 
+def _crop_figure_sync(
+    src_root: Path,
+    filename: str,
+    out_images: Path,
+    box: CropBox | None,
+    quad: CropQuad | None,
+) -> str:
+    """解析源图（词法包含 + 跟随 symlink）并按 quad/box 裁剪，供线程池调用。
+
+    quad 优先（四角透视校正），否则 box（矩形裁剪）。源图不存在 / 越界 →
+    ``FileNotFoundError``；裁剪层的异常（``ValueError`` / ``DegenerateQuadError``
+    / ``OSError``）原样上抛由路由分类。两者皆 None 不可达（路由已校验）。
+    """
+    img_dir = src_root.resolve()
+    source = img_dir / filename
+    if (
+        not source.is_relative_to(img_dir)
+        or not source.is_file()
+        or source.suffix.lower() not in _IMAGE_EXTS
+    ):
+        raise FileNotFoundError(filename)
+    if quad is not None:
+        pts = (
+            (quad.tl.x, quad.tl.y),
+            (quad.tr.x, quad.tr.y),
+            (quad.br.x, quad.br.y),
+            (quad.bl.x, quad.bl.y),
+        )
+        return crop_quad_to_images(source, out_images, pts)
+    if box is not None:
+        return crop_region_to_images(
+            source, out_images, (box.x0, box.y0, box.x1, box.y1),
+        )
+    raise ValueError("缺少裁剪区域")  # 不可达：路由已校验 box/quad 至少一个
+
+
 @router.post(
     "/tasks/{task_id}/crop-figure",
     response_model=CropFigureResponse,
@@ -449,26 +488,25 @@ async def crop_figure(
         raise ApiBusinessError(
             APIErrorCode.INVALID_FILENAME, 400, "非法文档目录",
         )
-    box = (req.box.x0, req.box.y0, req.box.x1, req.box.y1)
+    # box / quad 二选一：quad 优先（四角透视校正），否则 box（矩形裁剪）。
+    if req.quad is None and req.box is None:
+        raise ApiBusinessError(
+            APIErrorCode.INVALID_CROP_REGION, 400, "缺少裁剪区域（box 或 quad）",
+        )
     # 绑定为局部变量：闭包内 mypy 不沿用外层的 task 非空 / doc_rel 非 None 窄化。
     src_root = Path(task.image_dir)
     out_images = Path(task.output_dir) / doc_rel / "images"
 
-    def _do() -> str:
-        # 解析源图：沿用 get_source_image 的词法包含 + 跟随 symlink 校验
-        # （image_dir 可能是含软链的 stage 目录）。
-        img_dir = src_root.resolve()
-        source = img_dir / filename
-        if (
-            not source.is_relative_to(img_dir)
-            or not source.is_file()
-            or source.suffix.lower() not in _IMAGE_EXTS
-        ):
-            raise FileNotFoundError(filename)
-        return crop_region_to_images(source, out_images, box)
-
     try:
-        name = await asyncio.to_thread(_do)
+        name = await asyncio.to_thread(
+            _crop_figure_sync, src_root, filename, out_images,
+            req.box, req.quad,
+        )
+    except DegenerateQuadError as exc:
+        raise ApiBusinessError(
+            APIErrorCode.INVALID_CROP_REGION, 400, "四角区域退化，无法矫正",
+            params={"reason": str(exc)},
+        ) from exc
     except (FileNotFoundError, ValueError) as exc:
         raise ApiBusinessError(
             APIErrorCode.IMAGE_NOT_FOUND, 404, "源图不存在或无法读取",

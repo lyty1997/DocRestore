@@ -242,6 +242,9 @@ export const en: Record<TranslationKey, string> = {
   "figureCrop.noSources": "No source images available",
   "figureCrop.sourceLabel": "Source image",
   "figureCrop.fromCursorPage": "Auto-selected the source image for the page at your cursor; switch above if needed",
+  "figureCrop.modeRect": "Rectangle",
+  "figureCrop.modeQuad": "Four-corner correction",
+  "figureCrop.quadHint": "Drag the 4 corner points to the figure's top-left / top-right / bottom-right / bottom-left; on confirm it is auto rotation- and perspective-corrected to a straight view.",
   "figureCrop.confirm": "Crop & insert",
   "figureCrop.submitting": "Cropping…",
 
@@ -350,6 +353,7 @@ export const en: Record<TranslationKey, string> = {
   "errors.api.read_failed": "Read failed: {reason}",
   "errors.api.invalid_filename": "Invalid filename",
   "errors.api.markdown_update_failed": "Save failed: {reason}",
+  "errors.api.invalid_crop_region": "Invalid crop region (missing or degenerate box / corners)",
   "errors.api.upload_session_not_found": "Upload session not found",
   "errors.api.upload_session_completed": "Session is finalized, cannot continue",
   "errors.api.upload_session_no_files": "Session has no files",

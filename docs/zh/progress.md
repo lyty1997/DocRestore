@@ -1560,3 +1560,34 @@ markdown 引用），不依赖图像变换、对所有幻灯片管用，但是�
 **跨不同布局容器 round-trip 对齐** / 找不到锚点不动 / 无页标记返回 undefined / 最后一页按剩余比例）。
 真实浏览器滚动验证需完整栈 + 多页任务（当前前端 dev server 502、任务列表空），留待实测；纯函数几何
 已由单测覆盖（逻辑风险点在此），残留风险仅为真实浏览器里的布局时序（已用双 rAF 兜底）。
+
+
+## 2026-06-09 - 截图四角校正（旋转 + 透视矫正）
+
+**背景**：人工框选的插图常带旋转 / 透视畸变（屏摄、斜拍）。给「重截插图」对话框加四角校正：
+用户放 4 个角点定界，后端透视变换矫正为正视图。**复用 PPT 模式的 OpenCV warp**（slide_rectify）。
+
+**模式（用户拍板）**：保留矩形裁剪（默认）+ 新增四角校正，对话框内开关切换；向后兼容。
+
+**后端**：
+- `slide_rectify.warp_quad(image, quad) -> ImageBGR | None`：从 `rectify` 抽出的纯透视变换（**不做
+  PPT 专用的顶边上抬**），按给定角点顺序映射到正矩形，退化（任一边 < 16px）返回 None。不改 `rectify`
+  避免动 PPT 路径（接受 ~6 行重复）。
+- `content_crop.crop_quad_to_images(src, images_dir, quad)`：读图 → 角点夹取到图内 → 按**固定角色顺序
+  信任、不几何重排**（否则旋转插图会被重标角点矫正成错向）建 Quad → warp_quad → 存 manual_N.jpg。
+  显式动作失败要暴露：读图失败 ValueError→404、退化 `DegenerateQuadError`→400、写盘 OSError→500。
+- schemas：`CropPoint{x,y}` + `CropQuad{tl,tr,br,bl}`；`CropFigureRequest.box` 改可选 + 加 `quad`。
+- 路由：quad 优先 / box 次之 / 皆空 400；新错误码 `INVALID_CROP_REGION`。抽 `_crop_figure_sync`
+  helper 降复杂度（C901）。
+
+**前端**：
+- 新 `QuadCropEditor`：图 + 4 个固定角色（tl/tr/br/bl）可拖角点 + SVG 叠加（evenodd 镂空压暗外区 +
+  描边四边形），复用 CropEditor 的指针捕获模式。
+- `FigureCropDialog`：模式开关；切到四角时用当前矩形框作初始四角（boxToQuad）；按模式发 box 或 quad。
+- schemas.ts/client.ts：CropQuad 类型、cropFigure body box?/quad?；i18n 三语 figureCrop.modeRect/
+  modeQuad/quadHint + errors.api.invalid_crop_region；App.css quad-editor 样式。
+
+**验证**：mypy --strict（68 文件）/ ruff / 前端 typecheck+lint 全绿；后端 +6 测试（warp_quad 旋转矫正
+确定性断言"旋转白方块→正视白方块白占比>0.9" + 退化→None；路由 quad 路径 / quad 优先于 box / 皆空 400 /
+退化 quad 400），前端 +5（QuadCropEditor 角点定位 + polygon 点序；对话框切四角模式确认带 quad 非 box）。
+透视变换正确性由 warp_quad 单测覆盖（核心逻辑风险）；交互拖拽 / 真实插图视觉验证需完整栈，留待实测。

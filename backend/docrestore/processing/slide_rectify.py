@@ -173,6 +173,31 @@ def rectify(
     return warped
 
 
+def warp_quad(image_bgr: ImageBGR, quad: Quad) -> ImageBGR | None:
+    """按四角点把区域透视变换为正视矩形；退化四边形返回 ``None``。
+
+    与 ``rectify`` 的区别：**不做顶边上抬**（上抬是 PPT 屏摄补暗标题栏专用），
+    按给定角点顺序（左上 / 右上 / 右下 / 左下）原样映射到正矩形——调用方负责
+    定好角点角色，本函数不按几何重排（供"手动四角校正"时旋转的插图也能正确
+    矫正）。输出尺寸取四边形上下边 / 左右边的最大长度。任一边低于
+    ``_MIN_RECTIFIED_SIDE_PX`` 视为退化（近共线 sliver）返回 ``None``，交由调用方
+    决定回退 / 报错，不强行产出"竹签图"。
+    """
+    src = quad.as_array()
+    tl, tr, br, bl = src[0], src[1], src[2], src[3]
+    width = max(_dist(tr, tl), _dist(br, bl))
+    height = max(_dist(bl, tl), _dist(br, tr))
+    w, h = int(round(width)), int(round(height))
+    if w < _MIN_RECTIFIED_SIDE_PX or h < _MIN_RECTIFIED_SIDE_PX:
+        return None
+    dst = np.array(
+        [[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=np.float32,
+    )
+    matrix = cv2.getPerspectiveTransform(src.astype(np.float32), dst)
+    warped: ImageBGR = cv2.warpPerspective(image_bgr, matrix, (w, h))
+    return warped
+
+
 def _rectify_sync(
     image_path: Path,
     output_dir: Path,

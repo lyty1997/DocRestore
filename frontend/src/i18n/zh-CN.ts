@@ -247,6 +247,9 @@ export const zhCN = {
   "figureCrop.noSources": "没有可用的源图",
   "figureCrop.sourceLabel": "源图",
   "figureCrop.fromCursorPage": "已自动选中光标所在页的源图，可在上方下拉切换",
+  "figureCrop.modeRect": "矩形裁剪",
+  "figureCrop.modeQuad": "四角校正",
+  "figureCrop.quadHint": "把 4 个角点分别拖到插图的左上 / 右上 / 右下 / 左下角，确认后自动旋转 + 透视校正为正视图。",
   "figureCrop.confirm": "裁剪并插入",
   "figureCrop.submitting": "裁剪中…",
 
@@ -337,6 +340,7 @@ export const zhCN = {
   "errors.api.read_failed": "读取失败：{reason}",
   "errors.api.invalid_filename": "非法文件名",
   "errors.api.markdown_update_failed": "保存失败：{reason}",
+  "errors.api.invalid_crop_region": "裁剪区域无效（缺少或退化的框 / 四角点）",
   "errors.api.upload_session_not_found": "上传会话不存在",
   "errors.api.upload_session_completed": "会话已完成，不可继续操作",
   "errors.api.upload_session_no_files": "会话中无文件",

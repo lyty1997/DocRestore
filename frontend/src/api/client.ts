@@ -46,6 +46,7 @@ import {
   type OcrWarmupResponse,
   type GpuListResponse,
   type CropBox,
+  type CropQuad,
   type CropDetectResponse,
   type CropFigureResponse,
 } from "./schemas";
@@ -257,7 +258,10 @@ export async function cropFigure(
   taskId: string,
   body: {
     source_filename: string;
-    box: CropBox;
+    /** 矩形裁剪框；与 quad 二选一（quad 优先做透视校正）。 */
+    box?: CropBox | undefined;
+    /** 四角校正点；提供时后端透视矫正为正视图。 */
+    quad?: CropQuad | undefined;
     doc_dir?: string | undefined;
   },
 ): Promise<CropFigureResponse> {

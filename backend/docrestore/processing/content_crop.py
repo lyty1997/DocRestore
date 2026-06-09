@@ -34,6 +34,8 @@ import numpy as np
 from cv2.typing import MatLike
 from numpy.typing import NDArray
 
+from docrestore.processing.slide_rectify import Quad, warp_quad
+
 logger = logging.getLogger(__name__)
 
 #: OpenCV BGR 图像类型别名。
@@ -220,6 +222,18 @@ async def crop_page(
 _IMAGE_EXTS = (".jpg", ".jpeg", ".png")
 #: 检测框 (x0, y0, x1, y1)，原图像素坐标系。
 CropBoxTuple = tuple[int, int, int, int]
+#: 四角点 (左上, 右上, 右下, 左下)，每点 (x, y)，原图像素坐标系。顺序即角色，
+#: 由调用方（前端固定角色手柄）保证，供四角透视校正。
+QuadTuple = tuple[
+    tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int],
+]
+
+
+class DegenerateQuadError(Exception):
+    """四角校正的四边形退化（近共线 sliver），无法透视矫正。
+
+    与"读图失败"区分：让路由把它映射成 400（区域无效）而非 404（源图不存在）。
+    """
 
 
 def detect_boxes_for_dir(
@@ -290,6 +304,46 @@ def crop_region_to_images(
     name = _next_manual_figure_name(images_dir)
     out_path = images_dir / name
     if not cv2.imwrite(str(out_path), cropped):
+        raise OSError(f"裁剪图写盘失败: {out_path}")
+    return name
+
+
+def crop_quad_to_images(
+    source_image: Path,
+    images_dir: Path,
+    quad: QuadTuple,
+) -> str:
+    """从 source_image 按四角点透视矫正裁一块，存进 images_dir，返回文件名。
+
+    供编辑模式"四角校正"：用户在源图上放 4 个角点（左上 / 右上 / 右下 / 左下）
+    框住倾斜 / 透视变形的插图 → 透视变换矫正为正视矩形 → 存为 ``manual_N.jpg``。
+    角点先夹取到图内（越界点会让透视矩阵异常）；**按给定角色顺序信任、不按几何
+    重排**（否则旋转的插图会被重标角点而矫正成错向）。
+
+    与 ``crop_region_to_images`` 同属显式用户动作：读图失败 / 退化四边形抛
+    ``ValueError``、写盘失败抛 ``OSError``，由调用方转 API 错误（不静默回退）。
+    """
+    img = cv2.imread(str(source_image))
+    if img is None:
+        raise ValueError(f"读图失败: {source_image}")
+    h, w = img.shape[:2]
+
+    def _clamp(point: tuple[int, int]) -> tuple[int, int]:
+        return (max(0, min(point[0], w - 1)), max(0, min(point[1], h - 1)))
+
+    q = Quad(
+        top_left=_clamp(quad[0]),
+        top_right=_clamp(quad[1]),
+        bottom_right=_clamp(quad[2]),
+        bottom_left=_clamp(quad[3]),
+    )
+    warped = warp_quad(img, q)
+    if warped is None:
+        raise DegenerateQuadError(f"退化四边形，无法矫正: {quad}")
+    images_dir.mkdir(parents=True, exist_ok=True)
+    name = _next_manual_figure_name(images_dir)
+    out_path = images_dir / name
+    if not cv2.imwrite(str(out_path), warped):
         raise OSError(f"裁剪图写盘失败: {out_path}")
     return name
 

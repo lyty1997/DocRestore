@@ -297,6 +297,22 @@ export const CropBoxSchema = z.object({
 });
 export type CropBox = z.infer<typeof CropBoxSchema>;
 
+/** 单个角点（原图像素坐标） */
+export const CropPointSchema = z.object({
+  x: z.number(),
+  y: z.number(),
+});
+export type CropPoint = z.infer<typeof CropPointSchema>;
+
+/** 四角点（原图像素坐标），顺序即角色：左上/右上/右下/左下（四角透视校正用） */
+export const CropQuadSchema = z.object({
+  tl: CropPointSchema,
+  tr: CropPointSchema,
+  br: CropPointSchema,
+  bl: CropPointSchema,
+});
+export type CropQuad = z.infer<typeof CropQuadSchema>;
+
 /** 单张图裁剪框检测结果；box=null 表示无需裁剪（已裁剪 / 无侧栏 / 检测失败） */
 export const CropDetectItemSchema = z.object({
   name: z.string(),

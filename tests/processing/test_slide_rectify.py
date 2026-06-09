@@ -34,6 +34,7 @@ from docrestore.processing.slide_rectify import (
     detect_slide_quad,
     rectify,
     rectify_page,
+    warp_quad,
 )
 
 #: PPT 真图目录（issue 约定路径），相对项目根
@@ -115,6 +116,49 @@ def test_order_corners_rotated_labels_correct() -> None:
     assert _close(quad.top_right, exp_tr)
     assert _close(quad.bottom_right, exp_br)
     assert _close(quad.bottom_left, exp_bl)
+
+
+def test_warp_quad_corrects_rotation() -> None:
+    """四角校正核心：把旋转的白方块按其 4 角矫正为正视，输出近全白、≈原边长。
+
+    若不做透视变换、只取外接矩形，旋转方块的外接框会含黑角 → 白占比明显 <1。
+    """
+    img = np.zeros((200, 200, 3), dtype=np.uint8)
+    center = np.array([100.0, 100.0], dtype=np.float32)
+    # 轴对齐方块（边长 100）的 4 角，顺序 tl tr br bl
+    base = np.array(
+        [(50, 50), (150, 50), (150, 150), (50, 150)], dtype=np.float32,
+    )
+    theta = float(np.deg2rad(30.0))
+    rot = np.array(
+        [[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]],
+        dtype=np.float32,
+    )
+    rotated = (base - center) @ rot.T + center
+    cv2.fillConvexPoly(img, rotated.astype(np.int32), (255, 255, 255))
+    quad = Quad(
+        top_left=(int(rotated[0][0]), int(rotated[0][1])),
+        top_right=(int(rotated[1][0]), int(rotated[1][1])),
+        bottom_right=(int(rotated[2][0]), int(rotated[2][1])),
+        bottom_left=(int(rotated[3][0]), int(rotated[3][1])),
+    )
+    out = warp_quad(img, quad)
+    assert out is not None
+    # 矫正后是正视白方块：白像素占比很高（容边缘插值少量灰）
+    assert float((out > 200).mean()) > 0.9
+    # 旋转不改边长，输出 ≈ 100×100
+    assert abs(out.shape[0] - 100) <= 3
+    assert abs(out.shape[1] - 100) <= 3
+
+
+def test_warp_quad_degenerate_returns_none() -> None:
+    """近共线 sliver 四边形（任一边 < 阈值）→ None，不产竹签图。"""
+    img = np.zeros((100, 100, 3), dtype=np.uint8)
+    quad = Quad(
+        top_left=(10, 10), top_right=(12, 10),
+        bottom_right=(12, 11), bottom_left=(10, 11),
+    )
+    assert warp_quad(img, quad) is None
 
 
 def test_detect_finds_trapezoid() -> None:
