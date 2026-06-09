@@ -10,7 +10,7 @@
  * 文档 tab、edit/save 状态机、源图同步滚动等公共行为。
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import remarkGfm from "remark-gfm";
@@ -24,9 +24,17 @@ import type { TaskResultResponse } from "../api/schemas";
 import { preprocessMarkdown } from "../features/task/markdown";
 import { filterImagesForDoc } from "../features/task/sourceImages";
 import { usePreviewScrollSync } from "../hooks/usePreviewScrollSync";
+import {
+  getCenterPagePosition,
+  scrollToPagePosition,
+  type PagePosition,
+} from "../hooks/useScrollSync";
 import { useTranslation } from "../i18n";
 import { CodeViewer } from "./CodeViewer";
-import { MarkdownWysiwygEditor } from "./MarkdownWysiwygEditor";
+import {
+  MarkdownWysiwygEditor,
+  type MarkdownWysiwygEditorHandle,
+} from "./MarkdownWysiwygEditor";
 import { SourceImagePanel } from "./SourceImagePanel";
 
 interface DocCodePreviewProps {
@@ -68,6 +76,14 @@ export function DocCodePreview({
   const [editText, setEditText] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | undefined>();
+
+  /* 预览 ↔ 编辑互切保位：
+     - editStartPosition：进入编辑时从预览侧抓取，传给编辑器作初始滚动位置
+     - previewRestorePosition：离开编辑（预览/保存）时从编辑器抓取，预览重挂后落位 */
+  const editorRef = useRef<MarkdownWysiwygEditorHandle>(null);
+  const [editStartPosition, setEditStartPosition] = useState<PagePosition>();
+  const [previewRestorePosition, setPreviewRestorePosition] =
+    useState<PagePosition>();
 
   /* 左右同步滚动：callback ref → state 触发 hook 重绑 listener */
   const [leftScrollEl, setLeftScrollEl] = useState<HTMLDivElement>();
@@ -135,11 +151,26 @@ export function DocCodePreview({
 
   const enterEdit = useCallback((): void => {
     if (selectedDoc !== undefined) {
+      // 进入编辑前抓取预览当前所在 page 位置，传给编辑器作初始滚动（不回顶部）
+      setEditStartPosition(
+        rightScrollEl === undefined
+          ? undefined
+          : getCenterPagePosition(rightScrollEl),
+      );
       setEditText(selectedDoc.markdown);
       setEditMode(true);
       setSaveError(undefined);
     }
-  }, [selectedDoc]);
+  }, [selectedDoc, rightScrollEl]);
+
+  /* 离开编辑。restore=true（预览/保存）时抓取编辑器当前位置，预览重挂后落回去；
+     restore=false（切文档 / 切代码视图，语境已变）则清空不保位。 */
+  const leaveEdit = useCallback((restore: boolean): void => {
+    setPreviewRestorePosition(
+      restore ? editorRef.current?.getPagePosition() : undefined,
+    );
+    setEditMode(false);
+  }, []);
 
   const handleSave = useCallback(async (): Promise<void> => {
     if (selectedDoc === undefined) return;
@@ -151,15 +182,37 @@ export function DocCodePreview({
         idx === selectedIdx ? { ...doc, markdown: editText } : doc,
       );
       onResultsChange(next);
-      setEditMode(false);
+      leaveEdit(true);
     } catch {
       setSaveError(t("common.saveFailed"));
     } finally {
       setSaving(false);
     }
   }, [
-    editText, onResultsChange, results, selectedDoc, selectedIdx, taskId, t,
+    editText, leaveEdit, onResultsChange, results, selectedDoc, selectedIdx,
+    taskId, t,
   ]);
+
+  /* 离开编辑回到预览后，把预览滚回编辑时所在位置（双向保位的回程）。
+     预览重挂 → rightScrollEl 经 callback ref 填入触发本 effect；双 rAF 等
+     Markdown 锚点布局完再落位，用完即清避免劫持后续正常滚动。 */
+  useEffect(() => {
+    if (editMode) return;
+    if (previewRestorePosition === undefined) return;
+    if (rightScrollEl === undefined) return;
+    const pos = previewRestorePosition;
+    let raf2: number | undefined;
+    const raf1 = globalThis.requestAnimationFrame(() => {
+      raf2 = globalThis.requestAnimationFrame(() => {
+        scrollToPagePosition(rightScrollEl, pos);
+        setPreviewRestorePosition(undefined);
+      });
+    });
+    return () => {
+      globalThis.cancelAnimationFrame(raf1);
+      if (raf2 !== undefined) globalThis.cancelAnimationFrame(raf2);
+    };
+  }, [editMode, previewRestorePosition, rightScrollEl]);
 
   const renderHeader = (): React.JSX.Element | undefined => {
     if (!showHeader) return undefined;
@@ -173,7 +226,7 @@ export function DocCodePreview({
               type="button"
               className={`toggle-btn ${viewMode === "doc" ? "active" : ""}`}
               onClick={() => {
-                if (editMode) setEditMode(false);
+                if (editMode) leaveEdit(false);
                 setViewMode("doc");
               }}
             >
@@ -183,7 +236,7 @@ export function DocCodePreview({
               type="button"
               className={`toggle-btn ${viewMode === "code" ? "active" : ""}`}
               onClick={() => {
-                if (editMode) setEditMode(false);
+                if (editMode) leaveEdit(false);
                 setViewMode("code");
               }}
             >
@@ -197,7 +250,7 @@ export function DocCodePreview({
               <button
                 type="button"
                 className={`toggle-btn ${editMode ? "" : "active"}`}
-                onClick={() => { setEditMode(false); }}
+                onClick={() => { leaveEdit(true); }}
               >
                 {t("common.preview")}
               </button>
@@ -268,7 +321,7 @@ export function DocCodePreview({
                 + (isFailed ? "doc-tab--failed" : "doc-tab--ok")
               }
               onClick={() => {
-                if (editMode) setEditMode(false);
+                if (editMode) leaveEdit(false);
                 setSelectedIdx(idx);
               }}
               title={isFailed ? doc.error : ""}
@@ -317,10 +370,12 @@ export function DocCodePreview({
         {!selectedDocFailed && editMode && (
           <div className="markdown-editor">
             <MarkdownWysiwygEditor
+              ref={editorRef}
               value={editText}
               onChange={setEditText}
               taskId={taskId}
               docDir={selectedDoc.doc_dir}
+              initialPagePosition={editStartPosition}
             />
           </div>
         )}

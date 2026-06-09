@@ -15,7 +15,11 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { useScrollSync } from "../../src/hooks/useScrollSync";
+import {
+  getCenterPagePosition,
+  scrollToPagePosition,
+  useScrollSync,
+} from "../../src/hooks/useScrollSync";
 
 /**
  * 给 jsdom 里的元素补上 getBoundingClientRect / clientHeight / scrollHeight
@@ -352,5 +356,100 @@ describe("useScrollSync", () => {
     simulateScroll(left.container, 300);
     await flushRaf();
     expect(right.container.scrollTop).toBe(0);
+  });
+});
+
+/**
+ * getCenterPagePosition / scrollToPagePosition：预览 ↔ 编辑器互切保位的取/落位。
+ *
+ * 与 useScrollSync 共用 data-page 锚点几何，但这里直接测纯函数（不经 scroll
+ * 事件），覆盖：取视口中心 page+比例、按位置落位、跨不同布局容器 round-trip
+ * 对齐、找不到锚点不动、最后一页按剩余内容比例。
+ */
+describe("getCenterPagePosition / scrollToPagePosition", () => {
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("getCenterPagePosition 取视口中心所在 page 与区间比例", () => {
+    const { container } = makeContainer(
+      [
+        { key: "1.jpg", top: 0 },
+        { key: "2.jpg", top: 1000 },
+      ],
+      { viewportHeight: 400, scrollHeight: 2400 },
+    );
+    container.scrollTop = 300; // centerY = 500，处在 1.jpg→2.jpg 区间 50%
+    expect(getCenterPagePosition(container)).toEqual({ key: "1.jpg", ratio: 0.5 });
+  });
+
+  it("scrollToPagePosition 按位置把容器滚到该 page+比例居中", () => {
+    const { container } = makeContainer(
+      [
+        { key: "1.jpg", top: 0, height: 800 },
+        { key: "2.jpg", top: 900, height: 800 },
+      ],
+      { viewportHeight: 400, scrollHeight: 2000 },
+    );
+    // 1.jpg→2.jpg 区间 0→900，50% 映射点 450，居中 scrollTop = 450 - 200 = 250
+    scrollToPagePosition(container, { key: "1.jpg", ratio: 0.5 });
+    expect(container.scrollTop).toBe(250);
+  });
+
+  it("跨不同布局容器 round-trip：预览取位 → 编辑器落到同 page 同比例", () => {
+    const preview = makeContainer(
+      [
+        { key: "1.jpg", top: 0 },
+        { key: "2.jpg", top: 1000 },
+      ],
+      { viewportHeight: 400, scrollHeight: 2400 },
+    );
+    const editor = makeContainer(
+      [
+        { key: "1.jpg", top: 0, height: 800 },
+        { key: "2.jpg", top: 900, height: 800 },
+      ],
+      { viewportHeight: 400, scrollHeight: 2000 },
+    );
+    preview.container.scrollTop = 300;
+    const pos = getCenterPagePosition(preview.container);
+    expect(pos).toBeDefined();
+    if (pos === undefined) throw new Error("pos 不应为空");
+    scrollToPagePosition(editor.container, pos);
+    expect(editor.container.scrollTop).toBe(250);
+  });
+
+  it("目标容器无同 key 锚点时不动（保持原 scrollTop）", () => {
+    const { container } = makeContainer([{ key: "a.jpg", top: 0 }]);
+    container.scrollTop = 123;
+    scrollToPagePosition(container, { key: "missing.jpg", ratio: 0.5 });
+    expect(container.scrollTop).toBe(123);
+  });
+
+  it("无页标记时 getCenterPagePosition 返回 undefined", () => {
+    const { container } = makeContainer([]);
+    expect(getCenterPagePosition(container)).toBeUndefined();
+  });
+
+  it("最后一页按剩余内容比例 round-trip", () => {
+    const preview = makeContainer(
+      [
+        { key: "1.jpg", top: 0 },
+        { key: "2.jpg", top: 1000 },
+      ],
+      { viewportHeight: 400, scrollHeight: 2400 },
+    );
+    const editor = makeContainer(
+      [
+        { key: "1.jpg", top: 0, height: 800 },
+        { key: "2.jpg", top: 900, height: 800 },
+      ],
+      { viewportHeight: 400, scrollHeight: 2000 },
+    );
+    preview.container.scrollTop = 1300; // centerY = 1500，最后一页剩余区间 5/14
+    const pos = getCenterPagePosition(preview.container);
+    if (pos === undefined) throw new Error("pos 不应为空");
+    scrollToPagePosition(editor.container, pos);
+    expect(editor.container.scrollTop).toBeCloseTo(985.714, 3);
   });
 });

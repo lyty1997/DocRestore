@@ -1534,3 +1534,29 @@ markdown 引用），不依赖图像变换、对所有幻灯片管用，但是�
 
 **验证**：前端 typecheck/lint 绿；FigureCropDialog 测试 6 例（原 3 + 新增 3：基名匹配自动选中并提示 /
 多文档按 docDir 前缀锚定 / 无匹配回退首张且不提示）。视觉/交互验证同上节，需完整栈实测。
+
+
+## 2026-06-09 - 预览 ↔ 编辑器互切保位（双向）
+
+**背景**：进入编辑模式时编辑器从头开始，丢失预览时所在位置。用户要求双向保位：进入编辑落到
+预览所在位置，保存/退出编辑回预览也落到编辑所在位置。
+
+**复用既有锚点机制**：预览（`.markdown-preview`，`injectPageAnchors` 注的 `[data-page]`）和编辑器
+（Tiptap `PageAnchor` 节点渲染的 `[data-page]`）共用同一套页锚点。`useScrollSync` 里早有
+`getCenterPagePosition`（取视口中心的 `{page key, 区间比例}`）和连续映射数学，只是私有。
+
+**改动**：
+- `useScrollSync.ts`：导出 `PagePosition` 类型 + `getCenterPagePosition`；新增 `scrollToPagePosition`
+  （把 `{key, ratio}` 落到同 page 同比例居中处）。把原 `getContinuousTargetScrollTop` 的映射逻辑抽成
+  共用 `pagePositionToScrollTop`（行为零变化，原 continuous 测试精确值全过）。
+- `MarkdownWysiwygEditor`：改 `forwardRef` 暴露 `getPagePosition()` 句柄；加 `initialPagePosition` prop，
+  编辑器就绪后双 rAF 等 ProseMirror 锚点布局完，滚到该位置（`editor.view.dom.closest(.wysiwyg-editor-content)`
+  反查滚动容器）。无页标记则不动（留在顶部）。
+- `DocCodePreview`：`enterEdit` 抓预览 `getCenterPagePosition` → 传 `initialPagePosition`；
+  `leaveEdit(restore)`——预览/保存按钮 `restore=true`（抓编辑器位置，预览重挂后双 rAF 落位、用完即清），
+  切文档/切代码视图 `restore=false`（语境已变不保位）。
+
+**验证**：前端 typecheck/lint 绿，全量 99 测试通过；useScrollSync 测试 +6（取中心 page+比例 / 按位置落位 /
+**跨不同布局容器 round-trip 对齐** / 找不到锚点不动 / 无页标记返回 undefined / 最后一页按剩余比例）。
+真实浏览器滚动验证需完整栈 + 多页任务（当前前端 dev server 502、任务列表空），留待实测；纯函数几何
+已由单测覆盖（逻辑风险点在此），残留风险仅为真实浏览器里的布局时序（已用双 rAF 兜底）。

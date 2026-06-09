@@ -27,6 +27,18 @@ export interface ScrollSyncOptions {
 }
 
 /**
+ * 视口中心所在的 page 位置：page key + 它在「当前 page → 下一 page」区间里的比例。
+ *
+ * 供预览 ↔ 编辑器互切时保位：一侧 ``getCenterPagePosition`` 取位置，另一侧
+ * ``scrollToPagePosition`` 落到同 page + 同比例处（两侧布局不同也对齐，因为
+ * 锚点用文件名而非像素）。
+ */
+export interface PagePosition {
+  readonly key: string;
+  readonly ratio: number;
+}
+
+/**
  * 绑定左右两侧容器的同步滚动。
  *
  * 两侧容器内须有 `[data-page]` 锚点元素，且可滚动（overflow 非 visible）。
@@ -198,31 +210,55 @@ function getContinuousTargetScrollTop(
 ): number | undefined {
   const sourcePosition = getCenterPagePosition(source);
   if (sourcePosition === undefined) return undefined;
+  return pagePositionToScrollTop(target, sourcePosition);
+}
 
-  const targetAnchors = getAnchorMetrics(target);
-  const targetIdx = targetAnchors.findIndex(
-    (anchor) => anchor.key === sourcePosition.key,
-  );
-  const targetAnchor = targetAnchors[targetIdx];
-  if (targetAnchor === undefined) return undefined;
+/**
+ * 把 ``PagePosition``（page key + 区间比例）映射成该容器内的居中 scrollTop。
+ *
+ * 找同 key 锚点，按比例在「当前 page → 下一 page」区间插值得到内容坐标，
+ * 再换算成让该点居于视口中心的 scrollTop（夹取到合法范围）。找不到同 key
+ * 锚点（如目标侧无该页 / 无页标记）返回 undefined。
+ */
+function pagePositionToScrollTop(
+  container: HTMLElement,
+  position: PagePosition,
+): number | undefined {
+  const anchors = getAnchorMetrics(container);
+  const idx = anchors.findIndex((anchor) => anchor.key === position.key);
+  const anchor = anchors[idx];
+  if (anchor === undefined) return undefined;
 
-  const nextTargetAnchor = targetAnchors[targetIdx + 1];
-  const targetY = nextTargetAnchor === undefined
-    ? targetAnchor.top
-      + getAnchorSpanToEnd(target, targetAnchor) * sourcePosition.ratio
-    : targetAnchor.top
-      + (nextTargetAnchor.top - targetAnchor.top) * sourcePosition.ratio;
+  const next = anchors[idx + 1];
+  const targetY = next === undefined
+    ? anchor.top + getAnchorSpanToEnd(container, anchor) * position.ratio
+    : anchor.top + (next.top - anchor.top) * position.ratio;
 
-  return clampScrollTop(target, targetY - target.clientHeight / 2);
+  return clampScrollTop(container, targetY - container.clientHeight / 2);
+}
+
+/**
+ * 把容器滚到指定 ``PagePosition``（同 page + 同区间比例）居中处。
+ *
+ * 供预览 ↔ 编辑器互切保位：用另一侧 ``getCenterPagePosition`` 取到的位置直接
+ * 落位。找不到对应锚点时不动（容器保持原 scrollTop）。
+ */
+export function scrollToPagePosition(
+  container: HTMLElement,
+  position: PagePosition,
+): void {
+  const top = pagePositionToScrollTop(container, position);
+  if (top === undefined) return;
+  container.scrollTop = top;
 }
 
 /**
  * 返回源容器视口中心对应的 page key，以及它在当前 page 到下一 page
  * 区间里的比例。最后一页没有下一锚点时，若锚点元素自身有高度，则用自身高度。
  */
-function getCenterPagePosition(
+export function getCenterPagePosition(
   container: HTMLElement,
-): { readonly key: string; readonly ratio: number } | undefined {
+): PagePosition | undefined {
   const anchors = getAnchorMetrics(container);
   if (anchors.length === 0) return undefined;
 

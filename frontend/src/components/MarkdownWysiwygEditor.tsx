@@ -32,7 +32,13 @@ import {
 } from "@tiptap/extension-table";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import { StarterKit } from "@tiptap/starter-kit";
-import { useEffect, useRef, useState } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 
 import { getAssetUrl } from "../api/client";
 import {
@@ -40,8 +46,23 @@ import {
   editorImagesToAssetUrls,
 } from "../features/task/markdown";
 import { htmlToMarkdown, markdownToHtml } from "../features/task/markdownRoundtrip";
+import {
+  getCenterPagePosition,
+  scrollToPagePosition,
+  type PagePosition,
+} from "../hooks/useScrollSync";
 import { useTranslation } from "../i18n";
 import { FigureCropDialog } from "./FigureCropDialog";
+
+/** Tiptap 在 ``.wysiwyg-editor`` 与 ``.ProseMirror`` 之间插入的滚动容器类名。 */
+const SCROLL_CONTAINER_SELECTOR = ".wysiwyg-editor-content";
+
+/** 由 ``editor`` 反查其滚动容器（``.wysiwyg-editor-content``）。 */
+function getScrollContainer(editor: Editor | null): HTMLElement | undefined {
+  if (editor === null) return undefined;
+  const container = editor.view.dom.closest(SCROLL_CONTAINER_SELECTOR);
+  return container instanceof HTMLElement ? container : undefined;
+}
 
 /**
  * 自定义 PageAnchor 节点：把 ``<!-- page: X -->`` 锚点渲染为一行小灰条，
@@ -244,11 +265,23 @@ interface MarkdownWysiwygEditorProps {
   readonly taskId?: string | undefined;
   /** 多文档子目录：拼 asset URL 前缀（与预览 ``preprocessMarkdown`` 一致）。 */
   readonly docDir?: string | undefined;
+  /** 挂载后初始滚动到的 page 位置（从预览侧带过来，进入编辑不回到顶部）。 */
+  readonly initialPagePosition?: PagePosition | undefined;
 }
 
-export function MarkdownWysiwygEditor({
-  value, onChange, taskId, docDir,
-}: MarkdownWysiwygEditorProps): React.JSX.Element {
+/** 命令式句柄：供外层（离开编辑回预览时）读取编辑器当前 page 位置。 */
+export interface MarkdownWysiwygEditorHandle {
+  /** 当前视口中心所在的 page 位置；无页标记 / 未就绪时返回 undefined。 */
+  readonly getPagePosition: () => PagePosition | undefined;
+}
+
+export const MarkdownWysiwygEditor = forwardRef<
+  MarkdownWysiwygEditorHandle,
+  MarkdownWysiwygEditorProps
+>(function MarkdownWysiwygEditor(
+  { value, onChange, taskId, docDir, initialPagePosition },
+  ref,
+): React.JSX.Element {
   const { t } = useTranslation();
   const lastEmittedRef = useRef<string>("");
   const [showFigureDialog, setShowFigureDialog] = useState<boolean>(false);
@@ -309,6 +342,36 @@ export function MarkdownWysiwygEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor, value]);
 
+  /* 进入编辑时滚到预览带过来的 page 位置（不回到顶部）。编辑器就绪后用双 rAF
+     等 ProseMirror 把 [data-page] 锚点渲染并布局完再落位。 */
+  useEffect(() => {
+    if (initialPagePosition === undefined) return;
+    const container = getScrollContainer(editor);
+    if (container === undefined) return;
+    let raf2: number | undefined;
+    const raf1 = globalThis.requestAnimationFrame(() => {
+      raf2 = globalThis.requestAnimationFrame(() => {
+        scrollToPagePosition(container, initialPagePosition);
+      });
+    });
+    return () => {
+      globalThis.cancelAnimationFrame(raf1);
+      if (raf2 !== undefined) globalThis.cancelAnimationFrame(raf2);
+    };
+    // 仅在 editor 就绪时执行一次；initialPagePosition 进入编辑时已锁定不再变。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editor]);
+
+  /* 暴露当前 page 位置：离开编辑回预览时由外层读取以保位。 */
+  useImperativeHandle(ref, () => ({
+    getPagePosition: (): PagePosition | undefined => {
+      const container = getScrollContainer(editor);
+      return container === undefined
+        ? undefined
+        : getCenterPagePosition(container);
+    },
+  }), [editor]);
+
   /* 「插入截图」确认：assetPath 为相对 images/manual_N.jpg，
      编辑器内用 asset URL 显示（保存时 htmlToValue 逆变换回相对路径）。 */
   const handleFigureConfirm = (assetPath: string): void => {
@@ -348,4 +411,6 @@ export function MarkdownWysiwygEditor({
       )}
     </div>
   );
-}
+});
+
+MarkdownWysiwygEditor.displayName = "MarkdownWysiwygEditor";
