@@ -50,11 +50,6 @@ _MIN_AREA_RATIO = 0.2
 #: 透视变换会产出 1×N 之类的"竹签图"喂给 OCR；此时回退原图。正常幻灯片矫正
 #: 结果都是数百像素，16px 既能拦下退化 sliver，又绝不会误伤真实幻灯片。
 _MIN_RECTIFIED_SIDE_PX = 16
-#: 四边形偏离正矩形的"偏斜"阈值（度）：4 角偏离直角的最大值 ≤ 此值视为近正视。
-#: 近正视幻灯片只**遮黑周边、保持原图尺寸**、不做透视 warp（warp / 裁小都会改变
-#: 幻灯片在画面里的相对尺度，让下游 VL 把化学结构 / 图表切碎）；超过此值的强透视
-#: 屏摄才做完整 warp 矫正。
-_MAX_SKEW_DEG = 8.0
 
 
 @dataclass(frozen=True)
@@ -178,56 +173,6 @@ def rectify(
     return warped
 
 
-def _quad_skew(quad: Quad) -> float:
-    """四边形偏离正矩形的程度：4 个角偏离直角(90°)的最大度数。
-
-    近正视屏摄 → 各角接近 90°、返回值小；强透视 → 角偏离大、返回值大。
-    """
-    pts = quad.as_array()
-    tl, tr, br, bl = pts[0], pts[1], pts[2], pts[3]
-
-    def corner(
-        a: NDArray[np.float32], b: NDArray[np.float32], c: NDArray[np.float32],
-    ) -> float:
-        v1, v2 = a - b, c - b
-        denom = float(np.linalg.norm(v1) * np.linalg.norm(v2)) + 1e-9
-        cos = float(np.dot(v1, v2)) / denom
-        return float(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0))))
-
-    angles = [
-        corner(bl, tl, tr), corner(tl, tr, br),
-        corner(tr, br, bl), corner(br, bl, tl),
-    ]
-    return max(abs(a - 90.0) for a in angles)
-
-
-def _mask_surroundings(
-    image_bgr: ImageBGR, quad: Quad, *, top_extend_ratio: float,
-) -> ImageBGR:
-    """去掉屏幕四边形外的周边（投影厅 / 墙面等），但**保持原图尺寸**：把包围盒外
-    涂黑、不裁小、不缩放、不 warp。
-
-    关键：实测 VL 对"幻灯片占满画面"的小图会按更高分辨率把化学结构 / 图表切碎；
-    若直接裁小（或 warp 缩小），幻灯片相对尺度被放大 → 切碎。这里只 mask 周边、
-    保持幻灯片在原图中的位置与尺度不变，VL 的内部缩放与处理整张原图时一致 →
-    图保持完整；同时周边被涂黑，不污染 OCR。
-    """
-    pts = quad.as_array()
-    h, w = image_bgr.shape[:2]
-    x0 = int(max(0.0, float(np.min(pts[:, 0]))))
-    x1 = int(min(float(w), float(np.max(pts[:, 0]))))
-    y0 = int(max(0.0, float(np.min(pts[:, 1]))))
-    y1 = int(min(float(h), float(np.max(pts[:, 1]))))
-    # 顶边上抬，补回常被暗标题栏 / 吊顶遮挡的区域
-    box_h = y1 - y0
-    y0 = int(max(0, y0 - int(box_h * top_extend_ratio)))
-    if x1 - x0 < _MIN_RECTIFIED_SIDE_PX or y1 - y0 < _MIN_RECTIFIED_SIDE_PX:
-        return image_bgr
-    masked: ImageBGR = np.zeros_like(image_bgr)
-    masked[y0:y1, x0:x1] = image_bgr[y0:y1, x0:x1]
-    return masked
-
-
 def _rectify_sync(
     image_path: Path,
     output_dir: Path,
@@ -235,15 +180,10 @@ def _rectify_sync(
     save_debug: bool,
     debug_dir: str,
     top_extend_ratio: float,
-    max_skew_deg: float,
 ) -> Path:
     """rectify_page 的同步实现（在 to_thread 中运行）。
 
-    返回供下游 OCR 使用的图片路径：处理成功 → 处理图路径；任何失败 → 原图路径。
-
-    **按需矫正**：检测到的四边形偏斜 ≤ ``max_skew_deg`` 视为近正视，只按包围盒
-    裁掉周边、不做透视 warp（保完整图，避免 VL 切碎）；超过则做完整 warp 矫正。
-    两条路都"裁掉周边"，区别仅在要不要 warp。
+    返回供下游 OCR 使用的图片路径：矫正成功 → 矫正图路径；任何失败 → 原图路径。
     """
     image = cv2.imread(str(image_path))
     if image is None:
@@ -254,24 +194,10 @@ def _rectify_sync(
         logger.info("未检测到幻灯片四边形，回退原图：%s", image_path.name)
         return image_path
     try:
-        skew = _quad_skew(quad)
-        if skew <= max_skew_deg:
-            out_img = _mask_surroundings(
-                image, quad, top_extend_ratio=top_extend_ratio,
-            )
-            logger.info(
-                "幻灯片近正视(偏斜%.1f°≤%.1f°)，仅遮黑周边保原尺寸、不 warp：%s",
-                skew, max_skew_deg, image_path.name,
-            )
-        else:
-            out_img = rectify(image, quad, top_extend_ratio=top_extend_ratio)
-            logger.info(
-                "幻灯片强透视(偏斜%.1f°>%.1f°)，完整透视矫正：%s",
-                skew, max_skew_deg, image_path.name,
-            )
+        warped = rectify(image, quad, top_extend_ratio=top_extend_ratio)
     except cv2.error:
         logger.warning(
-            "矫正 / 裁剪异常，回退原图：%s", image_path.name, exc_info=True,
+            "透视矫正异常，回退原图：%s", image_path.name, exc_info=True,
         )
         return image_path
 
@@ -284,8 +210,8 @@ def _rectify_sync(
     # 不中断下游 OCR"契约（否则异常会冒泡到 _ocr_producer 崩整个 task）。
     try:
         rectified_dir.mkdir(parents=True, exist_ok=True)
-        if not cv2.imwrite(str(after_path), out_img):
-            logger.warning("处理图写盘失败，回退原图：%s", image_path.name)
+        if not cv2.imwrite(str(after_path), warped):
+            logger.warning("矫正图写盘失败，回退原图：%s", image_path.name)
             return image_path
         if save_debug:
             # before 对照：原图副本，便于与 after 目视对比验收
@@ -305,13 +231,11 @@ async def rectify_page(
     save_debug: bool = True,
     debug_dir: str = ".rectified",
     top_extend_ratio: float = 0.2,
-    max_skew_deg: float = _MAX_SKEW_DEG,
 ) -> Path:
     """逐页矫正异步入口。OpenCV 阻塞调用走 to_thread，不阻塞事件循环。
 
-    ``max_skew_deg``：四边形偏斜 ≤ 此值（度）只裁剪去周边、不做透视 warp（保完整图）；
-    超过才完整 warp 矫正。任何失败（读图 / 未检测到四边形 / 处理异常 / 写盘）都回退
-    原图路径，保证下游 OCR 不中断。返回供 OCR 使用的图片路径。
+    任何失败（读图失败 / 未检测到四边形 / 矫正异常 / 写盘失败）都回退原图
+    路径，保证下游 OCR 不中断。返回供 OCR 使用的图片路径。
     """
     return await asyncio.to_thread(
         _rectify_sync,
@@ -320,5 +244,4 @@ async def rectify_page(
         save_debug=save_debug,
         debug_dir=debug_dir,
         top_extend_ratio=top_extend_ratio,
-        max_skew_deg=max_skew_deg,
     )

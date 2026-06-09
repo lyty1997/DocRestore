@@ -397,10 +397,6 @@ class PowerPointRestoreConfig(BaseModel):
     rectify_debug_dir: str = ".rectified"
     #: 顶边上抬比例，补回常被吊顶 / 暗标题栏遮挡的区域
     rectify_top_extend_ratio: float = 0.2
-    #: 按需矫正阈值（度）：屏幕四边形偏斜（4 角偏离直角的最大值）≤ 此值视为近正视，
-    #: 只**遮黑周边、保持原图尺寸**、不做透视 warp（warp / 裁小会改变幻灯片相对尺度，
-    #: 让 VL 把化学结构 / 图表切碎）；超过此值的强透视屏摄才做完整 warp 矫正。
-    rectify_max_skew_deg: float = 8.0
 
 
 class ContentCropConfig(BaseModel):
