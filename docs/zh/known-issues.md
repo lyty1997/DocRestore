@@ -491,7 +491,14 @@ merged_raw 补回尾部）。本文档场景里 giant line 唯一来源就是退
 
 ## 编辑模式（Tiptap）长文档只显示第一屏、无法下滑（2026-06-09，已修）
 
-**现象**：PPT 编辑模式只能显示/编辑第一页内容，鼠标无法向下滚动看后续页（文档模式因正文常较短未暴露）。
+**现象**：编辑模式只能显示/编辑文档开头一屏，鼠标无法向下滚动看后续内容。用户在 PPT 模式首次发现。
+
+**与模式无关**：文档模式与 PPT 模式编辑共用同一组件（`DocCodePreview` → `MarkdownWysiwygEditor`）
+与同一份 CSS，编辑器里**没有任何按模式的分支**。触发条件是**编辑器渲染高度 > 可视区（~80vh）即被裁**，
+与是文档还是 PPT、正文多长无关——论文本量文档模式通常**更长**，只会更早触发。之所以在 PPT 先暴露：
+**预览**路径（`.markdown-preview`）把 `overflow-y:auto` 直接挂在滚动元素上、无包裹层，两种模式都正常滚；
+**只有编辑器**有下面的包裹层缺陷，所以"谁先去编辑一篇超过一屏的文档"就先撞上，恰好是 PPT。PPT 即便正文
+稀疏也易超一屏，因整个 deck（多页 + 大幅居中插图）合进一个 `document.md`，但这是诱因不是根因。
 
 **根因**：CSS flex 链断在 Tiptap 的 `<EditorContent>` 包裹层。`.wysiwyg-editor`（`height:80vh;
 display:flex; flex-direction:column; overflow:hidden`）下，滚动样式 `flex:1; overflow-y:auto`
