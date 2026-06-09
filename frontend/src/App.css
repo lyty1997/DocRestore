@@ -4305,7 +4305,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  width: min(640px, 100%);
+  width: min(1080px, 96vw);
   max-height: 90vh;
   overflow: auto;
   padding: 20px;
@@ -4356,13 +4356,44 @@ body {
   font-size: 12px;
   color: var(--accent, #2563eb);
 }
-.figure-crop-canvas {
+/* 编辑区 + 实时矫正预览 两栏（窄屏自动换行堆叠） */
+.figure-crop-stage {
   display: flex;
-  justify-content: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-start;
 }
+.figure-crop-canvas {
+  flex: 1 1 360px;
+  min-width: 0;
+}
+/* 编辑器铺满所在列（覆盖基础 .crop-editor 的 520px 上限） */
 .figure-crop-canvas .crop-editor,
 .figure-crop-canvas .quad-editor {
+  width: 100%;
   max-width: 100%;
+}
+.figure-crop-preview {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.figure-crop-preview-label {
+  font-size: 12px;
+  color: var(--text-muted, #666);
+}
+.figure-crop-preview-box {
+  position: relative;
+  overflow: hidden;
+  background:
+    repeating-conic-gradient(#0000000a 0% 25%, transparent 0% 50%) 50% / 16px 16px;
+  border: 1px solid var(--border, #ddd);
+  border-radius: 4px;
+}
+.figure-crop-preview-empty {
+  width: 120px;
+  height: 80px;
 }
 .figure-crop-error {
   margin: 0;

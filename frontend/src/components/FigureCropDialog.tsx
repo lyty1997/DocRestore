@@ -14,6 +14,7 @@ import type { CropBox, CropQuad } from "../api/schemas";
 import { useTranslation } from "../i18n";
 import { CropEditor } from "./CropEditor";
 import { QuadCropEditor } from "./QuadCropEditor";
+import { RectifiedPreview } from "./RectifiedPreview";
 
 interface NaturalSize {
   readonly width: number;
@@ -173,6 +174,12 @@ export function FigureCropDialog({
     natural !== undefined
     && (mode === "quad" ? quad !== undefined : box !== undefined);
 
+  // 实时预览用的四边形：四角模式直接用 quad，矩形模式由当前框生成轴对齐四边形
+  const previewQuad =
+    mode === "quad"
+      ? quad
+      : (box === undefined ? undefined : boxToQuad(box));
+
   return (
     <div className="figure-crop-overlay" role="dialog" aria-modal="true">
       <div className="figure-crop-dialog">
@@ -242,31 +249,46 @@ export function FigureCropDialog({
         )}
 
         {selected !== "" && (
-          <div className="figure-crop-canvas">
-            {/* 测量用隐藏图：拿原图自然尺寸后才渲染编辑器 */}
-            <img
-              src={getSourceImageUrl(taskId, selected)}
-              alt=""
-              style={{ display: "none" }}
-              onLoad={onImgLoad}
-            />
-            {ready && mode === "rect" && box !== undefined && (
-              <CropEditor
-                imageUrl={getSourceImageUrl(taskId, selected)}
-                naturalWidth={natural.width}
-                naturalHeight={natural.height}
-                box={box}
-                onChange={setBox}
+          <div className="figure-crop-stage">
+            <div className="figure-crop-canvas">
+              {/* 测量用隐藏图：拿原图自然尺寸后才渲染编辑器 */}
+              <img
+                src={getSourceImageUrl(taskId, selected)}
+                alt=""
+                style={{ display: "none" }}
+                onLoad={onImgLoad}
               />
-            )}
-            {ready && mode === "quad" && quad !== undefined && (
-              <QuadCropEditor
-                imageUrl={getSourceImageUrl(taskId, selected)}
-                naturalWidth={natural.width}
-                naturalHeight={natural.height}
-                quad={quad}
-                onChange={setQuad}
-              />
+              {ready && mode === "rect" && box !== undefined && (
+                <CropEditor
+                  imageUrl={getSourceImageUrl(taskId, selected)}
+                  naturalWidth={natural.width}
+                  naturalHeight={natural.height}
+                  box={box}
+                  onChange={setBox}
+                />
+              )}
+              {ready && mode === "quad" && quad !== undefined && (
+                <QuadCropEditor
+                  imageUrl={getSourceImageUrl(taskId, selected)}
+                  naturalWidth={natural.width}
+                  naturalHeight={natural.height}
+                  quad={quad}
+                  onChange={setQuad}
+                />
+              )}
+            </div>
+            {ready && previewQuad !== undefined && (
+              <div className="figure-crop-preview">
+                <span className="figure-crop-preview-label">
+                  {t("figureCrop.previewLabel")}
+                </span>
+                <RectifiedPreview
+                  imageUrl={getSourceImageUrl(taskId, selected)}
+                  naturalWidth={natural.width}
+                  naturalHeight={natural.height}
+                  quad={previewQuad}
+                />
+              </div>
             )}
           </div>
         )}

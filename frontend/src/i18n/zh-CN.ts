@@ -250,6 +250,7 @@ export const zhCN = {
   "figureCrop.modeRect": "矩形裁剪",
   "figureCrop.modeQuad": "四角校正",
   "figureCrop.quadHint": "把 4 个角点分别拖到插图的左上 / 右上 / 右下 / 左下角，确认后自动旋转 + 透视校正为正视图。",
+  "figureCrop.previewLabel": "矫正预览（实时）",
   "figureCrop.confirm": "裁剪并插入",
   "figureCrop.submitting": "裁剪中…",
 

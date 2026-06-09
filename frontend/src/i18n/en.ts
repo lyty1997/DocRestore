@@ -245,6 +245,7 @@ export const en: Record<TranslationKey, string> = {
   "figureCrop.modeRect": "Rectangle",
   "figureCrop.modeQuad": "Four-corner correction",
   "figureCrop.quadHint": "Drag the 4 corner points to the figure's top-left / top-right / bottom-right / bottom-left; on confirm it is auto rotation- and perspective-corrected to a straight view.",
+  "figureCrop.previewLabel": "Corrected preview (live)",
   "figureCrop.confirm": "Crop & insert",
   "figureCrop.submitting": "Cropping…",
 

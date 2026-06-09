@@ -123,6 +123,23 @@ describe("FigureCropDialog", () => {
     expect(screen.queryByText(/自动选中/)).toBeNull();
   });
 
+  it("源图加载后渲染实时矫正预览框", async () => {
+    const { container } = render(
+      <LanguageProvider>
+        <FigureCropDialog taskId="t1" onConfirm={vi.fn()} onClose={vi.fn()} />
+      </LanguageProvider>,
+    );
+    await screen.findByRole("combobox");
+    const [firstImg] = document.querySelectorAll("img");
+    if (firstImg === undefined) throw new Error("测量图未渲染");
+    fireEvent.load(firstImg);
+    await waitFor(() => {
+      expect(
+        container.querySelector(".figure-crop-preview-box"),
+      ).not.toBeNull();
+    });
+  });
+
   it("切到四角校正模式确认 → cropFigure 带 quad（非 box）", async () => {
     const { onConfirm } = renderDialog();
     await screen.findByRole("combobox");

@@ -1591,3 +1591,28 @@ markdown 引用），不依赖图像变换、对所有幻灯片管用，但是�
 确定性断言"旋转白方块→正视白方块白占比>0.9" + 退化→None；路由 quad 路径 / quad 优先于 box / 皆空 400 /
 退化 quad 400），前端 +5（QuadCropEditor 角点定位 + polygon 点序；对话框切四角模式确认带 quad 非 box）。
 透视变换正确性由 warp_quad 单测覆盖（核心逻辑风险）；交互拖拽 / 真实插图视觉验证需完整栈，留待实测。
+
+
+## 2026-06-09 - 裁剪对话框铺满窗口 + 实时矫正预览
+
+**背景**：裁剪编辑器原限 520px 偏小；矫正效果要确认后才看得到。要求两栏：编辑器铺满 +
+右侧实时渲染矫正结果（随拖动更新）。纯前端。
+
+**实时预览（核心）**：四角校正的预览需要真·透视变换，且要实时——用 CSS `matrix3d`（4 点单应性）
+让 GPU 变换，免后端往返。
+- 新 `features/task/perspective.ts`：经典 4 点投影标定（adjugate / basisToPoints / general2DProjection），
+  `quadToRectProjection(tl,tr,br,bl,w,h)` 求把源图四边形映射到正矩形的 3×3 投影矩阵，`matrix3dFromQuad`
+  转成 CSS matrix3d 列主序字符串。方向与后端 `warp_quad` 一致（源四边形 → 正矩形）。
+- 新 `RectifiedPreview`：按四边形边长算输出宽高 → 等比缩放进预览框 → `<img>` 按源图自然尺寸渲染 +
+  `transform-origin:0 0` + matrix3d，容器 overflow:hidden 裁出正视结果。矩形 / 四角共用（矩形传由框
+  生成的轴对齐四边形，退化为纯裁剪）。
+
+**铺满 + 两栏**：`FigureCropDialog` 编辑区改 `.figure-crop-stage` 两栏（编辑器 flex:1 铺满 + 右侧
+预览），窄屏 flex-wrap 堆叠；对话框 `width: min(640→1080px, 96vw)`；`.figure-crop-canvas .crop-editor/
+.quad-editor` 去 520px 上限（只在对话框内覆盖，不动 CropPanel 建任务页）。编辑器 scale 仍按
+`naturalWidth/clientWidth`（图 width:100% 不 letterbox，列变宽则换算更细，math 仍成立）。
+
+**验证**：前端 typecheck/lint 全绿，全量 108 测试通过；+6（perspective 4 角精确映射 round-trip /
+轴对齐中点 / matrix3d 16 数有限；RectifiedPreview 套 matrix3d+自然尺寸 / 退化空框；对话框加载后出预览框）。
+**matrix3d 的 CSS 列主序排布 + 套在自然尺寸 img 上**是最易错处、jsdom 测不了真实渲染，需完整栈眼检；
+投影数学本身已由 round-trip 单测兜死。
