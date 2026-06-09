@@ -241,6 +241,7 @@ export const en: Record<TranslationKey, string> = {
   "figureCrop.loading": "Loading source images…",
   "figureCrop.noSources": "No source images available",
   "figureCrop.sourceLabel": "Source image",
+  "figureCrop.fromCursorPage": "Auto-selected the source image for the page at your cursor; switch above if needed",
   "figureCrop.confirm": "Crop & insert",
   "figureCrop.submitting": "Cropping…",
 

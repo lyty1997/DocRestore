@@ -87,6 +87,29 @@ const PageAnchor = TiptapNode.create({
 });
 
 
+/**
+ * 当前光标所在页（最近的前置 PageAnchor 的原图文件名）。
+ *
+ * 用于「插入截图」时把源图自动锚定到光标所在页：从文档开头扫到光标位置，
+ * 记录途中最后一个 ``pageAnchor`` 节点的 ``page`` 属性（即 ``<!-- page: X -->``
+ * 里的原图基名）。光标在首个页标记之前 → 返回 ``undefined``（由调用方回退）。
+ */
+function pageAtCursor(editor: Editor): string | undefined {
+  const { from } = editor.state.selection;
+  let page: string | undefined;
+  editor.state.doc.nodesBetween(0, from, (node) => {
+    if (node.type.name === "pageAnchor") {
+      const value: unknown = node.attrs.page;
+      if (typeof value === "string" && value.trim() !== "") {
+        page = value.trim();
+      }
+    }
+    return true;
+  });
+  return page;
+}
+
+
 /** 当前光标处于哪个 heading 级别（用于 toolbar select 的 value）。 */
 function currentHeadingLevel(editor: Editor): "p" | "h1" | "h2" | "h3" | "h4" {
   if (editor.isActive("heading", { level: 1 })) return "h1";
@@ -229,6 +252,8 @@ export function MarkdownWysiwygEditor({
   const { t } = useTranslation();
   const lastEmittedRef = useRef<string>("");
   const [showFigureDialog, setShowFigureDialog] = useState<boolean>(false);
+  /* 打开「插入截图」时锁定的光标所在页（原图文件名），用于自动选源图。 */
+  const [cursorPage, setCursorPage] = useState<string | undefined>();
 
   /* markdown(value，相对 images/) → 编辑器 HTML（asset URL，能渲染图）。 */
   const valueToHtml = (md: string): string =>
@@ -304,7 +329,11 @@ export function MarkdownWysiwygEditor({
         onInsertFigure={
           taskId === undefined
             ? undefined
-            : () => { setShowFigureDialog(true); }
+            : () => {
+                // 在打开对话框前锁定光标所在页，供对话框自动选中对应源图
+                setCursorPage(pageAtCursor(editor));
+                setShowFigureDialog(true);
+              }
         }
       />
       <EditorContent editor={editor} className="wysiwyg-editor-content" />
@@ -312,6 +341,7 @@ export function MarkdownWysiwygEditor({
         <FigureCropDialog
           taskId={taskId}
           docDir={docDir}
+          cursorPage={cursorPage}
           onConfirm={handleFigureConfirm}
           onClose={() => { setShowFigureDialog(false); }}
         />

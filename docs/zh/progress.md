@@ -1515,3 +1515,22 @@ markdown 引用），不依赖图像变换、对所有幻灯片管用，但是�
 全栈门禁绿：前端 typecheck/lint/90 测试、后端 mypy --strict + ruff + 相关测试通过。
 
 **注**：交互拖拽/真实插图渲染的视觉验证需完整栈（后端+上传+OCR 产物），留待实测。
+
+
+## 2026-06-09 - 重截插图自动锚定到光标所在页
+
+**背景**：上节「插入截图」对话框默认选中源图列表**第一张**，用户编辑某页插图坏图时还要手动在下拉里
+翻找当前页对应的源图。改为打开对话框时自动锚定到光标所在页的源图。
+
+**实现**：
+- `MarkdownWysiwygEditor` 新增 `pageAtCursor(editor)`：从文档头 `nodesBetween(0, selection.from)` 扫到光标，
+  取途中最后一个 `pageAnchor` 节点的 `page` 属性（即 `<!-- page: 原图名 -->` 的原图基名）。点「🖼 插入截图」
+  时（toolbar 按钮 `onMouseDown preventDefault` 保住选区）捕获该页名存入 `cursorPage` state，传给对话框。
+- `FigureCropDialog` 新增 `cursorPage` prop + `matchSourceByPage(sources, cursorPage, docDir)`：源图列表是相对
+  `image_dir` 路径（多文档带子目录前缀），页标记只含基名 → 按**基名**匹配；多张同名时优先取 `docDir` 前缀下
+  那张；无匹配回退列表首张（即旧行为）。加载源图后据此 `setSelected`，匹配成功置 `autoMatched` 显示提示
+  「已自动选中光标所在页的源图，可在上方下拉切换」（三语 `figureCrop.fromCursorPage`），用户手动改选即清除提示。
+- 配合 `handleFigureConfirm` 仍在保住的光标处 `setImage` 插入 → 源图与插入位置都落在同一页，真正「锚定到光标所在页」。
+
+**验证**：前端 typecheck/lint 绿；FigureCropDialog 测试 6 例（原 3 + 新增 3：基名匹配自动选中并提示 /
+多文档按 docDir 前缀锚定 / 无匹配回退首张且不提示）。视觉/交互验证同上节，需完整栈实测。

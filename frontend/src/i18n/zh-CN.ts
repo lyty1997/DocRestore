@@ -246,6 +246,7 @@ export const zhCN = {
   "figureCrop.loading": "加载源图列表中…",
   "figureCrop.noSources": "没有可用的源图",
   "figureCrop.sourceLabel": "源图",
+  "figureCrop.fromCursorPage": "已自动选中光标所在页的源图，可在上方下拉切换",
   "figureCrop.confirm": "裁剪并插入",
   "figureCrop.submitting": "裁剪中…",
 

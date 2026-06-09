@@ -4301,6 +4301,11 @@ body {
   min-width: 0;
   padding: 4px 6px;
 }
+.figure-crop-auto {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--accent, #2563eb);
+}
 .figure-crop-canvas {
   display: flex;
   justify-content: center;

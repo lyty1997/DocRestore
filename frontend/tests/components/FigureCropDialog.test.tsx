@@ -69,6 +69,60 @@ describe("FigureCropDialog", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("光标所在页匹配源图时自动选中该页并提示", async () => {
+    render(
+      <LanguageProvider>
+        <FigureCropDialog
+          taskId="t1"
+          cursorPage="b.jpg"
+          onConfirm={vi.fn()}
+          onClose={vi.fn()}
+        />
+      </LanguageProvider>,
+    );
+    await screen.findByRole("combobox");
+    // 下拉当前显示值为光标所在页（findByDisplayValue 按选中项校验）
+    expect(await screen.findByDisplayValue("b.jpg")).not.toBeNull();
+    // 自动锚定提示出现
+    expect(screen.getByText(/自动选中/)).not.toBeNull();
+  });
+
+  it("多文档任务按基名 + docDir 前缀锚定到对应子目录源图", async () => {
+    listSourceImagesMock.mockResolvedValue({
+      task_id: "t1",
+      images: ["docA/p1.jpg", "docB/p1.jpg"],
+    });
+    render(
+      <LanguageProvider>
+        <FigureCropDialog
+          taskId="t1"
+          docDir="docB"
+          cursorPage="p1.jpg"
+          onConfirm={vi.fn()}
+          onClose={vi.fn()}
+        />
+      </LanguageProvider>,
+    );
+    await screen.findByRole("combobox");
+    expect(await screen.findByDisplayValue("docB/p1.jpg")).not.toBeNull();
+  });
+
+  it("光标页无匹配源图时回退列表首张且不提示", async () => {
+    render(
+      <LanguageProvider>
+        <FigureCropDialog
+          taskId="t1"
+          cursorPage="missing.jpg"
+          onConfirm={vi.fn()}
+          onClose={vi.fn()}
+        />
+      </LanguageProvider>,
+    );
+    await screen.findByRole("combobox");
+    expect(await screen.findByDisplayValue("a.jpg")).not.toBeNull();
+    expect(screen.queryByText(/自动选中/)).toBeNull();
+  });
+
   it("源图加载出尺寸后确认 → 调用 cropFigure 并回调 asset_path", async () => {
     const { onConfirm } = renderDialog();
     await screen.findByRole("combobox");

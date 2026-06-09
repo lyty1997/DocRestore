@@ -235,6 +235,7 @@ export const zhTW: Record<TranslationKey, string> = {
   "figureCrop.loading": "載入原圖列表中…",
   "figureCrop.noSources": "沒有可用的原圖",
   "figureCrop.sourceLabel": "原圖",
+  "figureCrop.fromCursorPage": "已自動選中游標所在頁的原圖，可在上方下拉切換",
   "figureCrop.confirm": "裁剪並插入",
   "figureCrop.submitting": "裁剪中…",
 

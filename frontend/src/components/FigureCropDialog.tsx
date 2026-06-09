@@ -22,6 +22,8 @@ interface NaturalSize {
 interface FigureCropDialogProps {
   readonly taskId: string;
   readonly docDir?: string | undefined;
+  /** 光标所在页的原图文件名（来自 ``<!-- page: X -->`` 标记），用于自动选源图。 */
+  readonly cursorPage?: string | undefined;
   /** 确认裁剪后回调 markdown 相对引用（images/manual_N.jpg）。 */
   readonly onConfirm: (assetPath: string) => void;
   readonly onClose: () => void;
@@ -31,9 +33,38 @@ function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** 取路径最后一段（源图列表是相对路径，页标记只含基名）。 */
+function basename(path: string): string {
+  return path.split("/").at(-1) ?? path;
+}
+
+/**
+ * 按光标所在页（原图基名）在源图列表里挑最匹配的一张。
+ *
+ * 源图列表是相对 ``image_dir`` 的路径（多文档任务带子目录前缀），页标记
+ * 只含基名 → 按基名匹配；若有多张同名（多文档），优先取 ``docDir`` 下那张。
+ * 无匹配返回 ``undefined``，由调用方回退到列表首张。
+ */
+function matchSourceByPage(
+  sources: readonly string[],
+  cursorPage: string | undefined,
+  docDir: string | undefined,
+): string | undefined {
+  if (cursorPage === undefined || cursorPage === "") return undefined;
+  const target = basename(cursorPage);
+  const candidates = sources.filter((s) => basename(s) === target);
+  if (candidates.length === 0) return undefined;
+  if (docDir !== undefined && docDir !== "") {
+    const scoped = candidates.find((s) => s.startsWith(`${docDir}/`));
+    if (scoped !== undefined) return scoped;
+  }
+  return candidates[0];
+}
+
 export function FigureCropDialog({
   taskId,
   docDir,
+  cursorPage,
   onConfirm,
   onClose,
 }: FigureCropDialogProps): React.JSX.Element {
@@ -45,6 +76,8 @@ export function FigureCropDialog({
   const [loadingList, setLoadingList] = useState<boolean>(true);
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [error, setError] = useState<string | undefined>();
+  // 当前选中的源图是否由光标所在页自动锚定（用于提示；用户改选后清除）
+  const [autoMatched, setAutoMatched] = useState<boolean>(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,7 +85,10 @@ export function FigureCropDialog({
       .then((res) => {
         if (cancelled) return;
         setSources(res.images);
-        setSelected(res.images[0] ?? "");
+        // 优先锚定到光标所在页的源图，无匹配则回退列表首张
+        const matched = matchSourceByPage(res.images, cursorPage, docDir);
+        setSelected(matched ?? res.images[0] ?? "");
+        setAutoMatched(matched !== undefined);
         setLoadingList(false);
       })
       .catch((error_: unknown) => {
@@ -63,13 +99,14 @@ export function FigureCropDialog({
     return () => {
       cancelled = true;
     };
-  }, [taskId]);
+  }, [taskId, cursorPage, docDir]);
 
   // 切换源图（事件里重置尺寸 / 框，等新图 onLoad 重新初始化；不放 effect 避免级联渲染）
   const selectSource = (name: string): void => {
     setSelected(name);
     setNatural(undefined);
     setBox(undefined);
+    setAutoMatched(false);
   };
 
   const onImgLoad = (e: React.SyntheticEvent<HTMLImageElement>): void => {
@@ -141,6 +178,10 @@ export function FigureCropDialog({
               ))}
             </select>
           </label>
+        )}
+
+        {autoMatched && (
+          <p className="figure-crop-auto">{t("figureCrop.fromCursorPage")}</p>
         )}
 
         {selected !== "" && (
