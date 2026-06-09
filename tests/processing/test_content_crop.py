@@ -25,10 +25,12 @@ import cv2  # noqa: E402
 from cv2.typing import MatLike  # noqa: E402
 
 from docrestore.processing.content_crop import (  # noqa: E402
+    _next_manual_figure_name,
     _runs,
     apply_crop_boxes,
     compute_crop_box,
     crop_page,
+    crop_region_to_images,
     detect_boxes_for_dir,
     detect_content_lr,
 )
@@ -190,3 +192,56 @@ class TestCropHelpers:
             assert out.shape[1] == 1280  # 未被裁剪
         finally:
             outside.unlink(missing_ok=True)
+
+
+class TestCropRegionToImages:
+    """编辑模式手动重截插图：从源图按框裁块存进 images/。"""
+
+    def test_crops_region_and_saves(self, tmp_path: Path) -> None:
+        """按框裁出子图存为 manual_1.jpg，尺寸=框宽高。"""
+        src = tmp_path / "page.jpg"
+        cv2.imwrite(str(src), _make_full_width())  # 1280x900
+        images = tmp_path / "out" / "images"
+        name = crop_region_to_images(src, images, (100, 50, 700, 450))
+        assert name == "manual_1.jpg"
+        saved = cv2.imread(str(images / name))
+        assert saved is not None
+        assert saved.shape[1] == 600  # x[100,700]
+        assert saved.shape[0] == 400  # y[50,450]
+
+    def test_sequential_names_increment(self, tmp_path: Path) -> None:
+        """连续两次重截 → manual_1 / manual_2，不覆盖。"""
+        src = tmp_path / "page.jpg"
+        cv2.imwrite(str(src), _make_full_width())
+        images = tmp_path / "images"
+        n1 = crop_region_to_images(src, images, (0, 0, 100, 100))
+        n2 = crop_region_to_images(src, images, (0, 0, 120, 120))
+        assert n1 == "manual_1.jpg"
+        assert n2 == "manual_2.jpg"
+        assert (images / n1).is_file()
+        assert (images / n2).is_file()
+
+    def test_next_name_skips_existing_max(self, tmp_path: Path) -> None:
+        """已存在 manual_5.jpg → 下一个序号从 6 起（取最大 +1）。"""
+        images = tmp_path / "images"
+        images.mkdir()
+        (images / "manual_5.jpg").write_bytes(b"x")
+        assert _next_manual_figure_name(images) == "manual_6.jpg"
+
+    def test_clamps_out_of_bounds_box(self, tmp_path: Path) -> None:
+        """框超出图边界 → 夹取到图内，仍产出有效图（不抛异常）。"""
+        src = tmp_path / "page.jpg"
+        cv2.imwrite(str(src), _make_full_width())  # 1280x900
+        images = tmp_path / "images"
+        name = crop_region_to_images(src, images, (-50, -50, 5000, 5000))
+        saved = cv2.imread(str(images / name))
+        assert saved is not None
+        assert saved.shape[1] == 1280
+        assert saved.shape[0] == 900
+
+    def test_missing_source_raises(self, tmp_path: Path) -> None:
+        """源图不存在 → ValueError（显式动作失败要暴露，不静默回退）。"""
+        with pytest.raises(ValueError, match="读图失败"):
+            crop_region_to_images(
+                tmp_path / "nope.jpg", tmp_path / "images", (0, 0, 10, 10),
+            )

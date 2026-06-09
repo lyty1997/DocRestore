@@ -5,6 +5,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  editorAssetUrlsToImages,
+  editorImagesToAssetUrls,
   injectPageAnchors,
   preprocessMarkdown,
   rewriteImageUrls,
@@ -133,5 +135,58 @@ describe("preprocessMarkdown (集成：锚点 + 图片重写 + 标签转义)", (
     expect(out).toContain('<span class="page-anchor" data-page="a.jpg">');
     // 非白名单 <Unknown> 被转义
     expect(out).toContain("&lt;Unknown&gt;");
+  });
+});
+
+describe("editor 图片 URL 正逆变换", () => {
+  const taskId = "abc-123";
+
+  it("forward：images/ → asset URL（markdown）", () => {
+    const out = editorImagesToAssetUrls("![alt](images/foo_1.jpg)", taskId);
+    expect(out).toContain("/api/v1/tasks/abc-123/assets/images/foo_1.jpg");
+  });
+
+  it("forward：多文档加 docDir 前缀", () => {
+    const out = editorImagesToAssetUrls("![](images/x.jpg)", taskId, "doc-1");
+    expect(out).toContain("/api/v1/tasks/abc-123/assets/doc-1/images/x.jpg");
+  });
+
+  it("forward 不剥离 _OCR/images 中间产物引用（与 rewriteImageUrls 不同）", () => {
+    const input = "![](sub_OCR/images/3.jpg)";
+    // 只匹配以 images/ 开头的引用，_OCR/images 原样保留
+    expect(editorImagesToAssetUrls(input, taskId)).toBe(input);
+  });
+
+  it("round-trip：forward 后 reverse 还原回相对 images/（无 docDir）", () => {
+    const input = "![alt](images/foo_1.jpg)";
+    const fwd = editorImagesToAssetUrls(input, taskId);
+    expect(editorAssetUrlsToImages(fwd, taskId)).toBe(input);
+  });
+
+  it("reverse 丢掉 docDir 前缀，回到稳定的相对 images/", () => {
+    const input = "![](images/x.jpg)";
+    const fwd = editorImagesToAssetUrls(input, taskId, "doc-1");
+    // 逆变换不带 docDir：还原成相对 images/（下次加载再补前缀）
+    expect(editorAssetUrlsToImages(fwd, taskId)).toBe(input);
+  });
+
+  it("reverse 不动指向其他任务 / 外链的 URL", () => {
+    const other = "![](/api/v1/tasks/zzz/assets/images/y.jpg)";
+    const ext = "![](https://example.com/a.png)";
+    expect(editorAssetUrlsToImages(other, taskId)).toBe(other);
+    expect(editorAssetUrlsToImages(ext, taskId)).toBe(ext);
+  });
+
+  it("HTML <img> round-trip 同样还原", () => {
+    const input = '<img src="images/manual_2.jpg" alt="">';
+    const fwd = editorImagesToAssetUrls(input, taskId);
+    expect(fwd).toContain("/api/v1/tasks/abc-123/assets/images/manual_2.jpg");
+    expect(editorAssetUrlsToImages(fwd, taskId)).toBe(input);
+  });
+
+  it("taskId 缺失场景由调用方跳过；此处仅验证相对引用不被误伤", () => {
+    // 已是相对路径、无 asset 前缀 → reverse 不应改动
+    const input = "![](images/foo.jpg)";
+    expect(editorAssetUrlsToImages(input, taskId)).toBe(input);
   });
 });

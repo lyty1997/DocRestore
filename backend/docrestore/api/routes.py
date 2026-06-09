@@ -43,6 +43,8 @@ from docrestore.api.schemas import (
     CropDetectItem,
     CropDetectRequest,
     CropDetectResponse,
+    CropFigureRequest,
+    CropFigureResponse,
     CustomSensitiveWord,
     DiagnoseCodeFileRequest,
     DirEntry,
@@ -76,6 +78,7 @@ from docrestore.pipeline.config import (
 )
 from docrestore.processing.content_crop import (
     apply_crop_boxes,
+    crop_region_to_images,
     detect_boxes_for_dir,
 )
 
@@ -403,6 +406,80 @@ async def get_crop_image(image_dir: str, name: str) -> FileResponse:
             APIErrorCode.IMAGE_NOT_FOUND, 404, "图片不存在",
         )
     return FileResponse(target)
+
+
+def _validate_doc_dir(doc_dir: str | None) -> str | None:
+    """校验多文档子目录：返回安全相对路径（空串=根 output_dir）；非法返回 None。"""
+    if not doc_dir:
+        return ""
+    p = PurePosixPath(doc_dir)
+    if p.is_absolute() or ".." in p.parts or "." in p.parts:
+        return None
+    return doc_dir
+
+
+@router.post(
+    "/tasks/{task_id}/crop-figure",
+    response_model=CropFigureResponse,
+)
+async def crop_figure(
+    task_id: str,
+    req: CropFigureRequest,
+) -> CropFigureResponse:
+    """编辑模式手动重截插图：从某张源图按框裁一块存进文档 images/，返回引用路径。
+
+    供用户在编辑器里看到被切碎 / 缺失的插图时，自己框选源图重新截一张完整图插入。
+    裁剪图落 ``output_dir/{doc_dir}/images/manual_N.jpg``，返回 markdown 相对引用
+    ``images/manual_N.jpg``（多文档的 doc_dir 前缀由前端 asset URL 重写时补）。
+    """
+    manager = _get_manager()
+    task = manager.get_task(task_id)
+    if task is None:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
+
+    filename = req.source_filename
+    if not filename or ".." in filename or filename.startswith("/"):
+        raise ApiBusinessError(
+            APIErrorCode.INVALID_FILENAME, 400, "非法文件名",
+        )
+    doc_rel = _validate_doc_dir(req.doc_dir)
+    if doc_rel is None:
+        raise ApiBusinessError(
+            APIErrorCode.INVALID_FILENAME, 400, "非法文档目录",
+        )
+    box = (req.box.x0, req.box.y0, req.box.x1, req.box.y1)
+    # 绑定为局部变量：闭包内 mypy 不沿用外层的 task 非空 / doc_rel 非 None 窄化。
+    src_root = Path(task.image_dir)
+    out_images = Path(task.output_dir) / doc_rel / "images"
+
+    def _do() -> str:
+        # 解析源图：沿用 get_source_image 的词法包含 + 跟随 symlink 校验
+        # （image_dir 可能是含软链的 stage 目录）。
+        img_dir = src_root.resolve()
+        source = img_dir / filename
+        if (
+            not source.is_relative_to(img_dir)
+            or not source.is_file()
+            or source.suffix.lower() not in _IMAGE_EXTS
+        ):
+            raise FileNotFoundError(filename)
+        return crop_region_to_images(source, out_images, box)
+
+    try:
+        name = await asyncio.to_thread(_do)
+    except (FileNotFoundError, ValueError) as exc:
+        raise ApiBusinessError(
+            APIErrorCode.IMAGE_NOT_FOUND, 404, "源图不存在或无法读取",
+        ) from exc
+    except OSError as exc:
+        raise ApiBusinessError(
+            APIErrorCode.WRITE_FAILED, 500, "裁剪图写盘失败",
+            params={"reason": str(exc)},
+        ) from exc
+
+    return CropFigureResponse(asset_path=f"images/{name}")
 
 
 async def _apply_requested_crop(req: CreateTaskRequest) -> None:

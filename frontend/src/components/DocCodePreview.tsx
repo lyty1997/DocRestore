@@ -319,6 +319,8 @@ export function DocCodePreview({
             <MarkdownWysiwygEditor
               value={editText}
               onChange={setEditText}
+              taskId={taskId}
+              docDir={selectedDoc.doc_dir}
             />
           </div>
         )}

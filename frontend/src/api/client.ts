@@ -24,6 +24,7 @@ import {
   OcrWarmupResponseSchema,
   GpuListResponseSchema,
   CropDetectResponseSchema,
+  CropFigureResponseSchema,
   type ActionResponse,
   type BrowseDirsResponse,
   type CreateTaskResponse,
@@ -46,6 +47,7 @@ import {
   type GpuListResponse,
   type CropBox,
   type CropDetectResponse,
+  type CropFigureResponse,
 } from "./schemas";
 import { appendTokenToUrl, getAuthHeaders, loadApiToken } from "./auth";
 
@@ -243,6 +245,28 @@ export function getCropImageUrl(imageDir: string, name: string): string {
     `${API_BASE}/crop/image?image_dir=${encodeURIComponent(imageDir)}` +
       `&name=${encodeURIComponent(name)}`,
   );
+}
+
+/**
+ * 编辑模式手动重截插图：从某张源图按框裁一块存进文档 images/，返回引用路径。
+ *
+ * 返回的 ``asset_path`` 是 markdown 相对引用（``images/manual_N.jpg``）；
+ * 调用方据此在编辑器里插入图片。
+ */
+export async function cropFigure(
+  taskId: string,
+  body: {
+    source_filename: string;
+    box: CropBox;
+    doc_dir?: string | undefined;
+  },
+): Promise<CropFigureResponse> {
+  const response = await fetch(`${API_BASE}/tasks/${taskId}/crop-figure`, {
+    method: "POST",
+    headers: apiHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  return handleResponse(response, CropFigureResponseSchema);
 }
 
 /** 检测 image_dir 下每张图的建议正文裁剪框（供"裁剪预览 + 拖拽微调"） */

@@ -125,6 +125,24 @@ class CropDetectResponse(BaseModel):
     images: list[CropDetectItem]
 
 
+class CropFigureRequest(BaseModel):
+    """编辑模式手动重截插图请求：从某张源图按框裁一块，存进文档 images/。"""
+
+    #: 源图相对名（相对 task.image_dir，来自 source-images 列表）。
+    source_filename: str
+    #: 裁剪框（源图像素坐标系）。
+    box: CropBox
+    #: 多文档时目标文档子目录（存进 output_dir/{doc_dir}/images/）；
+    #: 单文档省略或空串 = 根 output_dir/images/。
+    doc_dir: str | None = None
+
+
+class CropFigureResponse(BaseModel):
+    """重截插图响应：asset_path 为 markdown 相对引用（images/xxx.jpg）。"""
+
+    asset_path: str
+
+
 class CreateTaskRequest(BaseModel):
     """创建任务请求"""
 

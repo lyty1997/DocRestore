@@ -224,9 +224,19 @@ export const zhTW: Record<TranslationKey, string> = {
   "editor.hr": "水平分隔線",
   "editor.insertTable": "插入表格",
   "editor.link": "連結",
+  "editor.insertFigure": "插入截圖（從原圖重新框選插圖）",
   "editor.linkPrompt": "輸入 URL（留空清除連結）",
   "editor.undo": "撤銷 (Ctrl+Z)",
   "editor.redo": "重做 (Ctrl+Y)",
+
+  // ── 重新截取插圖對話框 ──
+  "figureCrop.title": "重新截取插圖",
+  "figureCrop.hint": "選一張原圖，拖動方框框住要插入的插圖區域，確認後插入到游標處。",
+  "figureCrop.loading": "載入原圖列表中…",
+  "figureCrop.noSources": "沒有可用的原圖",
+  "figureCrop.sourceLabel": "原圖",
+  "figureCrop.confirm": "裁剪並插入",
+  "figureCrop.submitting": "裁剪中…",
 
   // ── App 級別 ──
   "app.processingFailed": "處理失敗",

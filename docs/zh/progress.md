@@ -1485,3 +1485,33 @@ slide_rectify 回到 warp-only（13 passed）；processing+pipeline 539 passed�
 
 **真正的解法（未做，备选）**：后处理**合并空间相邻的切图**（按 grounding 坐标找相邻块、合并成一张、改写
 markdown 引用），不依赖图像变换、对所有幻灯片管用，但是独立的中等工程。需要时再起。
+
+
+## 2026-06-09 - 编辑模式手动重截插图 + 编辑器图片渲染修复
+
+**背景**：PPT/文档模式 OCR 偶有插图被切碎或漏图（VL doc_parser 固有限制，见上节）。给用户一个兜底：
+在编辑器里看到坏图时，自己从源图重新框选完整插图、裁出插入。复用 content_crop S5 的 `CropEditor`
+（可拖拽/8 手柄缩放框）。用户确认范围**含编辑器图片渲染修复**（之前 Tiptap 编辑视图里图片是 `images/`
+相对路径，根本不渲染）。
+
+**三部分**：
+1. **后端** `POST /tasks/{id}/crop-figure` {source_filename, box, doc_dir?} → 从源图按框裁块存
+   `output_dir/{doc_dir}/images/manual_N.jpg`（`crop_region_to_images`，序号取现存 manual_* 最大 +1 防覆盖），
+   返回 markdown 相对引用 `images/manual_N.jpg`。源图解析沿用 get_source_image 的词法包含+跟随 symlink
+   校验；doc_dir 走 `_validate_doc_dir` 防穿越；显式动作失败要暴露（读图失败 ValueError→404、写盘
+   OSError→500），**不静默回退**（与逐页裁剪契约相反）。
+2. **编辑器图片渲染修复**：`MarkdownWysiwygEditor` 加 `taskId`/`docDir` props。`markdown.ts` 新增
+   `editorImagesToAssetUrls`（灌入前 `images/`→asset URL，编辑视图才能渲染图；**不**剥 `_OCR/images`、不注
+   page-anchor，保证 round-trip 无损）与 `editorAssetUrlsToImages`（保存前逆变换回 `images/`，取 URL 最后一个
+   `images/` 起片段、丢 token 与 docDir 前缀、只动本任务 asset）。`valueToHtml`/`htmlToValue` 单点拦截。
+3. **前端** `FigureCropDialog`（列源图→下拉选→隐藏图测自然尺寸→CropEditor 框选→确认 cropFigure→回调
+   asset_path），编辑器工具栏「🖼 插入截图」按钮 `setImage({src})` 插入（asset URL，保存时逆变换）；
+   DocCodePreview 透传 taskId/docDir；client `cropFigure`；schema `CropFigureResponse`；i18n 三语 figureCrop.*；
+   CSS 模态对话框。
+
+**验证**：后端 crop_region 单测 5 例（裁块/序号递增/跳过已存在最大/越界夹取/缺图 raise）+ 路由 6 例
+（裁剪落 images/、doc_dir 子目录、404 任务/源图、400 穿越源图名/非法 doc_dir）；前端 markdown 正逆变换
+8 例（round-trip 无损 + 不剥 _OCR + 丢 docDir 前缀 + 不动外链）+ FigureCropDialog 渲染/确认 3 例。
+全栈门禁绿：前端 typecheck/lint/90 测试、后端 mypy --strict + ruff + 相关测试通过。
+
+**注**：交互拖拽/真实插图渲染的视觉验证需完整栈（后端+上传+OCR 产物），留待实测。

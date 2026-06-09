@@ -12,8 +12,11 @@
  *   - markdown 中 ``<!-- page: X -->`` 是位置锚点，必须 round-trip 保留 →
  *     在 ``markdownRoundtrip.ts`` 转换时用自定义 ``data-page-anchor`` div
  *     桥接，编辑器里以小灰条「📄 X」显示
- *   - 图片 URL 在编辑期间走 ``preprocessMarkdown`` 重写到后端 assets，
- *     保存前用 ``revertImageUrls`` 恢复成原 ``images/...`` 形态
+ *   - 图片 URL：提供 ``taskId`` 时，灌入前用 ``editorImagesToAssetUrls`` 把
+ *     ``images/...`` 重写成后端 asset URL（编辑视图才能渲染图），保存时用
+ *     ``editorAssetUrlsToImages`` 逆变换回 ``images/...`` 再 ``onChange``
+ *   - 工具栏「插入截图」：打开 ``FigureCropDialog`` 让用户从源图重新框选插图，
+ *     裁出后插入（供修复被 OCR 切碎 / 缺失的插图）
  */
 
 import {
@@ -29,10 +32,16 @@ import {
 } from "@tiptap/extension-table";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import { StarterKit } from "@tiptap/starter-kit";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import { useTranslation } from "../i18n";
+import { getAssetUrl } from "../api/client";
+import {
+  editorAssetUrlsToImages,
+  editorImagesToAssetUrls,
+} from "../features/task/markdown";
 import { htmlToMarkdown, markdownToHtml } from "../features/task/markdownRoundtrip";
+import { useTranslation } from "../i18n";
+import { FigureCropDialog } from "./FigureCropDialog";
 
 /**
  * 自定义 PageAnchor 节点：把 ``<!-- page: X -->`` 锚点渲染为一行小灰条，
@@ -91,9 +100,11 @@ function currentHeadingLevel(editor: Editor): "p" | "h1" | "h2" | "h3" | "h4" {
 interface ToolbarProps {
   readonly editor: Editor;
   readonly t: (key: string) => string;
+  /** 提供时显示「插入截图」按钮（仅在有 taskId 的任务编辑场景）。 */
+  readonly onInsertFigure?: (() => void) | undefined;
 }
 
-function Toolbar({ editor, t }: ToolbarProps): React.JSX.Element {
+function Toolbar({ editor, t, onInsertFigure }: ToolbarProps): React.JSX.Element {
   const btn = (
     label: string,
     isActive: boolean,
@@ -187,6 +198,8 @@ function Toolbar({ editor, t }: ToolbarProps): React.JSX.Element {
 
       {btn("⊞", editor.isActive("table"), insertTable, t("editor.insertTable"))}
       {btn("🔗", editor.isActive("link"), setLink, t("editor.link"))}
+      {onInsertFigure !== undefined
+        && btn("🖼", false, onInsertFigure, t("editor.insertFigure"))}
 
       <span className="wysiwyg-tb-sep" />
 
@@ -204,13 +217,30 @@ function Toolbar({ editor, t }: ToolbarProps): React.JSX.Element {
 interface MarkdownWysiwygEditorProps {
   readonly value: string;
   readonly onChange: (markdown: string) => void;
+  /** 任务 ID：提供时启用图片渲染（images/ ↔ asset URL）与「插入截图」。 */
+  readonly taskId?: string | undefined;
+  /** 多文档子目录：拼 asset URL 前缀（与预览 ``preprocessMarkdown`` 一致）。 */
+  readonly docDir?: string | undefined;
 }
 
 export function MarkdownWysiwygEditor({
-  value, onChange,
+  value, onChange, taskId, docDir,
 }: MarkdownWysiwygEditorProps): React.JSX.Element {
   const { t } = useTranslation();
   const lastEmittedRef = useRef<string>("");
+  const [showFigureDialog, setShowFigureDialog] = useState<boolean>(false);
+
+  /* markdown(value，相对 images/) → 编辑器 HTML（asset URL，能渲染图）。 */
+  const valueToHtml = (md: string): string =>
+    markdownToHtml(
+      taskId === undefined ? md : editorImagesToAssetUrls(md, taskId, docDir),
+    );
+
+  /* 编辑器 HTML → markdown(相对 images/，供 onChange / 保存)。 */
+  const htmlToValue = (html: string): string => {
+    const md = htmlToMarkdown(html);
+    return taskId === undefined ? md : editorAssetUrlsToImages(md, taskId);
+  };
 
   const extensions: Extensions = [
     StarterKit.configure({
@@ -228,7 +258,7 @@ export function MarkdownWysiwygEditor({
 
   const editor = useEditor({
     extensions,
-    content: markdownToHtml(value),
+    content: valueToHtml(value),
     editorProps: {
       attributes: {
         class: "wysiwyg-prose",
@@ -236,8 +266,7 @@ export function MarkdownWysiwygEditor({
       },
     },
     onUpdate: ({ editor: ed }) => {
-      const html = ed.getHTML();
-      const md = htmlToMarkdown(html);
+      const md = htmlToValue(ed.getHTML());
       lastEmittedRef.current = md;
       onChange(md);
     },
@@ -248,15 +277,45 @@ export function MarkdownWysiwygEditor({
      此时 value === lastEmittedRef → 不重新 setContent，避免光标跳。 */
   useEffect(() => {
     if (value === lastEmittedRef.current) return;
-    const html = markdownToHtml(value);
-    editor.commands.setContent(html, { emitUpdate: false });
+    editor.commands.setContent(valueToHtml(value), { emitUpdate: false });
     lastEmittedRef.current = value;
+    // valueToHtml 依赖 taskId/docDir，但二者随 value（切文档）一起变化，
+    // 故只在 value 变时同步即可，无需进依赖数组（避免每次渲染重置内容）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor, value]);
+
+  /* 「插入截图」确认：assetPath 为相对 images/manual_N.jpg，
+     编辑器内用 asset URL 显示（保存时 htmlToValue 逆变换回相对路径）。 */
+  const handleFigureConfirm = (assetPath: string): void => {
+    const prefix = docDir ? `${docDir}/` : "";
+    const src =
+      taskId === undefined
+        ? assetPath
+        : getAssetUrl(taskId, `${prefix}${assetPath}`);
+    editor.chain().focus().setImage({ src }).run();
+    setShowFigureDialog(false);
+  };
 
   return (
     <div className="wysiwyg-editor">
-      <Toolbar editor={editor} t={t} />
+      <Toolbar
+        editor={editor}
+        t={t}
+        onInsertFigure={
+          taskId === undefined
+            ? undefined
+            : () => { setShowFigureDialog(true); }
+        }
+      />
       <EditorContent editor={editor} />
+      {showFigureDialog && taskId !== undefined && (
+        <FigureCropDialog
+          taskId={taskId}
+          docDir={docDir}
+          onConfirm={handleFigureConfirm}
+          onClose={() => { setShowFigureDialog(false); }}
+        />
+      )}
     </div>
   );
 }

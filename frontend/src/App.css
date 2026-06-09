@@ -4229,3 +4229,91 @@ body {
   border: 2px solid #fff;
   border-radius: 50%;
 }
+
+/* ── 重新截取插图对话框 ── */
+.figure-crop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.5);
+}
+.figure-crop-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(640px, 100%);
+  max-height: 90vh;
+  overflow: auto;
+  padding: 20px;
+  background: var(--bg, #fff);
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+}
+.figure-crop-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.figure-crop-header h3 {
+  margin: 0;
+  font-size: 16px;
+}
+.figure-crop-close {
+  padding: 0 8px;
+  font-size: 22px;
+  line-height: 1;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+.figure-crop-hint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted, #666);
+}
+.figure-crop-status {
+  margin: 8px 0;
+  font-size: 13px;
+  color: var(--text-muted, #666);
+}
+.figure-crop-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.figure-crop-select select {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+}
+.figure-crop-canvas {
+  display: flex;
+  justify-content: center;
+}
+.figure-crop-canvas .crop-editor {
+  max-width: 100%;
+}
+.figure-crop-error {
+  margin: 0;
+  font-size: 13px;
+  color: #dc2626;
+}
+.figure-crop-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.figure-crop-footer button.primary {
+  color: #fff;
+  background: #2563eb;
+  border-color: #2563eb;
+}
+.figure-crop-footer button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

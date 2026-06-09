@@ -311,3 +311,9 @@ export const CropDetectResponseSchema = z.object({
   images: z.array(CropDetectItemSchema),
 });
 export type CropDetectResponse = z.infer<typeof CropDetectResponseSchema>;
+
+/** POST /tasks/{id}/crop-figure 响应：asset_path 为 markdown 相对引用 images/xxx.jpg */
+export const CropFigureResponseSchema = z.object({
+  asset_path: z.string(),
+});
+export type CropFigureResponse = z.infer<typeof CropFigureResponseSchema>;

@@ -246,6 +246,54 @@ def detect_boxes_for_dir(
     return items
 
 
+#: 手动重截插图的文件名前缀（区别于 OCR 自动抽取的 ``{stem}_{N}``）。
+_MANUAL_FIGURE_PREFIX = "manual_"
+
+
+def _next_manual_figure_name(images_dir: Path) -> str:
+    """扫描 images_dir 下现存 ``manual_N.jpg``，返回下一个空闲序号文件名。
+
+    取最大现存序号 +1，避免覆盖 OCR 自动抽取的图或已有的手动截图。
+    目录不存在视为无现存手动图（返回 ``manual_1.jpg``）。
+    """
+    max_n = 0
+    if images_dir.is_dir():
+        for p in images_dir.glob(f"{_MANUAL_FIGURE_PREFIX}*.jpg"):
+            stem = p.stem[len(_MANUAL_FIGURE_PREFIX):]
+            if stem.isdigit():
+                max_n = max(max_n, int(stem))
+    return f"{_MANUAL_FIGURE_PREFIX}{max_n + 1}.jpg"
+
+
+def crop_region_to_images(
+    source_image: Path,
+    images_dir: Path,
+    box: CropBoxTuple,
+) -> str:
+    """从 source_image 按 box 裁一块，存进 images_dir，返回生成的文件名。
+
+    供编辑模式"手动重截插图"：用户框选源图某区域 → 裁出 → 存为 ``manual_N.jpg``。
+    box 越界自动夹取到图内有效范围。读图失败抛 ``ValueError``，写盘失败抛 ``OSError``，
+    由调用方转成 API 错误（本函数不吞异常，与逐页裁剪"失败回退原图"语义不同——
+    手动重截是显式用户动作，失败要让用户看到，不能静默）。
+    """
+    img = cv2.imread(str(source_image))
+    if img is None:
+        raise ValueError(f"读图失败: {source_image}")
+    h, w = img.shape[:2]
+    x0 = max(0, min(box[0], w - 1))
+    y0 = max(0, min(box[1], h - 1))
+    x1 = max(x0 + 1, min(box[2], w))
+    y1 = max(y0 + 1, min(box[3], h))
+    cropped = img[y0:y1, x0:x1]
+    images_dir.mkdir(parents=True, exist_ok=True)
+    name = _next_manual_figure_name(images_dir)
+    out_path = images_dir / name
+    if not cv2.imwrite(str(out_path), cropped):
+        raise OSError(f"裁剪图写盘失败: {out_path}")
+    return name
+
+
 def apply_crop_boxes(
     image_dir: Path,
     boxes: dict[str, CropBoxTuple],

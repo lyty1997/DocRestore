@@ -230,9 +230,19 @@ export const en: Record<TranslationKey, string> = {
   "editor.hr": "Horizontal rule",
   "editor.insertTable": "Insert table",
   "editor.link": "Link",
+  "editor.insertFigure": "Insert figure (re-crop from a source image)",
   "editor.linkPrompt": "Enter URL (leave empty to remove)",
   "editor.undo": "Undo (Ctrl+Z)",
   "editor.redo": "Redo (Ctrl+Y)",
+
+  // ── Re-crop figure dialog ──
+  "figureCrop.title": "Re-crop figure",
+  "figureCrop.hint": "Pick a source image, drag the box over the figure to insert, then confirm to insert at the cursor.",
+  "figureCrop.loading": "Loading source images…",
+  "figureCrop.noSources": "No source images available",
+  "figureCrop.sourceLabel": "Source image",
+  "figureCrop.confirm": "Crop & insert",
+  "figureCrop.submitting": "Cropping…",
 
   // ── App-level ──
   "app.processingFailed": "Processing Failed",

@@ -235,9 +235,19 @@ export const zhCN = {
   "editor.hr": "水平分隔线",
   "editor.insertTable": "插入表格",
   "editor.link": "链接",
+  "editor.insertFigure": "插入截图（从源图重新框选插图）",
   "editor.linkPrompt": "输入链接 URL（留空清除链接）",
   "editor.undo": "撤销 (Ctrl+Z)",
   "editor.redo": "重做 (Ctrl+Y)",
+
+  // ── 重新截取插图对话框 ──
+  "figureCrop.title": "重新截取插图",
+  "figureCrop.hint": "选一张源图，拖动方框框住要插入的插图区域，确认后插入到光标处。",
+  "figureCrop.loading": "加载源图列表中…",
+  "figureCrop.noSources": "没有可用的源图",
+  "figureCrop.sourceLabel": "源图",
+  "figureCrop.confirm": "裁剪并插入",
+  "figureCrop.submitting": "裁剪中…",
 
   // ── App 级别 ──
   "app.processingFailed": "处理失败",

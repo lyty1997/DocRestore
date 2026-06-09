@@ -102,3 +102,63 @@ export function rewriteImageUrls(
 
   return result;
 }
+
+/**
+ * 编辑器专用：把 markdown 里的 ``images/`` 引用重写成后端 asset URL，
+ * 让 Tiptap 编辑视图能直接渲染图片。
+ *
+ * 与 ``rewriteImageUrls`` 的区别：只做 ``images/`` → asset URL，**不**剥离
+ * ``_OCR/images`` 中间产物、不注入 page-anchor、不转义标签，保证编辑器
+ * round-trip（保存时再由 ``editorAssetUrlsToImages`` 逆变换）无损。
+ */
+export function editorImagesToAssetUrls(
+  markdown: string,
+  taskId: string,
+  docDir?: string,
+): string {
+  const assetPrefix = docDir ? `${docDir}/` : "";
+  let result = markdown.replaceAll(
+    /!\[([^\]]*)\]\((images\/[^)]+)\)/g,
+    (_match, alt: string, src: string) =>
+      `![${alt}](${getAssetUrl(taskId, `${assetPrefix}${src}`)})`,
+  );
+  result = result.replaceAll(
+    /(<img\s[^>]*?)src=(["'])(images\/[^"']+)\2/g,
+    (_match, prefix: string, quote: string, src: string) =>
+      `${prefix}src=${quote}${getAssetUrl(taskId, `${assetPrefix}${src}`)}${quote}`,
+  );
+  return result;
+}
+
+/**
+ * 编辑器逆变换：保存前把本任务的 asset URL 还原回 ``images/xxx`` 相对路径。
+ *
+ * - 只动指向本任务 ``/tasks/{taskId}/assets/`` 的 URL（用户手填的外链不碰）
+ * - 取 URL 路径里最后一个 ``images/`` 起的片段，丢掉 ``?token=`` 与多文档
+ *   的 ``{docDir}/`` 前缀（下次加载会重新补），得到稳定的 ``images/xxx``
+ */
+function assetUrlToImagesPath(url: string): string {
+  const path = url.split("?", 1)[0] ?? url;
+  const idx = path.lastIndexOf("images/");
+  return idx === -1 ? url : path.slice(idx);
+}
+
+export function editorAssetUrlsToImages(
+  markdown: string,
+  taskId: string,
+): string {
+  const base = `/tasks/${taskId}/assets/`;
+  let result = markdown.replaceAll(
+    /!\[([^\]]*)\]\(([^)]+)\)/g,
+    (match, alt: string, url: string) =>
+      url.includes(base) ? `![${alt}](${assetUrlToImagesPath(url)})` : match,
+  );
+  result = result.replaceAll(
+    /(<img\s[^>]*?)src=(["'])([^"']+)\2/g,
+    (match, prefix: string, quote: string, url: string) =>
+      url.includes(base)
+        ? `${prefix}src=${quote}${assetUrlToImagesPath(url)}${quote}`
+        : match,
+  );
+  return result;
+}
