@@ -1643,3 +1643,24 @@ zoom=1 居中 / 小框中心对准 / 封顶 2/s0 / 贴边夹取 / 短维度居�
 断言视口内出编辑器且无 .figure-crop-preview）。**真实浏览器 Playwright 实测**（真任务 c5cee22a）：
 初始 scale=1.300（=0.78/0.6 设计值）→ 收框松手 2.891，框占视口 78%、中心偏差 <0.1px，手柄恒
 14/16px；四角模式切换保位、外扩角点松手回落 2.32，描边视觉 ≈2px（calc 与祖先 scale 相乘正确）。
+
+
+## 2026-06-11 - 编辑模式源图随文本同步滚动
+
+**背景**：预览模式左侧源图栏随 markdown 滚动连续同步（usePreviewScrollSync + data-page 锚点），
+编辑模式此前被显式禁用（rightScrollEl 仅预览容器）。要求编辑模式也支持同款图随文滚。
+
+**方案**（复用现有机制，纯接线）：
+- `MarkdownWysiwygEditor` 新增可选 prop `onScrollContainerChange?: (el?) => void`：编辑器就绪后
+  把滚动容器（`.wysiwyg-editor-content`，内含 PageAnchor 渲染的 `[data-page]` 锚点）回调给外层，
+  卸载时无参调用清空解绑。
+- `DocCodePreview`：新增 `editorScrollEl` state 接住容器，加第二路
+  `usePreviewScrollSync(leftScrollEl, editorScrollEl, editMode && …)`——与预览那路
+  （`!editMode && …`）互斥启用，同一锚点连续映射策略，手感一致。进入编辑时
+  initialPagePosition 落位的程序化滚动会顺带把源图栏对齐到位。
+
+**验证**：typecheck/lint 全绿，110 测试通过（同步引擎已有 useScrollSync.test.ts 覆盖，本次为
+纯接线 + 真浏览器实测）。Playwright 实测（真任务 c5cee22a，两侧各 20 锚点）：编辑器滚 9000→
+左栏跟到 3850、滚 20000→7513；反向左栏回 0→编辑器跟到 320；两侧视口中心 page key 一致
+（DSC07965.JPG）；切回预览模式原同步回归正常。console 仅既有 files-index 404 探测与 tiptap
+duplicate link 警告，与本次无关。

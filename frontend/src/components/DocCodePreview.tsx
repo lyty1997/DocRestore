@@ -88,6 +88,8 @@ export function DocCodePreview({
   /* 左右同步滚动：callback ref → state 触发 hook 重绑 listener */
   const [leftScrollEl, setLeftScrollEl] = useState<HTMLDivElement>();
   const [rightScrollEl, setRightScrollEl] = useState<HTMLDivElement>();
+  /* 编辑模式右侧滚动容器（编辑器就绪后经 onScrollContainerChange 填入） */
+  const [editorScrollEl, setEditorScrollEl] = useState<HTMLElement>();
 
   const selectedDoc = results[selectedIdx];
   const selectedDocFailed =
@@ -147,6 +149,13 @@ export function DocCodePreview({
     leftScrollEl,
     rightScrollEl,
     !editMode && !selectedDocFailed && viewMode === "doc",
+  );
+
+  /* 编辑模式：源图栏 ↔ 编辑器同步滚动（同一 page 锚点策略，与预览手感一致） */
+  usePreviewScrollSync(
+    leftScrollEl,
+    editorScrollEl,
+    editMode && !selectedDocFailed && viewMode === "doc",
   );
 
   const enterEdit = useCallback((): void => {
@@ -376,6 +385,7 @@ export function DocCodePreview({
               taskId={taskId}
               docDir={selectedDoc.doc_dir}
               initialPagePosition={editStartPosition}
+              onScrollContainerChange={setEditorScrollEl}
             />
           </div>
         )}

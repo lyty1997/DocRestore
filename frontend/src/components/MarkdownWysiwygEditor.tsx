@@ -267,6 +267,8 @@ interface MarkdownWysiwygEditorProps {
   readonly docDir?: string | undefined;
   /** 挂载后初始滚动到的 page 位置（从预览侧带过来，进入编辑不回到顶部）。 */
   readonly initialPagePosition?: PagePosition | undefined;
+  /** 滚动容器就绪/卸载时回调（卸载时无参调用），供外层绑定源图栏同步滚动。 */
+  readonly onScrollContainerChange?: ((el?: HTMLElement) => void) | undefined;
 }
 
 /** 命令式句柄：供外层（离开编辑回预览时）读取编辑器当前 page 位置。 */
@@ -279,7 +281,14 @@ export const MarkdownWysiwygEditor = forwardRef<
   MarkdownWysiwygEditorHandle,
   MarkdownWysiwygEditorProps
 >(function MarkdownWysiwygEditor(
-  { value, onChange, taskId, docDir, initialPagePosition },
+  {
+    value,
+    onChange,
+    taskId,
+    docDir,
+    initialPagePosition,
+    onScrollContainerChange,
+  },
   ref,
 ): React.JSX.Element {
   const { t } = useTranslation();
@@ -361,6 +370,17 @@ export const MarkdownWysiwygEditor = forwardRef<
     // 仅在 editor 就绪时执行一次；initialPagePosition 进入编辑时已锁定不再变。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor]);
+
+  /* 滚动容器就绪时通知外层（绑定源图栏同步滚动），卸载时清空解绑。
+     EditorContent（子组件）的 effect 先跑、ProseMirror 视图已挂载，
+     此处 closest 能拿到 .wysiwyg-editor-content。 */
+  useEffect(() => {
+    if (onScrollContainerChange === undefined) return;
+    onScrollContainerChange(getScrollContainer(editor));
+    return () => {
+      onScrollContainerChange();
+    };
+  }, [editor, onScrollContainerChange]);
 
   /* 暴露当前 page 位置：离开编辑回预览时由外层读取以保位。 */
   useImperativeHandle(ref, () => ({
