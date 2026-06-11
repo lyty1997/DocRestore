@@ -4283,6 +4283,35 @@ body {
   color: var(--text-secondary, #888);
   word-break: break-all;
 }
+/* 上一张 / 下一张 导航条（左右按钮 + 居中文件名） */
+.crop-panel-nav {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.crop-panel-nav .crop-panel-name {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+}
+.crop-nav-btn {
+  flex: 0 0 auto;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--color-text);
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+}
+.crop-nav-btn:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+.crop-nav-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 .crop-editor {
   position: relative;
   max-width: 520px;

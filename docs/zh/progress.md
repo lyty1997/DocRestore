@@ -1711,3 +1711,11 @@ duplicate link 警告，与本次无关。
 缩略图 + 单编辑器、图不黑 ✓；缩略图切换 1/34→5/34 换图保框 ✓；拖 e 手柄 363→263 生效、
 se 角点 elementFromPoint 命中 handle ✓；重截插图对话框回归（4 遮罩+8 手柄、压暗一致）✓。
 typecheck/lint 全绿，110 测试通过。
+
+
+## 2026-06-11 - 裁剪面板补充：上一张 / 下一张切换键
+
+CropPanel 编辑器上方加导航条：`‹ 上一张`｜`i / N · 文件名`（居中）｜`下一张 ›`，到边界禁用
+不回绕；切图（按钮或缩略图）后激活缩略图自动 `scrollIntoView` 滚进可视区。i18n 三语
+crop.prev/next。Playwright 实测：首张 prev 禁用、连点 next 至 6/34、回退 5/34、激活缩略图
+始终可见；typecheck/lint 0 错，110 测试通过。

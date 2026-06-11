@@ -61,6 +61,8 @@ export const zhCN = {
   "crop.detecting": "检测建议裁剪框中…",
   "crop.detectFailed": "裁剪框检测失败，将退回自动裁剪",
   "crop.noneToCrop": "未检测到需裁剪的图（已是正文 / 无侧栏）",
+  "crop.prev": "上一张",
+  "crop.next": "下一张",
 
   // ── 任务表单 ──
   "taskForm.sourceLabel": "图片来源",

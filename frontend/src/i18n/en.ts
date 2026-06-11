@@ -66,6 +66,8 @@ export const en: Record<TranslationKey, string> = {
   "crop.detecting": "Detecting suggested crop boxes…",
   "crop.detectFailed": "Crop detection failed; falling back to auto-crop",
   "crop.noneToCrop": "No images need cropping (already content / no side columns)",
+  "crop.prev": "Previous",
+  "crop.next": "Next",
 
   // ── Task form ──
   "taskForm.sourceLabel": "Image Source",

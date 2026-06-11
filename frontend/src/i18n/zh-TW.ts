@@ -65,6 +65,8 @@ export const zhTW: Record<TranslationKey, string> = {
   "crop.detecting": "偵測建議裁剪框中…",
   "crop.detectFailed": "裁剪框偵測失敗，將退回自動裁剪",
   "crop.noneToCrop": "未偵測到需裁剪的圖（已是正文 / 無側欄）",
+  "crop.prev": "上一張",
+  "crop.next": "下一張",
 
   // ── 任務表單 ──
   "taskForm.sourceLabel": "圖片來源",

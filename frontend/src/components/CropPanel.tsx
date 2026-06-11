@@ -8,7 +8,7 @@
  * 的框外压暗叠加（见 .crop-editor 的 overflow 注释）；缩略图条横向滚动选图。
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { detectCropBoxes, getCropImageUrl } from "../api/client";
 import type { CropBox, CropDetectItem } from "../api/schemas";
@@ -33,6 +33,13 @@ export function CropPanel({
   const [selected, setSelected] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
+  const thumbsRef = useRef<HTMLDivElement>(null);
+
+  // 切图（按钮 / 缩略图）后把激活缩略图滚进可视区，条与编辑器保持对应
+  useEffect(() => {
+    const active = thumbsRef.current?.querySelector(".crop-thumb.active");
+    active?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [selected]);
 
   useEffect(() => {
     if (!enabled || imageDir.trim() === "") {
@@ -83,6 +90,12 @@ export function CropPanel({
   const current = currentIdx === -1 ? undefined : items[currentIdx];
   const currentBox = current === undefined ? undefined : boxes[current.name];
 
+  // 上一张 / 下一张（到边界禁用，不回绕）
+  const goTo = (delta: number): void => {
+    const next = items[currentIdx + delta];
+    if (next !== undefined) setSelected(next.name);
+  };
+
   return (
     <div className="crop-panel">
       <p className="crop-panel-hint">{t("crop.hint")}</p>
@@ -93,7 +106,7 @@ export function CropPanel({
       )}
 
       {items.length > 0 && (
-        <div className="crop-thumbs" role="listbox">
+        <div className="crop-thumbs" role="listbox" ref={thumbsRef}>
           {items.map((it) => (
             <button
               type="button"
@@ -120,8 +133,32 @@ export function CropPanel({
 
       {current !== undefined && currentBox !== undefined && (
         <div className="crop-panel-item">
-          <div className="crop-panel-name">
-            {`${(currentIdx + 1).toString()} / ${items.length.toString()} · ${current.name}`}
+          <div className="crop-panel-nav">
+            <button
+              type="button"
+              className="crop-nav-btn"
+              onClick={() => {
+                goTo(-1);
+              }}
+              disabled={currentIdx <= 0}
+              title={t("crop.prev")}
+            >
+              {`‹ ${t("crop.prev")}`}
+            </button>
+            <div className="crop-panel-name">
+              {`${(currentIdx + 1).toString()} / ${items.length.toString()} · ${current.name}`}
+            </div>
+            <button
+              type="button"
+              className="crop-nav-btn"
+              onClick={() => {
+                goTo(1);
+              }}
+              disabled={currentIdx >= items.length - 1}
+              title={t("crop.next")}
+            >
+              {`${t("crop.next")} ›`}
+            </button>
           </div>
           <CropEditor
             key={current.name}
