@@ -25,6 +25,8 @@ interface QuadCropEditorProps {
   readonly naturalHeight: number;
   readonly quad: CropQuad;
   readonly onChange: (quad: CropQuad) => void;
+  /** 一次拖拽（角点）结束时回调，供外层做松手后的视图联动。 */
+  readonly onDragEnd?: () => void;
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -37,6 +39,7 @@ export function QuadCropEditor({
   naturalHeight,
   quad,
   onChange,
+  onDragEnd,
 }: QuadCropEditorProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<
@@ -62,7 +65,10 @@ export function QuadCropEditor({
     const drag = dragRef.current;
     const container = containerRef.current;
     if (drag === undefined || container === null) return;
-    const scale = naturalWidth / container.clientWidth; // 原图像素 / 显示像素
+    // 原图像素 / 显示像素；用 getBoundingClientRect 使外层 transform scale 也计入
+    const displayWidth = container.getBoundingClientRect().width;
+    if (displayWidth <= 0) return;
+    const scale = naturalWidth / displayWidth;
     const dx = (e.clientX - drag.startX) * scale;
     const dy = (e.clientY - drag.startY) * scale;
     const next: CropPoint = {
@@ -76,6 +82,7 @@ export function QuadCropEditor({
     if (dragRef.current !== undefined) {
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
       dragRef.current = undefined;
+      onDragEnd?.();
     }
   };
 

@@ -5,16 +5,25 @@
  * 调用后端 ``crop-figure`` 裁出 → 回调 asset_path，由编辑器插入图片。
  *
  * 复用 ``CropEditor``（与建任务前"正文裁剪预览"同一个拖拽/缩放框组件）。
+ *
+ * 缩放联动：编辑器放在固定尺寸视口里，每次拖拽松手后按当前裁剪框（quad 模式
+ * 取四点外接框）重算 translate+scale，原图平滑缩放铺开到视口约 78%——框越小
+ * 图放得越大，单一画面即所见即所得，无独立预览窗。
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { cropFigure, getSourceImageUrl, listSourceImages } from "../api/client";
 import type { CropBox, CropQuad } from "../api/schemas";
+import {
+  fitRegion,
+  quadBBox,
+  type RegionBBox,
+  type ViewTransform,
+} from "../features/task/cropFit";
 import { useTranslation } from "../i18n";
 import { CropEditor } from "./CropEditor";
 import { QuadCropEditor } from "./QuadCropEditor";
-import { RectifiedPreview } from "./RectifiedPreview";
 
 interface NaturalSize {
   readonly width: number;
@@ -95,6 +104,50 @@ export function FigureCropDialog({
   const [error, setError] = useState<string | undefined>();
   // 当前选中的源图是否由光标所在页自动锚定（用于提示；用户改选后清除）
   const [autoMatched, setAutoMatched] = useState<boolean>(false);
+  // 视口内容层变换（undefined = 未测量 / 无布局环境，回退整图 100% 宽展示）
+  const [view, setView] = useState<ViewTransform | undefined>();
+  const viewportRef = useRef<HTMLDivElement>(null);
+
+  // 按区域重算视图变换（图加载 / 换模式 / 拖拽松手 / 窗口尺寸变化时调用）
+  const refit = (
+    size: NaturalSize | undefined,
+    region: RegionBBox | undefined,
+  ): void => {
+    const viewport = viewportRef.current;
+    if (viewport === null || size === undefined || region === undefined) return;
+    setView(fitRegion(
+      viewport.clientWidth,
+      viewport.clientHeight,
+      size.width,
+      size.height,
+      region,
+    ));
+  };
+
+  // 当前模式下驱动缩放联动的区域（quad 模式取四点外接框）
+  const activeRegion = (): RegionBBox | undefined =>
+    mode === "quad"
+      ? (quad === undefined ? undefined : quadBBox(quad))
+      : box;
+
+  const onDragEnd = (): void => {
+    refit(natural, activeRegion());
+  };
+
+  // 窗口尺寸变化时按最新状态重算（ref 中转拿最新闭包，监听只挂一次）
+  const refitRef = useRef<() => void>(onDragEnd);
+  useEffect(() => {
+    refitRef.current = onDragEnd;
+  });
+  useEffect(() => {
+    const onResize = (): void => {
+      refitRef.current();
+    };
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -124,6 +177,7 @@ export function FigureCropDialog({
     setNatural(undefined);
     setBox(undefined);
     setQuad(undefined);
+    setView(undefined);
     setAutoMatched(false);
   };
 
@@ -141,12 +195,15 @@ export function FigureCropDialog({
     const initBox: CropBox = { x0, y0, x1: x0 + bw, y1: y0 + bh };
     setBox(initBox);
     setQuad(boxToQuad(initBox));
+    refit({ width: w, height: h }, initBox);
   };
 
   // 切模式：进四角校正时用当前矩形框作初始四角（用户在此基础上把角拖到插图实际四角）
+  // 两个方向切换后的活动区域都是当前矩形框 → 按它重算视图
   const switchMode = (next: CropMode): void => {
     if (next === "quad" && box !== undefined) setQuad(boxToQuad(box));
     setMode(next);
+    refit(natural, box);
   };
 
   const onSubmit = (): void => {
@@ -173,12 +230,6 @@ export function FigureCropDialog({
   const ready =
     natural !== undefined
     && (mode === "quad" ? quad !== undefined : box !== undefined);
-
-  // 实时预览用的四边形：四角模式直接用 quad，矩形模式由当前框生成轴对齐四边形
-  const previewQuad =
-    mode === "quad"
-      ? quad
-      : (box === undefined ? undefined : boxToQuad(box));
 
   return (
     <div className="figure-crop-overlay" role="dialog" aria-modal="true">
@@ -249,45 +300,49 @@ export function FigureCropDialog({
         )}
 
         {selected !== "" && (
-          <div className="figure-crop-stage">
-            <div className="figure-crop-canvas">
-              {/* 测量用隐藏图：拿原图自然尺寸后才渲染编辑器 */}
-              <img
-                src={getSourceImageUrl(taskId, selected)}
-                alt=""
-                style={{ display: "none" }}
-                onLoad={onImgLoad}
-              />
-              {ready && mode === "rect" && box !== undefined && (
-                <CropEditor
-                  imageUrl={getSourceImageUrl(taskId, selected)}
-                  naturalWidth={natural.width}
-                  naturalHeight={natural.height}
-                  box={box}
-                  onChange={setBox}
-                />
-              )}
-              {ready && mode === "quad" && quad !== undefined && (
-                <QuadCropEditor
-                  imageUrl={getSourceImageUrl(taskId, selected)}
-                  naturalWidth={natural.width}
-                  naturalHeight={natural.height}
-                  quad={quad}
-                  onChange={setQuad}
-                />
-              )}
-            </div>
-            {ready && previewQuad !== undefined && (
-              <div className="figure-crop-preview">
-                <span className="figure-crop-preview-label">
-                  {t("figureCrop.previewLabel")}
-                </span>
-                <RectifiedPreview
-                  imageUrl={getSourceImageUrl(taskId, selected)}
-                  naturalWidth={natural.width}
-                  naturalHeight={natural.height}
-                  quad={previewQuad}
-                />
+          <div className="figure-crop-viewport" ref={viewportRef}>
+            {/* 测量用隐藏图：拿原图自然尺寸后才渲染编辑器 */}
+            <img
+              src={getSourceImageUrl(taskId, selected)}
+              alt=""
+              style={{ display: "none" }}
+              onLoad={onImgLoad}
+            />
+            {ready && (
+              <div
+                className="figure-crop-zoom"
+                style={
+                  view === undefined
+                    ? undefined
+                    : {
+                        width: view.baseWidth,
+                        height: view.baseHeight,
+                        transform: `translate(${view.tx.toString()}px, ${view.ty.toString()}px) scale(${view.zoom.toString()})`,
+                        // 手柄 / 框线按此反向缩放，视觉尺寸不随 zoom 变大
+                        "--crop-zoom": view.zoom,
+                      }
+                }
+              >
+                {mode === "rect" && box !== undefined && (
+                  <CropEditor
+                    imageUrl={getSourceImageUrl(taskId, selected)}
+                    naturalWidth={natural.width}
+                    naturalHeight={natural.height}
+                    box={box}
+                    onChange={setBox}
+                    onDragEnd={onDragEnd}
+                  />
+                )}
+                {mode === "quad" && quad !== undefined && (
+                  <QuadCropEditor
+                    imageUrl={getSourceImageUrl(taskId, selected)}
+                    naturalWidth={natural.width}
+                    naturalHeight={natural.height}
+                    quad={quad}
+                    onChange={setQuad}
+                    onDragEnd={onDragEnd}
+                  />
+                )}
               </div>
             )}
           </div>

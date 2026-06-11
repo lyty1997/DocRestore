@@ -238,9 +238,7 @@ export const zhTW: Record<TranslationKey, string> = {
   "figureCrop.fromCursorPage": "已自動選中游標所在頁的原圖，可在上方下拉切換",
   "figureCrop.modeRect": "矩形裁剪",
   "figureCrop.modeQuad": "四角校正",
-  "figureCrop.quadHint": "把 4 個角點分別拖到插圖的左上 / 右上 / 右下 / 左下角，確認後自動旋轉 + 透視校正為正視圖。",
-  "figureCrop.previewLabel": "矯正預覽（即時）",
-  "figureCrop.confirm": "裁剪並插入",
+  "figureCrop.quadHint": "把 4 個角點分別拖到插圖的左上 / 右上 / 右下 / 左下角，確認後自動旋轉 + 透視校正為正視圖。",  "figureCrop.confirm": "裁剪並插入",
   "figureCrop.submitting": "裁剪中…",
 
   // ── App 級別 ──

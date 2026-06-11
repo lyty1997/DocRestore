@@ -1616,3 +1616,30 @@ markdown 引用），不依赖图像变换、对所有幻灯片管用，但是�
 轴对齐中点 / matrix3d 16 数有限；RectifiedPreview 套 matrix3d+自然尺寸 / 退化空框；对话框加载后出预览框）。
 **matrix3d 的 CSS 列主序排布 + 套在自然尺寸 img 上**是最易错处、jsdom 测不了真实渲染，需完整栈眼检；
 投影数学本身已由 round-trip 单测兜死。
+
+
+## 2026-06-11 - 重做裁剪缩放联动：原图随框缩放铺开，移除独立预览窗
+
+**背景**：上一笔"两栏实时矫正预览"被否决——用户要的是**原图随裁剪框缩放、在窗口内铺开**，
+而非旁边再开一个窗口渲染结果。交互拍板：拖动中视图稳定，**松手后自动缩放**（平滑过渡）。
+
+**方案**：单一画面 + 缩放视口。
+- 新 `features/task/cropFit.ts`（纯几何）：`fitRegion(vw,vh,iw,ih,region)` 算内容层变换——
+  整图适配视口的基准尺寸（baseWidth/Height）+ zoom（框铺满视口 78%，下限 1、上限 2 CSS px/源
+  像素防模糊放大）+ 平移（框中心对准视口中心，夹取不露空）；`quadBBox` 取四点外接框。
+- `FigureCropDialog`：编辑器包进 `.figure-crop-viewport`（固定高 min(58vh,680px)、overflow
+  hidden）+ `.figure-crop-zoom` 内容层（宽高=基准尺寸，translate+scale 内联，transition
+  0.25s 平滑落位）。图加载 / 切模式 / 拖拽松手 / 窗口 resize 时 refit。
+- `CropEditor`/`QuadCropEditor`：加可选 `onDragEnd`（pointerUp 时回调）；指针换算
+  `clientWidth` → `getBoundingClientRect().width`（计入外层 transform scale，CropPanel 不受影响）。
+- 手柄/框线反缩放：内容层写 CSS 变量 `--crop-zoom`，手柄 `scale(1/z)`、box 边框
+  `calc(2px/z)`、quad 描边 `stroke-width calc(2/z)`——放大后视觉尺寸恒定（新增
+  `types/css-vars.d.ts` 声明合并允许 style 写 `--xxx`，免 as 断言）。
+- **删除** `RectifiedPreview` / `perspective.ts` 及其测试、i18n previewLabel、两栏 CSS（保留
+  价值被否决，按减熵原则连根清）。
+
+**验证**：typecheck/lint 全绿，110 测试通过（-8 预览/perspective，+7 cropFit 纯函数：整图
+zoom=1 居中 / 小框中心对准 / 封顶 2/s0 / 贴边夹取 / 短维度居中 / 非法尺寸 undefined；对话框用例改
+断言视口内出编辑器且无 .figure-crop-preview）。**真实浏览器 Playwright 实测**（真任务 c5cee22a）：
+初始 scale=1.300（=0.78/0.6 设计值）→ 收框松手 2.891，框占视口 78%、中心偏差 <0.1px，手柄恒
+14/16px；四角模式切换保位、外扩角点松手回落 2.32，描边视觉 ≈2px（calc 与祖先 scale 相乘正确）。

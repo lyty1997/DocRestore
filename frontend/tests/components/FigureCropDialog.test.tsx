@@ -123,7 +123,7 @@ describe("FigureCropDialog", () => {
     expect(screen.queryByText(/自动选中/)).toBeNull();
   });
 
-  it("源图加载后渲染实时矫正预览框", async () => {
+  it("源图加载后在缩放视口内渲染编辑器（无独立预览窗）", async () => {
     const { container } = render(
       <LanguageProvider>
         <FigureCropDialog taskId="t1" onConfirm={vi.fn()} onClose={vi.fn()} />
@@ -135,9 +135,11 @@ describe("FigureCropDialog", () => {
     fireEvent.load(firstImg);
     await waitFor(() => {
       expect(
-        container.querySelector(".figure-crop-preview-box"),
+        container.querySelector(".figure-crop-viewport .figure-crop-zoom .crop-editor"),
       ).not.toBeNull();
     });
+    // 旧的两栏预览窗已移除
+    expect(container.querySelector(".figure-crop-preview")).toBeNull();
   });
 
   it("切到四角校正模式确认 → cropFigure 带 quad（非 box）", async () => {

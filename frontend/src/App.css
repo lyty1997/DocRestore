@@ -4356,44 +4356,38 @@ body {
   font-size: 12px;
   color: var(--accent, #2563eb);
 }
-/* 编辑区 + 实时矫正预览 两栏（窄屏自动换行堆叠） */
-.figure-crop-stage {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-  align-items: flex-start;
+/* 缩放视口：编辑器在内，松手后随裁剪框缩放铺开（overflow 裁掉放大后的图外区域） */
+.figure-crop-viewport {
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+  height: min(58vh, 680px);
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 6px;
 }
-.figure-crop-canvas {
-  flex: 1 1 360px;
-  min-width: 0;
+/* 内容层：宽高 = 整图适配视口的基准尺寸（JS 内联），transform 做缩放+平移 */
+.figure-crop-zoom {
+  width: 100%;
+  transform-origin: 0 0;
+  transition: transform 0.25s ease;
+  will-change: transform;
 }
-/* 编辑器铺满所在列（覆盖基础 .crop-editor 的 520px 上限） */
-.figure-crop-canvas .crop-editor,
-.figure-crop-canvas .quad-editor {
+/* 编辑器铺满内容层（覆盖基础 .crop-editor 的 520px 上限） */
+.figure-crop-zoom .crop-editor,
+.figure-crop-zoom .quad-editor {
   width: 100%;
   max-width: 100%;
 }
-.figure-crop-preview {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+/* 手柄 / 框线按 --crop-zoom 反向缩放，放大后视觉尺寸恒定 */
+.figure-crop-zoom .crop-editor-handle,
+.figure-crop-zoom .quad-editor-handle {
+  transform: scale(calc(1 / var(--crop-zoom, 1)));
 }
-.figure-crop-preview-label {
-  font-size: 12px;
-  color: var(--text-muted, #666);
+.figure-crop-zoom .crop-editor-box {
+  border-width: calc(2px / var(--crop-zoom, 1));
 }
-.figure-crop-preview-box {
-  position: relative;
-  overflow: hidden;
-  background:
-    repeating-conic-gradient(#0000000a 0% 25%, transparent 0% 50%) 50% / 16px 16px;
-  border: 1px solid var(--border, #ddd);
-  border-radius: 4px;
-}
-.figure-crop-preview-empty {
-  width: 120px;
-  height: 80px;
+.figure-crop-zoom .quad-editor-poly {
+  stroke-width: calc(2 / var(--crop-zoom, 1));
 }
 .figure-crop-error {
   margin: 0;
