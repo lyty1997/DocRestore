@@ -60,8 +60,9 @@ export const en: Record<TranslationKey, string> = {
   "taskList.clearFinishedResult": "Deleted {ok}, failed {fail}",
 
   // ── Content crop ──
-  "crop.toggle": "Manually adjust content crop box (remove side columns / header)",
-  "crop.hint": "Drag the box to move, drag handles to resize; auto-crop is used when off.",
+  "crop.title": "Content crop",
+  "crop.desc": "Fine-tune the content crop box per image (remove side columns / header). When off, auto-detected crop is used.",
+  "crop.hint": "Click a thumbnail to switch image; drag the box to move, drag handles to resize.",
   "crop.detecting": "Detecting suggested crop boxes…",
   "crop.detectFailed": "Crop detection failed; falling back to auto-crop",
   "crop.noneToCrop": "No images need cropping (already content / no side columns)",

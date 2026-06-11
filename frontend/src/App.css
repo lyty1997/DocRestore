@@ -1311,7 +1311,43 @@ body {
   cursor: not-allowed;
 }
 
+/* 列表 + 点选预览 两栏（窄屏自动换行堆叠） */
+.server-picker-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.server-picker-preview {
+  display: flex;
+  flex: 0 1 260px;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 300px;
+  padding: 0.4rem;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-surface-alt);
+}
+
+.server-picker-preview img {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  object-fit: contain;
+  border-radius: 3px;
+}
+
+.server-picker-preview-name {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  word-break: break-all;
+}
+
 .server-picker-list {
+  flex: 1 1 320px;
+  min-width: 0;
   max-height: 300px;
   overflow-y: auto;
   border: 1px solid var(--color-border);
@@ -4183,12 +4219,49 @@ body {
   gap: 12px;
   margin-top: 8px;
 }
-.crop-toggle {
+/* 缩略图条：横向滚动选图（同屏只挂一个编辑器） */
+.crop-thumbs {
   display: flex;
-  align-items: center;
   gap: 8px;
+  padding: 6px;
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface-alt);
+}
+.crop-thumb {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 2px;
+  width: 92px;
+  padding: 4px;
   cursor: pointer;
-  font-size: 14px;
+  background: none;
+  border: 2px solid transparent;
+  border-radius: 6px;
+}
+.crop-thumb img {
+  display: block;
+  width: 100%;
+  height: 60px;
+  object-fit: cover;
+  border-radius: 4px;
+}
+.crop-thumb-name {
+  overflow: hidden;
+  font-size: 10px;
+  color: var(--color-text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.crop-thumb.active {
+  border-color: var(--color-primary);
+  background: var(--color-primary-glow);
+}
+/* 单图编辑器放宽到面板宽度（覆盖基础 .crop-editor 520px 上限） */
+.crop-panel .crop-editor {
+  max-width: min(860px, 100%);
 }
 .crop-panel-hint {
   margin: 0;
@@ -4222,12 +4295,18 @@ body {
   width: 100%;
   border-radius: 4px;
 }
+/* 框外压暗：四块精确遮罩（勿换回 9999px box-shadow——溢出图区，
+   多编辑器同屏层层叠加致全黑；裁剪它又会切掉贴边手柄） */
+.crop-editor-shade {
+  position: absolute;
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.35);
+}
 .crop-editor-box {
   position: absolute;
   box-sizing: border-box;
   cursor: move;
   border: 2px solid #2563eb;
-  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);
 }
 .crop-editor-handle {
   position: absolute;

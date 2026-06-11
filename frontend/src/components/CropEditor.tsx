@@ -125,6 +125,30 @@ export function CropEditor({
   const width = ((box.x1 - box.x0) / naturalWidth) * 100;
   const height = ((box.y1 - box.y0) / naturalHeight) * 100;
 
+  // 框外压暗：上 / 下 / 左 / 右四块精确遮罩（不能用 9999px box-shadow——溢出
+  // 图区且无法裁剪：裁剪会切掉贴边手柄，多编辑器同屏时压暗还会层层叠加致全黑）
+  const shades: React.CSSProperties[] = [
+    { left: 0, top: 0, width: "100%", height: `${top.toString()}%` },
+    {
+      left: 0,
+      top: `${(top + height).toString()}%`,
+      width: "100%",
+      height: `${(100 - top - height).toString()}%`,
+    },
+    {
+      left: 0,
+      top: `${top.toString()}%`,
+      width: `${left.toString()}%`,
+      height: `${height.toString()}%`,
+    },
+    {
+      left: `${(left + width).toString()}%`,
+      top: `${top.toString()}%`,
+      width: `${(100 - left - width).toString()}%`,
+      height: `${height.toString()}%`,
+    },
+  ];
+
   return (
     <div
       ref={containerRef}
@@ -134,6 +158,10 @@ export function CropEditor({
       onPointerCancel={onPointerUp}
     >
       <img className="crop-editor-img" src={imageUrl} alt="" draggable={false} />
+      {shades.map((style, i) => (
+        // 固定四块（上下左右），顺序稳定，索引即身份
+        <div key={i} className="crop-editor-shade" style={style} />
+      ))}
       <div
         className="crop-editor-box"
         onPointerDown={onHandleDown("move")}

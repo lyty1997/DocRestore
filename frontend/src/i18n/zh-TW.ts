@@ -59,8 +59,9 @@ export const zhTW: Record<TranslationKey, string> = {
   "taskList.clearFinishedResult": "已刪除 {ok} 個，失敗 {fail} 個",
 
   // ── 文件正文裁剪（content_crop）──
-  "crop.toggle": "手動調整正文裁剪框（去左右欄 / 頁首）",
-  "crop.hint": "拖動方框移動、拖四周手柄縮放，框住正文區；不開則自動裁剪。",
+  "crop.title": "正文裁剪",
+  "crop.desc": "手動微調每張圖的正文裁剪框（去左右欄 / 頁首）。關閉則按自動偵測裁剪。",
+  "crop.hint": "點擊縮圖切換圖片；拖動方框移動、拖四周手柄縮放，框住正文區。",
   "crop.detecting": "偵測建議裁剪框中…",
   "crop.detectFailed": "裁剪框偵測失敗，將退回自動裁剪",
   "crop.noneToCrop": "未偵測到需裁剪的圖（已是正文 / 無側欄）",

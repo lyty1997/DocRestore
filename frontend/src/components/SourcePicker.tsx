@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import { browseDirs, stageServerSources } from "../api/client";
+import { browseDirs, getCropImageUrl, stageServerSources } from "../api/client";
 import type { DirEntry } from "../api/schemas";
 import { useTranslation } from "../i18n";
 import { FileUploader } from "./FileUploader";
@@ -50,12 +50,15 @@ export function SourcePicker({
   const [stageError, setStageError] = useState<string | undefined>();
   const [confirmedDir, setConfirmedDir] = useState<string | undefined>();
   const [pathInput, setPathInput] = useState("");
+  /* 最近点选的图片文件名：右侧渲染预览，让用户知道选的是哪张照片 */
+  const [previewFile, setPreviewFile] = useState<string | undefined>();
 
   const navigate = useCallback(
     async (path?: string): Promise<void> => {
       setLoading(true);
       setBrowseError(undefined);
       setSelectedFiles(new Set());
+      setPreviewFile(undefined);
       try {
         const resp = await browseDirs(path, true);
         setCurrentPath(resp.path);
@@ -80,6 +83,8 @@ export function SourcePicker({
   }, [tab, currentPath, confirmedDir, navigate]);
 
   const toggleSelect = (name: string): void => {
+    // 无论勾选还是取消，都把刚操作的图渲染到预览栏（所见即所点）
+    setPreviewFile(name);
     setSelectedFiles((prev) => {
       const next = new Set(prev);
       if (next.has(name)) {
@@ -227,6 +232,7 @@ export function SourcePicker({
             </button>
           </div>
 
+          <div className="server-picker-body">
           <div className="server-picker-list">
             {loading && (
               <p className="server-picker-loading">{t("common.loading")}</p>
@@ -316,6 +322,18 @@ export function SourcePicker({
                 )}
               </>
             )}
+          </div>
+
+          {/* 点选文件的实时预览：知道选的是哪张照片 */}
+          {previewFile !== undefined && (
+            <div className="server-picker-preview">
+              <img
+                src={getCropImageUrl(currentPath, previewFile)}
+                alt={previewFile}
+              />
+              <span className="server-picker-preview-name">{previewFile}</span>
+            </div>
+          )}
           </div>
 
           {stageError !== undefined && (

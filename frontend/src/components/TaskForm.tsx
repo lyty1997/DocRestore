@@ -589,24 +589,33 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
         />
       </div>
 
-      {/* 文档模式正文裁剪：开关 + 拖拽微调面板（仅文档模式 + 已选源时显示） */}
+      {/* 文档模式正文裁剪：开关 + 拖拽微调面板（仅文档模式 + 已选源时显示）。
+          与 LLM 精修 / 脱敏同款 section + toggle-switch，保证入口显眼一致。 */}
       {mode === "doc" && imageDir.trim() !== "" && (
-        <div className="form-group">
-          <label className="crop-toggle">
-            <input
-              type="checkbox"
-              checked={cropEnabled}
-              onChange={(event) => {
-                const on = event.target.checked;
-                setCropEnabled(on);
-                if (!on) {
-                  setCropBoxes({});
-                }
-              }}
-              disabled={disabled}
-            />
-            {t("crop.toggle")}
-          </label>
+        <div className="form-group pii-section">
+          <div className="pii-header">
+            <span className="pii-title">{t("crop.title")}</span>
+            <label className="toggle-switch" htmlFor="crop-toggle">
+              <input
+                id="crop-toggle"
+                type="checkbox"
+                checked={cropEnabled}
+                onChange={(event) => {
+                  const on = event.target.checked;
+                  setCropEnabled(on);
+                  if (!on) {
+                    setCropBoxes({});
+                  }
+                }}
+                disabled={disabled}
+              />
+              <span className="toggle-slider" />
+              <span className="toggle-label">
+                {cropEnabled ? t("common.enabled") : t("common.disabled")}
+              </span>
+            </label>
+          </div>
+          <p className="pii-desc">{t("crop.desc")}</p>
           <CropPanel
             imageDir={imageDir}
             enabled={cropEnabled}

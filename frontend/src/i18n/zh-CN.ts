@@ -55,8 +55,9 @@ export const zhCN = {
   "taskList.clearFinishedResult": "已删除 {ok} 个，失败 {fail} 个",
 
   // ── 文档正文裁剪（content_crop）──
-  "crop.toggle": "手动调整正文裁剪框（去左右栏 / 页眉）",
-  "crop.hint": "拖动方框移动、拖四周手柄缩放，框住正文区；不开则自动裁剪。",
+  "crop.title": "正文裁剪",
+  "crop.desc": "手动微调每张图的正文裁剪框（去左右栏 / 页眉）。关闭则按自动检测裁剪。",
+  "crop.hint": "点击缩略图切换图片；拖动方框移动、拖四周手柄缩放，框住正文区。",
   "crop.detecting": "检测建议裁剪框中…",
   "crop.detectFailed": "裁剪框检测失败，将退回自动裁剪",
   "crop.noneToCrop": "未检测到需裁剪的图（已是正文 / 无侧栏）",
