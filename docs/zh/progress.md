@@ -1719,3 +1719,28 @@ CropPanel 编辑器上方加导航条：`‹ 上一张`｜`i / N · 文件名`�
 不回绕；切图（按钮或缩略图）后激活缩略图自动 `scrollIntoView` 滚进可视区。i18n 三语
 crop.prev/next。Playwright 实测：首张 prev 禁用、连点 next 至 6/34、回退 5/34、激活缩略图
 始终可见；typecheck/lint 0 错，110 测试通过。
+
+
+## 2026-06-11 - 裁剪面板：侧边切换键 + 任务级删除图片（exclude_images）
+
+**侧边切换键**：上一张/下一张从标题行移到图框左右两侧纵向居中（.crop-stage flex 三列：
+‹ 键 | 编辑器 | › 键），到边界禁用；标题行改为"i / N · 文件名 + ✕ 删除此图"。
+
+**删除图片（核心：任务级排除，绝不动磁盘源文件）**：
+- 后端：`OCRConfig.exclude_images: list[str]`（相对根 image_dir，与 crop_boxes 同 key 空间）——
+  挂 OCR 配置使请求合成（model_copy）/DB 持久化/resume 全部复用现有机制零迁移。
+  `resolve_excluded_paths`（拒绝 `..`/绝对路径越界 key；**不 resolve 软链**——stage 目录源图
+  是外部软链，resolve 会越界判废，与 scan_images 未 resolve 路径同构比对）；process_tree 根目录
+  解析后经 _process_leaf/process_many 下传 `exclude_abs`，`_scan_task_images` 统一扫描+过滤
+  （直调场景按本目录自行解析）；剩余为空的叶子目录整个跳过，全空报"图片已全部被排除"。
+  `_apply_requested_crop` 跳过被排除图（排除是任务级的，不该就地预裁剪其磁盘文件）。
+- 前端：CropPanel 改列出**全部**图（无框图纯预览+提示"不裁剪仍可删除"）；✕ 删除当前图→
+  选中位移到下一张（末张前移）；缩略图条下"已排除 N 张（点击文件名恢复）"清单；
+  框上报自动剔除被删图。TaskForm `cropExcluded` state → 提交并入 `ocr.exclude_images`
+  （exclude 单独存在也会触发 ocr 覆盖块）；关开关清空。client/useTaskRunner 类型透传。
+
+**验证**：后端 mypy --strict/ruff 全绿，新增 tests/pipeline/test_exclude_images.py 5 例（解析
+正常/越界拒绝/空、软链身份保持、子目录 key 叶子比对），全量 1154 passed；前端 typecheck/lint
+0 错、110 测试。Playwright E2E：侧键与图框纵向居中偏差 0px 且分居两侧；删 2 张→排除清单 2 项、
+计数 36→34；恢复 1 张精确回滚选中；拦截建任务 POST 实测 payload `ocr.exclude_images` 只含未恢复
+的 1 张、其框已从 crop_boxes 剔除（33=34-1）。

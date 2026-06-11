@@ -4283,7 +4283,7 @@ body {
   color: var(--text-secondary, #888);
   word-break: break-all;
 }
-/* 上一张 / 下一张 导航条（左右按钮 + 居中文件名） */
+/* 标题行：居中文件名 + 右侧删除按钮 */
 .crop-panel-nav {
   display: flex;
   gap: 8px;
@@ -4294,23 +4294,74 @@ body {
   min-width: 0;
   text-align: center;
 }
-.crop-nav-btn {
+.crop-delete-btn {
   flex: 0 0 auto;
   padding: 4px 12px;
   font-size: 12px;
   cursor: pointer;
-  color: var(--color-text);
+  color: #dc2626;
   background: var(--color-surface-alt);
   border: 1px solid var(--color-border);
   border-radius: 4px;
 }
-.crop-nav-btn:hover:not(:disabled) {
+.crop-delete-btn:hover {
+  border-color: #dc2626;
+}
+/* 编辑舞台：左右切换键贴图框两侧、纵向居中 */
+.crop-stage {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.crop-stage-main {
+  flex: 1;
+  min-width: 0;
+}
+.crop-side-btn {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 72px;
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--color-text);
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+.crop-side-btn:hover:not(:disabled) {
   border-color: var(--color-primary);
   color: var(--color-primary);
 }
-.crop-nav-btn:disabled {
-  opacity: 0.4;
+.crop-side-btn:disabled {
+  opacity: 0.35;
   cursor: not-allowed;
+}
+/* 无框图的纯预览 */
+.crop-plain-img {
+  display: block;
+  width: 100%;
+  max-width: min(860px, 100%);
+  border-radius: 4px;
+}
+/* 已排除清单（点击文件名恢复） */
+.crop-excluded {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.crop-excluded-item {
+  padding: 1px 6px;
+  margin: 0 4px 2px 0;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--color-primary);
+  background: none;
+  border: 1px dashed var(--color-border);
+  border-radius: 4px;
+}
+.crop-excluded-item:hover {
+  border-color: var(--color-primary);
 }
 .crop-editor {
   position: relative;

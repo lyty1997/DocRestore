@@ -77,6 +77,8 @@ interface CreateTaskBody {
     model?: string | undefined;
     gpu_id?: string | undefined;
     paddle_pipeline?: "basic" | "vl" | undefined;
+    /** 任务级排除的输入图（相对 image_dir，与 crop_boxes key 同空间） */
+    exclude_images?: readonly string[] | undefined;
   } | undefined;
   code?: {
     enable: boolean;

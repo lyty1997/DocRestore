@@ -46,6 +46,8 @@ class OCRConfigRequest(BaseModel):
 
     model: str | None = None
     gpu_id: str | None = None  # GPU 选择（CUDA_VISIBLE_DEVICES）
+    #: 任务级排除的输入图（相对 image_dir，与 crop_boxes key 同空间）
+    exclude_images: list[str] | None = None
     paddle_pipeline: Literal["basic", "vl"] | None = None
     paddle_python: str | None = None
     paddle_ocr_timeout: int | None = None

@@ -114,6 +114,8 @@ export interface OCRConfig {
   model: string;
   gpu_id?: string | undefined;
   paddle_pipeline?: "basic" | "vl" | undefined;
+  /** 任务级排除的输入图（裁剪面板删除的图，相对 image_dir） */
+  exclude_images?: readonly string[] | undefined;
 }
 
 /** OCR 引擎值常量（label/desc 通过 i18n 获取） */
@@ -231,6 +233,8 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
   const [mode, setMode] = useState<ProcessingMode>("doc");
   const [cropEnabled, setCropEnabled] = useState(false);
   const [cropBoxes, setCropBoxes] = useState<Record<string, CropBox>>({});
+  /* 裁剪面板中删除（任务级排除）的图，相对 image_dir */
+  const [cropExcluded, setCropExcluded] = useState<readonly string[]>([]);
   /* 统一 LLM 精修开关：对所有模式生效（文档分段 / 代码 / PPT 按页）。
      默认开，保持文档/代码模式既有行为；关闭时所有模式只输出 OCR 清洗结果。 */
   const [refineEnabled, setRefineEnabled] = useState(true);
@@ -466,18 +470,23 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
           }
         : undefined;
 
-    /* OCR 引擎配置：模型或 GPU 有显式值才传；gpuId="" 表示自动（不覆盖） */
+    /* OCR 引擎配置：模型 / GPU 有显式值，或裁剪面板有排除图才传；
+       gpuId="" 表示自动（不覆盖） */
     const codeNeedsPaddleBasic =
       mode === "code" && ocrModel.startsWith("paddle-ocr/");
+    const excludeActive =
+      mode === "doc" && cropEnabled && cropExcluded.length > 0;
     const hasOcrOverride =
       ocrModel !== DEFAULT_OCR_MODEL ||
       gpuId !== GPU_AUTO_VALUE ||
-      codeNeedsPaddleBasic;
+      codeNeedsPaddleBasic ||
+      excludeActive;
     const ocr: OCRConfig | undefined = hasOcrOverride
       ? {
           model: ocrModel,
           gpu_id: gpuId === GPU_AUTO_VALUE ? undefined : gpuId,
           paddle_pipeline: codeNeedsPaddleBasic ? "basic" : undefined,
+          exclude_images: excludeActive ? cropExcluded : undefined,
         }
       : undefined;
 
@@ -605,6 +614,7 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
                   setCropEnabled(on);
                   if (!on) {
                     setCropBoxes({});
+                    setCropExcluded([]);
                   }
                 }}
                 disabled={disabled}
@@ -620,6 +630,7 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
             imageDir={imageDir}
             enabled={cropEnabled}
             onBoxesChange={setCropBoxes}
+            onExcludeChange={setCropExcluded}
           />
         </div>
       )}

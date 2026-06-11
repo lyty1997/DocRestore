@@ -68,6 +68,9 @@ export const en: Record<TranslationKey, string> = {
   "crop.noneToCrop": "No images need cropping (already content / no side columns)",
   "crop.prev": "Previous",
   "crop.next": "Next",
+  "crop.delete": "Remove image",
+  "crop.noBoxHint": "No sidebars detected; this image won't be cropped (can still be removed)",
+  "crop.excludedLabel": "{count} image(s) excluded from this task (click a name to restore): ",
 
   // ── Task form ──
   "taskForm.sourceLabel": "Image Source",

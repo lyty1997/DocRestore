@@ -79,6 +79,10 @@ class OCRConfig(BaseModel):
     """OCR 引擎配置"""
 
     model: str = "paddle-ocr/ppocr-v4"  # 统一模型标识符
+    #: 本次任务排除的输入图（相对 image_dir 的路径，与裁剪框 key 同空间）。
+    #: 前端"正文裁剪"面板删除图片时填；仅任务级生效（扫描时跳过），
+    #: 绝不删除 / 移动磁盘上的源文件。随任务配置持久化，resume 自动沿用。
+    exclude_images: list[str] = Field(default_factory=list)
     model_path: str = "models/DeepSeek-OCR-2"  # DeepSeek-OCR-2 本地权重路径
     gpu_memory_utilization: float = 0.75
     max_model_len: int = 8192

@@ -26,9 +26,9 @@ import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -391,6 +391,39 @@ def scan_images(image_dir: Path) -> list[Path]:
     )
 
 
+def resolve_excluded_paths(
+    image_dir: Path,
+    rels: Sequence[str],
+) -> frozenset[Path]:
+    """把任务级排除清单（相对 ``image_dir`` 的路径）解析为绝对路径集合。
+
+    - 拒绝绝对路径与含 ``..`` 的 key（路径穿越防护，静默忽略）；
+    - **不 resolve 软链**：stage 目录的源图是指向外部真实文件的软链，
+      跟随会落到 image_dir 之外；``scan_images`` 返回的也是未 resolve
+      路径，同构拼接即可精确比对。
+    """
+    out: set[Path] = set()
+    for rel in rels:
+        pure = PurePosixPath(rel)
+        if pure.is_absolute() or ".." in pure.parts:
+            continue
+        out.add(image_dir / rel)
+    return frozenset(out)
+
+
+async def _filter_excluded_leaves(
+    leaf_dirs: list[Path],
+    exclude_abs: frozenset[Path],
+) -> list[Path]:
+    """剔除"排除清单生效后剩余图为空"的叶子目录。"""
+    kept: list[Path] = []
+    for d in leaf_dirs:
+        imgs = await asyncio.to_thread(scan_images, d)
+        if any(p not in exclude_abs for p in imgs):
+            kept.append(d)
+    return kept
+
+
 def _count_images(d: Path) -> int:
     """统计目录下图片文件数量（不递归，与 scan_images 一致）。"""
     try:
@@ -595,6 +628,19 @@ class Pipeline:
                     msg = f"未找到图片文件: {image_dir}"
                     raise FileNotFoundError(msg)
 
+                # 任务级排除清单（key 相对根 image_dir）：在根入口解析成
+                # 绝对路径集合后下传；剩余图为空的叶子目录整个跳过
+                exclude_abs = resolve_excluded_paths(
+                    image_dir, (ocr or self._config.ocr).exclude_images,
+                )
+                if exclude_abs:
+                    leaf_dirs = await _filter_excluded_leaves(
+                        leaf_dirs, exclude_abs,
+                    )
+                    if not leaf_dirs:
+                        msg = f"图片已全部被排除: {image_dir}"
+                        raise FileNotFoundError(msg)
+
                 # 单目录：直接委托 process_many（无需 warmup）
                 if (
                     len(leaf_dirs) == 1 and leaf_dirs[0] == image_dir
@@ -602,6 +648,7 @@ class Pipeline:
                     result = await self.process_many(
                         image_dir, output_dir, on_progress,
                         llm, gpu_lock, pii, ocr, code=code, ppt=ppt,
+                        exclude_abs=exclude_abs,
                     )
                     return [result]
 
@@ -704,6 +751,7 @@ class Pipeline:
         *,
         total: int,
         controller: RateController | None = None,
+        exclude_abs: frozenset[Path] | None = None,
     ) -> PipelineResult:
         """process_tree 并行分支：处理单个叶子目录并补全 doc_dir。
 
@@ -732,6 +780,7 @@ class Pipeline:
                 llm, gpu_lock, pii, ocr,
                 code=code, ppt=ppt,
                 controller=controller,
+                exclude_abs=exclude_abs,
             )
 
         result.doc_dir = (
@@ -777,6 +826,7 @@ class Pipeline:
         code: CodeRestoreConfig | None = None,
         ppt: PowerPointRestoreConfig | None = None,
         controller: RateController | None = None,
+        exclude_abs: frozenset[Path] | None = None,
     ) -> PipelineResult:
         """单文档流式处理：OCR Producer + Stream Processor。
 
@@ -785,6 +835,9 @@ class Pipeline:
 
         `controller` 非空时跨 process_many 调用共享（process_tree 并行分支
         warmup cold start 使用），否则本次内部临时创建。
+
+        `exclude_abs` 为任务级排除图的绝对路径集合（process_tree 在根目录
+        解析后下传）；为 None 时按 ocr 配置对本目录自行解析（直调场景）。
         """
         async with self._task_profiler(output_dir) as (profiler, is_root):
             root_stage = profiler.stage(
@@ -796,7 +849,31 @@ class Pipeline:
                 return await self._stream_pipeline(
                     image_dir, output_dir, on_progress,
                     llm, gpu_lock, pii, ocr, code, ppt, controller,
+                    exclude_abs,
                 )
+
+    async def _scan_task_images(
+        self,
+        image_dir: Path,
+        ocr: OCRConfig | None,
+        exclude_abs: frozenset[Path] | None,
+    ) -> list[Path]:
+        """扫描输入图并应用任务级排除清单；剩余为空抛 FileNotFoundError。
+
+        ``exclude_abs`` 为 None 时（process_many 直调，本目录即根）按 ocr
+        配置对本目录解析；process_tree 调用链则在根目录解析后下传。
+        """
+        images = await asyncio.to_thread(scan_images, image_dir)
+        if exclude_abs is None:
+            exclude_abs = resolve_excluded_paths(
+                image_dir, (ocr or self._config.ocr).exclude_images,
+            )
+        if exclude_abs:
+            images = [p for p in images if p not in exclude_abs]
+        if not images:
+            msg = f"未找到图片文件: {image_dir}"
+            raise FileNotFoundError(msg)
+        return images
 
     async def _stream_pipeline(
         self,
@@ -810,6 +887,7 @@ class Pipeline:
         code: CodeRestoreConfig | None,
         ppt: PowerPointRestoreConfig | None,
         controller: RateController | None,
+        exclude_abs: frozenset[Path] | None = None,
     ) -> PipelineResult:
         """process_many 的实际实现：启动 OCR Producer + Stream Processor。"""
         await asyncio.to_thread(
@@ -836,10 +914,7 @@ class Pipeline:
                     message_params=dict(message_params or {}),
                 ))
 
-        images = await asyncio.to_thread(scan_images, image_dir)
-        if not images:
-            msg = f"未找到图片文件: {image_dir}"
-            raise FileNotFoundError(msg)
+        images = await self._scan_task_images(image_dir, ocr, exclude_abs)
         if self._engine_manager is None and self._ocr_engine is None:
             msg = "OCR 引擎未初始化"
             raise RuntimeError(msg)

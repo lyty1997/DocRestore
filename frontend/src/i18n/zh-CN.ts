@@ -63,6 +63,9 @@ export const zhCN = {
   "crop.noneToCrop": "未检测到需裁剪的图（已是正文 / 无侧栏）",
   "crop.prev": "上一张",
   "crop.next": "下一张",
+  "crop.delete": "删除此图",
+  "crop.noBoxHint": "未检测到侧栏，此图不裁剪（仍可删除排除）",
+  "crop.excludedLabel": "已排除 {count} 张，本次任务跳过（点击文件名恢复）：",
 
   // ── 任务表单 ──
   "taskForm.sourceLabel": "图片来源",

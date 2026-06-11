@@ -67,6 +67,9 @@ export const zhTW: Record<TranslationKey, string> = {
   "crop.noneToCrop": "未偵測到需裁剪的圖（已是正文 / 無側欄）",
   "crop.prev": "上一張",
   "crop.next": "下一張",
+  "crop.delete": "刪除此圖",
+  "crop.noBoxHint": "未偵測到側欄，此圖不裁剪（仍可刪除排除）",
+  "crop.excludedLabel": "已排除 {count} 張，本次任務跳過（點擊檔名恢復）：",
 
   // ── 任務表單 ──
   "taskForm.sourceLabel": "圖片來源",

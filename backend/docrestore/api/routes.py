@@ -527,9 +527,19 @@ async def _apply_requested_crop(req: CreateTaskRequest) -> None:
     """
     if not req.crop_boxes:
         return
+    # 被任务排除的图不预裁剪（排除是任务级的，不该改动其磁盘文件）
+    excluded = (
+        set(req.ocr.exclude_images)
+        if req.ocr is not None and req.ocr.exclude_images is not None
+        else set()
+    )
     crop_boxes = {
-        name: (b.x0, b.y0, b.x1, b.y1) for name, b in req.crop_boxes.items()
+        name: (b.x0, b.y0, b.x1, b.y1)
+        for name, b in req.crop_boxes.items()
+        if name not in excluded
     }
+    if not crop_boxes:
+        return
     await asyncio.to_thread(apply_crop_boxes, Path(req.image_dir), crop_boxes)
 
 

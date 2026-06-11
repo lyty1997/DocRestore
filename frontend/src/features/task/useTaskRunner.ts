@@ -350,7 +350,11 @@ export function useTaskRunner(): UseTaskRunnerReturn {
           | readonly { word: string; code?: string | undefined }[]
           | undefined;
       },
-      ocr?: { model?: string | undefined; gpu_id?: string | undefined },
+      ocr?: {
+        model?: string | undefined;
+        gpu_id?: string | undefined;
+        exclude_images?: readonly string[] | undefined;
+      },
       code?: { enable: boolean },
       ppt?: { enable: boolean },
       cropBoxes?: Record<string, CropBox>,
