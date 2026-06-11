@@ -245,3 +245,157 @@ class TestCropRegionToImages:
             crop_region_to_images(
                 tmp_path / "nope.jpg", tmp_path / "images", (0, 0, 10, 10),
             )
+
+
+def _make_layout(
+    w: int,
+    h: int,
+    cols: list[tuple[int, int, int, int]],
+    content_idx: int,
+    *,
+    bg: int = 255,
+    fg: int = 40,
+    divider_x: int | None = None,
+) -> tuple[MatLike, tuple[int, int]]:
+    """按列清单合成版式图：每列 ``(x0, x1, 行距, 线粗)``；返回 (图, 正文边界)。
+
+    与 ``_make_three_column`` 相比可参数化列数 / 宽度 / 行密度 / 配色 /
+    栏间分隔线，供鲁棒性矩阵用例复用。
+    """
+    img = np.full((h, w, 3), bg, np.uint8)
+    color = (fg, fg, fg)
+    for x0, x1, gap, thick in cols:
+        y = int(h * 0.08)
+        while y < int(h * 0.9):
+            cv2.line(img, (x0, y), (x1, y), color, thick)
+            y += gap
+    if divider_x is not None:
+        cv2.line(img, (divider_x, 0), (divider_x, h - 1), color, 2)
+    target = cols[content_idx]
+    return img, (target[0], target[1])
+
+
+def _assert_box_matches(
+    img: MatLike, content: tuple[int, int], tol_ratio: float = 0.06,
+) -> None:
+    """断言检测框对齐正文边界（容差按图宽比例，膨胀留边在容差内）。"""
+    box = compute_crop_box(img)
+    assert box is not None
+    w = img.shape[1]
+    tol = tol_ratio * w
+    assert abs(box[0] - content[0]) < tol
+    assert abs(box[1] - content[1]) < tol
+
+
+class TestRobustness:
+    """鲁棒性矩阵（2026-06-11 加固）。
+
+    旧版固定像素核 + 硬中心先验只在"高分辨率 + 居中构图 + 宽沟壑双侧栏"
+    形态下可靠；核宽相对化 + 质量×中心衰减选段后，本组用例锁住以下行为，
+    防止参数回调时退化。
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "cols", "content_idx", "divider_x"),
+        [
+            # 侧栏数目：单左 / 单右（无"必须双栏"假设）
+            ("仅左侧栏", [(40, 200, 30, 4), (460, 1150, 36, 6)], 1, None),
+            ("仅右侧栏", [(140, 800, 36, 6), (1060, 1240, 30, 4)], 0, None),
+            # 侧栏宽度：特宽 30% / 窄 6%
+            ("左侧栏特宽", [(40, 420, 30, 4), (560, 1200, 36, 6)], 1, None),
+            ("左侧栏窄", [(20, 100, 30, 4), (240, 1180, 36, 6)], 1, None),
+            # 窄沟壑 100px（7.8% 图宽；旧版固定核在此宽度桥接误裁）
+            (
+                "窄沟壑100px",
+                [(40, 360, 30, 4), (460, 840, 36, 6), (940, 1240, 30, 4)],
+                1,
+                None,
+            ),
+            # 沟壑正中的垂直分隔线（文档站 border）
+            (
+                "分隔线居中",
+                [(40, 200, 30, 4), (460, 840, 36, 6), (1080, 1240, 30, 4)],
+                1,
+                330,
+            ),
+        ],
+    )
+    def test_layout_variants(
+        self,
+        name: str,
+        cols: list[tuple[int, int, int, int]],
+        content_idx: int,
+        divider_x: int | None,
+    ) -> None:
+        """各版式变体均应裁出正文列（排除侧栏、不切正文）。"""
+        img, content = _make_layout(
+            1280, 900, cols, content_idx, divider_x=divider_x,
+        )
+        _assert_box_matches(img, content)
+
+    @pytest.mark.parametrize("scale", [0.5, 1.0, 3.0])
+    def test_resolution_invariance(self, scale: float) -> None:
+        """同一版式跨分辨率行为一致（核宽相对化；旧版固定像素核低分辨率失效）。"""
+        s = scale
+        cols = [
+            (int(40 * s), int(200 * s), 30, 4),
+            (int(460 * s), int(840 * s), 36, 6),
+            (int(1080 * s), int(1240 * s), 30, 4),
+        ]
+        img, content = _make_layout(int(1280 * s), int(900 * s), cols, 1)
+        _assert_box_matches(img, content)
+
+    def test_dark_theme(self) -> None:
+        """深色主题（亮字暗底）：自适应二值化间接成列，仍应裁出正文。"""
+        img, content = _make_layout(
+            1280, 900,
+            [(40, 200, 30, 4), (460, 840, 36, 6), (1080, 1240, 30, 4)],
+            1, bg=28, fg=225,
+        )
+        _assert_box_matches(img, content)
+
+    def test_off_center_content_with_sparse_wide_sidebar(self) -> None:
+        """偏拍：正文不跨画面中心、右侧稀疏宽栏——质量分应压制选错列。
+
+        旧版硬中心先验在此形态下退化为最宽段碰运气，最差把侧栏当正文裁掉
+        整列正文（鲁棒性实验实锤的最危险失效）。
+        """
+        img = np.full((900, 1280, 3), 255, np.uint8)
+        y = 70
+        while y < 800:
+            cv2.line(img, (80, y), (560, y), (40, 40, 40), 6)
+            y += 28
+        # 右侧稀疏短行（行长确定性参差，模拟大纲 / 评论栏）
+        y = 90
+        i = 0
+        while y < 700:
+            x1 = 660 + 180 + (i * 97) % 240
+            cv2.line(img, (660, y), (x1, y), (40, 40, 40), 3)
+            y += 64
+            i += 1
+        _assert_box_matches(img, (80, 560))
+
+    def test_sparse_content_dense_nav_never_picks_nav(self) -> None:
+        """稀疏正文（短行术语表）+ 密集左导航：不得把导航当正文。
+
+        纯质量分会锚到更密的左导航（真实样本 DSC07963 形态——旧版在该图
+        恰因误选段被 ratio 守卫拒绝而放行）；中心距离衰减后要么选中正文、
+        要么按守卫放行，绝不能裁出贴左缘的导航框。
+        """
+        img = np.full((900, 1280, 3), 255, np.uint8)
+        y = 70
+        while y < 820:  # 密集左导航
+            cv2.line(img, (26, y), (300, y), (40, 40, 40), 4)
+            y += 22
+        y = 100
+        while y < 760:  # 稀疏短行正文（近画面中心）
+            cv2.line(img, (560, y), (790, y), (40, 40, 40), 3)
+            y += 50
+        y = 90
+        while y < 600:  # 右侧大纲
+            cv2.line(img, (1020, y), (1200, y), (40, 40, 40), 3)
+            y += 40
+        box = compute_crop_box(img)
+        # 允许 None（守卫放行）；若给框，框中心必须在导航右缘之外
+        if box is not None:
+            assert (box[0] + box[1]) / 2 > 300
