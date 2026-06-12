@@ -407,46 +407,81 @@ class TestToolDiagnostics:
         assert noise[0].line == 1
         assert noise[0].column == 13
 
-    def test_cpp_include_root_is_passed_to_command(
+    def test_cpp_include_root_mirrored_into_command(
         self, tmp_path: Path,
     ) -> None:
-        source = tmp_path / "src" / "bad.cc"
-        source.parent.mkdir()
-        source.write_text('#include "src/good.h"\n', encoding="utf-8")
+        """include_root 以中和影子镜像进 -I（不再直传真实目录），目标编译影子副本。
+
+        影子树是临时目录，诊断返回即清理；对其内容的检查全在命令回调内完成。
+        """
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        (src_dir / "good.h").write_text("int g(void);\n", encoding="utf-8")
+        source = src_dir / "bad.cc"
+        source.write_text('#include "good.h"\n', encoding="utf-8")
+        captured: dict[str, object] = {}
 
         def run(
             cmd: list[str], cwd: Path, timeout_s: int,
         ) -> CommandRunResult:
-            assert "-I" in cmd
-            assert str(tmp_path) in cmd
-            assert cwd == source.parent
+            include_dirs = [
+                Path(cmd[idx + 1])
+                for idx, arg in enumerate(cmd)
+                if arg == "-I"
+            ]
+            captured["cmd"] = cmd
+            captured["cwd"] = cwd
+            captured["compiled"] = cmd[-1]
+            captured["sibling_mirrored"] = any(
+                (d / "src" / "good.h").is_file() or (d / "good.h").is_file()
+                for d in include_dirs
+            )
             return CommandRunResult(returncode=0)
 
         runner = CodeDiagnosticRunner(
             tool_resolver=lambda _tool: "/usr/bin/tool",
             command_runner=run,
         )
-        target = CodeDiagnosticTarget(
+        result = runner.run_target(CodeDiagnosticTarget(
             path="src/bad.cc",
             file_path=source,
             language="cpp",
             include_root=tmp_path,
-        )
-        result = runner.run_target(target)
+        ))
         assert result.status == "syntax_clean"
+        cmd = captured["cmd"]
+        assert isinstance(cmd, list)
+        assert "-I" in cmd
+        # 真实 include_root 不再逐字直传（已重映射为影子）。
+        assert str(tmp_path) not in cmd
+        # 编译的是影子副本，cwd 是其父目录，磁盘原文件零改写。
+        assert captured["compiled"] != str(source)
+        assert captured["cwd"] == Path(str(captured["compiled"])).parent
+        assert captured["sibling_mirrored"] is True
+        assert source.read_text(encoding="utf-8") == '#include "good.h"\n'
 
-    def test_diagnose_text_passes_extra_include_roots(
+    def test_diagnose_text_mirrors_include_roots(
         self, tmp_path: Path,
     ) -> None:
-        """真实兄弟目录应作为 -I 传入，使同目录 #include 可解析（B7 C19）。"""
+        """include_root 与兄弟目录都以中和影子镜像进 -I（不再直传真实目录，B7 C19）。"""
         sibling_dir = tmp_path / "src"
         sibling_dir.mkdir()
-        captured: dict[str, list[str]] = {}
+        (sibling_dir / "bar.h").write_text("int bar(void);\n", encoding="utf-8")
+        captured: dict[str, object] = {}
 
         def run(
             cmd: list[str], cwd: Path, timeout_s: int,
         ) -> CommandRunResult:
+            include_dirs = [
+                Path(cmd[idx + 1])
+                for idx, arg in enumerate(cmd)
+                if arg == "-I"
+            ]
             captured["cmd"] = cmd
+            captured["n_includes"] = len(include_dirs)
+            captured["bar_mirrored"] = any(
+                (d / "bar.h").is_file() for d in include_dirs
+            )
             return CommandRunResult(returncode=0)
 
         runner = CodeDiagnosticRunner(
@@ -462,10 +497,16 @@ class TestToolDiagnostics:
             runner=runner,
         )
         cmd = captured["cmd"]
+        assert isinstance(cmd, list)
         assert "-I" in cmd
-        # 兄弟目录与 include_root 都进入 -I 搜索路径。
-        assert str(sibling_dir) in cmd
-        assert str(tmp_path) in cmd
+        # 真实目录不再逐字直传（已重映射为影子）。
+        assert str(tmp_path) not in cmd
+        assert str(sibling_dir) not in cmd
+        # include_root + 兄弟目录 + 草稿父目录都镜像进 -I（>=2）。
+        assert isinstance(captured["n_includes"], int)
+        assert captured["n_includes"] >= 2
+        # 兄弟头 bar.h 经影子可解析。
+        assert captured["bar_mirrored"] is True
 
     def test_diagnose_text_writes_sibling_files(self) -> None:
         """sibling_files 写入同一临时根使同目录 #include 可解析（自审 followup）。"""
@@ -594,14 +635,17 @@ class TestUnsafeIncludeNeutralization:
         # 原文件未被就地改写（只读 NAS / 交付物安全）。
         assert src.read_text(encoding="utf-8") == original
 
-    def test_safe_source_compiles_original_in_place(
+    def test_safe_source_compiled_from_sanitized_shadow(
         self, tmp_path: Path,
     ) -> None:
-        """无不安全 include 时走原路径，编译真实文件（不复制、行为不变）。"""
+        """无不安全 include 也走中和影子副本：内容原样、原文件零改写。
+
+        兄弟文件可能藏不安全 include，故安全目标也必须从影子树编译，不能就地编译磁盘
+        原文件（否则同目录恶意头会被传递性预处理，#1b）。
+        """
         src = tmp_path / "ok.c"
-        src.write_text(
-            "#include <stdio.h>\nint main(void){return 0;}\n", encoding="utf-8",
-        )
+        original = "#include <stdio.h>\nint main(void){return 0;}\n"
+        src.write_text(original, encoding="utf-8")
         capture = _CaptureRunner()
         runner = CodeDiagnosticRunner(
             tool_resolver=lambda tool: f"/usr/bin/{tool}",
@@ -609,4 +653,67 @@ class TestUnsafeIncludeNeutralization:
         )
         runner.run_target(_target(src, "c"))
         assert capture.cmd is not None
-        assert capture.cmd[-1] == str(src)
+        # 编译的是影子副本而非磁盘原文件。
+        assert capture.cmd[-1] != str(src)
+        # 安全 include 不被改动，影子副本内容与原文件一致。
+        assert capture.compiled_text == original
+        # 原文件零改写。
+        assert src.read_text(encoding="utf-8") == original
+
+    def test_transitive_sibling_include_neutralized(
+        self, tmp_path: Path,
+    ) -> None:
+        """兄弟头文件里的不安全 include 也被中和：堵传递性 LFI（#1b）。
+
+        目标 main.c 只写合法的 ``#include "evil.h"``（不会被直接中和），evil.h 里藏
+        ``#include "/etc/passwd"``。-I 必须指向中和影子树，使预处理器经 evil.h 也读
+        不到目标文件；磁盘上的 evil.h 保持原样（交付物零改写）。
+        """
+        evil_header = tmp_path / "evil.h"
+        evil_original = '#include "/etc/passwd"\n'
+        evil_header.write_text(evil_original, encoding="utf-8")
+        main = tmp_path / "main.c"
+        main.write_text(
+            '#include "evil.h"\nint main(void){return 0;}\n', encoding="utf-8",
+        )
+        captured: dict[str, object] = {}
+
+        def run(
+            cmd: list[str], cwd: Path, timeout_s: int,
+        ) -> CommandRunResult:
+            # 影子树是临时目录，诊断返回后即清理；必须在命令回调内读取其内容。
+            include_dirs = [
+                Path(cmd[idx + 1])
+                for idx, arg in enumerate(cmd)
+                if arg == "-I"
+            ]
+            captured["headers"] = [
+                (d / "evil.h").read_text(encoding="utf-8")
+                for d in include_dirs
+                if (d / "evil.h").is_file()
+            ]
+            captured["compiled"] = Path(cmd[-1]).read_text(encoding="utf-8")
+            return CommandRunResult(returncode=0)
+
+        runner = CodeDiagnosticRunner(
+            tool_resolver=lambda tool: f"/usr/bin/{tool}",
+            command_runner=run,
+        )
+        runner.run_target(CodeDiagnosticTarget(
+            path="main.c",
+            file_path=main,
+            language="c",
+            include_root=tmp_path,
+        ))
+        headers = captured["headers"]
+        assert isinstance(headers, list)
+        assert headers, "影子树未包含兄弟头文件 evil.h"
+        for content in headers:
+            assert "/etc/passwd" not in content
+            assert "blocked unsafe include" in content
+        # 磁盘上的原兄弟头文件零改写。
+        assert evil_header.read_text(encoding="utf-8") == evil_original
+        # 编译目标本身（合法 include 保留）也不含 /etc/passwd。
+        compiled = captured["compiled"]
+        assert isinstance(compiled, str)
+        assert "/etc/passwd" not in compiled
