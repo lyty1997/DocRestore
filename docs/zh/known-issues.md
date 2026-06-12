@@ -518,3 +518,28 @@ flex 容器而失效、`overflow-y:auto` 因自身高度=内容高度而不触�
 **教训**：给第三方组件（Tiptap/EditorContent 等）做 flex 滚动布局时，确认 `flex`/`overflow`
 落在**真正的直接子项**上——组件常在你的容器与内容之间插一层无样式包裹 div，样式加错层级会
 静默失效。
+
+## g++/gcc 诊断 LFI：`#import` / `#include_next` 绕过 `#include` 中和（#1d，已修复 2026-06-13）
+
+**现象**：代码诊断的 C/C++ 不安全 include 中和只识别 `#include`（`_C_INCLUDE_RE` /
+`_C_INCLUDE_DIRECTIVE_RE` 只匹配 `# include`）。真实 gcc 同样处理 `#import "/x"` 与
+`#include_next "/x"`，按路径读取外部文件并把内容当编译错误上下文回显——这两条指令未被中和，
+sentinel 复现 `marker in blob == True`，构成与 #1/#1b/#1c 同类的任意文件读取（LFI）。
+
+**根因**：预处理读文件指令不止 `#include` 一种。`#import`（gcc 当作 include-once 的 include）
+和 `#include_next` 都会真实打开目标文件；`#include_next` 还会用相对名沿 `-I` 搜索路径解析。
+旧正则只认 `#include`，漏掉这两个同类面。
+
+**修复**（`backend/docrestore/processing/code_diagnostics.py`）：把读文件指令集合扩到
+`include | include_next | import`：
+- 指令本体 `_C_INCLUDE_DIRECTIVE_RE = r"^\s*#\s*(?:include(?:_next)?|import)\b"`，`\b` 词边界使
+  `#define IMPORT` / `#includex` 这类非真实指令不误命中。
+- 字面量 `_C_INCLUDE_RE` 同步扩展，从这三条指令里提取路径。
+- 策略不变：绝对/越级字面量中和；非字面量目标（宏/计算式）一律中和。
+- 相对名 `#include_next "h.h"` 不属于 LFI 升级——它只能命中 `-I` 搜索路径，而诊断的 `-I` 全是
+  已逐文件中和的影子树，本身受控（非任意文件读）。真正的 LFI 原语是绝对/越级字面量与非字面量。
+
+**验证**：真实 gcc 端到端取证——未修时 `#import "/abs/sentinel"` 与 `#include_next "/abs/sentinel"`
+均把 marker 回显进诊断（`does not name a type`）；修后该行变注释、sentinel 不被读取，
+`marker not in blob`。新增参数化单测（import/include_next × c/cpp）+ 11 条 `_neutralize` 单元用例，
+`TestUnsafeIncludeNeutralization` 40 例全过；临时还原旧正则可复现 4 例失败，证明回归测试非空转。

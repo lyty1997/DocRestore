@@ -570,10 +570,17 @@ def diagnose_text(
         ))
 
 
-# C/C++ #include 字面量（含 <...> 与 "..." 两种形式），捕获组 1 为路径。
-_C_INCLUDE_RE = re.compile(r'#\s*include\s*[<"]\s*([^>"\n]+?)\s*[>"]')
-# C/C++ #include 指令本体（行首预处理指令，不限定目标形态）。
-_C_INCLUDE_DIRECTIVE_RE = re.compile(r"^\s*#\s*include\b")
+# C/C++ 读文件预处理指令的字面量（含 <...> 与 "..." 两种形式），捕获组 1 为路径。
+# 指令集合覆盖 include | include_next | import：真实 gcc 处理 #import 与
+# #include_next 时同样会按路径读取外部文件并把内容当编译错误上下文回显，只认
+# #include 会漏掉这两个同类 LFI 面。
+_C_INCLUDE_RE = re.compile(
+    r'#\s*(?:include(?:_next)?|import)\s*[<"]\s*([^>"\n]+?)\s*[>"]',
+)
+# C/C++ 读文件预处理指令本体（行首预处理指令，不限定目标形态）。
+# ``\b`` 在 ``include`` 后要求词边界，故 ``#define IMPORT`` / ``#includex`` 这类
+# 非真实指令不会误命中；``include(?:_next)?`` 让 ``include_next`` 整体匹配。
+_C_INCLUDE_DIRECTIVE_RE = re.compile(r"^\s*#\s*(?:include(?:_next)?|import)\b")
 # Rust 文件包含宏调用起始（include!/include_str!/include_bytes!）。
 _RUST_INCLUDE_CALL_RE = re.compile(r"\binclude(?:_str|_bytes)?\s*!\s*\(")
 # Rust 文件包含宏 + 字面量首参，捕获组 1 为路径。
@@ -601,12 +608,13 @@ def _is_unsafe_include_path(raw: str) -> bool:
 
 
 def _c_include_is_unsafe(line: str) -> bool:
-    """C/C++：行首 #include 指向绝对/越级，或宏/计算式（无法静态验证）→ 判定中和。"""
+    """C/C++：行首读文件指令（#include/#include_next/#import）指向绝对/越级，或宏/
+    计算式（无法静态验证）→ 判定中和。"""
     if not _C_INCLUDE_DIRECTIVE_RE.match(line):
         return False
     literal = _C_INCLUDE_RE.search(line)
     if literal is None:
-        # #include MACRO / #include FOO(...) 等非字面量：宏展开可指向任意绝对路径，
+        # #include MACRO / #import FOO(...) 等非字面量：宏展开可指向任意绝对路径，
         # 静态无法解析 → 一律中和，宁可牺牲个别诊断也不留任意文件读取的缝。
         return True
     return _is_unsafe_include_path(literal.group(1))
