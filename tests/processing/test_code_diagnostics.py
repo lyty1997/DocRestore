@@ -599,6 +599,20 @@ class TestUnsafeIncludeNeutralization:
             ("#include <stdio.h>", "c", 0),
             ('#include "sibling.h"', "c", 0),
             ('#include "sub/local.h"', "cpp", 0),
+            # #import / #include_next 同样按路径真实读文件 → 同等中和（#1d）。
+            ('#import "/etc/passwd"', "c", 1),
+            ("#import </etc/passwd>", "cpp", 1),
+            ('#  import   "../secret.h"', "cpp", 1),
+            ('#include_next "/etc/passwd"', "c", 1),
+            ("#include_next </etc/passwd>", "cpp", 1),
+            ('#include_next "../secret.h"', "c", 1),
+            ("#import MACRO", "c", 1),
+            ("#include_next FOO_HDR", "cpp", 1),
+            ('#import "sibling.h"', "c", 0),
+            ("#include_next <stdio.h>", "cpp", 0),
+            # 形似但非读文件指令：#define IMPORT / 标识符截断不应误中和。
+            ('#define IMPORT "/etc/passwd"', "c", 0),
+            ('#includex "/etc/passwd"', "c", 0),
             ('include_str!("/etc/passwd")', "rust", 1),
             ('include!("../mod.rs")', "rust", 1),
             ('#[path = "/abs/mod.rs"]', "rust", 1),
@@ -836,5 +850,52 @@ class TestUnsafeIncludeNeutralization:
             item.message for item in result.items
         )
         assert marker not in blob, "宏 include 经真实 gcc 泄漏了 sentinel 内容"
+        # sentinel 与磁盘原文件零改写。
+        assert sentinel.read_text(encoding="utf-8") == marker + "\n"
+
+    @pytest.mark.skipif(
+        shutil.which("gcc") is None,
+        reason="需要真实 gcc 验证 #import/#include_next 经预处理器不泄漏文件内容",
+    )
+    @pytest.mark.parametrize(
+        ("directive", "language", "suffix"),
+        [
+            ("#import", "c", "c"),
+            ("#import", "cpp", "cpp"),
+            ("#include_next", "c", "c"),
+            ("#include_next", "cpp", "cpp"),
+        ],
+    )
+    def test_import_include_next_no_leak_real_compiler(
+        self, tmp_path: Path, directive: str, language: str, suffix: str,
+    ) -> None:
+        """真 gcc 端到端：``#import`` / ``#include_next`` 指向绝对路径 sentinel，中和后
+        内容不回显进诊断（#1d）。
+
+        真实 gcc 处理这两条指令时同样会按路径真实读取外部文件，并把内容当编译错误上
+        下文回显——只认 ``#include`` 会漏掉这两个同类 LFI 面。中和后该行变注释，
+        sentinel 不被读取，诊断里不应出现其内容。
+        """
+        marker = "TOPSECRET_DIRECTIVE_LEAK_7b1e"
+        sentinel = tmp_path / "secret.txt"
+        sentinel.write_text(marker + "\n", encoding="utf-8")
+        main = tmp_path / f"main.{suffix}"
+        main.write_text(
+            f'{directive} "{sentinel}"\nint main(void){{return 0;}}\n',
+            encoding="utf-8",
+        )
+        runner = CodeDiagnosticRunner()  # 真实 tool_resolver + command_runner
+        result = runner.run_target(CodeDiagnosticTarget(
+            path=main.name,
+            file_path=main,
+            language=language,
+            include_root=tmp_path,
+        ))
+        blob = result.summary + "\n" + "\n".join(
+            item.message for item in result.items
+        )
+        assert marker not in blob, (
+            f"{directive} 经真实 gcc 泄漏了 sentinel 内容"
+        )
         # sentinel 与磁盘原文件零改写。
         assert sentinel.read_text(encoding="utf-8") == marker + "\n"
