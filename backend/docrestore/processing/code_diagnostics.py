@@ -43,6 +43,10 @@ logger = logging.getLogger(__name__)
 _DIAG_RLIMIT_CPU_SECONDS = 15
 #: 诊断子进程可写文件总字节上限（语法诊断不应产出大文件）。
 _DIAG_RLIMIT_FSIZE_BYTES = 64 * 1024 * 1024
+#: 诊断影子树单文件大小上限（超限源文件不参与诊断，记日志）。
+_DIAG_MIRROR_MAX_FILE_BYTES = 5 * 1024 * 1024
+#: 单个 -I 根最多镜像的文件数，挡住病态超大目录拖垮诊断（DoS）。
+_DIAG_MIRROR_MAX_FILES = 2000
 
 
 @dataclass(frozen=True)
@@ -368,38 +372,47 @@ class CodeDiagnosticRunner:
         language: str,
         stack: contextlib.ExitStack,
     ) -> CodeDiagnosticTarget:
-        """源码含不安全 #include 时，改为编译一份中和副本而非原文件。
+        """把目标文件与其所有 -I 根镜像成一份中和影子树后再编译。
 
-        绝不就地改写原文件：交付目录可能位于只读 NAS，且不应污染交付物。命中时把
-        原目录补进 -I，保留合法相对/兄弟 #include 的解析能力。tmp 副本生命周期由
-        调用方的 ExitStack 接管，诊断返回即清理。
+        只中和目标文件不足以堵 LFI：诊断给编译器加了跨文件 -I（include_root /
+        extra_include_roots），兄弟头文件被预处理器原样读取——目标里一句合法的
+        ``#include "B.h"`` 就能经 B.h 内的 ``#include "/etc/passwd"`` 传递性读取
+        任意文件。故把目标父目录与每个 -I 根整体复制进隔离 tmp 影子树、逐文件中和，
+        ``-I`` 与编译目标全部重定向到影子树，预处理器再触达不到磁盘上未中和的原文件。
+        目标若落在某个 -I 根内，按原相对位置放入该根影子，保住带子目录 / ``..`` 的
+        相对 include 解析。绝不就地改写原文件（只读 NAS / 交付物安全），影子树生命周期
+        由调用方 ExitStack 接管。
         """
         if language not in _UNSAFE_INCLUDE_RES:
             return target
-        try:
-            text = target.file_path.read_text(encoding="utf-8")
-        except OSError:
-            return target
-        sanitized, blocked = _neutralize_unsafe_includes(text, language)
-        if blocked == 0:
-            return target
-        logger.warning(
-            "诊断中和 %d 处不安全 #include（疑似 LFI 注入）: %s",
-            blocked, target.path,
-        )
-        safe_root = Path(stack.enter_context(
+        shadow = Path(stack.enter_context(
             tempfile.TemporaryDirectory(prefix="docrestore-code-safe-"),
         ))
-        safe_file = safe_root / target.file_path.name
-        safe_file.write_text(sanitized, encoding="utf-8")
-        extra = list(target.extra_include_roots or [])
-        extra.append(target.file_path.parent)
+        builder = _ShadowBuilder(shadow, language)
+        new_include_root = builder.mirror(target.include_root)
+        new_extra: list[Path] = []
+        for root in target.extra_include_roots or []:
+            mirrored = builder.mirror(root)
+            if mirrored is not None:
+                new_extra.append(mirrored)
+        shadow_file, parent_shadow = _resolve_shadow_file(
+            target.file_path, builder, shadow, language,
+        )
+        if shadow_file is None:
+            return target
+        if parent_shadow is not None:
+            new_extra.insert(0, parent_shadow)
+        if builder.blocked:
+            logger.warning(
+                "诊断中和 %d 处不安全 #include（疑似 LFI 注入）: %s",
+                builder.blocked, target.path,
+            )
         return CodeDiagnosticTarget(
             path=target.path,
-            file_path=safe_file,
+            file_path=shadow_file,
             language=target.language,
-            include_root=target.include_root,
-            extra_include_roots=extra,
+            include_root=new_include_root,
+            extra_include_roots=new_extra or None,
         )
 
     def _run_tool_compiled(
@@ -602,6 +615,156 @@ def _neutralize_unsafe_includes(text: str, language: str) -> tuple[str, int]:
     if blocked == 0:
         return text, 0
     return "\n".join(lines), blocked
+
+
+def _mirror_sanitized_tree(
+    src_root: Path, dest_root: Path, language: str,
+) -> int:
+    """把 ``src_root`` 整树复制进 ``dest_root``，逐源文件中和不安全 #include。
+
+    返回中和的指令总数。文本源文件按 ``language`` 的 include 规则中和后写入；读不出
+    UTF-8 的（二进制 / 资源文件，仍可能被 ``#include``）按原字节复制。符号链接一律
+    跳过（可能指向树外的 ``/etc/passwd``），超大文件与超量文件数也跳过并记日志，挡住
+    病态目录拖垮诊断（DoS）。``dest_root`` 由调用方负责清理。
+    """
+    try:
+        entries = sorted(src_root.rglob("*"))
+    except OSError:
+        return 0
+    dest_root.mkdir(parents=True, exist_ok=True)
+    blocked_total = 0
+    copied = 0
+    for path in entries:
+        if copied >= _DIAG_MIRROR_MAX_FILES:
+            logger.warning(
+                "诊断影子树文件数超 %d，截断镜像: %s",
+                _DIAG_MIRROR_MAX_FILES, src_root,
+            )
+            break
+        if path.is_symlink():
+            continue
+        dest = dest_root / path.relative_to(src_root)
+        if path.is_dir():
+            with contextlib.suppress(OSError):
+                dest.mkdir(parents=True, exist_ok=True)
+            continue
+        if not path.is_file():
+            continue
+        blocked_total += _mirror_one_file(path, dest, language)
+        copied += 1
+    return blocked_total
+
+
+def _mirror_one_file(src: Path, dest: Path, language: str) -> int:
+    """镜像单个文件到影子树并中和；返回中和数。超大跳过、读失败按原字节复制。"""
+    try:
+        size = src.stat().st_size
+    except OSError:
+        return 0
+    with contextlib.suppress(OSError):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    if size > _DIAG_MIRROR_MAX_FILE_BYTES:
+        logger.warning("诊断影子树跳过超大文件(%d B): %s", size, src.name)
+        return 0
+    try:
+        text = src.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        with contextlib.suppress(OSError):
+            shutil.copyfile(src, dest)
+        return 0
+    sanitized, blocked = _neutralize_unsafe_includes(text, language)
+    with contextlib.suppress(OSError):
+        dest.write_text(sanitized, encoding="utf-8")
+    return blocked
+
+
+class _ShadowBuilder:
+    """构建中和影子树：把 -I 根逐个镜像进隔离 tmp，记真实根→影子根映射并去重。"""
+
+    def __init__(self, shadow: Path, language: str) -> None:
+        self._shadow = shadow
+        self._language = language
+        self._mirrors: dict[Path, Path] = {}
+        self.order: list[tuple[Path, Path]] = []
+        self.blocked = 0
+
+    def mirror(self, real_root: Path | None) -> Path | None:
+        """镜像一个真实目录（按解析后路径去重），返回影子根；不可镜像返回 None。"""
+        if real_root is None:
+            return None
+        try:
+            resolved = real_root.resolve(strict=False)
+        except OSError:
+            return None
+        if not resolved.is_dir():
+            return None
+        cached = self._mirrors.get(resolved)
+        if cached is not None:
+            return cached
+        dest = self._shadow / f"r{len(self._mirrors)}"
+        self.blocked += _mirror_sanitized_tree(resolved, dest, self._language)
+        self._mirrors[resolved] = dest
+        self.order.append((resolved, dest))
+        return dest
+
+
+def _locate_in_shadow(
+    real_file: Path, order: list[tuple[Path, Path]],
+) -> Path | None:
+    """目标落在某个已镜像根内时，返回它在最深匹配根影子里的对应位置。"""
+    try:
+        resolved = real_file.resolve(strict=False)
+    except OSError:
+        return None
+    best: tuple[int, Path] | None = None
+    for real_root, shadow_root in order:
+        if resolved == real_root or real_root in resolved.parents:
+            depth = len(real_root.parts)
+            if best is None or depth > best[0]:
+                best = (depth, shadow_root / resolved.relative_to(real_root))
+    if best is None:
+        return None
+    return best[1] if best[1].is_file() else None
+
+
+def _neutralize_into(
+    real_file: Path, shadow: Path, language: str,
+) -> Path | None:
+    """兜底：父目录不可镜像时，单独中和目标本体写入影子根。"""
+    try:
+        text = real_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    sanitized, _ = _neutralize_unsafe_includes(text, language)
+    dest = shadow / real_file.name
+    try:
+        dest.write_text(sanitized, encoding="utf-8")
+    except OSError:
+        return None
+    return dest
+
+
+def _resolve_shadow_file(
+    real_file: Path,
+    builder: _ShadowBuilder,
+    shadow: Path,
+    language: str,
+) -> tuple[Path | None, Path | None]:
+    """定位目标文件在影子树中的位置。
+
+    返回 ``(影子文件, 需补进 -I 的父影子根)``：目标若已落在某个 -I 根影子内直接复用
+    （父影子根为 None）；否则镜像其父目录并把父影子根补进 -I 让同目录兄弟可解析；都
+    不成则兜底单独中和目标本体。影子文件为 None 表示无法处理，调用方退回原 target。
+    """
+    located = _locate_in_shadow(real_file, builder.order)
+    if located is not None:
+        return located, None
+    parent_shadow = builder.mirror(real_file.parent)
+    if parent_shadow is not None:
+        candidate = parent_shadow / real_file.name
+        if candidate.is_file():
+            return candidate, parent_shadow
+    return _neutralize_into(real_file, shadow, language), None
 
 
 def _diag_preexec() -> None:  # pragma: no cover - 仅在子进程 fork 后执行
