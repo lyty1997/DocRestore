@@ -79,18 +79,15 @@ describe("fitRegion", () => {
     expect(v.ty + v.baseHeight * v.zoom).toBeGreaterThanOrEqual(vh);
   });
 
-  it("width 模式：纵向整高框按宽度放大（both 模式下被钉在 1）", () => {
-    // 纵向整高、宽 40% 的正文框：both 模式高度方向 0.78 < 1 → zoom=1
+  it("纵向整高框（正文裁剪）zoom 钳在 1：框纵向满窗、水平居中即预期", () => {
+    // 高度项 0.78×vh/(图高×s0) ≡ 0.78 < 1 → clamp 到 1（勿为"放大"改宽度
+    // 主导：框上下边会溢出视口无法选中，已被用户否决）
     const region = { x0: 480, y0: 0, x1: 1120, y1: ih };
-    const both = mustFit(fitRegion(vw, vh, iw, ih, region));
-    expect(both.zoom).toBe(1);
-    // width 模式只看宽度：0.78 * 800 / (640*0.5) = 1.95
-    const v = mustFit(fitRegion(vw, vh, iw, ih, region, "width"));
-    expect(v.zoom).toBeCloseTo(1.95, 5);
-    // 框中心水平对准视口中心；纵向溢出时中心对齐后夹取在合法范围
-    expect(v.tx + 800 * 0.5 * v.zoom).toBeCloseTo(vw / 2, 5);
-    expect(v.ty).toBeLessThanOrEqual(0);
-    expect(v.ty + v.baseHeight * v.zoom).toBeGreaterThanOrEqual(vh);
+    const v = mustFit(fitRegion(vw, vh, iw, ih, region));
+    expect(v.zoom).toBe(1);
+    // zoom=1 高度主导：基准高 = 视口高，框纵向正好填满
+    expect(v.baseHeight).toBe(vh);
+    expect(v.ty).toBe(0);
   });
 
   it("zoom=1 下比视口短的维度居中", () => {

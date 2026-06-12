@@ -233,7 +233,6 @@ export function CropPanel({
                   naturalWidth={current.width}
                   naturalHeight={current.height}
                   initialRegion={currentBox}
-                  fitAxis="width"
                 >
                   <CropEditor
                     imageUrl={getCropImageUrl(imageDir, current.name)}

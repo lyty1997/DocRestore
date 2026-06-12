@@ -21,7 +21,6 @@ import {
 
 import {
   fitRegion,
-  type FitAxis,
   type RegionBBox,
   type ViewTransform,
 } from "../features/task/cropFit";
@@ -33,8 +32,6 @@ interface CropZoomViewportProps {
   readonly initialRegion?: RegionBBox | undefined;
   /** 视口附加 class（覆盖高度等场景差异）。 */
   readonly className?: string | undefined;
-  /** 缩放适配轴：纵向整高框（正文裁剪）用 "width"，默认 "both"。 */
-  readonly fitAxis?: FitAxis | undefined;
   readonly children: React.ReactNode;
 }
 
@@ -47,14 +44,7 @@ export const CropZoomViewport = forwardRef<
   CropZoomViewportHandle,
   CropZoomViewportProps
 >(function CropZoomViewport(
-  {
-    naturalWidth,
-    naturalHeight,
-    initialRegion,
-    className,
-    fitAxis = "both",
-    children,
-  },
+  { naturalWidth, naturalHeight, initialRegion, className, children },
   ref,
 ): React.JSX.Element {
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -73,10 +63,9 @@ export const CropZoomViewport = forwardRef<
         naturalWidth,
         naturalHeight,
         region,
-        fitAxis,
       ));
     },
-    [naturalWidth, naturalHeight, fitAxis],
+    [naturalWidth, naturalHeight],
   );
 
   useImperativeHandle(ref, () => ({ refit }), [refit]);
