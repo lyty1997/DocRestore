@@ -109,6 +109,25 @@ export function CropPanel({
     setBoxes((prev) => ({ ...prev, [name]: box }));
   };
 
+  // 无检测框的图手动开启裁剪：初始框居中 80% 宽 × 整高（与检测框同形态）
+  const addManualBox = (it: CropDetectItem): void => {
+    updateBox(it.name, {
+      x0: Math.round(it.width * 0.1),
+      y0: 0,
+      x1: Math.round(it.width * 0.9),
+      y1: it.height,
+    });
+  };
+
+  // 取消该图裁剪（检测误检 / 手动框后悔），回到"不裁剪"状态
+  const removeBox = (name: string): void => {
+    setBoxes((prev) => {
+      const next = { ...prev };
+      delete next[name];  // eslint-disable-line @typescript-eslint/no-dynamic-delete
+      return next;
+    });
+  };
+
   const visible = items.filter((it) => !excluded.includes(it.name));
   const currentIdx = visible.findIndex((it) => it.name === selected);
   const current = currentIdx === -1 ? undefined : visible[currentIdx];
@@ -192,6 +211,18 @@ export function CropPanel({
             <div className="crop-panel-name">
               {`${(currentIdx + 1).toString()} / ${visible.length.toString()} · ${current.name}`}
             </div>
+            {currentBox !== undefined && (
+              <button
+                type="button"
+                className="crop-action-btn"
+                onClick={() => {
+                  removeBox(current.name);
+                }}
+                title={t("crop.removeBox")}
+              >
+                {t("crop.removeBox")}
+              </button>
+            )}
             <button
               type="button"
               className="crop-delete-btn"
@@ -217,13 +248,24 @@ export function CropPanel({
             <div className="crop-stage-main">
               {currentBox === undefined ? (
                 <>
-                  {/* 未检测到侧栏：仅预览不裁剪（仍可删除） */}
+                  {/* 未检测到侧栏：默认不裁剪，可手动框选开启人工裁剪 */}
                   <img
                     className="crop-plain-img"
                     src={getCropImageUrl(imageDir, current.name)}
                     alt={current.name}
                   />
-                  <p className="crop-panel-hint">{t("crop.noBoxHint")}</p>
+                  <p className="crop-panel-hint">
+                    {t("crop.noBoxHint")}
+                    <button
+                      type="button"
+                      className="crop-action-btn"
+                      onClick={() => {
+                        addManualBox(current);
+                      }}
+                    >
+                      {t("crop.addBox")}
+                    </button>
+                  </p>
                 </>
               ) : (
                 <CropZoomViewport

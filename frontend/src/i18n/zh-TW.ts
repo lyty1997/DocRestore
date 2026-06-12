@@ -68,7 +68,9 @@ export const zhTW: Record<TranslationKey, string> = {
   "crop.prev": "上一張",
   "crop.next": "下一張",
   "crop.delete": "刪除此圖",
-  "crop.noBoxHint": "未偵測到側欄，此圖不裁剪（仍可刪除排除）",
+  "crop.noBoxHint": "未偵測到側欄，此圖預設不裁剪。",
+  "crop.addBox": "手動框選裁剪",
+  "crop.removeBox": "不裁剪此圖",
   "crop.excludedLabel": "已排除 {count} 張，本次任務跳過（點擊檔名恢復）：",
 
   // ── 任務表單 ──

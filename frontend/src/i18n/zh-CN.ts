@@ -64,7 +64,9 @@ export const zhCN = {
   "crop.prev": "上一张",
   "crop.next": "下一张",
   "crop.delete": "删除此图",
-  "crop.noBoxHint": "未检测到侧栏，此图不裁剪（仍可删除排除）",
+  "crop.noBoxHint": "未检测到侧栏，此图默认不裁剪。",
+  "crop.addBox": "手动框选裁剪",
+  "crop.removeBox": "不裁剪此图",
   "crop.excludedLabel": "已排除 {count} 张，本次任务跳过（点击文件名恢复）：",
 
   // ── 任务表单 ──
