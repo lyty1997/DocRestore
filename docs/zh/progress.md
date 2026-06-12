@@ -1815,3 +1815,21 @@ OCR 目录 `_crop_OCR`、NAS 原图完好 3488×2624。
 **遗留说明**：用户报障里"笔记本屏幕被当插图"另一半原因是前景笔记本叠在正文列内、OCR 版面
 模型把它判为 image 块——手动框生效后用户可收 y1 裁掉下方笔记本；纯靠算法的"插图块后过滤"
 另行排期。
+
+## 2026-06-13 - 堵 g++/gcc 诊断 LFI 残留面：`#import` / `#include_next`（#1d）
+
+**背景**：#1/#1b/#1c 已堵住直接 #include LFI、传递性兄弟头、宏 include、非 UTF-8 头旁路。
+ultrareview 复审指出仍剩一个同类高危：C/C++ 中和逻辑只认 `#include`，真实 gcc 同样处理
+`#import "/x"` 与 `#include_next "/x"`（按路径读文件并回显内容），sentinel 复现 LFI 仍成立。
+
+**修复**（`processing/code_diagnostics.py`，详见 known-issues.md「#1d」）：把读文件预处理指令集合
+从 `include` 扩到 `include | include_next | import`。`_C_INCLUDE_DIRECTIVE_RE` 与 `_C_INCLUDE_RE`
+两条正则同步扩展，`\b` 词边界确保 `#define IMPORT` / `#includex` 不误命中。中和策略不变：
+绝对/越级字面量中和、非字面量目标一律中和。相对名 `#include_next` 只命中受控影子树 `-I`，非 LFI 升级。
+
+**验证**：mypy --strict / ruff / typos 全绿；`TestUnsafeIncludeNeutralization` 40 例过（含真实 gcc
+端到端 import/include_next × c/cpp 无泄漏 e2e），`test_code_diagnostics.py` 60 例全过。临时还原旧正则
+复现 4 例失败，证明回归测试有效拦截。
+
+**遗留**：security_audit_2026_06_13 清单里的 High（paddle_python exec / SSRF / output_dir rmtree /
+默认放行鉴权 / PII 上云脱敏绕过 / api_key 明文入库）尚未处理，另行排期。
