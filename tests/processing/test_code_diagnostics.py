@@ -18,6 +18,7 @@ from docrestore.processing.code_diagnostics import (
     CodeDiagnosticRunner,
     CodeDiagnosticTarget,
     CommandRunResult,
+    _neutralize_unsafe_includes,
     _run_command,
     diagnose_text,
 )
@@ -524,3 +525,88 @@ class TestRunCommandProcessGroup:
             time.sleep(0.1)
         else:
             pytest.fail("子进程超时后未被进程组清理，存在孤儿")
+
+
+class _CaptureRunner:
+    """伪命令运行器：读取真正送编译的文件内容并捕获，零退出码。"""
+
+    def __init__(self) -> None:
+        self.compiled_text: str | None = None
+        self.cmd: list[str] | None = None
+
+    def __call__(
+        self, cmd: list[str], cwd: Path, timeout_s: int,
+    ) -> CommandRunResult:
+        self.cmd = cmd
+        # file_arg 恒为 cmd 末位（见 _tool_spec）。
+        self.compiled_text = Path(cmd[-1]).read_text(encoding="utf-8")
+        return CommandRunResult(returncode=0)
+
+
+class TestUnsafeIncludeNeutralization:
+    """g++/gcc #include LFI 防护：不安全 include 中和后才送预处理器。"""
+
+    @pytest.mark.parametrize(
+        ("line", "language", "blocked"),
+        [
+            ('#include "/etc/passwd"', "c", 1),
+            ("#include </etc/passwd>", "cpp", 1),
+            ('#include "../../etc/passwd"', "c", 1),
+            ('#  include   "../secret.h"', "c", 1),
+            ('#include "C:/Windows/win.ini"', "cpp", 1),
+            ("#include <stdio.h>", "c", 0),
+            ('#include "sibling.h"', "c", 0),
+            ('#include "sub/local.h"', "cpp", 0),
+            ('include_str!("/etc/passwd")', "rust", 1),
+            ('include!("../mod.rs")', "rust", 1),
+            ('#[path = "/abs/mod.rs"]', "rust", 1),
+            ('let s = include_str!("data.txt");', "rust", 0),
+            ("int main(void){return 0;}", "c", 0),
+        ],
+    )
+    def test_neutralize_unit(
+        self, line: str, language: str, blocked: int,
+    ) -> None:
+        text = f"{line}\nint main(void){{return 0;}}\n"
+        out, count = _neutralize_unsafe_includes(text, language)
+        assert count == blocked
+        # 行号守恒：中和是整行替换，不增删行。
+        assert len(out.split("\n")) == len(text.split("\n"))
+        if blocked:
+            assert "/etc" not in out
+            assert "blocked unsafe include" in out
+
+    def test_neutralized_before_compile_and_original_untouched(
+        self, tmp_path: Path,
+    ) -> None:
+        src = tmp_path / "evil.c"
+        original = '#include "/etc/passwd"\nint main(void){return 0;}\n'
+        src.write_text(original, encoding="utf-8")
+        capture = _CaptureRunner()
+        runner = CodeDiagnosticRunner(
+            tool_resolver=lambda tool: f"/usr/bin/{tool}",
+            command_runner=capture,
+        )
+        runner.run_target(_target(src, "c"))
+        # 送编译的内容已中和，预处理器读不到目标文件。
+        assert capture.compiled_text is not None
+        assert "/etc/passwd" not in capture.compiled_text
+        # 原文件未被就地改写（只读 NAS / 交付物安全）。
+        assert src.read_text(encoding="utf-8") == original
+
+    def test_safe_source_compiles_original_in_place(
+        self, tmp_path: Path,
+    ) -> None:
+        """无不安全 include 时走原路径，编译真实文件（不复制、行为不变）。"""
+        src = tmp_path / "ok.c"
+        src.write_text(
+            "#include <stdio.h>\nint main(void){return 0;}\n", encoding="utf-8",
+        )
+        capture = _CaptureRunner()
+        runner = CodeDiagnosticRunner(
+            tool_resolver=lambda tool: f"/usr/bin/{tool}",
+            command_runner=capture,
+        )
+        runner.run_target(_target(src, "c"))
+        assert capture.cmd is not None
+        assert capture.cmd[-1] == str(src)
