@@ -15,14 +15,13 @@ import { useEffect, useRef, useState } from "react";
 
 import { cropFigure, getSourceImageUrl, listSourceImages } from "../api/client";
 import type { CropBox, CropQuad } from "../api/schemas";
-import {
-  fitRegion,
-  quadBBox,
-  type RegionBBox,
-  type ViewTransform,
-} from "../features/task/cropFit";
+import { quadBBox, type RegionBBox } from "../features/task/cropFit";
 import { useTranslation } from "../i18n";
 import { CropEditor } from "./CropEditor";
+import {
+  CropZoomViewport,
+  type CropZoomViewportHandle,
+} from "./CropZoomViewport";
 import { QuadCropEditor } from "./QuadCropEditor";
 
 interface NaturalSize {
@@ -104,25 +103,8 @@ export function FigureCropDialog({
   const [error, setError] = useState<string | undefined>();
   // 当前选中的源图是否由光标所在页自动锚定（用于提示；用户改选后清除）
   const [autoMatched, setAutoMatched] = useState<boolean>(false);
-  // 视口内容层变换（undefined = 未测量 / 无布局环境，回退整图 100% 宽展示）
-  const [view, setView] = useState<ViewTransform | undefined>();
-  const viewportRef = useRef<HTMLDivElement>(null);
-
-  // 按区域重算视图变换（图加载 / 换模式 / 拖拽松手 / 窗口尺寸变化时调用）
-  const refit = (
-    size: NaturalSize | undefined,
-    region: RegionBBox | undefined,
-  ): void => {
-    const viewport = viewportRef.current;
-    if (viewport === null || size === undefined || region === undefined) return;
-    setView(fitRegion(
-      viewport.clientWidth,
-      viewport.clientHeight,
-      size.width,
-      size.height,
-      region,
-    ));
-  };
+  // 缩放视口句柄：拖拽松手 / 切模式时按最新区域重新落位
+  const zoomRef = useRef<CropZoomViewportHandle>(null);
 
   // 当前模式下驱动缩放联动的区域（quad 模式取四点外接框）
   const activeRegion = (): RegionBBox | undefined =>
@@ -131,23 +113,9 @@ export function FigureCropDialog({
       : box;
 
   const onDragEnd = (): void => {
-    refit(natural, activeRegion());
+    const region = activeRegion();
+    if (region !== undefined) zoomRef.current?.refit(region);
   };
-
-  // 窗口尺寸变化时按最新状态重算（ref 中转拿最新闭包，监听只挂一次）
-  const refitRef = useRef<() => void>(onDragEnd);
-  useEffect(() => {
-    refitRef.current = onDragEnd;
-  });
-  useEffect(() => {
-    const onResize = (): void => {
-      refitRef.current();
-    };
-    window.addEventListener("resize", onResize);
-    return () => {
-      window.removeEventListener("resize", onResize);
-    };
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -177,7 +145,6 @@ export function FigureCropDialog({
     setNatural(undefined);
     setBox(undefined);
     setQuad(undefined);
-    setView(undefined);
     setAutoMatched(false);
   };
 
@@ -195,7 +162,7 @@ export function FigureCropDialog({
     const initBox: CropBox = { x0, y0, x1: x0 + bw, y1: y0 + bh };
     setBox(initBox);
     setQuad(boxToQuad(initBox));
-    refit({ width: w, height: h }, initBox);
+    // 初始落位由 CropZoomViewport 的 initialRegion 在挂载时完成
   };
 
   // 切模式：进四角校正时用当前矩形框作初始四角（用户在此基础上把角拖到插图实际四角）
@@ -203,7 +170,7 @@ export function FigureCropDialog({
   const switchMode = (next: CropMode): void => {
     if (next === "quad" && box !== undefined) setQuad(boxToQuad(box));
     setMode(next);
-    refit(natural, box);
+    if (box !== undefined) zoomRef.current?.refit(box);
   };
 
   const onSubmit = (): void => {
@@ -300,7 +267,7 @@ export function FigureCropDialog({
         )}
 
         {selected !== "" && (
-          <div className="figure-crop-viewport" ref={viewportRef}>
+          <>
             {/* 测量用隐藏图：拿原图自然尺寸后才渲染编辑器 */}
             <img
               src={getSourceImageUrl(taskId, selected)}
@@ -308,20 +275,13 @@ export function FigureCropDialog({
               style={{ display: "none" }}
               onLoad={onImgLoad}
             />
-            {ready && (
-              <div
-                className="figure-crop-zoom"
-                style={
-                  view === undefined
-                    ? undefined
-                    : {
-                        width: view.baseWidth,
-                        height: view.baseHeight,
-                        transform: `translate(${view.tx.toString()}px, ${view.ty.toString()}px) scale(${view.zoom.toString()})`,
-                        // 手柄 / 框线按此反向缩放，视觉尺寸不随 zoom 变大
-                        "--crop-zoom": view.zoom,
-                      }
-                }
+            {ready ? (
+              <CropZoomViewport
+                key={selected}
+                ref={zoomRef}
+                naturalWidth={natural.width}
+                naturalHeight={natural.height}
+                initialRegion={box}
               >
                 {mode === "rect" && box !== undefined && (
                   <CropEditor
@@ -343,9 +303,11 @@ export function FigureCropDialog({
                     onDragEnd={onDragEnd}
                   />
                 )}
-              </div>
+              </CropZoomViewport>
+            ) : (
+              <div className="figure-crop-viewport" />
             )}
-          </div>
+          </>
         )}
 
         {error !== undefined && (

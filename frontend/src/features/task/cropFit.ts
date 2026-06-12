@@ -53,11 +53,18 @@ export function quadBBox(quad: CropQuad): RegionBBox {
   };
 }
 
+/** 缩放适配轴：both = 框完整可见（取两方向最小）；width = 宽度主导。 */
+export type FitAxis = "both" | "width";
+
 /**
  * 计算"裁剪框铺满视口"的内容层变换。
  *
  * - zoom 下限 1（不比整图适配更小）、上限按 ``MAX_PIXEL_SCALE`` 封顶；
  * - 框中心对准视口中心，再夹取平移避免图边内侧露空（内容比视口小则居中）。
+ * - ``axis="width"``：只按框宽算缩放（纵向溢出由视口裁剪）——供正文裁剪
+ *   这类**纵向整高**框使用：整高框在 both 模式下高度方向永远把 zoom 钉在 1
+ *   （0.78×vh/(图高×s0) ≡ 0.78 < 1），看不到放大；其上下边贴图边本无调整
+ *   意义，核心操作是左右边，宽度主导后 e/w 手柄随中心对齐始终可见。
  *
  * 视口或原图尺寸非正（如 jsdom 无布局）返回 ``undefined``，调用方回退为
  * 不变换的整图展示。
@@ -68,6 +75,7 @@ export function fitRegion(
   naturalWidth: number,
   naturalHeight: number,
   region: RegionBBox,
+  axis: FitAxis = "both",
 ): ViewTransform | undefined {
   if (viewportWidth <= 0 || viewportHeight <= 0) return undefined;
   if (naturalWidth <= 0 || naturalHeight <= 0) return undefined;
@@ -80,12 +88,12 @@ export function fitRegion(
   const baseHeight = naturalHeight * s0;
   const regionW = Math.max(1, region.x1 - region.x0);
   const regionH = Math.max(1, region.y1 - region.y0);
+  const widthFit = viewportWidth / (regionW * s0);
   const zoomFit =
     FILL_RATIO
-    * Math.min(
-      viewportWidth / (regionW * s0),
-      viewportHeight / (regionH * s0),
-    );
+    * (axis === "width"
+      ? widthFit
+      : Math.min(widthFit, viewportHeight / (regionH * s0)));
   const zoomMax = Math.max(1, MAX_PIXEL_SCALE / s0);
   const zoom = clamp(zoomFit, 1, zoomMax);
   // 框中心在内容层（已含 zoom）坐标系的位置

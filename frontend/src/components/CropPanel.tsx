@@ -15,6 +15,10 @@ import { detectCropBoxes, getCropImageUrl } from "../api/client";
 import type { CropBox, CropDetectItem } from "../api/schemas";
 import { useTranslation } from "../i18n";
 import { CropEditor } from "./CropEditor";
+import {
+  CropZoomViewport,
+  type CropZoomViewportHandle,
+} from "./CropZoomViewport";
 
 interface CropPanelProps {
   readonly imageDir: string;
@@ -39,6 +43,8 @@ export function CropPanel({
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
   const thumbsRef = useRef<HTMLDivElement>(null);
+  // 缩放视口句柄：拖拽松手后按最新框重新落位（图随框缩放铺开）
+  const zoomRef = useRef<CropZoomViewportHandle>(null);
 
   // 切图（侧边键 / 缩略图）后把激活缩略图滚进可视区，条与编辑器保持对应
   useEffect(() => {
@@ -220,16 +226,29 @@ export function CropPanel({
                   <p className="crop-panel-hint">{t("crop.noBoxHint")}</p>
                 </>
               ) : (
-                <CropEditor
+                <CropZoomViewport
                   key={current.name}
-                  imageUrl={getCropImageUrl(imageDir, current.name)}
+                  ref={zoomRef}
+                  className="crop-panel-viewport"
                   naturalWidth={current.width}
                   naturalHeight={current.height}
-                  box={currentBox}
-                  onChange={(b): void => {
-                    updateBox(current.name, b);
-                  }}
-                />
+                  initialRegion={currentBox}
+                  fitAxis="width"
+                >
+                  <CropEditor
+                    imageUrl={getCropImageUrl(imageDir, current.name)}
+                    naturalWidth={current.width}
+                    naturalHeight={current.height}
+                    box={currentBox}
+                    onChange={(b): void => {
+                      updateBox(current.name, b);
+                    }}
+                    onDragEnd={(): void => {
+                      const b = boxes[current.name];
+                      if (b !== undefined) zoomRef.current?.refit(b);
+                    }}
+                  />
+                </CropZoomViewport>
               )}
             </div>
             <button

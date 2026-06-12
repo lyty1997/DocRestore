@@ -1744,3 +1744,24 @@ crop.prev/next。Playwright 实测：首张 prev 禁用、连点 next 至 6/34�
 0 错、110 测试。Playwright E2E：侧键与图框纵向居中偏差 0px 且分居两侧；删 2 张→排除清单 2 项、
 计数 36→34；恢复 1 张精确回滚选中；拦截建任务 POST 实测 payload `ocr.exclude_images` 只含未恢复
 的 1 张、其框已从 crop_boxes 剔除（33=34-1）。
+
+
+## 2026-06-12 - 缩放视口复用：输入图裁剪面板获得插图重截同款联动
+
+**需求**：把重截插图对话框的"拖框松手 → 原图自动缩放铺开"效果复用到建任务的输入图裁剪面板。
+
+**抽取共用组件 CropZoomViewport**（FigureCropDialog 内嵌视口逻辑外提）：固定尺寸视口 +
+内容层 translate+scale（cropFit 纯几何）+ --crop-zoom 手柄反缩放 + resize 自动重算；
+命令式 `refit(region)` 供外层拖拽松手/切模式触发；切图由外层换 key 重挂、initialRegion
+挂载落位一次。FigureCropDialog 重构为调用方（删内部 view/refit/resize 逻辑，行为零变化）。
+
+**关键几何坑——纵向整高框在 both 模式下 zoom 恒为 1**：正文框纵向取整高（content_crop
+MVP），fitRegion 取两方向最小 → 高度项 0.78×vh/(图高×s0) ≡ 0.78 < 1 被 clamp 钉死，复用
+后看不到任何放大。解法：fitRegion 加 `axis: "both"|"width"`，面板用**宽度主导**（框宽铺满
+78%，纵向溢出由视口裁剪居中）——整高框上下边贴图边本无调整意义，核心操作的 e/w 手柄随
+中心对齐始终可见；对话框保持 both 不变。
+
+**验证**：typecheck/lint 0 错，111 测试（+1 width 模式：both 钉 1 vs width 1.95 + 水平中心
+对齐 + 纵向夹取）。Playwright 实测：面板初始 scale 2.989（此前恒 1）→ 收框松手 3.456 →
+切下一张重挂回 3.01，e/w 手柄视口内可见；对话框回归初始 1.300（0.78/0.6 设计值）→ 收框
+1.562 → 切四角校正保位，与重构前行为一致。
