@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -26,8 +28,21 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+try:  # POSIX 资源限额（编译炸弹/超大 #include 防护），Windows 无此模块。
+    import resource as _resource
+except ImportError:  # pragma: no cover - 非 POSIX 平台
+    _resource = None  # type: ignore[assignment]
+
 if TYPE_CHECKING:
     from docrestore.processing.code_file_grouping import SourceFile
+
+logger = logging.getLogger(__name__)
+
+#: 单个诊断子进程的 CPU 秒上限，宏展开炸弹在 wall-clock 超时前先被 CPU 限额掐断。
+#: 不设 RLIMIT_AS：rustc/jemalloc 会保留大量虚拟地址空间，地址空间限额易误伤正常诊断。
+_DIAG_RLIMIT_CPU_SECONDS = 15
+#: 诊断子进程可写文件总字节上限（语法诊断不应产出大文件）。
+_DIAG_RLIMIT_FSIZE_BYTES = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -342,6 +357,54 @@ class CodeDiagnosticRunner:
     def _run_tool(
         self, target: CodeDiagnosticTarget, language: str,
     ) -> CodeDiagnostic:
+        """编译型语言诊断入口：先中和不安全 #include，再走真正的编译诊断。"""
+        with contextlib.ExitStack() as stack:
+            safe_target = self._sanitize_target(target, language, stack)
+            return self._run_tool_compiled(safe_target, language)
+
+    def _sanitize_target(
+        self,
+        target: CodeDiagnosticTarget,
+        language: str,
+        stack: contextlib.ExitStack,
+    ) -> CodeDiagnosticTarget:
+        """源码含不安全 #include 时，改为编译一份中和副本而非原文件。
+
+        绝不就地改写原文件：交付目录可能位于只读 NAS，且不应污染交付物。命中时把
+        原目录补进 -I，保留合法相对/兄弟 #include 的解析能力。tmp 副本生命周期由
+        调用方的 ExitStack 接管，诊断返回即清理。
+        """
+        if language not in _UNSAFE_INCLUDE_RES:
+            return target
+        try:
+            text = target.file_path.read_text(encoding="utf-8")
+        except OSError:
+            return target
+        sanitized, blocked = _neutralize_unsafe_includes(text, language)
+        if blocked == 0:
+            return target
+        logger.warning(
+            "诊断中和 %d 处不安全 #include（疑似 LFI 注入）: %s",
+            blocked, target.path,
+        )
+        safe_root = Path(stack.enter_context(
+            tempfile.TemporaryDirectory(prefix="docrestore-code-safe-"),
+        ))
+        safe_file = safe_root / target.file_path.name
+        safe_file.write_text(sanitized, encoding="utf-8")
+        extra = list(target.extra_include_roots or [])
+        extra.append(target.file_path.parent)
+        return CodeDiagnosticTarget(
+            path=target.path,
+            file_path=safe_file,
+            language=target.language,
+            include_root=target.include_root,
+            extra_include_roots=extra,
+        )
+
+    def _run_tool_compiled(
+        self, target: CodeDiagnosticTarget, language: str,
+    ) -> CodeDiagnostic:
         spec = _tool_spec(
             language,
             target.file_path,
@@ -485,6 +548,74 @@ def diagnose_text(
         ))
 
 
+# C/C++ #include 指令（含 <...> 与 "..." 两种形式）。
+_C_INCLUDE_RE = re.compile(r'#\s*include\s*[<"]\s*([^>"\n]+?)\s*[>"]')
+# Rust 文件包含宏（include!/include_str!/include_bytes!）。
+_RUST_INCLUDE_RE = re.compile(
+    r'\binclude(?:_str|_bytes)?\s*!\s*\(\s*"([^"\n]+)"',
+)
+# Rust #[path = "..."] 模块属性，可指向任意文件。
+_RUST_PATH_ATTR_RE = re.compile(r'#\s*\[\s*path\s*=\s*"([^"\n]+)"')
+
+#: 按语言列出"会让编译器读取外部文件"的指令正则；捕获组 1 为目标路径。
+_UNSAFE_INCLUDE_RES: dict[str, tuple[re.Pattern[str], ...]] = {
+    "c": (_C_INCLUDE_RE,),
+    "cpp": (_C_INCLUDE_RE,),
+    "rust": (_RUST_INCLUDE_RE, _RUST_PATH_ATTR_RE),
+}
+
+
+def _is_unsafe_include_path(raw: str) -> bool:
+    """判断 #include 目标是否为绝对路径或越级路径（潜在任意文件读取）。"""
+    candidate = raw.strip().replace("\\", "/")
+    if not candidate:
+        return False
+    if candidate.startswith("/"):
+        return True
+    if re.match(r"^[A-Za-z]:/", candidate):  # Windows 盘符 C:/...
+        return True
+    segments = [seg for seg in candidate.split("/") if seg]
+    return ".." in segments
+
+
+def _neutralize_unsafe_includes(text: str, language: str) -> tuple[str, int]:
+    """中和源码中指向绝对/越级路径的 #include，保留行号。
+
+    诊断用 g++/gcc ``-fsyntax-only`` 仍会运行预处理器，``#include "/etc/passwd"``
+    会被真实读取并经报错回显内容，构成任意文件读取（LFI）。OCR/用户文本不可信，
+    编译前把危险 include 整行替换为等长无害注释——行号不变、诊断仍可用，但预处理器
+    不再触达目标文件。残余面：宏拼接 include（``#define P "/etc/passwd"`` +
+    ``#include P``）不在静态扫描范围，由子进程资源限额 + 隔离临时目录兜底。
+    """
+    patterns = _UNSAFE_INCLUDE_RES.get(language)
+    if not patterns:
+        return text, 0
+    lines = text.split("\n")
+    blocked = 0
+    for idx, line in enumerate(lines):
+        for regex in patterns:
+            match = regex.search(line)
+            if match and _is_unsafe_include_path(match.group(1)):
+                lines[idx] = "// docrestore: blocked unsafe include"
+                blocked += 1
+                break
+    if blocked == 0:
+        return text, 0
+    return "\n".join(lines), blocked
+
+
+def _diag_preexec() -> None:  # pragma: no cover - 仅在子进程 fork 后执行
+    """诊断子进程的资源限额（仅 POSIX）：掐断宏展开炸弹与异常写盘。"""
+    if _resource is None:
+        return
+    for res, limit in (
+        (_resource.RLIMIT_CPU, _DIAG_RLIMIT_CPU_SECONDS),
+        (_resource.RLIMIT_FSIZE, _DIAG_RLIMIT_FSIZE_BYTES),
+    ):
+        with contextlib.suppress(ValueError, OSError):
+            _resource.setrlimit(res, (limit, limit))
+
+
 def _run_command(
     cmd: list[str], cwd: Path, timeout_s: int,
 ) -> CommandRunResult:
@@ -501,6 +632,7 @@ def _run_command(
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
+        preexec_fn=_diag_preexec if os.name == "posix" else None,  # noqa: PLW1509
     ) as proc:
         try:
             stdout, stderr = proc.communicate(timeout=timeout_s)
