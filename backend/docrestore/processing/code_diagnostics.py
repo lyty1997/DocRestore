@@ -383,7 +383,7 @@ class CodeDiagnosticRunner:
         相对 include 解析。绝不就地改写原文件（只读 NAS / 交付物安全），影子树生命周期
         由调用方 ExitStack 接管。
         """
-        if language not in _UNSAFE_INCLUDE_RES:
+        if language not in _SANITIZED_LANGUAGES:
             return target
         shadow = Path(stack.enter_context(
             tempfile.TemporaryDirectory(prefix="docrestore-code-safe-"),
@@ -399,7 +399,16 @@ class CodeDiagnosticRunner:
             target.file_path, builder, shadow, language,
         )
         if shadow_file is None:
-            return target
+            # 兜底也失败（中和副本写盘异常等）：fail-closed —— 指向影子树内未写出的
+            # 占位文件，让编译器报"打不开文件"，绝不回退去编译磁盘上未中和的原文件
+            # （旧版 return target 是 LFI 回退面：写盘失败时会拿原始文件直喂编译器）。
+            return CodeDiagnosticTarget(
+                path=target.path,
+                file_path=shadow / target.file_path.name,
+                language=target.language,
+                include_root=new_include_root,
+                extra_include_roots=new_extra or None,
+            )
         if parent_shadow is not None:
             new_extra.insert(0, parent_shadow)
         if builder.blocked:
@@ -561,21 +570,21 @@ def diagnose_text(
         ))
 
 
-# C/C++ #include 指令（含 <...> 与 "..." 两种形式）。
+# C/C++ #include 字面量（含 <...> 与 "..." 两种形式），捕获组 1 为路径。
 _C_INCLUDE_RE = re.compile(r'#\s*include\s*[<"]\s*([^>"\n]+?)\s*[>"]')
-# Rust 文件包含宏（include!/include_str!/include_bytes!）。
+# C/C++ #include 指令本体（行首预处理指令，不限定目标形态）。
+_C_INCLUDE_DIRECTIVE_RE = re.compile(r"^\s*#\s*include\b")
+# Rust 文件包含宏调用起始（include!/include_str!/include_bytes!）。
+_RUST_INCLUDE_CALL_RE = re.compile(r"\binclude(?:_str|_bytes)?\s*!\s*\(")
+# Rust 文件包含宏 + 字面量首参，捕获组 1 为路径。
 _RUST_INCLUDE_RE = re.compile(
     r'\binclude(?:_str|_bytes)?\s*!\s*\(\s*"([^"\n]+)"',
 )
 # Rust #[path = "..."] 模块属性，可指向任意文件。
 _RUST_PATH_ATTR_RE = re.compile(r'#\s*\[\s*path\s*=\s*"([^"\n]+)"')
 
-#: 按语言列出"会让编译器读取外部文件"的指令正则；捕获组 1 为目标路径。
-_UNSAFE_INCLUDE_RES: dict[str, tuple[re.Pattern[str], ...]] = {
-    "c": (_C_INCLUDE_RE,),
-    "cpp": (_C_INCLUDE_RE,),
-    "rust": (_RUST_INCLUDE_RE, _RUST_PATH_ATTR_RE),
-}
+#: 需要影子树中和的语言（编译器预处理会按路径真实读取外部文件 → LFI 面）。
+_SANITIZED_LANGUAGES: frozenset[str] = frozenset({"c", "cpp", "rust"})
 
 
 def _is_unsafe_include_path(raw: str) -> bool:
@@ -591,27 +600,56 @@ def _is_unsafe_include_path(raw: str) -> bool:
     return ".." in segments
 
 
+def _c_include_is_unsafe(line: str) -> bool:
+    """C/C++：行首 #include 指向绝对/越级，或宏/计算式（无法静态验证）→ 判定中和。"""
+    if not _C_INCLUDE_DIRECTIVE_RE.match(line):
+        return False
+    literal = _C_INCLUDE_RE.search(line)
+    if literal is None:
+        # #include MACRO / #include FOO(...) 等非字面量：宏展开可指向任意绝对路径，
+        # 静态无法解析 → 一律中和，宁可牺牲个别诊断也不留任意文件读取的缝。
+        return True
+    return _is_unsafe_include_path(literal.group(1))
+
+
+def _rust_include_is_unsafe(line: str) -> bool:
+    """Rust：include 宏 / #[path] 指向绝对/越级，或动态表达式（concat! 等）→ 中和。"""
+    attr = _RUST_PATH_ATTR_RE.search(line)
+    if attr and _is_unsafe_include_path(attr.group(1)):
+        return True
+    if _RUST_INCLUDE_CALL_RE.search(line):
+        literal = _RUST_INCLUDE_RE.search(line)
+        if literal is None:
+            # include!(concat!(...)) 等动态首参：目标静态不可知 → 一律中和。
+            return True
+        if _is_unsafe_include_path(literal.group(1)):
+            return True
+    return False
+
+
 def _neutralize_unsafe_includes(text: str, language: str) -> tuple[str, int]:
-    """中和源码中指向绝对/越级路径的 #include，保留行号。
+    """中和源码中会让编译器读取外部文件的不安全 #include，保留行号。
 
     诊断用 g++/gcc ``-fsyntax-only`` 仍会运行预处理器，``#include "/etc/passwd"``
     会被真实读取并经报错回显内容，构成任意文件读取（LFI）。OCR/用户文本不可信，
-    编译前把危险 include 整行替换为等长无害注释——行号不变、诊断仍可用，但预处理器
-    不再触达目标文件。残余面：宏拼接 include（``#define P "/etc/passwd"`` +
-    ``#include P``）不在静态扫描范围，由子进程资源限额 + 隔离临时目录兜底。
+    编译前把危险指令整行替换为等长无害注释——行号不变、诊断仍可用，但预处理器不再
+    触达目标文件。除绝对/越级字面量外，**宏 include（``#define P "/x"`` 后
+    ``#include P``）与动态表达式（Rust ``include!(concat!(...))``）这类静态无法验证
+    目标的形式也一并中和**——资源限额与隔离临时目录都挡不住预处理器按绝对路径读文件，
+    唯有在写入影子树前把这类指令掐掉才真正堵死 LFI。
     """
-    patterns = _UNSAFE_INCLUDE_RES.get(language)
-    if not patterns:
+    if language in ("c", "cpp"):
+        is_unsafe = _c_include_is_unsafe
+    elif language == "rust":
+        is_unsafe = _rust_include_is_unsafe
+    else:
         return text, 0
     lines = text.split("\n")
     blocked = 0
     for idx, line in enumerate(lines):
-        for regex in patterns:
-            match = regex.search(line)
-            if match and _is_unsafe_include_path(match.group(1)):
-                lines[idx] = "// docrestore: blocked unsafe include"
-                blocked += 1
-                break
+        if is_unsafe(line):
+            lines[idx] = "// docrestore: blocked unsafe include"
+            blocked += 1
     if blocked == 0:
         return text, 0
     return "\n".join(lines), blocked
@@ -656,7 +694,13 @@ def _mirror_sanitized_tree(
 
 
 def _mirror_one_file(src: Path, dest: Path, language: str) -> int:
-    """镜像单个文件到影子树并中和；返回中和数。超大跳过、读失败按原字节复制。"""
+    """镜像单个文件到影子树并中和；返回中和数。超大文件跳过、彻底读不出则跳过。
+
+    非 UTF-8 文件用 ``errors="replace"`` 解码后**仍走中和**：危险 ``#include`` 行本身
+    是 ASCII，混入非法字节不能成为绕过中和的旁路（旧版解码失败直接 ``copyfile``，会把
+    危险指令原样留在影子树）。读不出（权限/IO）直接跳过——绝不原字节复制可被预处理的
+    文本，预处理器在影子树同样触达不到即安全。
+    """
     try:
         size = src.stat().st_size
     except OSError:
@@ -667,10 +711,8 @@ def _mirror_one_file(src: Path, dest: Path, language: str) -> int:
         logger.warning("诊断影子树跳过超大文件(%d B): %s", size, src.name)
         return 0
     try:
-        text = src.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        with contextlib.suppress(OSError):
-            shutil.copyfile(src, dest)
+        text = src.read_text(encoding="utf-8", errors="replace")
+    except OSError:
         return 0
     sanitized, blocked = _neutralize_unsafe_includes(text, language)
     with contextlib.suppress(OSError):
