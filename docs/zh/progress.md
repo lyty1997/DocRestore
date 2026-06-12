@@ -1793,3 +1793,25 @@ fitAxis prop；CropPanel 不再传 width。整高框 zoom 钳在 1 = 框纵向 1
 **验证**：typecheck/lint 0 错、111 测试。Playwright 实测（DSC07963——恰是歧义守卫放行的
 稀疏术语页）：点手动框选→编辑器+视口出现、拖 e 手柄 -60px 生效；点不裁剪→回到纯预览+
 入口按钮，闭环成立。
+
+
+## 2026-06-12 - 修复手动裁剪框静默失效：废弃就地预裁剪，改任务级 OCRConfig.crop_boxes
+
+**用户报障**：任务 8caabe3f 手动微调正文裁剪"没生效一样"，笔记本屏幕被当插图截进正文。
+取证：14 张 NAS 原图全部仍全尺寸 → 手动框确实没应用。根因：NAS 是 CIFS 只读挂载，旧版
+`apply_crop_boxes` 就地覆盖原图时 `cv2.imwrite` 失败返回 False 无检查 → **静默丢失**。
+
+**修复**（详见 doc-content-crop.md §13）：手动框改任务级 `OCRConfig.crop_boxes`，OCR 前由
+`crop_page_manual` 裁到任务输出目录，绝不写用户目录；`ImageOverrides`（排除+用户框）根入口
+解析整体下传。一并根治：可写目录原图被覆盖毁坏（S4 遗留风险）、stage 软链源框静默跳过、
+多目录任务 `_process_leaf` 漏传排除清单的隐藏 bug；手动框上下边（y0/y1）真正生效。
+`apply_crop_boxes` 删除。前端零改动。
+
+**验证**：mypy --strict 66 文件 / ruff 全绿，1159 passed（+crop_page_manual 3 例 +
+resolve_crop_boxes/ImageOverrides 4 例，-apply_crop_boxes 2 例）。真实 E2E：软链 stage 2 张 +
+手动框建任务（关精修）→ `.content_crop/DSC07963_crop.JPG` 精确 1500×1700（上下边生效）、
+OCR 目录 `_crop_OCR`、NAS 原图完好 3488×2624。
+
+**遗留说明**：用户报障里"笔记本屏幕被当插图"另一半原因是前景笔记本叠在正文列内、OCR 版面
+模型把它判为 image 块——手动框生效后用户可收 y1 裁掉下方笔记本；纯靠算法的"插图块后过滤"
+另行排期。

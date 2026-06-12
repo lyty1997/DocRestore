@@ -79,7 +79,6 @@ from docrestore.pipeline.config import (
 )
 from docrestore.processing.content_crop import (
     DegenerateQuadError,
-    apply_crop_boxes,
     crop_quad_to_images,
     crop_region_to_images,
     detect_boxes_for_dir,
@@ -520,27 +519,48 @@ async def crop_figure(
     return CropFigureResponse(asset_path=f"images/{name}")
 
 
-async def _apply_requested_crop(req: CreateTaskRequest) -> None:
-    """前端"裁剪预览 + 微调"确认的框 → 创建任务前就地预裁剪图片（覆盖原图）。
+def _requested_crop_boxes(
+    req: CreateTaskRequest,
+) -> dict[str, tuple[int, int, int, int]]:
+    """请求中的手动裁剪框（剔除被任务排除的图）。
 
-    content_crop 的已裁剪判据会自动跳过、不二次裁；放建任务前做避免框穿过 pipeline/DB。
+    框走任务级 ``OCRConfig.crop_boxes``：OCR 前由 pipeline 裁到任务输出目录，
+    **绝不写用户目录**——旧版"建任务前就地覆盖原图"在只读挂载（NAS）上
+    cv2.imwrite 静默失败致框默默丢失，可写时又会毁原图，已废弃。
     """
     if not req.crop_boxes:
-        return
-    # 被任务排除的图不预裁剪（排除是任务级的，不该改动其磁盘文件）
+        return {}
     excluded = (
         set(req.ocr.exclude_images)
         if req.ocr is not None and req.ocr.exclude_images is not None
         else set()
     )
-    crop_boxes = {
+    return {
         name: (b.x0, b.y0, b.x1, b.y1)
         for name, b in req.crop_boxes.items()
         if name not in excluded
     }
-    if not crop_boxes:
-        return
-    await asyncio.to_thread(apply_crop_boxes, Path(req.image_dir), crop_boxes)
+
+
+def _resolve_ocr_config(
+    req: CreateTaskRequest,
+    default_ocr: OCRConfig,
+) -> OCRConfig | None:
+    """合成任务 OCR 配置：请求级覆盖 + 手动裁剪框（任务级生效）。
+
+    手动框随 OCR 配置入 DB 持久化，resume 自动沿用。
+    """
+    ocr_cfg: OCRConfig | None = None
+    if req.ocr is not None:
+        ocr_cfg = default_ocr.model_copy(
+            update=req.ocr.model_dump(exclude_none=True),
+        )
+    crop_boxes = _requested_crop_boxes(req)
+    if crop_boxes:
+        ocr_cfg = (ocr_cfg or default_ocr).model_copy(
+            update={"crop_boxes": crop_boxes},
+        )
+    return ocr_cfg
 
 
 @router.post("/tasks", response_model=TaskResponse)
@@ -563,11 +583,8 @@ async def create_task(
             update=req.llm.model_dump(exclude_none=True),
         )
 
-    ocr_cfg: OCRConfig | None = None
-    if req.ocr is not None:
-        ocr_cfg = defaults.ocr.model_copy(
-            update=req.ocr.model_dump(exclude_none=True),
-        )
+    # OCR 覆盖 + 手动裁剪框（任务级，见 _requested_crop_boxes 注释）
+    ocr_cfg = _resolve_ocr_config(req, defaults.ocr)
 
     pii_cfg: PIIConfig | None = None
     if req.pii is not None:
@@ -601,9 +618,6 @@ async def create_task(
             APIErrorCode.MODE_CONFLICT, 400,
             "代码模式与 PPT 模式不能同时启用",
         )
-
-    # 前端"裁剪预览 + 微调"确认的框：创建任务前就地预裁剪图片，跑裁剪后的图。
-    await _apply_requested_crop(req)
 
     task = manager.create_task(
         image_dir=req.image_dir,

@@ -26,8 +26,8 @@ import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Callable, Sequence
-from dataclasses import replace
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol
 
@@ -424,6 +424,50 @@ async def _filter_excluded_leaves(
     return kept
 
 
+#: 裁剪框 (x0, y0, x1, y1)。与 content_crop.CropBoxTuple 同构；本地定义避免
+#: 顶层 import content_crop 引入 cv2 硬依赖（cv2 调用均走分支内延迟导入）。
+_CropBoxTuple = tuple[int, int, int, int]
+
+
+def resolve_crop_boxes(
+    image_dir: Path,
+    boxes: Mapping[str, _CropBoxTuple],
+) -> dict[Path, _CropBoxTuple]:
+    """把用户裁剪框（相对 ``image_dir`` 的路径 → 框）解析为绝对路径键。
+
+    净化规则与 ``resolve_excluded_paths`` 一致：拒绝绝对路径与含 ``..`` 的
+    key（静默忽略），不 resolve 软链。
+    """
+    out: dict[Path, _CropBoxTuple] = {}
+    for rel, box in boxes.items():
+        pure = PurePosixPath(rel)
+        if pure.is_absolute() or ".." in pure.parts:
+            continue
+        out[image_dir / rel] = box
+    return out
+
+
+@dataclass(frozen=True)
+class ImageOverrides:
+    """任务级输入图覆盖：排除清单 + 用户手动裁剪框（key 已解析为绝对路径）。
+
+    key 相对**根** image_dir（与前端 detect / crop_boxes 同空间），必须在根
+    入口解析后整体下传——叶子目录层按叶子相对路径解析会失配（多文档任务的
+    子目录前缀 key 在叶子层拼不出存在的路径，覆盖静默失效）。
+    """
+
+    exclude: frozenset[Path]
+    crop_boxes: dict[Path, _CropBoxTuple]
+
+    @classmethod
+    def resolve(cls, image_dir: Path, ocr: OCRConfig) -> ImageOverrides:
+        """按 OCR 配置在 ``image_dir``（根）上解析两类覆盖。"""
+        return cls(
+            exclude=resolve_excluded_paths(image_dir, ocr.exclude_images),
+            crop_boxes=resolve_crop_boxes(image_dir, ocr.crop_boxes),
+        )
+
+
 def _count_images(d: Path) -> int:
     """统计目录下图片文件数量（不递归，与 scan_images 一致）。"""
     try:
@@ -628,14 +672,15 @@ class Pipeline:
                     msg = f"未找到图片文件: {image_dir}"
                     raise FileNotFoundError(msg)
 
-                # 任务级排除清单（key 相对根 image_dir）：在根入口解析成
-                # 绝对路径集合后下传；剩余图为空的叶子目录整个跳过
-                exclude_abs = resolve_excluded_paths(
-                    image_dir, (ocr or self._config.ocr).exclude_images,
+                # 任务级覆盖（排除清单 + 用户裁剪框，key 相对根 image_dir）：
+                # 必须在根入口解析为绝对路径后整体下传（叶子层解析会失配）；
+                # 剩余图为空的叶子目录整个跳过
+                overrides = ImageOverrides.resolve(
+                    image_dir, ocr or self._config.ocr,
                 )
-                if exclude_abs:
+                if overrides.exclude:
                     leaf_dirs = await _filter_excluded_leaves(
-                        leaf_dirs, exclude_abs,
+                        leaf_dirs, overrides.exclude,
                     )
                     if not leaf_dirs:
                         msg = f"图片已全部被排除: {image_dir}"
@@ -648,7 +693,7 @@ class Pipeline:
                     result = await self.process_many(
                         image_dir, output_dir, on_progress,
                         llm, gpu_lock, pii, ocr, code=code, ppt=ppt,
-                        exclude_abs=exclude_abs,
+                        overrides=overrides,
                     )
                     return [result]
 
@@ -671,6 +716,7 @@ class Pipeline:
                         on_progress, llm, gpu_lock, pii, ocr, code, ppt,
                         total=len(leaves_sorted),
                         controller=controller,
+                        overrides=overrides,
                     ),
                     name=f"warmup-leaf-{warmup_leaf.name}",
                 )
@@ -691,6 +737,7 @@ class Pipeline:
                             on_progress, llm, gpu_lock, pii, ocr, code, ppt,
                             total=len(leaves_sorted),
                             controller=controller,
+                            overrides=overrides,
                         ),
                         name=f"leaf-{leaf.name}",
                     )
@@ -751,11 +798,13 @@ class Pipeline:
         *,
         total: int,
         controller: RateController | None = None,
-        exclude_abs: frozenset[Path] | None = None,
+        overrides: ImageOverrides | None = None,
     ) -> PipelineResult:
         """process_tree 并行分支：处理单个叶子目录并补全 doc_dir。
 
         `controller` 非空时使用共享实例（warmup cold start 复用）。
+        `overrides` 为根入口解析好的任务级覆盖（排除 + 用户框），必须转传——
+        漏传时 _stream_pipeline 会按叶子目录重解析，根相对 key 失配静默失效。
         """
         profiler = current_profiler()
         rel = leaf.relative_to(image_dir)
@@ -780,7 +829,7 @@ class Pipeline:
                 llm, gpu_lock, pii, ocr,
                 code=code, ppt=ppt,
                 controller=controller,
-                exclude_abs=exclude_abs,
+                overrides=overrides,
             )
 
         result.doc_dir = (
@@ -826,7 +875,7 @@ class Pipeline:
         code: CodeRestoreConfig | None = None,
         ppt: PowerPointRestoreConfig | None = None,
         controller: RateController | None = None,
-        exclude_abs: frozenset[Path] | None = None,
+        overrides: ImageOverrides | None = None,
     ) -> PipelineResult:
         """单文档流式处理：OCR Producer + Stream Processor。
 
@@ -849,25 +898,16 @@ class Pipeline:
                 return await self._stream_pipeline(
                     image_dir, output_dir, on_progress,
                     llm, gpu_lock, pii, ocr, code, ppt, controller,
-                    exclude_abs,
+                    overrides,
                 )
 
     async def _scan_task_images(
         self,
         image_dir: Path,
-        ocr: OCRConfig | None,
-        exclude_abs: frozenset[Path] | None,
+        exclude_abs: frozenset[Path],
     ) -> list[Path]:
-        """扫描输入图并应用任务级排除清单；剩余为空抛 FileNotFoundError。
-
-        ``exclude_abs`` 为 None 时（process_many 直调，本目录即根）按 ocr
-        配置对本目录解析；process_tree 调用链则在根目录解析后下传。
-        """
+        """扫描输入图并应用任务级排除清单；剩余为空抛 FileNotFoundError。"""
         images = await asyncio.to_thread(scan_images, image_dir)
-        if exclude_abs is None:
-            exclude_abs = resolve_excluded_paths(
-                image_dir, (ocr or self._config.ocr).exclude_images,
-            )
         if exclude_abs:
             images = [p for p in images if p not in exclude_abs]
         if not images:
@@ -887,7 +927,7 @@ class Pipeline:
         code: CodeRestoreConfig | None,
         ppt: PowerPointRestoreConfig | None,
         controller: RateController | None,
-        exclude_abs: frozenset[Path] | None = None,
+        overrides: ImageOverrides | None = None,
     ) -> PipelineResult:
         """process_many 的实际实现：启动 OCR Producer + Stream Processor。"""
         await asyncio.to_thread(
@@ -914,7 +954,13 @@ class Pipeline:
                     message_params=dict(message_params or {}),
                 ))
 
-        images = await self._scan_task_images(image_dir, ocr, exclude_abs)
+        # 任务级覆盖归一：process_tree 链路已在根目录解析并下传；
+        # process_many 直调（本目录即根）按本目录解析
+        if overrides is None:
+            overrides = ImageOverrides.resolve(
+                image_dir, ocr or self._config.ocr,
+            )
+        images = await self._scan_task_images(image_dir, overrides.exclude)
         if self._engine_manager is None and self._ocr_engine is None:
             msg = "OCR 引擎未初始化"
             raise RuntimeError(msg)
@@ -962,6 +1008,7 @@ class Pipeline:
                     if not code_cfg.enable and not ppt_cfg.enable
                     else None
                 ),
+                overrides=overrides,
             ),
             name=f"ocr-producer-{image_dir.name}",
         )
@@ -1636,6 +1683,7 @@ class Pipeline:
         quality: QualityReport | None = None,
         ppt: PowerPointRestoreConfig | None = None,
         content_crop: ContentCropConfig | None = None,
+        overrides: ImageOverrides | None = None,
     ) -> None:
         """OCR 生产者：逐张 OCR → 清洗 → 可选 regex-only PII → 入队。
 
@@ -1652,11 +1700,26 @@ class Pipeline:
             )
             for i, img in enumerate(images):
                 t0 = time.perf_counter()
-                # OCR 前逐页前处理（CPU）：PPT 模式透视矫正 / 文档模式正文区裁剪
-                # （二选一，模式互斥）。处理后图喂 OCR；page.image_path 改回原图，
-                # marker / 前端源图按原文件名匹配。任何失败都回退原图，不中断 OCR。
+                # OCR 前逐页前处理（CPU）：用户手动框（任务级，最优先）/
+                # PPT 透视矫正 / 文档自动裁剪。处理后图喂 OCR；page.image_path
+                # 改回原图，marker / 前端源图按原文件名匹配。任何失败都回退
+                # 原图，不中断 OCR。手动框裁到任务输出目录，绝不写用户目录。
                 ocr_input = img
-                if ppt is not None and ppt.enable and ppt.rectify:
+                user_box = (
+                    None if overrides is None
+                    else overrides.crop_boxes.get(img)
+                )
+                if user_box is not None:
+                    from docrestore.processing.content_crop import (
+                        crop_page_manual,
+                    )
+                    cc = content_crop or ContentCropConfig()
+                    ocr_input = await crop_page_manual(
+                        img, output_dir, user_box,
+                        save_debug=cc.save_debug,
+                        debug_dir=cc.debug_dir,
+                    )
+                elif ppt is not None and ppt.enable and ppt.rectify:
                     from docrestore.processing.slide_rectify import (
                         rectify_page,
                     )

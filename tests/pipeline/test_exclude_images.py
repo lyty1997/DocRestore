@@ -16,7 +16,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from docrestore.pipeline.config import OCRConfig
 from docrestore.pipeline.pipeline import (
+    ImageOverrides,
+    resolve_crop_boxes,
     resolve_excluded_paths,
     scan_images,
 )
@@ -41,6 +44,52 @@ class TestResolveExcludedPaths:
 
     def test_empty(self) -> None:
         assert resolve_excluded_paths(Path("/x"), []) == frozenset()
+
+
+class TestResolveCropBoxes:
+    """用户裁剪框清单 → 绝对路径键（净化规则与排除清单一致）。"""
+
+    def test_plain_and_subdir_keys(self) -> None:
+        root = Path("/data/imgs")
+        out = resolve_crop_boxes(
+            root,
+            {"a.jpg": (1, 2, 3, 4), "sub/b.png": (5, 6, 7, 8)},
+        )
+        assert out == {
+            root / "a.jpg": (1, 2, 3, 4),
+            root / "sub/b.png": (5, 6, 7, 8),
+        }
+
+    def test_rejects_traversal_and_absolute(self) -> None:
+        root = Path("/data/imgs")
+        out = resolve_crop_boxes(
+            root,
+            {
+                "../evil.jpg": (0, 0, 1, 1),
+                "/etc/passwd": (0, 0, 1, 1),
+                "ok.jpg": (1, 2, 3, 4),
+            },
+        )
+        assert out == {root / "ok.jpg": (1, 2, 3, 4)}
+
+
+class TestImageOverrides:
+    """任务级覆盖（排除 + 用户框）从 OCR 配置一次解析。"""
+
+    def test_resolve_from_ocr_config(self) -> None:
+        root = Path("/data/imgs")
+        ocr = OCRConfig(
+            exclude_images=["drop.jpg"],
+            crop_boxes={"keep.jpg": (10, 0, 90, 100)},
+        )
+        ov = ImageOverrides.resolve(root, ocr)
+        assert ov.exclude == frozenset({root / "drop.jpg"})
+        assert ov.crop_boxes == {root / "keep.jpg": (10, 0, 90, 100)}
+
+    def test_default_config_is_empty(self) -> None:
+        ov = ImageOverrides.resolve(Path("/x"), OCRConfig())
+        assert not ov.exclude
+        assert not ov.crop_boxes
 
 
 class TestScanFilter:

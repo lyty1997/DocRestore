@@ -83,6 +83,13 @@ class OCRConfig(BaseModel):
     #: 前端"正文裁剪"面板删除图片时填；仅任务级生效（扫描时跳过），
     #: 绝不删除 / 移动磁盘上的源文件。随任务配置持久化，resume 自动沿用。
     exclude_images: list[str] = Field(default_factory=list)
+    #: 用户手动确认的正文裁剪框（相对 image_dir 路径 → (x0,y0,x1,y1)）。
+    #: 任务级生效：OCR 前按框裁到任务输出目录（crop_page_manual），优先于
+    #: 自动检测；**绝不写用户目录**——旧版就地覆盖原图在只读挂载上静默失败、
+    #: 可写时毁原图，已废弃。随任务配置持久化，resume 自动沿用。
+    crop_boxes: dict[str, tuple[int, int, int, int]] = Field(
+        default_factory=dict,
+    )
     model_path: str = "models/DeepSeek-OCR-2"  # DeepSeek-OCR-2 本地权重路径
     gpu_memory_utilization: float = 0.75
     max_model_len: int = 8192

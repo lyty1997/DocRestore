@@ -220,6 +220,45 @@ def compute_crop_box(image_bgr: ImageBGR) -> tuple[int, int] | None:
     return box
 
 
+def _save_cropped(
+    image: ImageBGR,
+    image_path: Path,
+    output_dir: Path,
+    box_xyxy: tuple[int, int, int, int],
+    *,
+    save_debug: bool,
+    debug_dir: str,
+) -> Path:
+    """按 ``(x0,y0,x1,y1)`` 裁剪并落盘到 ``output_dir/<debug_dir>``。
+
+    自动检测与用户手动框共用的落盘段。返回裁剪图路径；写盘失败回退原图路径
+    （兑现"任何失败回退原图、不中断下游 OCR"契约，与 slide_rectify 一致）。
+    """
+    x0, y0, x1, y1 = box_xyxy
+    cropped = image[y0:y1, x0:x1]
+    crop_dir = output_dir / debug_dir
+    stem = image_path.stem
+    suffix = image_path.suffix or ".jpg"
+    after_path = crop_dir / f"{stem}_crop{suffix}"
+    try:
+        crop_dir.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(after_path), cropped):
+            logger.warning("裁剪图写盘失败，回退原图：%s", image_path.name)
+            return image_path
+        if save_debug:
+            vis = image.copy()
+            cv2.rectangle(
+                vis, (x0, y0), (x1, max(y0, y1 - 1)), (0, 0, 255), 6,
+            )
+            cv2.imwrite(str(crop_dir / f"{stem}_box{suffix}"), vis)
+    except (OSError, cv2.error):
+        logger.warning(
+            "裁剪图落盘异常，回退原图：%s", image_path.name, exc_info=True,
+        )
+        return image_path
+    return after_path
+
+
 def _crop_sync(
     image_path: Path,
     output_dir: Path,
@@ -243,30 +282,62 @@ def _crop_sync(
         )
         return image_path
     x0, x1 = box
-    cropped = image[:, x0:x1]  # MVP：纵向取整高
-    crop_dir = output_dir / debug_dir
-    stem = image_path.stem
-    suffix = image_path.suffix or ".jpg"
-    after_path = crop_dir / f"{stem}_crop{suffix}"
-    # 落盘段整体兜底：mkdir / imwrite 可能抛 OSError 或 cv2.error，统一回退原图，
-    # 兑现"任何失败回退原图、不中断下游 OCR"契约（与 slide_rectify 一致）。
-    try:
-        crop_dir.mkdir(parents=True, exist_ok=True)
-        if not cv2.imwrite(str(after_path), cropped):
-            logger.warning("裁剪图写盘失败，回退原图：%s", image_path.name)
-            return image_path
-        if save_debug:
-            vis = image.copy()
-            cv2.rectangle(
-                vis, (x0, 0), (x1, image.shape[0] - 1), (0, 0, 255), 6,
-            )
-            cv2.imwrite(str(crop_dir / f"{stem}_box{suffix}"), vis)
-    except (OSError, cv2.error):
-        logger.warning(
-            "裁剪图落盘异常，回退原图：%s", image_path.name, exc_info=True,
-        )
+    # MVP：纵向取整高
+    return _save_cropped(
+        image, image_path, output_dir, (x0, 0, x1, int(image.shape[0])),
+        save_debug=save_debug, debug_dir=debug_dir,
+    )
+
+
+def _crop_manual_sync(
+    image_path: Path,
+    output_dir: Path,
+    box: tuple[int, int, int, int],
+    *,
+    save_debug: bool,
+    debug_dir: str,
+) -> Path:
+    """``crop_page_manual`` 的同步实现：跳过检测，直接按用户框裁剪。
+
+    框夹取到图内；读图失败 / 写盘失败回退原图（同 ``_crop_sync`` 契约）。
+    """
+    image = cv2.imread(str(image_path))
+    if image is None:
+        logger.warning("手动裁剪读图失败，回退原图：%s", image_path)
         return image_path
-    return after_path
+    h, w = image.shape[:2]
+    x0 = max(0, min(box[0], w - 1))
+    y0 = max(0, min(box[1], h - 1))
+    x1 = max(x0 + 1, min(box[2], w))
+    y1 = max(y0 + 1, min(box[3], h))
+    return _save_cropped(
+        image, image_path, output_dir, (x0, y0, x1, y1),
+        save_debug=save_debug, debug_dir=debug_dir,
+    )
+
+
+async def crop_page_manual(
+    image_path: Path,
+    output_dir: Path,
+    box: tuple[int, int, int, int],
+    *,
+    save_debug: bool = True,
+    debug_dir: str = ".content_crop",
+) -> Path:
+    """按用户手动框（任务级 ``OCRConfig.crop_boxes``）裁剪一页，供 OCR 用。
+
+    裁剪图落 ``output_dir/<debug_dir>``，**绝不写用户目录**——旧版"建任务前
+    就地覆盖原图"在只读挂载（NAS）上 imwrite 静默失败、可写时又会毁原图，
+    已废弃。任何失败回退原图路径，不中断下游 OCR。
+    """
+    return await asyncio.to_thread(
+        _crop_manual_sync,
+        image_path,
+        output_dir,
+        box,
+        save_debug=save_debug,
+        debug_dir=debug_dir,
+    )
 
 
 async def crop_page(
@@ -420,29 +491,8 @@ def crop_quad_to_images(
     return name
 
 
-def apply_crop_boxes(
-    image_dir: Path,
-    boxes: dict[str, CropBoxTuple],
-) -> None:
-    """按 boxes（图名 → (x0,y0,x1,y1)）**就地**裁剪 image_dir 的图（覆盖原图）。
-
-    只处理 boxes 里有框的图（裁剪后覆盖写回），其余图不动。裁剪后的图 content_crop
-    自动检测会判为"已裁剪"跳过、不二次裁。读图失败 / 越界路径的图保持原样不动。
-    """
-    root = image_dir.resolve()
-    for rel, box in boxes.items():
-        p = (image_dir / rel).resolve()
-        # 路径穿越防护：必须落在 image_dir 内
-        if root not in p.parents:
-            continue
-        if not p.is_file() or p.suffix.lower() not in _IMAGE_EXTS:
-            continue
-        img = cv2.imread(str(p))
-        if img is None:
-            continue
-        h, w = img.shape[:2]
-        x0 = max(0, min(box[0], w - 1))
-        y0 = max(0, min(box[1], h - 1))
-        x1 = max(x0 + 1, min(box[2], w))
-        y1 = max(y0 + 1, min(box[3], h))
-        cv2.imwrite(str(p), img[y0:y1, x0:x1])
+# 注：旧版 `apply_crop_boxes`（建任务前**就地覆盖**用户目录原图）已删除——
+# 只读挂载（NAS CIFS）上 cv2.imwrite 静默失败致用户手动框默默丢失（2026-06-12
+# 真实事故），可写目录又会不可逆毁坏原始照片；stage 软链源还因 resolve 守卫被
+# 静默跳过。手动框现走任务级 `OCRConfig.crop_boxes`，OCR 前由 `crop_page_manual`
+# 裁到任务输出目录，绝不写用户目录。

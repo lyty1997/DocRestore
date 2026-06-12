@@ -27,9 +27,9 @@ from cv2.typing import MatLike  # noqa: E402
 from docrestore.processing.content_crop import (  # noqa: E402
     _next_manual_figure_name,
     _runs,
-    apply_crop_boxes,
     compute_crop_box,
     crop_page,
+    crop_page_manual,
     crop_region_to_images,
     detect_boxes_for_dir,
     detect_content_lr,
@@ -169,29 +169,50 @@ class TestCropHelpers:
         assert box[0] > 200  # 排除左导航
         assert box[2] < 1080  # 排除右大纲
 
-    def test_apply_crop_boxes_inplace(self, tmp_path: Path) -> None:
-        """就地按框裁剪、覆盖原图。"""
-        src = tmp_path / "img.jpg"
-        cv2.imwrite(str(src), _make_three_column())  # 1280x900
-        apply_crop_boxes(tmp_path, {"img.jpg": (300, 0, 900, 900)})
-        out = cv2.imread(str(src))
-        assert out is not None
-        assert out.shape[1] == 600  # 裁到 x[300,900]=600 宽
-        assert out.shape[0] == 900  # 整高不变
+class TestCropPageManual:
+    """用户手动框（任务级 crop_boxes）裁剪：裁到输出目录，绝不写源目录。"""
 
-    def test_apply_crop_boxes_skips_traversal(self, tmp_path: Path) -> None:
-        """越界路径（../）被路径穿越守卫跳过，不处理外部文件。"""
-        outside = tmp_path.parent / "docrestore_evil_probe.jpg"
-        cv2.imwrite(str(outside), _make_three_column())
-        try:
-            apply_crop_boxes(
-                tmp_path, {"../docrestore_evil_probe.jpg": (0, 0, 50, 50)},
-            )
-            out = cv2.imread(str(outside))
-            assert out is not None
-            assert out.shape[1] == 1280  # 未被裁剪
-        finally:
-            outside.unlink(missing_ok=True)
+    @pytest.mark.asyncio
+    async def test_crops_to_output_dir_and_keeps_source(
+        self, tmp_path: Path,
+    ) -> None:
+        """按框裁剪落 output_dir/.content_crop，源图保持原样不被覆盖。"""
+        src_dir = tmp_path / "src"
+        out_dir = tmp_path / "out"
+        src_dir.mkdir()
+        src = src_dir / "img.jpg"
+        cv2.imwrite(str(src), _make_three_column())  # 1280x900
+        result = await crop_page_manual(src, out_dir, (300, 100, 900, 800))
+        assert result == out_dir / ".content_crop" / "img_crop.jpg"
+        cropped = cv2.imread(str(result))
+        assert cropped is not None
+        assert cropped.shape[1] == 600  # x[300,900]
+        assert cropped.shape[0] == 700  # y[100,800]（上下边也生效）
+        origin = cv2.imread(str(src))
+        assert origin is not None
+        assert origin.shape[1] == 1280  # 源图未被改动
+
+    @pytest.mark.asyncio
+    async def test_out_of_bounds_box_clamped(self, tmp_path: Path) -> None:
+        """越界框夹取到图内，仍产出有效裁剪图。"""
+        src = tmp_path / "img.jpg"
+        cv2.imwrite(str(src), _make_three_column())
+        result = await crop_page_manual(
+            src, tmp_path / "out", (-50, -50, 5000, 5000),
+        )
+        cropped = cv2.imread(str(result))
+        assert cropped is not None
+        assert cropped.shape[1] == 1280
+        assert cropped.shape[0] == 900
+
+    @pytest.mark.asyncio
+    async def test_missing_source_falls_back(self, tmp_path: Path) -> None:
+        """读图失败回退原图路径（契约：不中断下游 OCR）。"""
+        missing = tmp_path / "nope.jpg"
+        result = await crop_page_manual(
+            missing, tmp_path / "out", (0, 0, 100, 100),
+        )
+        assert result == missing
 
 
 class TestCropRegionToImages:

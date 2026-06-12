@@ -177,3 +177,24 @@ MVP 跑通后做的系统性鲁棒性实验（合成版式矩阵 + 36 张真实�
   需要语义；守卫会放行或按质量选，接受。
 - **近恒等灰区**：无侧栏但留白多（正文占比 ~85%）的图可能裁出含全部正文的近恒等框（无内容
   损失）；真实"已人工裁剪"图正文贴边、占比 >0.9 走 skip 不受影响。
+
+## 13. 手动框改任务级生效（2026-06-12，废弃就地预裁剪）
+
+**事故**：用户在 NAS（CIFS 只读挂载，uid=0/file_mode 0755）目录上手动微调裁剪框后建任务，
+框完全没生效——旧版 `_apply_requested_crop` → `apply_crop_boxes` **就地覆盖原图**，
+`cv2.imwrite` 对无写权限路径返回 False 且代码不检查返回值 → 框**静默丢失**（任务 8caabe3f，
+14 张原图全部仍 3488×2624 全尺寸实锤）。该设计的三重问题：① 只读挂载静默失效；② 可写目录
+**不可逆毁坏用户原始照片**；③ stage 软链源被 resolve 守卫静默跳过（"选中文件"方式框从未生效）。
+
+**新机制**：手动框走任务级 `OCRConfig.crop_boxes`（相对根 image_dir → (x0,y0,x1,y1)，与
+exclude_images 同 key 空间），随 OCR 配置入 DB、resume 自动沿用：
+- routes `_resolve_ocr_config`：请求 crop_boxes（剔除被排除图）合入 ocr 配置，不再写盘；
+- pipeline `ImageOverrides`（排除 + 用户框）在根入口解析为绝对路径整体下传——顺带修复
+  多目录任务 `_process_leaf` 漏传 exclude 的隐藏 bug（根相对 key 在叶子层失配，部分排除静默失效）；
+- `_ocr_producer` 预处理优先级：**用户框（crop_page_manual）> PPT 矫正 > 自动检测**；裁剪图落
+  `output_dir/.content_crop/{stem}_crop`（与自动同落点），**绝不写用户目录**；
+- 副产能力：手动框的 **y0/y1 上下边生效**（旧就地裁剪虽支持但从未可靠工作；自动检测仍整高）。
+
+`apply_crop_boxes` 已删除（源码处留"勿复活"注释）。E2E 实证：软链 stage 源 + 手动框
+(900,300,2400,2000) → `.content_crop/DSC07963_crop.JPG` 精确 1500×1700、OCR 目录
+`DSC07963_crop_OCR`、NAS 原图完好。
