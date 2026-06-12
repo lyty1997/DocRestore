@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -603,6 +604,13 @@ class TestUnsafeIncludeNeutralization:
             ('#[path = "/abs/mod.rs"]', "rust", 1),
             ('let s = include_str!("data.txt");', "rust", 0),
             ("int main(void){return 0;}", "c", 0),
+            # 宏 / 动态表达式 include：目标静态不可知，一律中和（#1c）。
+            ("#include MACRO", "c", 1),
+            ("#  include FOO_HDR", "cpp", 1),
+            ('include!(concat!("a", "b"))', "rust", 1),
+            ('include_str!(env!("OUT"))', "rust", 1),
+            # #define 自身无害（不读文件），不应被中和。
+            ('#define EVIL "/etc/passwd"', "c", 0),
         ],
     )
     def test_neutralize_unit(
@@ -717,3 +725,116 @@ class TestUnsafeIncludeNeutralization:
         compiled = captured["compiled"]
         assert isinstance(compiled, str)
         assert "/etc/passwd" not in compiled
+
+    def test_macro_include_directive_neutralized(self, tmp_path: Path) -> None:
+        """宏 include（``#define P "/abs"`` + ``#include P``）整行中和（#1c）。
+
+        非字面量 include 无法静态解析目标，预处理器会按宏展开读任意文件；字面量扫描
+        挡不住它，故任何非字面量 #include 一律中和。``#define`` 本身保留（无害）。
+        """
+        src = tmp_path / "macro.c"
+        original = (
+            '#define EVIL "/etc/passwd"\n'
+            "#include EVIL\n"
+            "int main(void){return 0;}\n"
+        )
+        src.write_text(original, encoding="utf-8")
+        capture = _CaptureRunner()
+        runner = CodeDiagnosticRunner(
+            tool_resolver=lambda tool: f"/usr/bin/{tool}",
+            command_runner=capture,
+        )
+        runner.run_target(_target(src, "c"))
+        compiled = capture.compiled_text
+        assert compiled is not None
+        # #include EVIL 已被整行中和，预处理器不会展开宏去读文件。
+        assert "#include EVIL" not in compiled
+        assert "blocked unsafe include" in compiled
+        # 原文件零改写。
+        assert src.read_text(encoding="utf-8") == original
+
+    def test_non_utf8_sibling_header_still_neutralized(
+        self, tmp_path: Path,
+    ) -> None:
+        """非 UTF-8 兄弟头里的危险 include 也被中和：堵 copyfile 旁路（#1c）。
+
+        危险 ``#include`` 行本身是 ASCII，文件尾混入非法字节即可触发旧版"解码失败→
+        copyfile 原样保留"的旁路。新版用 ``errors="replace"`` 解码后照样中和。
+        """
+        evil_header = tmp_path / "evil.h"
+        evil_bytes = b'#include "/etc/passwd"\n// non-utf8 tail \xff\xfe\n'
+        evil_header.write_bytes(evil_bytes)
+        main = tmp_path / "main.c"
+        main.write_text(
+            '#include "evil.h"\nint main(void){return 0;}\n', encoding="utf-8",
+        )
+        captured: dict[str, object] = {}
+
+        def run(
+            cmd: list[str], cwd: Path, timeout_s: int,
+        ) -> CommandRunResult:
+            include_dirs = [
+                Path(cmd[idx + 1])
+                for idx, arg in enumerate(cmd)
+                if arg == "-I"
+            ]
+            captured["headers"] = [
+                (d / "evil.h").read_text(encoding="utf-8", errors="replace")
+                for d in include_dirs
+                if (d / "evil.h").is_file()
+            ]
+            return CommandRunResult(returncode=0)
+
+        runner = CodeDiagnosticRunner(
+            tool_resolver=lambda tool: f"/usr/bin/{tool}",
+            command_runner=run,
+        )
+        runner.run_target(CodeDiagnosticTarget(
+            path="main.c",
+            file_path=main,
+            language="c",
+            include_root=tmp_path,
+        ))
+        headers = captured["headers"]
+        assert isinstance(headers, list)
+        assert headers, "影子树未包含非 UTF-8 兄弟头 evil.h"
+        for content in headers:
+            assert "/etc/passwd" not in content
+            assert "blocked unsafe include" in content
+        # 磁盘原文件零改写（仍是原始非法字节）。
+        assert evil_header.read_bytes() == evil_bytes
+
+    @pytest.mark.skipif(
+        shutil.which("gcc") is None,
+        reason="需要真实 gcc 验证宏 include 经预处理器不泄漏文件内容",
+    )
+    def test_macro_include_no_leak_real_compiler(self, tmp_path: Path) -> None:
+        """真 gcc 端到端：宏 include 指向 sentinel，中和后内容不回显进诊断（#1c）。
+
+        未中和时预处理器会真实读取 sentinel 并把内容当 C token 报错回显（LFI）；中和
+        后该行变注释，sentinel 不被读取，诊断里不应出现其内容。
+        """
+        marker = "TOPSECRET_MACRO_LEAK_4f3a"
+        sentinel = tmp_path / "secret.txt"
+        sentinel.write_text(marker + "\n", encoding="utf-8")
+        evil_header = tmp_path / "evil.h"
+        evil_header.write_text(
+            f'#define P "{sentinel}"\n#include P\n', encoding="utf-8",
+        )
+        main = tmp_path / "main.c"
+        main.write_text(
+            '#include "evil.h"\nint main(void){return 0;}\n', encoding="utf-8",
+        )
+        runner = CodeDiagnosticRunner()  # 真实 tool_resolver + command_runner
+        result = runner.run_target(CodeDiagnosticTarget(
+            path="main.c",
+            file_path=main,
+            language="c",
+            include_root=tmp_path,
+        ))
+        blob = result.summary + "\n" + "\n".join(
+            item.message for item in result.items
+        )
+        assert marker not in blob, "宏 include 经真实 gcc 泄漏了 sentinel 内容"
+        # sentinel 与磁盘原文件零改写。
+        assert sentinel.read_text(encoding="utf-8") == marker + "\n"
