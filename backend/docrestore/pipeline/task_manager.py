@@ -29,6 +29,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from docrestore.llm.credentials import refill_api_key_from_env
 from docrestore.models import PipelineResult, TaskProgress
 from docrestore.output.renderer import ANCHORED_DOCUMENT_FILENAME
 from docrestore.pipeline.config import (
@@ -190,7 +191,12 @@ class TaskManager:
                         status=TaskStatus(row.status),
                         image_dir=row.image_dir,
                         output_dir=row.output_dir,
-                        llm=row.llm,
+                        # api_key 不落库（#37）：水合时从环境回填供 resume 用
+                        llm=(
+                            refill_api_key_from_env(row.llm)
+                            if row.llm is not None
+                            else None
+                        ),
                         ocr=row.ocr,
                         pii=row.pii,
                         code=row.code,
@@ -663,7 +669,12 @@ class TaskManager:
             status=TaskStatus(row.status),
             image_dir=row.image_dir,
             output_dir=row.output_dir,
-            llm=row.llm,
+            # api_key 不落库（#37）：水合时从环境回填供 resume 用
+            llm=(
+                refill_api_key_from_env(row.llm)
+                if row.llm is not None
+                else None
+            ),
             ocr=row.ocr,
             pii=row.pii,
             code=row.code,

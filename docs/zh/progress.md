@@ -1941,3 +1941,27 @@ schema），但 denylist 的职责正是兜未来 schema 误改，漏列给了�
 **教训**：请求级可控量落到 rmtree / 写 / exec 等 sink，先锚定受信根再做 resolve 后严格子路径校验，sink 处
 二次校验防 TOCTOU。dev 领先 main **9 个 commit**（前 8 + 本次 #34）；High 余 **#36 / #37**，整批进 dev 后
 一个 release PR 收口 dev→main。
+
+## 2026-06-14 - 安全审查 #37：api_key 明文入库 → 落库排除 + 水合回填 + 存量清洗
+
+**问题**：`database.py::insert_task` 把含 `api_key` 的 `LLMConfig` 整体 `model_dump_json()` 落 `tasks.llm`
+列，明文凭据随 DB 文件 / 备份 / 快照长期留存（#37，High）。
+
+**修复**（`bugfix/37-api-key-plaintext`，三处）：
+- **落库排除**：`insert_task` → `model_dump_json(exclude={"api_key"})`。审计确认 `LLMConfig.api_key` 是
+  `config.py` 唯一凭据字段（OCR / PII / code / ppt 无），只锁它。
+- **水合回填**：新增 `llm/credentials.py::refill_api_key_from_env`（仅当 key 空才从 `DOCRESTORE_LLM_API_KEY`
+  回填，`model_copy` 不覆盖显式 key / 不原地改）；两个水合点 `load_persisted_tasks` / `get_task_async` 统一
+  过它 → resume 走的 `task.llm` 运行期可用。环境变量名常量与 `app.py` 启动回填共用。
+- **存量清洗**：`initialize` 阶段 `_scrub_persisted_api_keys` 抹历史行明文 key（幂等、容错损坏 JSON）。
+
+**resume 契约**：key 不再持久化 → resume / 重启依赖环境变量回填，运维须把云端 key 配在环境。
+
+**验证**：`test_database.py`（落库 raw 无 key / 清洗存量 / 幂等容错）+ `test_credentials.py`（4 例）+
+`test_task_manager.py`（端到端水合回填）。受影响模块全绿（persistence + llm + pipeline 69 passed、
+api 189 passed 9 skipped）+ mypy --strict + ruff + typos。`deployment.md` §3.4 补凭据持久化小节 +
+`known-issues.md` #37 条目。
+
+**教训**：持久化配置快照必须剔除凭据字段（`exclude`），凭据走环境运行期回填；存量数据补一次性清洗，否则
+只修新写入、老泄漏仍在。dev 领先 main **10 个 commit**（前 9 + 本次 #37）；**High 余 #36**（PII 上云前脱敏
+被绕过，工作量最大），整批进 dev 后一个 release PR 收口 dev→main。
