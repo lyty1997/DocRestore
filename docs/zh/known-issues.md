@@ -591,8 +591,12 @@ mypy --strict + ruff + typos 全绿，tests/api 132 passed。
 **修复**：
 - **删字段（schema 层）**：`OCRConfigRequest` 移除 `paddle_python` / `paddle_server_url` /
   `paddle_server_model_name`，pydantic 默认 `extra=ignore` 直接丢弃请求里这些键；前端零引用、无破坏。
-- **sink 兜底（denylist）**：`routes.py::_resolve_ocr_config` 经 `_OCR_INFRA_OVERRIDE_DENY` 二次剔除
-  解释器 / worker 脚本 / 服务地址类字段——即便将来 schema 误增同名字段也不会流进生效 OCRConfig。
+- **sink 兜底（allowlist，2026-06-13 自查硬化）**：`routes.py::_resolve_ocr_config` 用
+  `_OCR_SAFE_OVERRIDE_ALLOW` **默认拒绝**、只放行登记过的业务字段（`model` / `gpu_id` /
+  `exclude_images` / `paddle_pipeline` / `paddle_ocr_timeout`）。初版用 denylist 逐一枚举危险字段，
+  自查发现漏了 `paddle_server_host` / `port`（与 `paddle_server_url` 同为 SSRF 出站目标）、`model_path`
+  （任意权重加载 → pickle RCE）等同类项——翻成 allowlist 后默认 deny，对 schema 漂移免疫，无需再追问
+  「危险字段列全没」。配套测试加 allowlist 与 `OCRConfigRequest` 字段集恒等断言，schema 新增字段忘登记即失败。
 - **api_base SSRF 守卫**：新增 `api/url_guard.py::validate_outbound_api_base`——仅 http/https；解析 host
   全部 IP，私网 / 链路本地（含元数据）/ 保留 / 多播 / 未指定一律拒；**环回放行**（本地 LLM 合法目标）；
   可选 `DOCRESTORE_LLM_API_BASE_ALLOWLIST` 白名单逃生口（含内网中转站）。`create_task` 对请求级
@@ -602,13 +606,15 @@ mypy --strict + ruff + typos 全绿，tests/api 132 passed。
 `http://localhost:11434/v1`，照搬会误杀本地 LLM。单用户桌面下环回 SSRF 价值极低，元数据
 （169.254 链路本地）/ 内网横向仍拦；LAN 上的本地 LLM 走白名单。
 
-**验证**：新增 `tests/api/test_url_guard.py`（21 例：SSRF 各目标拦截 / 环回+公网放行 / scheme /
-DNS 解析路径 / 白名单逃生口）+ `tests/api/test_override_security.py`（12 例：schema 丢弃 / sink 兜底 /
-业务字段仍生效 / denylist 覆盖 / 端点级 400）。tests/api + tests/llm 共 312 passed。mypy --strict +
-ruff + typos 全绿。
+**验证**：`tests/api/test_url_guard.py`（21 例：SSRF 各目标拦截 / 环回+公网放行 / scheme /
+DNS 解析路径 / 白名单逃生口）+ `tests/api/test_override_security.py`（18 例：schema 丢弃 / sink
+allowlist 兜底 / 业务字段仍生效 / 危险字段不在 allowlist / allowlist 与 schema 字段集恒等 /
+端点级 400）。两文件 40 passed；tests/api + tests/llm 全量 + mypy --strict + ruff + typos 全绿。
 
 **残留**：DNS rebinding（校验后 TTL 重绑内网）未防，需 connect 级 IP pin，过度工程暂不做。
 
 **教训**：请求级配置覆盖必须显式区分「业务字段（可外控）」与「基础设施字段（只服务端）」，默认 deny
-基础设施字段。出站地址只要请求级可控就必须过 SSRF 白/黑名单，并把云元数据端点（169.254.169.254）
+基础设施字段。落地用 **allowlist（默认拒绝、只放行已知安全字段）优于 denylist（逐一枚举危险字段）**——
+后者总会漏同类字段（本次就漏了 `paddle_server_host` / `model_path`），且每加一个新字段都得重新自问
+「危险吗」。出站地址只要请求级可控就必须过 SSRF 白/黑名单，并把云元数据端点（169.254.169.254）
 当一等公民拦截目标。

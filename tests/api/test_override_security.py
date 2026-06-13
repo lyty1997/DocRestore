@@ -17,8 +17,9 @@
 两道防线：
 1. schema 层——``OCRConfigRequest`` 不再声明 ``paddle_python`` /
    ``paddle_server_url`` / ``paddle_server_model_name``，pydantic 默认丢弃。
-2. sink 兜底——``_resolve_ocr_config`` 经 ``_OCR_INFRA_OVERRIDE_DENY`` 剔除，
-   即便 ``model_dump`` 误带基础设施键也不会流进生效 OCRConfig。
+2. sink 兜底——``_resolve_ocr_config`` 用 allowlist
+   ``_OCR_SAFE_OVERRIDE_ALLOW`` 只放行业务字段，即便 ``model_dump`` 误带
+   基础设施键（schema 回归）也进不了生效 OCRConfig。
 """
 
 from __future__ import annotations
@@ -27,13 +28,15 @@ import pytest
 from httpx import AsyncClient
 
 from docrestore.api.routes import (
-    _OCR_INFRA_OVERRIDE_DENY,
+    _OCR_SAFE_OVERRIDE_ALLOW,
     _resolve_ocr_config,
 )
 from docrestore.api.schemas import CreateTaskRequest, OCRConfigRequest
 from docrestore.pipeline.config import OCRConfig
 
-#: RCE / SSRF 攻击面的基础设施字段，必须全部在 sink 兜底名单内。
+#: RCE / SSRF 攻击面的基础设施字段，必须全部被 sink allowlist 拒之门外。
+#: 含本次硬化补纳的同类项：paddle_server_host/port（与 url 同为 SSRF 出站
+#: 目标）、model_path（任意权重加载 → pickle RCE）、api_version（URL 段）。
 _DANGEROUS_FIELDS = (
     "paddle_python",  # 解释器路径 → 任意二进制 exec（RCE）
     "paddle_server_python",
@@ -42,6 +45,11 @@ _DANGEROUS_FIELDS = (
     "deepseek_worker_script",
     "paddle_server_url",  # 推理服务地址 → SSRF + 页面图外泄
     "paddle_server_model_name",
+    "paddle_server_backend_config",  # YAML 配置路径
+    "paddle_server_host",  # 与 url 同为 SSRF 出站目标（host:port 拼 URL）
+    "paddle_server_port",
+    "paddle_server_api_version",  # URL path 段
+    "model_path",  # vLLM 任意路径加载权重（pickle → 潜在 RCE）
 )
 
 
@@ -113,7 +121,7 @@ class TestResolveOcrConfigSink:
         assert cfg.gpu_id == "2"
         assert cfg.paddle_pipeline == "basic"
 
-    def test_denylist_strips_even_if_dump_leaks_infra(
+    def test_sink_strips_even_if_dump_leaks_infra(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """兜底纵深：即便 model_dump 误带基础设施键，sink 也剔除。
@@ -140,13 +148,18 @@ class TestResolveOcrConfigSink:
         assert cfg.gpu_id == "3"
 
 
-class TestDenylistCoverage:
-    """兜底名单必须覆盖全部 RCE/SSRF 基础设施字段（防新增字段漏网）。"""
+class TestAllowlistExcludesInfra:
+    """allowlist 必须把全部 RCE/SSRF 基础设施字段挡在外，并与 schema 同步。"""
 
     @pytest.mark.parametrize("field", _DANGEROUS_FIELDS)
-    def test_dangerous_field_in_denylist(self, field: str) -> None:
-        """每个高危基础设施字段都在 _OCR_INFRA_OVERRIDE_DENY 内。"""
-        assert field in _OCR_INFRA_OVERRIDE_DENY
+    def test_dangerous_field_not_in_allowlist(self, field: str) -> None:
+        """每个高危基础设施字段都不在 _OCR_SAFE_OVERRIDE_ALLOW 内。"""
+        assert field not in _OCR_SAFE_OVERRIDE_ALLOW
+
+    def test_allowlist_matches_schema_fields(self) -> None:
+        """allowlist 与 OCRConfigRequest 字段集恒等：schema 新增字段若忘了
+        同步登记，断言失败，强制开发者就地判定该字段是否安全可覆盖。"""
+        assert _OCR_SAFE_OVERRIDE_ALLOW == set(OCRConfigRequest.model_fields)
 
 
 class TestApiBaseGuardEndpoint:
