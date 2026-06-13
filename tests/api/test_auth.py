@@ -19,14 +19,22 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 
-from docrestore.api.auth import configure_auth, require_auth
+import docrestore.api.auth as auth_module
+from docrestore.api.auth import (
+    configure_auth,
+    configure_auth_from_env,
+    enforce_bind_safety,
+    require_auth,
+)
 from docrestore.api.errors import ApiBusinessError, api_business_error_handler
 
 # 测试用 token
@@ -174,3 +182,90 @@ class TestErrorSanitization:
 
         # "RuntimeError: " + 200 个 x
         assert len(error_summary) == len("RuntimeError: ") + 200
+
+
+class TestTokenResolution:
+    """configure_auth_from_env 三种 token 来源解析（fail-closed）。"""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """隔离配置目录与鉴权环境变量，避免污染真实环境/相互干扰。"""
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        monkeypatch.delenv("DOCRESTORE_API_TOKEN", raising=False)
+        monkeypatch.delenv("DOCRESTORE_ALLOW_INSECURE", raising=False)
+        monkeypatch.delenv("DOCRESTORE_BIND_HOST", raising=False)
+
+    def test_explicit_token_takes_priority(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """显式 DOCRESTORE_API_TOKEN 非空 → 直接使用，不生成 device token。"""
+        explicit = "explicit-abc-123"
+        monkeypatch.setenv("DOCRESTORE_API_TOKEN", explicit)
+        configure_auth_from_env()
+        assert auth_module._API_TOKEN == explicit
+        assert auth_module._INSECURE_MODE is False
+
+    def test_insecure_opt_in_disables_auth(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """DOCRESTORE_ALLOW_INSECURE 为真 → 无鉴权模式（token 空）。"""
+        monkeypatch.setenv("DOCRESTORE_ALLOW_INSECURE", "1")
+        configure_auth_from_env()
+        assert auth_module._API_TOKEN == ""
+        assert auth_module._INSECURE_MODE is True
+
+    def test_default_generates_persistent_token(self, tmp_path: Path) -> None:
+        """默认（无 token、无 insecure）→ 自动生成并落地 device token。"""
+        configure_auth_from_env()
+        generated = auth_module._API_TOKEN
+        assert generated  # 非空，fail-closed
+        assert auth_module._INSECURE_MODE is False
+
+        token_file = tmp_path / "docrestore" / "device_token"
+        assert token_file.is_file()
+        assert token_file.read_text(encoding="utf-8").strip() == generated
+
+    def test_default_token_reused_across_restart(self) -> None:
+        """二次解析复用已落地 token（重启后配对不失效）。"""
+        configure_auth_from_env()
+        first = auth_module._API_TOKEN
+        configure_auth_from_env()
+        assert auth_module._API_TOKEN == first
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX 权限语义")
+    def test_default_token_file_is_owner_only(self, tmp_path: Path) -> None:
+        """落地的 device token 文件权限应为 0600（仅 owner 读写）。"""
+        configure_auth_from_env()
+        token_file = tmp_path / "docrestore" / "device_token"
+        assert oct(token_file.stat().st_mode)[-3:] == "600"
+
+
+class TestBindSafety:
+    """enforce_bind_safety fail-closed bind 守卫。"""
+
+    def test_insecure_non_loopback_refuses_start(self) -> None:
+        """无鉴权模式 + 非环回绑定 → 拒绝启动。"""
+        configure_auth("")  # 进入无鉴权模式
+        with pytest.raises(RuntimeError, match="非环回"):
+            enforce_bind_safety("0.0.0.0")  # noqa: S104 — 测试故意绑全网验证拒启
+
+    @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
+    def test_insecure_loopback_allowed(self, host: str) -> None:
+        """无鉴权模式 + 环回绑定 → 放行。"""
+        configure_auth("")
+        enforce_bind_safety(host)  # 不抛异常即通过
+
+    def test_insecure_unknown_host_allowed_with_warning(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """无鉴权模式 + 无法判定绑定地址 → 放行（仅告警）。"""
+        configure_auth("")
+        monkeypatch.delenv("DOCRESTORE_BIND_HOST", raising=False)
+        enforce_bind_safety(None)  # 不抛异常
+
+    def test_token_present_allows_any_host(self) -> None:
+        """有 token → 绑任意地址都安全，不拦截。"""
+        configure_auth("some-device-value")
+        enforce_bind_safety("0.0.0.0")  # noqa: S104 — 有 token 任意地址都安全

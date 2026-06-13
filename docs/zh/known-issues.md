@@ -543,3 +543,34 @@ sentinel 复现 `marker in blob == True`，构成与 #1/#1b/#1c 同类的任意�
 均把 marker 回显进诊断（`does not name a type`）；修后该行变注释、sentinel 不被读取，
 `marker not in blob`。新增参数化单测（import/include_next × c/cpp）+ 11 条 `_neutralize` 单元用例，
 `TestUnsafeIncludeNeutralization` 40 例全过；临时还原旧正则可复现 4 例失败，证明回归测试非空转。
+
+## API 默认未配 token 即完全放行：fail-closed 自动生成 token + bind 守卫（#35，已修复 2026-06-13）
+
+**现象**：未设 `DOCRESTORE_API_TOKEN` 时鉴权依赖直接 `return` 放行（`auth.py` 旧 :73/:101），仅打
+一行 warning；而 `start.sh` 默认 `BACKEND_HOST=0.0.0.0`。两者叠加 → 开箱即「全网未授权可达」，把
+同批 RCE（paddle_python）/ 任意 rmtree（output_dir）/ SSRF / PII 等面从「需认证」降级为「未授权可达」。
+
+**根因**：鉴权是 fail-open 默认（无 token = 放行），且默认绑定所有接口。
+
+**为何不照搬 issue 原方案（仅绑 loopback）**：产品方向是「桌面服务 + 手机配对」，手机要从局域网/
+远程够到桌面，纯 loopback 会挡掉手机端。故改为**等价或更强**的 fail-closed：永不以未鉴权状态对外可达。
+
+**修复**：
+- `auth.py` 新增 `configure_auth_from_env()` 三选一解析（fail-closed）：① 显式 `DOCRESTORE_API_TOKEN`；
+  ② `DOCRESTORE_ALLOW_INSECURE=1` 无鉴权逃生口（仅本机调试）；③ 默认**自动生成强随机 device token**
+  （`secrets.token_urlsafe(32)`），持久化到用户配置目录（Linux `~/.config/docrestore/`、Windows
+  `%APPDATA%\docrestore\`，POSIX 0600），重启复用——即手机配对用的 pairing secret。
+- `enforce_bind_safety()` bind 守卫：insecure 无鉴权模式下绑定非环回地址（如 `0.0.0.0`）→
+  `RuntimeError` 拒启；环回放行；无法判定（未设 `DOCRESTORE_BIND_HOST`）放行但告警。有 token 时
+  任意地址都安全（每请求都校验）。
+- `app.py::create_app` 接入 `configure_auth_from_env()` + `enforce_bind_safety()`；新增可选
+  `DOCRESTORE_CORS_ORIGINS` allowlist（默认空 = 不挂 CORS，最严格）。
+- `start.sh`：默认 `BACKEND_HOST` 0.0.0.0 → 127.0.0.1；启动 uvicorn 前 export `DOCRESTORE_BIND_HOST`
+  供守卫校验。
+
+**验证**：`tests/api/test_auth.py` 19 passed（新增 token 三来源解析 + bind 守卫共 11 例）；`create_app()`
+三路集成冒烟——显式 token 正常起 / insecure+0.0.0.0 真拒启 / 默认自动生成 43 字符持久 token 并落地。
+mypy --strict + ruff + typos 全绿，tests/api 132 passed。
+
+**教训**：安全默认必须 fail-closed。「方便开发」的 fail-open 默认在绑 0.0.0.0 时就是公网洞。面向手机
+配对的服务，正确解法不是「锁死 loopback」，而是「默认即有凭据、永不裸奔」，凭据顺带成为配对密钥。
