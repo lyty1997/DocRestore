@@ -342,6 +342,10 @@ export const en: Record<TranslationKey, string> = {
   // ── API business errors ──
   "errors.api.mode_conflict":
     "Mode conflict: Document / Code / PPT are mutually exclusive",
+  "errors.api.llm_api_base_rejected":
+    "LLM api_base rejected by security policy: must be a public http(s) " +
+    "address or in the server allowlist (private/internal/link-local " +
+    "addresses are blocked)",
   "errors.api.unauthorized": "Missing or invalid API Token",
   "errors.api.service_not_initialized": "Service not initialized",
   "errors.api.engine_manager_not_initialized": "OCR engine manager not initialized",

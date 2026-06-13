@@ -42,17 +42,23 @@ class LLMConfigRequest(BaseModel):
 
 
 class OCRConfigRequest(BaseModel):
-    """OCR 配置（请求级覆盖）"""
+    """OCR 配置（请求级覆盖）
+
+    安全约束（#32 / #33）：**基础设施字段绝不在此暴露**。
+    ``paddle_python`` / ``paddle_server_python`` / ``*_worker_script``
+    可控即任意本地二进制执行（RCE）；``paddle_server_url`` /
+    ``paddle_server_model_name`` 可控即把页面图 POST 到攻击者/内网地址
+    （SSRF + 数据外泄）。这些一律只由服务端配置注入，不接受请求级覆盖。
+    routes 合成时另有 ``_OCR_INFRA_OVERRIDE_DENY`` 做 sink 兜底。
+    新增字段前先判断是否为基础设施级——是则不要加在这里。
+    """
 
     model: str | None = None
     gpu_id: str | None = None  # GPU 选择（CUDA_VISIBLE_DEVICES）
     #: 任务级排除的输入图（相对 image_dir，与 crop_boxes key 同空间）
     exclude_images: list[str] | None = None
     paddle_pipeline: Literal["basic", "vl"] | None = None
-    paddle_python: str | None = None
     paddle_ocr_timeout: int | None = None
-    paddle_server_url: str | None = None
-    paddle_server_model_name: str | None = None
 
 
 class CustomSensitiveWord(BaseModel):

@@ -574,3 +574,41 @@ mypy --strict + ruff + typos 全绿，tests/api 132 passed。
 
 **教训**：安全默认必须 fail-closed。「方便开发」的 fail-open 默认在绑 0.0.0.0 时就是公网洞。面向手机
 配对的服务，正确解法不是「锁死 loopback」，而是「默认即有凭据、永不裸奔」，凭据顺带成为配对密钥。
+
+## 请求级覆盖基础设施字段：RCE（paddle_python）+ SSRF（api_base / paddle_server_url）（#32 / #33，已修复 2026-06-13）
+
+**现象**：创建任务的请求体里，OCR/LLM 配置覆盖经 `routes.py` 的 `model_copy(update=req.*.model_dump())`
+无差别叠进生效配置，连**基础设施字段**也能被请求覆盖：
+- `ocr.paddle_python` → OCR worker 以攻击者指定的任意已存在二进制为 `argv[0]` 启动（`ocr/base.py`
+  `create_subprocess_exec`，仅 `Path.exists()` 校验）→ **任意本地命令执行（RCE）**。
+- `ocr.paddle_server_url` / `llm.api_base` → OCR 页面图 / LLM 文本（可能含原文、PII）被 POST 到攻击者
+  或内网地址 → **SSRF + 数据外泄**，无地址白名单。
+- 叠加同批 #35（默认放行鉴权）= 未授权 RCE/SSRF 面。
+
+**根因**：请求级覆盖把「业务可调字段」和「基础设施字段」混在同一个 `model_dump()` 里整体 `model_copy`，
+没有区分哪些字段允许外部控制。
+
+**修复**：
+- **删字段（schema 层）**：`OCRConfigRequest` 移除 `paddle_python` / `paddle_server_url` /
+  `paddle_server_model_name`，pydantic 默认 `extra=ignore` 直接丢弃请求里这些键；前端零引用、无破坏。
+- **sink 兜底（denylist）**：`routes.py::_resolve_ocr_config` 经 `_OCR_INFRA_OVERRIDE_DENY` 二次剔除
+  解释器 / worker 脚本 / 服务地址类字段——即便将来 schema 误增同名字段也不会流进生效 OCRConfig。
+- **api_base SSRF 守卫**：新增 `api/url_guard.py::validate_outbound_api_base`——仅 http/https；解析 host
+  全部 IP，私网 / 链路本地（含元数据）/ 保留 / 多播 / 未指定一律拒；**环回放行**（本地 LLM 合法目标）；
+  可选 `DOCRESTORE_LLM_API_BASE_ALLOWLIST` 白名单逃生口（含内网中转站）。`create_task` 对请求级
+  `api_base` 校验（DNS 走 `to_thread`），失败 `400 LLM_API_BASE_REJECTED`、不建任务。
+
+**为何环回放行（偏离 issue #33「连环回一起拦」）**：provider=local 的合法 api_base 就是
+`http://localhost:11434/v1`，照搬会误杀本地 LLM。单用户桌面下环回 SSRF 价值极低，元数据
+（169.254 链路本地）/ 内网横向仍拦；LAN 上的本地 LLM 走白名单。
+
+**验证**：新增 `tests/api/test_url_guard.py`（21 例：SSRF 各目标拦截 / 环回+公网放行 / scheme /
+DNS 解析路径 / 白名单逃生口）+ `tests/api/test_override_security.py`（12 例：schema 丢弃 / sink 兜底 /
+业务字段仍生效 / denylist 覆盖 / 端点级 400）。tests/api + tests/llm 共 312 passed。mypy --strict +
+ruff + typos 全绿。
+
+**残留**：DNS rebinding（校验后 TTL 重绑内网）未防，需 connect 级 IP pin，过度工程暂不做。
+
+**教训**：请求级配置覆盖必须显式区分「业务字段（可外控）」与「基础设施字段（只服务端）」，默认 deny
+基础设施字段。出站地址只要请求级可控就必须过 SSRF 白/黑名单，并把云元数据端点（169.254.169.254）
+当一等公民拦截目标。
