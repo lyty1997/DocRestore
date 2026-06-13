@@ -681,3 +681,44 @@ tests/api + tests/pipeline 全量 **425 passed 17 skipped** + mypy --strict + ru
 
 **教训**：持久化「配置快照」时必须把**凭据字段从序列化中剔除**（`exclude`），凭据走环境变量在运行期回填——
 落盘的应是「可分享的配置」，不含「不可分享的密钥」。且要给存量数据补一次性清洗，否则只修了新写入、老泄漏仍在。
+
+## PII 上云前脱敏被多路绕过（#36，已修复 2026-06-14）
+
+**现象**：「上云前脱敏」是项目核心承诺，但 §9 全链路脱敏落地后仍有三条路径让敏感内容以原文送达云端。
+标准部署启动级 `PIIConfig.enable=False`、用户在前端按单次任务开 PII（走**请求级** `pii_cfg`），却在多处失效：
+- **①（代码模式 header 裸送）**：`_redact_code_pii` 把所有非空 leading-comment header **拼接后原样**
+  `detect_pii_entities(combined)`（云端），结构化 PII 的 regex 脱敏在该云端调用**之后**才执行 → 注释里
+  `Author: 张三 <a@corp.com>` 的邮箱 / 手机随 `combined` 裸送云端。
+- **②（gap-fill / 最终输出读错配置）**：`_fill_one_gap`(:3047) 与 `_finalize_single_doc`(:2177) 判
+  `self._config.pii.enable`（启动默认 False）而非请求级 `pii_cfg` → 用户单次开的 PII 在 gap-fill re-OCR
+  文本（**绕过 producer 逐页 regex 的全新文本**）与最终输出实体兜底处恒不脱敏。
+- **③（代码 prompt 源码片段 / 路径 / 诊断不脱）**：refine/rewrite/repair/audit prompt 把 `file_path` /
+  `related_snippets`（含外部 `context_root` 参考片段）/ `path_candidates` / `diagnostics` 拼进云端调用未脱敏；
+  其中 repair 诊断在脱敏前算，g++ `summary=output[:1000]` 带 caret 时会回显含 PII 的源码行。
+
+**根因**：请求级 `pii_cfg` 只透传到三模式分支入口，未贯穿到深层 helper（②回落启动级配置）；脱敏与「拼 prompt /
+送检」的**先后顺序**在代码模式被写反（①先送后脱）；代码 prompt 的非 `merged_text` 派生字段（路径 / 外部片段 /
+诊断）从未纳入脱敏面（③）。
+
+**修复**：
+- **①**：拼 `combined` **前**先对每个 header `redact_regex_only`，再 `detect_pii_entities`；lexicon 仍基于
+  （已结构化脱敏的）注释，人名照常检测。
+- **②**：`pii_cfg` 一路透传 `_stream_process → _finalize_single_doc → _maybe_fill_gaps → _fill_gaps →
+  _fill_one_gap`，:2177 / :3047 改用请求级 `pii_cfg`，禁止回落 `self._config.pii`。
+- **③**：请求级 `pii_cfg` 建 `redact_regex_only` 函数（`_make_regex_redactor`）下传 `CodeLLMRefiner` /
+  `DiagnosticCodeRepairer` / `CodeConsistencyAuditor`；在 `json.dumps` **之前**对 `file_path` /
+  `related_snippets` / `path_candidates` / `diagnostics` 按字段脱敏——先脱后序列化，`json.dumps` 对占位符里
+  任何引号（用户可自定义 placeholder / code）正确转义，**绝不破坏 JSON**。
+
+**PPT 模式经核查为干净**：`_ppt_pipeline` 自 §9 起即正确透传 `pii_cfg`、producer 逐页 regex、每页精修前
+`redact_snippet` + 组装兜底 + fail-closed，无 `self._config.pii` 误读，本次不改。
+
+**验证**：`test_request_level_pii_redacts_reocr_text`（②gap-fill）/ `test_finalize_output_uses_request_pii_when_startup_off`
+（②最终输出，含「回退 bug 必失败」反验证）/ `test_header_structured_pii_masked_before_detect`（①送检入参已掩码）/
+`test_redact_masks_prompt_fields` + `test_file_path_redacted_in_refine_prompt` + 对照 `test_no_redact_leaves_prompt_fields_raw`
+（③prompt 字段脱敏且产物合法 JSON）。PII + 代码模式相关 140 passed，全量 1296 passed（3 个 DeepSeek 失败为本机
+未配 OCR python 路径的既有环境问题，与本次无关），mypy --strict + ruff + typos 全绿。
+
+**教训**：「上云前脱敏」要把**请求级配置贯穿到每一个云端 sink**（深层 helper 不得回落启动默认）、**脱敏必须在
+拼 prompt / 送检之前**（顺序写反等于没脱）、并覆盖**所有**进 prompt 的字段（不止正文，路径 / 外部片段 / 诊断同样
+外发）。结构化字段脱敏放在 `json.dumps` 之前，序列化层天然兜住占位符转义。

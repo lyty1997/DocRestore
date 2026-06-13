@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import cast
 
 from docrestore.llm.base import LLMRefiner
+from docrestore.llm.cache import LLMCache
 from docrestore.models import Gap, PageOCR, RefineContext, RefinedResult
 from docrestore.pipeline.config import (
     LLMConfig,
@@ -34,6 +35,8 @@ from docrestore.pipeline.config import (
 )
 from docrestore.pipeline.pipeline import Pipeline
 from docrestore.pipeline.rate_controller import RateController
+from docrestore.privacy.redactor import EntityLexicon
+from docrestore.processing.dedup import IncrementalMerger
 
 _NAME = "张三"  # 仅出现在 producer 之后、需 LLM 检测的人名（正则兜不住）
 
@@ -191,3 +194,41 @@ async def test_doc_early_window_redacts_name_before_cloud(
     for text in fake.refine_inputs:
         assert _NAME not in text, f"人名上云前未脱敏: {text!r}"
     assert _NAME not in result.markdown
+
+
+async def test_finalize_output_uses_request_pii_when_startup_off(
+    tmp_path: Path,
+) -> None:
+    """#36：终结化输出实体兜底用请求级 pii_cfg，不回落 self._config.pii。
+
+    标准部署启动级 ``self._config.pii.enable=False``；直接喂一个含未脱敏人名的
+    refined_result（模拟早窗口漏脱）+ 词表 + 请求级开 PII，断言 _finalize_single_doc
+    输出兜底（:2177）把人名脱掉。旧 bug 读 self._config.pii（关）则兜底失效、人名
+    随最终输出落盘/外发。
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+    # 启动级 PII 关闭（标准部署默认）；精修/gap-fill 全关，聚焦输出兜底脱敏
+    cfg = PipelineConfig(
+        llm=LLMConfig(
+            model="", enable_refine=False,
+            enable_final_refine=False, enable_gap_fill=False,
+            enable_cache=False,
+        ),
+        pii=PIIConfig(enable=False),
+    )
+    pipeline = Pipeline(cfg)
+    merger = IncrementalMerger(cfg.dedup)
+    refined = [RefinedResult(markdown=f"负责人{_NAME}的报告。")]
+    lexicon = EntityLexicon(person_names=(_NAME,), org_names=())
+    request_pii = PIIConfig(enable=True, redact_person_name=True)
+    cache = LLMCache(out / ".llm_cache", enabled=False)
+
+    result = await pipeline._finalize_single_doc(
+        merger, [], refined, [], out, None, None, _report, lexicon,
+        cache, cfg.llm, None, pii_cfg=request_pii,
+    )
+
+    # 最终输出里人名已被请求级配置脱敏（占位符派生自配置，非硬编码）
+    assert _NAME not in result.markdown
+    assert request_pii.person_name_placeholder in result.markdown

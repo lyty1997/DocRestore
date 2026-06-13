@@ -19,7 +19,11 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from docrestore.llm.base import BaseLLMRefiner
-from docrestore.llm.code_refine import CodeRefineResult, CodeUnresolved
+from docrestore.llm.code_refine import (
+    CodeRefineResult,
+    CodeUnresolved,
+    RedactText,
+)
 from docrestore.llm.prompts import (
     build_code_consistency_audit_prompt,
     build_code_repair_prompt,
@@ -152,10 +156,14 @@ class DiagnosticCodeRepairer:
         *,
         diagnostic_runner: CodeDiagnosticRunner | None = None,
         window_radius: int = 8,
+        redact: RedactText | None = None,
     ) -> None:
         self._base = base
         self._diagnostic_runner = diagnostic_runner
         self._window_radius = window_radius
+        # #36：file_path / related_snippets / path_candidates / diagnostics 拼进
+        # 云端 prompt 前的脱敏函数；None = 未开 PII，不脱。
+        self._redact = redact
 
     async def repair(
         self,
@@ -175,6 +183,7 @@ class DiagnosticCodeRepairer:
             related_sources=related_sources or [],
             context_provider=context_provider,
             window_radius=self._window_radius,
+            redact=self._redact,
         )
         if not contexts:
             return CodeRefineResult(
@@ -276,10 +285,13 @@ class CodeConsistencyAuditor:
         *,
         diagnostic_runner: CodeDiagnosticRunner | None = None,
         excerpt_radius: int = 4,
+        redact: RedactText | None = None,
     ) -> None:
         self._base = base
         self._diagnostic_runner = diagnostic_runner
         self._excerpt_radius = excerpt_radius
+        # #36：审计 prompt 同样脱敏 file_path / related_snippets / diagnostics
+        self._redact = redact
 
     async def audit(
         self,
@@ -300,6 +312,7 @@ class CodeConsistencyAuditor:
             related_sources=related_sources or [],
             context_provider=context_provider,
             excerpt_radius=self._excerpt_radius,
+            redact=self._redact,
         )
         if not context.editable_ranges:
             return CodeRefineResult(
@@ -408,8 +421,16 @@ def build_repair_contexts(
     related_sources: list[SourceFile],
     context_provider: CodeContextProvider | None = None,
     window_radius: int = 8,
+    redact: RedactText | None = None,
 ) -> list[CodeRepairContext]:
-    """根据诊断失败行生成 scoped repair contexts。"""
+    """根据诊断失败行生成 scoped repair contexts。
+
+    ``redact`` 非空（#36）时，对拼进云端 prompt 的 file_path / related_snippets /
+    path_candidates / diagnostics 在 ``json.dumps`` **之前**按字段脱敏——先脱再
+    序列化，占位符里若含引号也会被 json 正确转义，绝不破坏 JSON。其余字段
+    （local_lines / outline / symbols）派生自 ``source.merged_text``，已在更上游
+    被 _redact_code_pii 脱过，无需重复。
+    """
     failing_lines = sorted({
         line
         for diagnostic in diagnostics
@@ -423,24 +444,30 @@ def build_repair_contexts(
     ranges = _merge_line_windows(failing_lines, line_count, window_radius)
     lines = source.merged_text.split("\n")
     outline = _file_outline(lines)
+    file_path = source.path
     path_candidates = _path_candidates(source)
+    related = _related_snippets(source, related_sources, context_provider)
+    diag_dicts = [diagnostic.to_index_dict() for diagnostic in diagnostics]
     source_pages = [
         f"{page.page_stem}.col{page.column_index}" for page in source.pages
     ]
+    if redact is not None:
+        file_path = redact(file_path)
+        path_candidates = [
+            _redact_path_candidate(pc, redact) for pc in path_candidates
+        ]
+        related = [redact(snippet) for snippet in related]
+        diag_dicts = [_redact_diag_dict(d, redact) for d in diag_dicts]
     return [
         CodeRepairContext(
-            file_path=source.path,
+            file_path=file_path,
             language=source.language,
             edit_range=edit_range,
             local_lines=_numbered_lines(lines, edit_range),
             enclosing_symbols=_enclosing_symbols(lines, edit_range.start_line),
             file_outline=outline,
-            diagnostics=[
-                diagnostic.to_index_dict() for diagnostic in diagnostics
-            ],
-            related_snippets=_related_snippets(
-                source, related_sources, context_provider,
-            ),
+            diagnostics=diag_dicts,
+            related_snippets=related,
             path_candidates=path_candidates,
             source_pages=source_pages,
             constraints=[
@@ -461,14 +488,26 @@ def build_consistency_audit_context(
     related_sources: list[SourceFile],
     context_provider: CodeContextProvider | None = None,
     excerpt_radius: int = 4,
+    redact: RedactText | None = None,
 ) -> CodeConsistencyAuditContext:
-    """组织全文件一致性审计上下文。"""
+    """组织全文件一致性审计上下文。
+
+    ``redact`` 非空（#36）：file_path / related_snippets / diagnostics 在
+    ``json.dumps`` 前按字段脱敏；其余字段派生自已脱敏的 ``source.merged_text``。
+    """
     lines = source.merged_text.split("\n")
     editable_ranges = _audit_editable_ranges(
         source, diagnostics, previous_result, lines,
     )
+    file_path = source.path
+    related = _related_snippets(source, related_sources, context_provider)
+    diag_dicts = [diagnostic.to_index_dict() for diagnostic in diagnostics]
+    if redact is not None:
+        file_path = redact(file_path)
+        related = [redact(snippet) for snippet in related]
+        diag_dicts = [_redact_diag_dict(d, redact) for d in diag_dicts]
     return CodeConsistencyAuditContext(
-        file_path=source.path,
+        file_path=file_path,
         language=source.language,
         editable_ranges=editable_ranges,
         read_only_excerpts=_read_only_excerpts(
@@ -476,15 +515,13 @@ def build_consistency_audit_context(
         ),
         file_outline=_file_outline(lines),
         symbol_table=_symbol_table(lines),
-        diagnostics=[diagnostic.to_index_dict() for diagnostic in diagnostics],
+        diagnostics=diag_dicts,
         previous_repairs=list(previous_result.flags),
         repeated_ocr_confusions=_find_repeated_ocr_confusions(lines),
         unresolved_items=[
             asdict(item) for item in previous_result.unresolved
         ],
-        related_snippets=_related_snippets(
-            source, related_sources, context_provider,
-        ),
+        related_snippets=related,
         constraints=[
             "patches must stay inside editable_ranges",
             "read_only_excerpts are evidence only and cannot be modified",
@@ -813,6 +850,53 @@ def _related_snippets(
         if len(snippets) >= 3:
             break
     return snippets
+
+
+def _redact_path_candidate(
+    candidate: dict[str, object], redact: RedactText,
+) -> dict[str, object]:
+    """path_candidates dict 的 path/filename 脱敏（#36，送云端 prompt 前）。
+
+    candidate 来自 OCR 的 IDE 路径串，可能含用户名等 PII；返回新 dict，不改原对象。
+    """
+    out = dict(candidate)
+    for key in ("path", "filename"):
+        value = out.get(key)
+        if isinstance(value, str):
+            out[key] = redact(value)
+    return out
+
+
+def _redact_diag_dict(
+    diagnostic: dict[str, object], redact: RedactText,
+) -> dict[str, object]:
+    """诊断 dict 的自由文本字段脱敏（#36，送云端 prompt 前）。
+
+    repair 的诊断在 _redact_code_pii **之前**算（基于原文）：g++/clang 的
+    ``summary``（``output[:1000]``）带 caret 时会回显含 PII 的源码行，
+    ``items[].message`` 也可能引用源码 token，``path`` 同 file_path——一并脱。
+    其余字段（枚举 / 计数 / 行号）无 PII。返回新 dict（含新 items 列表），不改原
+    对象（原对象还要写本地 files-index.json，保留原文）。
+    """
+    out = dict(diagnostic)
+    for key in ("path", "summary"):
+        value = out.get(key)
+        if isinstance(value, str):
+            out[key] = redact(value)
+    items = out.get("items")
+    if isinstance(items, list):
+        redacted_items: list[object] = []
+        for item in items:
+            if isinstance(item, dict):
+                new_item = dict(item)
+                message = new_item.get("message")
+                if isinstance(message, str):
+                    new_item["message"] = redact(message)
+                redacted_items.append(new_item)
+            else:
+                redacted_items.append(item)
+        out["items"] = redacted_items
+    return out
 
 
 def _parse_patch(raw: object) -> ScopedPatch | None:
