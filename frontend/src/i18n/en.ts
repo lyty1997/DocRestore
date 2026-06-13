@@ -346,6 +346,10 @@ export const en: Record<TranslationKey, string> = {
     "LLM api_base rejected by security policy: must be a public http(s) " +
     "address or in the server allowlist (private/internal/link-local " +
     "addresses are blocked)",
+  "errors.api.output_dir_rejected":
+    "output_dir rejected by security policy: must be under the server's " +
+    "trusted work root (defaults to the system temp dir, configurable via " +
+    "DOCRESTORE_WORK_ROOT) to prevent deleting arbitrary directories",
   "errors.api.unauthorized": "Missing or invalid API Token",
   "errors.api.service_not_initialized": "Service not initialized",
   "errors.api.engine_manager_not_initialized": "OCR engine manager not initialized",

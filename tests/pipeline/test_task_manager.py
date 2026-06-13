@@ -370,6 +370,59 @@ class TestDeleteTask:
         db.delete_task.assert_awaited_once_with(task.task_id)
 
 
+class TestDeleteTaskBoundary:
+    """delete_task rmtree 前的边界二次校验（#34 TOCTOU 防御）。"""
+
+    @pytest.mark.asyncio
+    async def test_refuses_outbounds_and_keeps_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """output_dir 在工作根之外 → 拒删、返回告警串、目录与内容完好无损。"""
+        root = tmp_path / "root"
+        root.mkdir()
+        monkeypatch.setenv("DOCRESTORE_WORK_ROOT", str(root))
+
+        outside = tmp_path / "precious"
+        outside.mkdir()
+        sentinel = outside / "keep.txt"
+        sentinel.write_text("勿删", encoding="utf-8")
+
+        mgr = _make_manager()
+        task = _make_completed_task("oob", outside, [])
+        mgr._tasks[task.task_id] = task
+
+        err = await mgr.delete_task(task.task_id)
+
+        assert err  # 非空告警串 = 拒删
+        assert outside.exists()
+        assert sentinel.exists()
+        # 任务保留在列表里，让用户/管理员察觉异常而非静默丢记录
+        assert mgr.get_task(task.task_id) is task
+
+    @pytest.mark.asyncio
+    async def test_allows_inbounds_under_custom_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """自定义工作根下的 output_dir 正常删除（回归：守卫不误杀合法删除）。"""
+        root = tmp_path / "root"
+        root.mkdir()
+        monkeypatch.setenv("DOCRESTORE_WORK_ROOT", str(root))
+
+        out_dir = root / "task-out"
+        out_dir.mkdir()
+        (out_dir / "document.md").write_text("x", encoding="utf-8")
+
+        mgr = _make_manager()
+        task = _make_completed_task("inb", out_dir, [])
+        mgr._tasks[task.task_id] = task
+
+        err = await mgr.delete_task(task.task_id)
+
+        assert err == ""
+        assert not out_dir.exists()
+        assert mgr.get_task(task.task_id) is None
+
+
 class TestRetryTask:
     """retry_task 三分支"""
 
