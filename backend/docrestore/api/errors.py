@@ -103,6 +103,10 @@ class APIErrorCode(StrEnum):
     #: 请求级 LLM api_base 被安全策略拒绝（私网 / 非白名单 / 非法地址）
     LLM_API_BASE_REJECTED = "LLM_API_BASE_REJECTED"
 
+    # ── 文件系统边界（任意删除防护）──────────────────
+    #: 请求级 output_dir 不在受信工作根下（防 DELETE 任务 rmtree 任意目录）
+    OUTPUT_DIR_REJECTED = "OUTPUT_DIR_REJECTED"
+
 
 class ApiBusinessError(HTTPException):
     """业务异常：携带机器可读的 ``code`` + 可参数化 ``params``。

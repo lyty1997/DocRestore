@@ -337,6 +337,10 @@ export const zhTW: Record<TranslationKey, string> = {
   "errors.api.llm_api_base_rejected":
     "LLM 中轉位址（api_base）被安全策略拒絕：必須是公網 http(s) 位址，" +
     "或在伺服端白名單內（禁止私網 / 內網 / 鏈路本地位址）",
+  "errors.api.output_dir_rejected":
+    "輸出目錄（output_dir）被安全策略拒絕：必須落在伺服端受信工作根之下" +
+    "（預設系統暫存目錄，可由 DOCRESTORE_WORK_ROOT 設定），" +
+    "以防誤刪工作根外的任意目錄",
   "errors.api.unauthorized": "缺少或無效的 API Token",
   "errors.api.service_not_initialized": "服務未初始化",
   "errors.api.engine_manager_not_initialized": "OCR 引擎管理器未初始化",

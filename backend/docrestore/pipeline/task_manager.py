@@ -38,6 +38,7 @@ from docrestore.pipeline.config import (
     PIIConfig,
     PowerPointRestoreConfig,
 )
+from docrestore.pipeline.path_guard import output_dir_within_root
 from docrestore.pipeline.pipeline import Pipeline
 from docrestore.pipeline.scheduler import PipelineScheduler
 
@@ -849,6 +850,20 @@ class TaskManager:
 
         if task.status in (TaskStatus.PENDING, TaskStatus.PROCESSING):
             return "任务运行中，请先取消"
+
+        # rmtree 前二次校验边界（#34 TOCTOU 防御）：覆盖建任务校验之前就存在的
+        # 历史越界任务、DB 篡改、未来漏接守卫的建任务路径——不在受信工作根下则
+        # 拒删、绝不触碰目录，并把任务留在列表里让用户/管理员察觉异常。
+        if not output_dir_within_root(task.output_dir):
+            logger.warning(
+                "拒绝删除越界 output_dir（不在工作根下，疑似历史/篡改任务）: "
+                "task=%s dir=%s",
+                task_id, task.output_dir,
+            )
+            return (
+                "输出目录在受信工作根之外，已拒绝删除以防误删；请检查 "
+                "DOCRESTORE_WORK_ROOT 配置或手动清理该目录"
+            )
 
         # 清理文件（快速本地 IO，无需异步化）
         output_dir = Path(task.output_dir)
