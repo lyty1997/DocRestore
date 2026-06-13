@@ -178,6 +178,15 @@ OPENAI_API_BASE=https://your-proxy.com/v1
 
 本地模式下 `LocalLLMRefiner.detect_pii_entities` 默认返回空 → 跳过 LLM 实体识别，只跑 regex 脱敏；**数据不会发送到任何外部服务**。`.env` 里的 API Key 可留空。
 
+#### 凭据持久化策略（api_key 不落库，#37）
+
+任务配置快照会持久化进 SQLite（供重启水合、resume / retry 复用），但 **`api_key` 绝不入库**——落库时 `LLMConfig` 以 `exclude={"api_key"}` 序列化，避免明文凭据随 DB 文件 / 备份 / 快照长期留存。
+
+代价与对策：
+
+- **重启 / resume 任务需要 LLM 时，凭据从环境变量回填**。把云端 key 配在环境（litellm 直读的 `OPENAI_API_KEY` / `GEMINI_API_KEY` / `GLM_API_KEY` 等），或设 `DOCRESTORE_LLM_API_KEY`（仅当配置内 key 为空时回填，绝不覆盖请求里显式带入的 key）。**别只在创建任务的请求体里传一次 key** 就指望 resume 时还在——它不会被持久化。
+- **存量库自动清洗**：旧版本曾把含明文 key 的配置整体入库；服务启动时一次性把历史 `tasks.llm` 里的 `api_key` 字段抹除（幂等，损坏行跳过）。升级后首次启动即生效，备份里的旧 key 建议一并轮换。
+
 ### 3.5 鉴权与网络暴露（安全）
 
 > 安全基线：**服务永不以「未鉴权」状态对外可达**（fail-closed）。这是面向「桌面服务 + 手机配对」形态设计的——手机需从局域网/远程够到桌面，所以不能用「仅绑 loopback」来兜底，改为「默认即自动生成 token，始终强制校验」。

@@ -34,11 +34,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from docrestore.llm.credentials import ENV_LLM_API_KEY
 from docrestore.models import PipelineResult, TaskProgress
 from docrestore.output.renderer import ANCHORED_DOCUMENT_FILENAME
 from docrestore.persistence.database import TaskDatabase, TaskRow
 from docrestore.pipeline.config import (
     CodeRestoreConfig,
+    LLMConfig,
     PowerPointRestoreConfig,
 )
 from docrestore.pipeline.task_manager import (
@@ -967,3 +969,31 @@ class TestHydrationMarkdown:
         )
         out = _read_hydration_markdown(doc)
         assert "# 正文" in out
+
+
+async def test_get_task_async_refills_api_key_from_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#37：get_task_async 从 DB 水合时回填 api_key（resume 凭据链路）。
+
+    落库已排除明文 key（insert exclude）；水合时从环境补回，证明 resume
+    场景下 api_key 既不持久化、运行期又可用。
+    """
+    db = TaskDatabase(str(tmp_path / "hydrate.db"))
+    await db.initialize()
+    try:
+        await db.insert_task(
+            task_id="hydr1", status="failed",
+            image_dir="/img", output_dir="/out",
+            llm=LLMConfig(model="gpt-4", api_key="sk-will-be-stripped"),
+        )
+        monkeypatch.setenv(ENV_LLM_API_KEY, "sk-from-env")
+        mgr = _make_manager(db=db)
+        # 内存无此任务 → 走 DB 水合路径
+        task = await mgr.get_task_async("hydr1")
+        assert task is not None
+        assert task.llm is not None
+        assert task.llm.api_key == "sk-from-env"  # 落库无 key，水合回填
+        assert task.llm.model == "gpt-4"
+    finally:
+        await db.close()
