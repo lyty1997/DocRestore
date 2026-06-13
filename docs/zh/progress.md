@@ -1888,3 +1888,27 @@ tests/api + tests/llm 共 **312 passed 10 skipped**；mypy --strict + ruff + typ
 
 **遗留**：High 余项 #34（output_dir rmtree）、#37（api_key 明文）、#36（PII 绕过，工作量最大）按序推进，
 各开 `bugfix/{N}-...` off 最新 dev；整批安全 issue 进 dev 后用一个 release PR 收口 dev→main。
+
+## 2026-06-13 - #32/#33 自查跟进：覆盖 denylist→allowlist 硬化（PR #54）
+
+**背景**：#32/#33 落地后自查 sink 兜底，发现 denylist `_OCR_INFRA_OVERRIDE_DENY` 不完整——漏列
+`paddle_server_host` / `paddle_server_port`（与已覆盖的 `paddle_server_url` 同为 SSRF 出站目标，
+`build_default_paddle_server_url()` 用 host:port 拼地址）、`model_path`（vLLM 任意路径加载权重 →
+pickle 潜在 RCE）、`paddle_server_api_version`。**当前不可利用**（这些字段不在 `OCRConfigRequest`
+schema），但 denylist 的职责正是兜未来 schema 误改，漏列给了「已完整」的假象。
+
+**修复**（`bugfix/ocr-override-allowlist` → PR #54 rebase 合 dev `b37f135`）：
+- `routes.py`：`_OCR_INFRA_OVERRIDE_DENY` 翻成 allowlist `_OCR_SAFE_OVERRIDE_ALLOW`，
+  `_resolve_ocr_config` 过滤条件反向（`key in allowlist`）。默认拒绝、只放行 5 个业务字段
+  （`model`/`gpu_id`/`exclude_images`/`paddle_pipeline`/`paddle_ocr_timeout`），对 schema 漂移免疫。
+- `schemas.py`：`OCRConfigRequest` docstring 同步（新增字段须登记 allowlist，否则请求级覆盖静默丢弃）。
+- 测试：危险字段清单补全 host/port/model_path 等同类项并断言**均不在 allowlist**；新增 **allowlist 与
+  `OCRConfigRequest` 字段集恒等**断言（schema 新增字段忘登记即失败）；`test_override_security` 扩到 18 例。
+- 文档：`deployment.md` §3.6 措辞同步 + 补「**设了白名单后环回不再自动放行**」UX 警告；
+  `known-issues.md`「#32/#33」记录硬化与教训。
+
+**验证**：`test_url_guard`(21) + `test_override_security`(18) = 40 passed；tests/api + tests/llm
+**318 passed 10 skipped**；mypy --strict + ruff + typos 全绿（pre-commit Passed）。
+
+**教训**：allowlist（默认拒绝、只放行已知安全字段）优于 denylist（逐一枚举危险字段）——后者总会漏同类
+字段。dev 现领先 main **7 个 commit**（4 LFI + #35 + #32/#33 + 本次硬化）。
