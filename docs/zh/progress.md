@@ -1859,3 +1859,32 @@ ultrareview 复审指出仍剩一个同类高危：C/C++ 中和逻辑只认 `#in
 **遗留**：High 余项 #32/#33（paddle_python RCE + api_base SSRF，同根因，建议同一 PR）、#34
 （output_dir rmtree）、#36（PII 绕过）、#37（api_key 明文）；手机配对完整传输层（二维码 + mesh/
 中继）待客户端形态敲定后单独设计。
+
+## 2026-06-13 - 安全审查 #32+#33：请求级覆盖基础设施字段 → RCE + SSRF 根治
+
+**主题**：堵住「创建任务请求体覆盖基础设施字段」这条攻击链——`paddle_python` 任意二进制执行（RCE，
+#32）、`paddle_server_url` / `llm.api_base` 指向攻击者/内网（SSRF + 数据外泄，#33）。同根因（请求级
+`model_copy` 不区分业务/基础设施字段），一个 PR 修。分支 `bugfix/32-33-request-override-rce-ssrf` off dev。
+
+**改动**：
+- `api/schemas.py`：`OCRConfigRequest` 删 `paddle_python` / `paddle_server_url` /
+  `paddle_server_model_name`（基础设施字段不再暴露给请求；pydantic 默认丢弃；前端零引用）。
+- `api/routes.py`：新增 `_OCR_INFRA_OVERRIDE_DENY` denylist，`_resolve_ocr_config` 合成生效配置时
+  二次剔除解释器/worker 脚本/服务地址（防 schema 回归）；`create_task` 对请求级 `llm.api_base` 过
+  SSRF 守卫（`to_thread` 包 DNS），失败 `400 LLM_API_BASE_REJECTED` 不建任务。
+- `api/url_guard.py`（新）：`validate_outbound_api_base`——仅 http/https；解析 host 全部 IP，私网/
+  链路本地(含元数据 169.254)/保留/多播/未指定拒；**环回放行**（本地 LLM）；IPv4-mapped 旁路按内嵌
+  IPv4 判定；可选 `DOCRESTORE_LLM_API_BASE_ALLOWLIST` host 白名单逃生口（命中即放行，含内网中转站）。
+- `api/errors.py`：新增 `LLM_API_BASE_REJECTED` 错误码；前端 i18n 三 locale 同步。
+- 设计文档 `deployment.md` §3.6「请求级配置覆盖安全」+ `DOCRESTORE_LLM_API_BASE_ALLOWLIST` env 表。
+
+**验证**：新增 `tests/api/test_url_guard.py`（21 例）+ `tests/api/test_override_security.py`（12 例）；
+tests/api + tests/llm 共 **312 passed 10 skipped**；mypy --strict + ruff + typos 全绿；前端本地
+`tsc -b` + eslint 通过（hook 的 npx 工具链误报已用项目本地链复核）。详见 known-issues.md「#32 / #33」。
+
+**偏离说明**：issue #33 写「连环回一起拦」，但本地 LLM（provider=local）合法 api_base 即
+`http://localhost:11434/v1`，照搬误杀该功能 → 环回放行（高价值目标元数据/内网横向仍拦），LAN
+本地 LLM 走白名单。**残留**：DNS rebinding 未防（需 connect 级 IP pin，过度工程暂不做）。
+
+**遗留**：High 余项 #34（output_dir rmtree）、#37（api_key 明文）、#36（PII 绕过，工作量最大）按序推进，
+各开 `bugfix/{N}-...` off 最新 dev；整批安全 issue 进 dev 后用一个 release PR 收口 dev→main。

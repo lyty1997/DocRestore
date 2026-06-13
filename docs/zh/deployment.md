@@ -222,6 +222,25 @@ API 默认**不挂** CORS 中间件（最严格：浏览器跨源请求被拦）
 
 issue #35 原修复方案写的是「未配 token 时仅绑 loopback 或拒启」。因产品方向（桌面服务 + 手机配对需 LAN/远程可达），纯 loopback 会挡掉手机端，故改为**等价或更强**的「默认自动生成 token + 始终 fail-closed」：任何路径都不会出现「未鉴权且对外可达」，loopback-only 仅保留为 insecure 逃生口的约束。
 
+### 3.6 请求级配置覆盖安全（防 RCE / SSRF）
+
+创建任务时请求体可携带配置覆盖（`ocr` / `llm` 等），但**基础设施字段绝不接受请求级覆盖**（#32 / #33）：
+
+- **OCR 基础设施字段**——解释器路径（`paddle_python` / `paddle_server_python`）、worker 脚本、推理服务地址（`paddle_server_url` / `paddle_server_model_name`）已从请求 schema 移除，并在合成生效配置时二次剔除。可控即任意二进制执行（RCE）或把页面图发往攻击者/内网（SSRF），故只由服务端配置注入。
+- **LLM `api_base`**（中转站地址）保留请求级可填，但过 SSRF 守卫：
+  - 仅允 `http` / `https`；
+  - 解析 host 的全部 IP，落入**私网（RFC1918）/ 链路本地（含云元数据 `169.254.169.254`）/ 保留 / 多播 / 未指定** → 拒绝（`400 LLM_API_BASE_REJECTED`）；
+  - **环回（`127.0.0.1` / `::1` / `localhost`）放行**——同机本地 LLM（ollama / vLLM）的合法目标；
+  - 可选白名单逃生口（见下）。
+
+| 环境变量 | 默认 | 作用 |
+|----------|------|------|
+| `DOCRESTORE_LLM_API_BASE_ALLOWLIST` | 空 | LLM `api_base` 的 host 白名单（逗号分隔）。**空**=不启用白名单，按上面 SSRF 规则放行公网+环回、挡私网/内网；**非空**=只许命中白名单的 host（命中即放行，含你信任的**内网中转站**——把 LAN 上的本地 LLM 接进来就靠这个） |
+
+**与 issue #33 的偏离说明**：issue 写「拦截私网 / **环回** / 链路本地」。但「本地 LLM」（provider=local）的合法 `api_base` 就是 `http://localhost:11434/v1` 这类环回地址，照搬会误杀该功能。故环回放行（单用户桌面下环回 SSRF 价值极低，高价值目标——云元数据、内网横向——仍拦），LAN 上的本地 LLM 走白名单逃生口。
+
+**残留风险**：DNS rebinding（校验时解析到公网、litellm 实际发包时 TTL 过期重绑内网）未防——需 connect 级 IP pin，属过度工程，已记入 known-issues 暂不实现。
+
 ## 4. OCR 引擎配置
 
 ### 4.1 引擎选择
