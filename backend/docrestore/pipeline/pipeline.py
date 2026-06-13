@@ -379,6 +379,25 @@ def _stitch_final_chunks(chunks: list[str]) -> str:
     return re.sub(r"\n{3,}", "\n\n", joined)
 
 
+def _make_regex_redactor(
+    pii_cfg: PIIConfig,
+) -> Callable[[str], str] | None:
+    """构造 ``redact_regex_only`` 的文本投影函数（#36），未开 PII 返回 None。
+
+    代码模式把 ``file_path`` / 源码片段 / 诊断拼进云端 prompt 前用它脱敏：结构化
+    PII + 凭据/token + 自定义词，**不做实体（人名/机构名）替换**——避免误伤
+    import 路径 / namespace / 标识符（与 _redact_code_pii 的正文处理同口径）。
+    """
+    if not pii_cfg.enable:
+        return None
+    redactor = PIIRedactor(pii_cfg)
+
+    def _redact(text: str) -> str:
+        return redactor.redact_regex_only(text)[0]
+
+    return _redact
+
+
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 
 
@@ -1486,9 +1505,19 @@ class Pipeline:
             )
 
             refine_mode = getattr(llm_cfg, "code_refine_mode", "refine")
-            code_refiner = CodeLLMRefiner(base_refiner_obj, mode=refine_mode)
-            code_repairer = DiagnosticCodeRepairer(base_refiner_obj)
-            code_auditor = CodeConsistencyAuditor(base_refiner_obj)
+            # #36：file_path / 源码片段 / 诊断拼进云端 prompt 前的脱敏函数（请求级
+            # pii_cfg；未开 PII 则 None，不脱）。三类 refiner（refine/repair/audit）
+            # 共用，确保任何送云端的 prompt 字段都先 redact_regex_only。
+            prompt_redact = _make_regex_redactor(pii_cfg)
+            code_refiner = CodeLLMRefiner(
+                base_refiner_obj, mode=refine_mode, redact=prompt_redact,
+            )
+            code_repairer = DiagnosticCodeRepairer(
+                base_refiner_obj, redact=prompt_redact,
+            )
+            code_auditor = CodeConsistencyAuditor(
+                base_refiner_obj, redact=prompt_redact,
+            )
             for i, src in enumerate(sources):
                 try:
                     diagnostics = pre_refine_diagnostics_by_path.get(
@@ -1623,11 +1652,17 @@ class Pipeline:
         # 每个文件切出 (header, body)，header + body == merged_text
         split = [_split_leading_comment(s.merged_text) for s in sources]
 
-        # 实体检测仅用所有非空 header 拼接（来源限注释，不取正文标识符）
+        # 实体检测仅用所有非空 header 拼接（来源限注释，不取正文标识符）。
+        # #36：拼接送 detect_pii_entities（云端）**之前**，先对每个 header 做
+        # redact_regex_only（结构化 PII + 凭据/token + 自定义词先掉）——否则注释里
+        # 的 `Author: 张三 <a@corp.com>` 的邮箱/手机会随 combined 裸送云端。人名/
+        # 机构名不被 regex 触及，实体检测仍基于（已结构化脱敏的）注释正常工作。
         lexicon: EntityLexicon | None = None
         detect_failed = False
         needs_lex = pii_cfg.redact_person_name or pii_cfg.redact_org_name
-        combined = "\n\n".join(h for h, _ in split if h)
+        combined = "\n\n".join(
+            redactor.redact_regex_only(h)[0] for h, _ in split if h
+        )
         if needs_lex and refiner is not None and combined:
             try:
                 person, org = await refiner.detect_pii_entities(combined)
@@ -1942,6 +1977,7 @@ class Pipeline:
             merger, pages_ref, refined_results, all_gaps,
             output_dir, llm, gpu_lock, report_fn, entity_lexicon,
             cache, llm_cfg, quality,
+            pii_cfg=pii_cfg,
             block_cloud=pii_block_cloud,
         )
 
@@ -2040,6 +2076,7 @@ class Pipeline:
         llm_cfg: LLMConfig,
         quality: QualityReport | None = None,
         *,
+        pii_cfg: PIIConfig,
         block_cloud: bool = False,
     ) -> PipelineResult:
         """单文档终结化：reassemble → gap fill → final refine → render。
@@ -2047,6 +2084,10 @@ class Pipeline:
         ``block_cloud=True``（PII fail-closed：实体检测失败）时跳过 gap fill 与
         final refine 两处云端调用，仅做本地 reassemble / 去重 / polish / render，
         避免把人名 / 机构名外发到云端。
+
+        ``pii_cfg`` 为**请求级** PII 配置（#36）：gap fill re-OCR 文本送云端前的
+        脱敏、以及输出实体兜底，全程以它为准，**禁止回落 ``self._config.pii``**
+        （启动默认 ``enable=False``，会让前端单次开的 PII 在这两处静默失效）。
         """
         profiler = current_profiler()
 
@@ -2071,6 +2112,7 @@ class Pipeline:
                 doc = await self._maybe_fill_gaps(
                     doc, all_gaps, pages_ref, output_dir,
                     llm, gpu_lock, report_fn, entity_lexicon,
+                    pii_cfg=pii_cfg,
                 )
             with profiler.stage("llm.final_refine"):
                 doc, truncated = await self._do_final_refine(
@@ -2174,8 +2216,9 @@ class Pipeline:
 
         # 实体脱敏输出兜底：词表就绪前已精修的"早窗口"段可能漏掉实体，这里对
         # 组装结果再脱敏一遍（lexicon=None 时跳过；结构化 PII 已在 producer 完成）。
-        if entity_lexicon is not None and self._config.pii.enable:
-            redacted_md, _ = PIIRedactor(self._config.pii).redact_snippet(
+        # 用请求级 pii_cfg（#36）：回落 self._config.pii 时标准部署恒 False → 兜底失效。
+        if entity_lexicon is not None and pii_cfg.enable:
+            redacted_md, _ = PIIRedactor(pii_cfg).redact_snippet(
                 doc.markdown, entity_lexicon,
             )
             if redacted_md != doc.markdown:
@@ -2904,8 +2947,14 @@ class Pipeline:
         gpu_lock: asyncio.Lock | None,
         report_fn: ReportFn,
         entity_lexicon: EntityLexicon | None = None,
+        *,
+        pii_cfg: PIIConfig,
     ) -> MergedDocument:
-        """条件检查后调用 _fill_gaps，不满足条件直接返回原文档。"""
+        """条件检查后调用 _fill_gaps，不满足条件直接返回原文档。
+
+        ``pii_cfg`` 为请求级 PII 配置（#36），透传给 _fill_gaps → _fill_one_gap，
+        让 gap re-OCR 文本在送云端前按请求级配置脱敏（不回落 self._config.pii）。
+        """
         if not self._config.llm.enable_gap_fill or not gaps:
             return doc
 
@@ -2933,6 +2982,7 @@ class Pipeline:
         doc, filled_count = await self._fill_gaps(
             doc, gaps, page_map, page_order,
             gpu_lock, refiner, report_fn, entity_lexicon,
+            pii_cfg=pii_cfg,
         )
         if filled_count > 0:
             await self._save_debug(
@@ -2950,8 +3000,13 @@ class Pipeline:
         refiner: object,
         report_fn: ReportFn,
         entity_lexicon: EntityLexicon | None = None,
+        *,
+        pii_cfg: PIIConfig,
     ) -> tuple[MergedDocument, int]:
-        """遍历 gap 列表，re-OCR + LLM 提取缺失内容并插入文档。"""
+        """遍历 gap 列表，re-OCR + LLM 提取缺失内容并插入文档。
+
+        ``pii_cfg`` 请求级 PII 配置（#36），透传给 _fill_one_gap 脱敏 re-OCR 文本。
+        """
         reocr_cache: dict[str, str] = {}
         markdown = doc.markdown
         filled_count = 0
@@ -2987,6 +3042,7 @@ class Pipeline:
                         gap, page_map, page_order,
                         reocr_cache, gpu_lock, refiner,
                         entity_lexicon,
+                        pii_cfg=pii_cfg,
                     )
             except Exception:
                 logger.warning(
@@ -3022,11 +3078,18 @@ class Pipeline:
         gpu_lock: asyncio.Lock | None,
         refiner: object,
         entity_lexicon: EntityLexicon | None = None,
+        *,
+        pii_cfg: PIIConfig,
     ) -> str:
         """对单个 gap 做 re-OCR + LLM 提取。
 
         返回填充内容（空字符串表示无法填充）。
         若启用 PII 脱敏，re-OCR 文本在送入 LLM 前先脱敏。
+
+        ``pii_cfg`` 为**请求级** PII 配置（#36）：gap 补全的 re-OCR 产生**全新
+        文本**，绕过了 producer 的逐页 regex 脱敏，必须在此送 fill_gap 云端前用
+        请求级配置补脱；回落 self._config.pii（默认 enable=False）会让结构化 PII
+        裸送云端。
         """
         # re-OCR 当前页
         current_text = await self._reocr_cached(
@@ -3043,9 +3106,9 @@ class Pipeline:
                 next_page_name, page_map, reocr_cache, gpu_lock,
             )
 
-        # PII 脱敏 re-OCR 文本（轻量模式，不调用 LLM）
-        if self._config.pii.enable:
-            redactor = PIIRedactor(self._config.pii)
+        # PII 脱敏 re-OCR 文本（轻量模式，不调用 LLM）；用请求级 pii_cfg（#36）
+        if pii_cfg.enable:
+            redactor = PIIRedactor(pii_cfg)
             current_text, _ = redactor.redact_snippet(
                 current_text, entity_lexicon,
             )

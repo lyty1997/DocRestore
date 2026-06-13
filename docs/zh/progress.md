@@ -1965,3 +1965,36 @@ api 189 passed 9 skipped）+ mypy --strict + ruff + typos。`deployment.md` §3.
 **教训**：持久化配置快照必须剔除凭据字段（`exclude`），凭据走环境运行期回填；存量数据补一次性清洗，否则
 只修新写入、老泄漏仍在。dev 领先 main **10 个 commit**（前 9 + 本次 #37）；**High 余 #36**（PII 上云前脱敏
 被绕过，工作量最大），整批进 dev 后一个 release PR 收口 dev→main。
+
+## 2026-06-14 - 安全审查 #36：PII 上云前脱敏被多路绕过（文档/代码/PPT 全审）
+
+**问题**（#36，High，最后一个 High）：「上云前脱敏」承诺被三条路径绕过，标准部署（启动级 `pii.enable=False`、
+前端单次任务开 PII 走**请求级** `pii_cfg`）下用户以为开了 PII 实则多路失效：
+- **①** 代码模式 `_redact_code_pii` 把**原始** header 拼接后 `detect_pii_entities(combined)` 裸送云端，结构化
+  PII 的 regex 脱敏在该云端调用之后才执行。
+- **②** `_finalize_single_doc`(:2177) / `_fill_one_gap`(:3047) 读 `self._config.pii`（默认 False）而非请求级
+  `pii_cfg` → gap-fill re-OCR 文本（绕过 producer 逐页 regex 的全新文本）+ 最终输出实体兜底恒不脱敏。
+- **③** 代码 prompt 的 `file_path` / `related_snippets`（含外部 `context_root` 片段）/ `path_candidates` /
+  `diagnostics`（g++ `summary` 回显源码行）未脱敏随 prompt 外发。
+
+**修复**（`bugfix/36-pii-cloud-redaction-bypass`）：
+- **①**：拼 `combined` 前先对每个 header `redact_regex_only`，再送检；人名仍保留供实体检测。
+- **②**：`pii_cfg` 一路透传 `_stream_process → _finalize_single_doc → _maybe_fill_gaps → _fill_gaps →
+  _fill_one_gap`，:2177 / :3047 改用请求级配置，禁止回落 `self._config.pii`。
+- **③**：`_make_regex_redactor(pii_cfg)` 建 `redact_regex_only` 函数下传 `CodeLLMRefiner` /
+  `DiagnosticCodeRepairer` / `CodeConsistencyAuditor`；在 `json.dumps` **之前**对四类字段按字段脱敏（先脱后
+  序列化 → 占位符引号被 json 转义，绝不破坏 JSON）；snippets / path / 诊断只 regex 不做实体替换（防误伤标识符）。
+
+**PPT 模式经全审为干净**：`_ppt_pipeline` 自 §9 起即正确透传 `pii_cfg` + producer 逐页 regex + 每页精修前
+`redact_snippet` + 组装兜底 + fail-closed，无误读，本次不改（已核验，不遗漏）。
+
+**验证**：5 个新增/强化回归测试覆盖 ①②③（含 ② 最终输出「回退 bug 必失败」反验证：临时还原 :2177 为
+`self._config.pii` 后该测试确失败）+ 对照「未开 PII 不脱」；PII + 代码模式相关 **140 passed**，全量
+**1296 passed 41 skipped**（3 个 DeepSeek 失败为本机未配 OCR python 路径的既有环境问题，stash 后净树同样失败，
+与本次无关）。mypy --strict + ruff + typos 全绿（pre-commit Passed）。`privacy.md` §10 新增设计 +
+`known-issues.md` #36 条目。
+
+**教训**：「上云前脱敏」须把请求级配置贯穿每个云端 sink（深层 helper 不回落启动默认）、脱敏必须在拼 prompt /
+送检之前（顺序写反等于没脱）、覆盖所有进 prompt 的字段（路径 / 外部片段 / 诊断同样外发）；结构化字段脱敏放在
+`json.dumps` 之前，序列化层兜住占位符转义。dev 领先 main **11 个 commit**（前 10 + 本次 #36）；**6 个 High
+安全 issue（#32–#37）全部修复进 dev**，下一步整批一个 release PR 收口 dev→main（届时 `Fixes #N` 自动关闭）。
