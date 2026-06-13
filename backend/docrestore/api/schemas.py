@@ -49,8 +49,10 @@ class OCRConfigRequest(BaseModel):
     可控即任意本地二进制执行（RCE）；``paddle_server_url`` /
     ``paddle_server_model_name`` 可控即把页面图 POST 到攻击者/内网地址
     （SSRF + 数据外泄）。这些一律只由服务端配置注入，不接受请求级覆盖。
-    routes 合成时另有 ``_OCR_INFRA_OVERRIDE_DENY`` 做 sink 兜底。
-    新增字段前先判断是否为基础设施级——是则不要加在这里。
+    routes 合成时另有 ``_OCR_SAFE_OVERRIDE_ALLOW`` allowlist 做 sink 兜底
+    （默认拒绝，只放行登记过的业务字段）。新增字段前先判断是否基础设施级——
+    是则不要加在这里；若是安全业务字段，记得同步登记到该 allowlist，
+    否则其请求级覆盖会被静默丢弃。
     """
 
     model: str | None = None

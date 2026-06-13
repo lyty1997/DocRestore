@@ -543,19 +543,19 @@ def _requested_crop_boxes(
     }
 
 
-#: OCR 基础设施字段：绝不接受请求级覆盖（#32 RCE / #33 SSRF）。schema 层
-#: 已不暴露这些键，此处再做一道 sink 兜底——即便将来 OCRConfigRequest 误增
-#: 同名字段，也不会流进生效 OCRConfig（解释器/worker 脚本可控即 RCE，推理
-#: 服务地址可控即 SSRF）。这些值只取服务端配置。
-_OCR_INFRA_OVERRIDE_DENY = frozenset({
-    "paddle_python",
-    "paddle_server_python",
-    "paddle_worker_script",
-    "paddle_server_url",
-    "paddle_server_model_name",
-    "paddle_server_backend_config",
-    "deepseek_python",
-    "deepseek_worker_script",
+#: OCR 请求级覆盖 allowlist：**只**放行这些业务级安全字段，其余一律拒——
+#: 含将来误加进 ``OCRConfigRequest`` 的基础设施字段。基础设施字段＝解释器/
+#: worker 脚本（可控即 RCE）+ server host/url/model_path（可控即 SSRF /
+#: 任意权重加载），只由服务端配置注入（#32 / #33）。用 allowlist 而非
+#: denylist：默认拒绝、对 schema 漂移免疫，无需逐一枚举危险字段。新增安全
+#: 字段须同步登记到这里，否则其请求级覆盖被静默丢弃（与 schemas.py 的
+#: ``OCRConfigRequest`` 字段保持同步）。
+_OCR_SAFE_OVERRIDE_ALLOW = frozenset({
+    "model",
+    "gpu_id",
+    "exclude_images",
+    "paddle_pipeline",
+    "paddle_ocr_timeout",
 })
 
 
@@ -565,16 +565,17 @@ def _resolve_ocr_config(
 ) -> OCRConfig | None:
     """合成任务 OCR 配置：请求级覆盖 + 手动裁剪框（任务级生效）。
 
-    手动框随 OCR 配置入 DB 持久化，resume 自动沿用。基础设施字段
-    （解释器 / worker 脚本 / 推理服务地址）经 ``_OCR_INFRA_OVERRIDE_DENY``
-    剔除，绝不被请求覆盖（#32 / #33）。
+    手动框随 OCR 配置入 DB 持久化，resume 自动沿用。只有
+    ``_OCR_SAFE_OVERRIDE_ALLOW`` 内的业务字段可被请求覆盖；基础设施字段
+    （解释器 / worker 脚本 / 推理服务地址）不在 allowlist 内一律丢弃，
+    绝不被请求覆盖（#32 / #33）。
     """
     ocr_cfg: OCRConfig | None = None
     if req.ocr is not None:
         override = {
             key: value
             for key, value in req.ocr.model_dump(exclude_none=True).items()
-            if key not in _OCR_INFRA_OVERRIDE_DENY
+            if key in _OCR_SAFE_OVERRIDE_ALLOW
         }
         if override:
             ocr_cfg = default_ocr.model_copy(update=override)
