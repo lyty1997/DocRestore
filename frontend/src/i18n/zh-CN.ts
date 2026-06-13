@@ -333,6 +333,10 @@ export const zhCN = {
   "errors.api.llm_api_base_rejected":
     "LLM 中转地址（api_base）被安全策略拒绝：必须是公网 http(s) 地址，" +
     "或在服务端白名单内（禁止私网 / 内网 / 链路本地地址）",
+  "errors.api.output_dir_rejected":
+    "输出目录（output_dir）被安全策略拒绝：必须落在服务端受信工作根之下" +
+    "（默认系统临时目录，可由 DOCRESTORE_WORK_ROOT 配置），" +
+    "以防误删工作根外的任意目录",
   "errors.api.unauthorized": "缺少或无效的 API Token",
   "errors.api.service_not_initialized": "服务未初始化",
   "errors.api.engine_manager_not_initialized": "OCR 引擎管理器未初始化",

@@ -618,3 +618,37 @@ allowlist 兜底 / 业务字段仍生效 / 危险字段不在 allowlist / allowl
 后者总会漏同类字段（本次就漏了 `paddle_server_host` / `model_path`），且每加一个新字段都得重新自问
 「危险吗」。出站地址只要请求级可控就必须过 SSRF 白/黑名单，并把云元数据端点（169.254.169.254）
 当一等公民拦截目标。
+
+## output_dir 无边界校验：DELETE 任务 rmtree 任意目录（#34，已修复 2026-06-13）
+
+**现象**：`output_dir` 由创建任务请求体原样带入（`routes.py` → `manager.create_task(output_dir=req.output_dir)`），
+删除任务时 `task_manager.py::delete_task` 对其 `shutil.rmtree(output_dir, ignore_errors=True)`。构造
+`{"image_dir": "/不存在", "output_dir": "/home/user/work"}`：非法 `image_dir` 让任务**快速进 FAILED**
+（终态即可删），随后 `DELETE /tasks/{id}` 删掉整棵 `/home/user/work` → **任意目录递归删除、静默不可逆**。
+叠加 #35（默认放行鉴权）= 未授权可达。
+
+**根因**：`output_dir` 是请求级可控的「写/删」路径却无任何边界约束——与 #32/#33 同一类（基础设施级可控量
+无白名单）。`rmtree` 是 sink，输入未受信即等于授权删任意目录。
+
+**修复**（两道防线，新增 `pipeline/path_guard.py`）：
+- **受信工作根**：`resolve_work_root()` 默认系统临时目录（正是默认输出 `{tempdir}/docrestore_{id}` 的父），
+  env `DOCRESTORE_WORK_ROOT` 可拓宽（持久化产物的逃生口，镜像 #33 白名单 env）。
+- **准入校验（建任务）**：`routes._resolve_output_dir` 把空串归一为 None（走安全默认），用户显式指定的过
+  `validate_output_dir`——`resolve()` 折叠 `..` / 符号链接后必须**严格落在工作根下**（且 ≠ 根本身），
+  越界 `400 OUTPUT_DIR_REJECTED` 不建任务。
+- **sink 二次校验（删除，TOCTOU 防御）**：`delete_task` rmtree 前再过 `output_dir_within_root`——覆盖建任务
+  校验前就存在的历史越界任务、DB 篡改、未来漏接的建任务路径；越界则**拒删、绝不触碰目录**，任务保留在列表里。
+
+**image_dir 不约束（明确判定）**：`image_dir` 是**只读输入**、全链路从不被删除（`collect_referenced_image_dirs`
+只用于上传清理时**跳过**被引用目录，是保护而非删除），且合法用法会指向 NAS / 外部只读目录——加同约束反而
+误杀正常用法。故只锁 `output_dir`（唯一危险 rmtree sink；`upload_dir` / `stage_dir` 均为服务端 `mkdtemp`
+生成，天然受信）。
+
+**验证**：`tests/api/test_output_dir_boundary.py`（17 例：严格子目录放行 / 根本身拒 / 兄弟越界拒 / `..` 逃逸拒 /
+符号链接逃逸拒 / 空值拒 / 非抛版判定 / env 工作根来源 / `_resolve_output_dir` 归一与 400 / 端点 400）+
+`tests/pipeline/test_task_manager.py::TestDeleteTaskBoundary`（2 例：越界拒删且目录完好 / 自定义根下正常删）。
+tests/api + tests/pipeline 全量 **425 passed 17 skipped** + mypy --strict + ruff + typos 全绿。
+
+**教训**：凡「请求级可控 → 落到 rmtree / 写文件 / exec 等 sink」的路径量，都要先锚定**受信根**再做 `resolve()`
+后的严格子路径校验，且 sink 处二次校验防 TOCTOU（建时校验只挡正门，符号链接 / DB 篡改靠 sink 兜底）。
+只读输入与可删输出要分开对待——别给只读输入也一刀切套删除边界。

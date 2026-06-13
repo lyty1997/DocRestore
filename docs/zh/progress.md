@@ -1912,3 +1912,32 @@ schema），但 denylist 的职责正是兜未来 schema 误改，漏列给了�
 
 **教训**：allowlist（默认拒绝、只放行已知安全字段）优于 denylist（逐一枚举危险字段）——后者总会漏同类
 字段。dev 现领先 main **7 个 commit**（4 LFI + #35 + #32/#33 + 本次硬化）。
+
+
+## 2026-06-13 - 安全审查 #34：output_dir 无边界 → DELETE 任意目录删除根治
+
+**背景**：六分区安全审查 High 项 #34。`output_dir` 请求级原样带入，删除任务时
+`shutil.rmtree(output_dir, ignore_errors=True)`。构造非法 `image_dir`（任务快速进 FAILED 终态）+
+`output_dir=/home/user/work`，`DELETE /tasks/{id}` 即递归删掉整棵工作区、静默不可逆；叠加 #35（默认放行
+鉴权）= 未授权可达。与 #32/#33 同类：基础设施级请求可控量无边界。
+
+**修复**（`bugfix/34-output-dir-boundary`，新增 `pipeline/path_guard.py`，两道防线）：
+- **受信工作根** `resolve_work_root()`：默认系统临时目录（默认输出 `{tempdir}/docrestore_{id}` 的父），
+  env `DOCRESTORE_WORK_ROOT` 拓宽（持久化产物逃生口，镜像 #33 白名单 env）。
+- **建任务准入** `routes._resolve_output_dir`：空串归一 None 走安全默认；显式值过 `validate_output_dir`——
+  `resolve()` 折叠 `..` / 符号链接后须严格落工作根下（≠ 根本身），越界 `400 OUTPUT_DIR_REJECTED` 不建任务。
+  抽成 helper 是因内联校验把 `create_task` 圈复杂度顶到 12 > 10（ruff C901）。
+- **删除 sink 二次校验** `delete_task`：rmtree 前过 `output_dir_within_root`（TOCTOU 防御：历史越界任务 /
+  DB 篡改 / 漏接路径）——越界拒删、绝不触碰目录、任务留列表让用户察觉。
+- `errors.py` 新增 `OUTPUT_DIR_REJECTED` + 三语 i18n。
+
+**明确判定**：`image_dir` 不约束（只读输入、全链路从不被删，合法指向 NAS 外部只读路径，加边界反而误杀）；
+唯一危险 rmtree sink 就 `output_dir`（`upload_dir` / `stage_dir` 均服务端 `mkdtemp` 天然受信）。
+
+**验证**：新增 `tests/api/test_output_dir_boundary.py`（17 例）+ `test_task_manager.py::TestDeleteTaskBoundary`
+（2 例）。tests/api + tests/pipeline 全量 **425 passed 17 skipped** + mypy --strict + ruff + typos 全绿
+（pre-commit Passed）。`deployment.md` §3.7 新增 + `known-issues.md` #34 条目。
+
+**教训**：请求级可控量落到 rmtree / 写 / exec 等 sink，先锚定受信根再做 resolve 后严格子路径校验，sink 处
+二次校验防 TOCTOU。dev 领先 main **9 个 commit**（前 8 + 本次 #34）；High 余 **#36 / #37**，整批进 dev 后
+一个 release PR 收口 dev→main。

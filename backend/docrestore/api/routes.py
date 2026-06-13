@@ -78,6 +78,10 @@ from docrestore.pipeline.config import (
     PIIConfig,
     PowerPointRestoreConfig,
 )
+from docrestore.pipeline.path_guard import (
+    OutputDirRejected,
+    validate_output_dir,
+)
 from docrestore.processing.content_crop import (
     DegenerateQuadError,
     crop_quad_to_images,
@@ -587,6 +591,29 @@ def _resolve_ocr_config(
     return ocr_cfg
 
 
+def _resolve_output_dir(req: CreateTaskRequest) -> str | None:
+    """归一并校验请求级 ``output_dir``（#34 边界守卫）。
+
+    空串 / 纯空白 → ``None``：交给 ``create_task`` 生成服务端安全默认
+    ``{tempdir}/docrestore_{id}``。用户显式指定的必须落在受信工作根下，越界即抛
+    ``ApiBusinessError(OUTPUT_DIR_REJECTED, 400)`` fail-fast 不建任务——否则该目录
+    会在任务删除时被 ``rmtree`` 递归删除。这里只做"准入校验"，透传去空白后的原始
+    路径串（不改写路径形态，删除 sink 会再二次解析校验兜底 TOCTOU）。
+    """
+    output_dir = (req.output_dir or "").strip() or None
+    if output_dir is None:
+        return None
+    try:
+        validate_output_dir(output_dir)
+    except OutputDirRejected as exc:
+        raise ApiBusinessError(
+            APIErrorCode.OUTPUT_DIR_REJECTED, 400,
+            f"输出目录被安全策略拒绝：{exc}",
+            params={"reason": str(exc)},
+        ) from exc
+    return output_dir
+
+
 @router.post("/tasks", response_model=TaskResponse)
 async def create_task(
     req: CreateTaskRequest,
@@ -650,9 +677,13 @@ async def create_task(
             "代码模式与 PPT 模式不能同时启用",
         )
 
+    # output_dir 边界守卫（#34）：越界 400 不建任务，否则该目录会在任务删除时
+    # 被 rmtree（任意目录递归删除）。详见 _resolve_output_dir。
+    output_dir = _resolve_output_dir(req)
+
     task = manager.create_task(
         image_dir=req.image_dir,
-        output_dir=req.output_dir,
+        output_dir=output_dir,
         llm=llm_cfg,
         ocr=ocr_cfg,
         pii=pii_cfg,
