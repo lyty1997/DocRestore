@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Sequence
 from contextlib import suppress
@@ -162,6 +163,9 @@ class TaskDatabase:
 
         await self._db.commit()
 
+        # 清洗历史明文 api_key（#37）：旧版曾把含 key 的 LLMConfig 整体入库。
+        await self._scrub_persisted_api_keys()
+
         # 将中断的任务标记为失败
         await self._recover_interrupted()
 
@@ -214,7 +218,15 @@ class TaskDatabase:
                 status,
                 image_dir,
                 output_dir,
-                llm.model_dump_json() if llm is not None else None,
+                # api_key 绝不落库（#37）：明文持久化 = 长期凭据泄漏面（备份/
+                # 快照/误传 DB 均带 key）。resume/水合时由
+                # llm.credentials.refill_api_key_from_env 从环境补回。其余
+                # Config 当前无凭据字段（config.py 审计：唯一凭据即 llm.api_key）。
+                (
+                    llm.model_dump_json(exclude={"api_key"})
+                    if llm is not None
+                    else None
+                ),
                 ocr.model_dump_json() if ocr is not None else None,
                 pii.model_dump_json() if pii is not None else None,
                 code.model_dump_json() if code is not None else None,
@@ -442,6 +454,38 @@ class TaskDatabase:
         if cursor.rowcount > 0:
             logger.info("已将 %d 个中断任务标记为失败", cursor.rowcount)
         await db.commit()
+
+    async def _scrub_persisted_api_keys(self) -> None:
+        """清洗历史明文 ``api_key``（#37）：抹掉已落库 ``tasks.llm`` 内的 key。
+
+        旧版本曾把含明文 ``api_key`` 的 ``LLMConfig`` 整体序列化入库，旧记录及
+        其备份/快照长期留存凭据。启动时一次性把 key 字段从 JSON 中移除（与新写
+        入的 ``exclude={"api_key"}`` 格式一致）。幂等：已无 key 的行不重写；JSON
+        损坏的行跳过（交由 ``_row_to_task`` 的容错分支处理）。
+        """
+        db = self._get_db()
+        cursor = await db.execute(
+            "SELECT task_id, llm FROM tasks "
+            "WHERE llm IS NOT NULL AND llm != ''",
+        )
+        rows = await cursor.fetchall()
+        scrubbed = 0
+        for row in rows:
+            try:
+                data = json.loads(row[1])
+            except (TypeError, ValueError):
+                continue  # 损坏 JSON 行跳过，不阻断启动
+            if not isinstance(data, dict) or not data.get("api_key"):
+                continue  # 已干净 / 非对象，无需重写
+            data.pop("api_key", None)
+            await db.execute(
+                "UPDATE tasks SET llm=? WHERE task_id=?",
+                (json.dumps(data, ensure_ascii=False), row[0]),
+            )
+            scrubbed += 1
+        if scrubbed:
+            logger.info("已清洗 %d 条历史任务的明文 api_key（#37）", scrubbed)
+            await db.commit()
 
     @staticmethod
     def _row_to_task(row: aiosqlite.Row) -> TaskRow:

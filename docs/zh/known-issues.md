@@ -652,3 +652,32 @@ tests/api + tests/pipeline 全量 **425 passed 17 skipped** + mypy --strict + ru
 **教训**：凡「请求级可控 → 落到 rmtree / 写文件 / exec 等 sink」的路径量，都要先锚定**受信根**再做 `resolve()`
 后的严格子路径校验，且 sink 处二次校验防 TOCTOU（建时校验只挡正门，符号链接 / DB 篡改靠 sink 兜底）。
 只读输入与可删输出要分开对待——别给只读输入也一刀切套删除边界。
+
+## api_key 明文持久化进 SQLite（#37，已修复 2026-06-14）
+
+**现象**：创建任务时 `LLMConfig`（含用户 `api_key`）整体 `model_dump_json()` 落库到 `tasks.llm` 列
+（`persistence/database.py`）。API 响应面虽不回显 key，但 **DB 文件 / 备份 / 快照 / 误共享即泄漏长期凭据**。
+
+**根因**：持久化层把配置快照「整体序列化」时未区分「业务配置」与「凭据字段」——`api_key` 是运行期凭据，
+不该和 model / timeout 等配置一起落盘。
+
+**修复**（落库排除 + 水合回填 + 存量清洗）：
+- **落库排除**：`insert_task` 改 `llm.model_dump_json(exclude={"api_key"})`——key 字段根本不进 DB。全量
+  审计确认 `LLMConfig.api_key` 是 `config.py` 里**唯一**凭据字段（OCR / PII / code / ppt 均无），故只锁它。
+- **水合回填**：新增 `llm/credentials.py::refill_api_key_from_env`——从 DB 还原（重启水合 / resume）出的
+  `LLMConfig` 其 key 为空，仅当为空时从环境 `DOCRESTORE_LLM_API_KEY` 回填（`model_copy` 返回新对象，
+  不覆盖显式 key、不原地改）。两个水合点（`load_persisted_tasks` / `get_task_async`）统一过它——resume
+  走的 `task.llm` 因此运行期可用。环境变量名常量与 `app.py` 启动回填共用单一真相源。
+- **存量清洗**：`initialize` 阶段 `_scrub_persisted_api_keys` 把历史行 `tasks.llm` 内已落的明文 key 从
+  JSON 中移除（幂等：已干净行不重写；JSON 损坏行跳过），清除「备份之外、仍在主库里」的存量泄漏面。
+
+**resume 凭据契约**：api_key 不再持久化 → **resume / 重启后必须能从环境拿到 key**。运维须把云端 key 配在
+环境（litellm 直读的 `OPENAI_API_KEY` 等，或 `DOCRESTORE_LLM_API_KEY`），别指望「请求体传一次 key」跨重启。
+
+**验证**：`tests/persistence/test_database.py`（落库 raw 串无 key / 启动清洗存量 / scrub 幂等且容错损坏行）+
+`tests/llm/test_credentials.py`（4 例：空才回填 / 显式 key 不被覆盖 / 无环境 / 空白环境）+
+`test_task_manager.py::test_get_task_async_refills_api_key_from_env`（端到端：落库无 key、水合回填环境 key）。
+受影响模块全绿（persistence + llm + pipeline + api，mypy --strict + ruff + typos）。
+
+**教训**：持久化「配置快照」时必须把**凭据字段从序列化中剔除**（`exclude`），凭据走环境变量在运行期回填——
+落盘的应是「可分享的配置」，不含「不可分享的密钥」。且要给存量数据补一次性清洗，否则只修了新写入、老泄漏仍在。

@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import aiosqlite
 import pytest
 
 from docrestore.persistence.database import TaskDatabase
@@ -272,3 +273,116 @@ async def test_complete_task_with_results_empty(db: TaskDatabase) -> None:
     assert row.status == "failed"
     assert row.error == "boom"
     assert await db.get_results("t_empty") == []
+
+
+async def test_insert_task_excludes_api_key(tmp_path: Path) -> None:
+    """#37：含 api_key 的 LLMConfig 落库后，raw llm 列不含明文 key。"""
+    db_path = str(tmp_path / "exclude.db")
+    db = TaskDatabase(db_path)
+    await db.initialize()
+    planted = "sk-planted-aaa"
+    try:
+        await db.insert_task(
+            task_id="k001", status="pending",
+            image_dir="/img", output_dir="/out",
+            llm=LLMConfig(model="gpt-4", api_key=planted),
+        )
+    finally:
+        await db.close()
+
+    # 独立连接读 raw 列：明文 key 与 api_key 字段都不应存在
+    async with aiosqlite.connect(db_path) as conn:
+        cursor = await conn.execute(
+            "SELECT llm FROM tasks WHERE task_id=?", ("k001",),
+        )
+        fetched = await cursor.fetchone()
+    assert fetched is not None
+    raw = fetched[0]
+    assert planted not in raw
+    assert "api_key" not in raw
+    assert "gpt-4" in raw  # 其余字段照常落库
+
+
+async def test_scrub_persisted_api_keys(tmp_path: Path) -> None:
+    """#37：启动清洗存量明文 key——旧行 llm JSON 含 key，重启后被抹。"""
+    db_path = str(tmp_path / "legacy.db")
+    db = TaskDatabase(db_path)
+    await db.initialize()
+    await db.insert_task(
+        task_id="legacy1", status="completed",
+        image_dir="/img", output_dir="/out",
+        llm=LLMConfig(model="gpt-4"),
+    )
+    await db.close()
+
+    # 伪造"旧版"行：llm JSON 内联明文 api_key（绕过新版 exclude）
+    planted = "sk-planted-bbb"
+    legacy_json = LLMConfig(
+        model="gpt-4", api_key=planted,
+    ).model_dump_json()
+    assert planted in legacy_json  # 前置：构造的旧串确实含明文
+    async with aiosqlite.connect(db_path) as conn:
+        await conn.execute(
+            "UPDATE tasks SET llm=? WHERE task_id=?",
+            (legacy_json, "legacy1"),
+        )
+        await conn.commit()
+
+    # 重新打开 → initialize 触发 scrub
+    db2 = TaskDatabase(db_path)
+    await db2.initialize()
+    try:
+        row = await db2.get_task("legacy1")
+        assert row is not None
+        assert row.llm is not None
+        assert row.llm.api_key == ""     # 明文 key 已抹
+        assert row.llm.model == "gpt-4"  # 其它字段完好
+    finally:
+        await db2.close()
+
+    # raw 串里也不再有明文 / api_key 字段
+    async with aiosqlite.connect(db_path) as conn:
+        cursor = await conn.execute(
+            "SELECT llm FROM tasks WHERE task_id=?", ("legacy1",),
+        )
+        fetched = await cursor.fetchone()
+    assert fetched is not None
+    assert planted not in fetched[0]
+    assert "api_key" not in fetched[0]
+
+
+async def test_scrub_skips_clean_and_corrupt_rows(tmp_path: Path) -> None:
+    """#37：scrub 幂等且鲁棒——已无 key 行与损坏 JSON 行都不致启动失败。"""
+    db_path = str(tmp_path / "mixed.db")
+    db = TaskDatabase(db_path)
+    await db.initialize()
+    await db.insert_task(
+        task_id="clean1", status="pending",
+        image_dir="/img", output_dir="/out",
+        llm=LLMConfig(model="gpt-4"),  # 已无 key（新版写入）
+    )
+    await db.close()
+
+    # 注入一行损坏 JSON，scrub 应跳过而非抛
+    async with aiosqlite.connect(db_path) as conn:
+        await conn.execute(
+            "INSERT INTO tasks "
+            "(task_id, status, image_dir, output_dir, llm, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "corrupt1", "failed", "/img", "/out", "{not valid json",
+                "2026-06-14T00:00:00", "2026-06-14T00:00:00",
+            ),
+        )
+        await conn.commit()
+
+    # 重新 initialize 不应抛（scrub 跑过损坏行）
+    db2 = TaskDatabase(db_path)
+    await db2.initialize()
+    try:
+        clean = await db2.get_task("clean1")
+        assert clean is not None
+        assert clean.llm is not None
+        assert clean.llm.model == "gpt-4"
+    finally:
+        await db2.close()
