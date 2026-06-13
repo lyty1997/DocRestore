@@ -22,7 +22,8 @@ from docrestore.llm.code_refine import (
     CodeRefineResult,
     _extract_json_payload,
 )
-from docrestore.pipeline.config import LLMConfig
+from docrestore.pipeline.config import LLMConfig, PIIConfig
+from docrestore.privacy.redactor import PIIRedactor
 from docrestore.processing.code_assembly import CodeColumn, CodeLine
 from docrestore.processing.code_file_grouping import PageColumn, SourceFile
 from docrestore.processing.ide_meta_extract import IDEMeta
@@ -367,3 +368,32 @@ class TestRewriteMode:
         """非法 mode 直接抛 ValueError"""
         with pytest.raises(ValueError, match="mode"):
             CodeLLMRefiner(BaseLLMRefiner(LLMConfig()), mode="bogus")
+
+
+class TestRefineRedactsFilePath:
+    """#36：file_path（source.path）拼进云端 prompt 前脱敏。"""
+
+    @pytest.mark.asyncio
+    async def test_file_path_redacted_in_refine_prompt(self) -> None:
+        """开 PII 时 refine prompt 里 file_path 的结构化 PII 已脱敏，原文不外发
+        （merged_code 已在更上游由 _redact_code_pii 脱过）。"""
+        cfg = PIIConfig(enable=True)
+        redactor = PIIRedactor(cfg)
+
+        def redact(text: str) -> str:
+            return redactor.redact_regex_only(text)[0]
+
+        base = BaseLLMRefiner(LLMConfig())
+        base._call_llm = AsyncMock(  # type: ignore[method-assign]
+            return_value=_mock_response('{"corrected_code": "x = 1\\n"}'),
+        )
+        refiner = CodeLLMRefiner(base, redact=redact)
+        # path 含结构化 PII（手机号），证明 file_path 也过 redact
+        source = _make_source("x = 1\n", path="users/13800138000/foo.cc")
+        await refiner.refine(source)
+
+        base._call_llm.assert_awaited_once()
+        kwargs = base._call_llm.call_args.args[0]
+        sent = json.dumps(kwargs["messages"], ensure_ascii=False)
+        assert "13800138000" not in sent
+        assert cfg.phone_placeholder in sent

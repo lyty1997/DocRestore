@@ -207,7 +207,32 @@ MergedDocument（合并后）
   检测开关 / PPT 输出兜底 / 关脱敏零改动且不调检测）；`check_quality.sh` 全绿
   （pytest 1025 passed）。
 
-## 10. 相关文档
+## 10. 上云前脱敏多路绕过修复（#36 · 2026-06-14）
+
+> 来源：2026-06-13 安全审查（High）。§9 落地后仍有三条路径绕过「上云前脱敏」。标准部署（启动级 `PIIConfig.enable=False`、前端按单次任务开 PII）下用户以为开了 PII，实则多路失效。
+
+### 10.1 三条绕过路径与修复
+
+| # | 绕过点 | 现象 | 修复 |
+|---|---|---|---|
+| ① | `_redact_code_pii`（代码模式 header 实体检测） | `combined` 用**原始** header 拼接后 `detect_pii_entities(combined)` 云端调用，结构化 PII 的 regex 脱敏在该调用**之后**才执行 → 注释里 `Author: 张三 <a@corp.com>` 的邮箱/手机随 combined 裸送云端 | 拼 `combined` **前**先对每个 header `redact_regex_only`（结构化 PII / 凭据 / 自定义词先掉）；人名不被 regex 触及，实体检测仍正常 |
+| ② | `_finalize_single_doc`(:2177) / `_fill_one_gap`(:3047) | 读 `self._config.pii`（启动默认 `enable=False`）而非**请求级** `pii_cfg` → 用户单次开 PII 走请求级，这两个 gate 恒 False → gap-fill re-OCR 文本（绕过 producer 逐页 regex 的全新文本）与最终输出实体兜底**不脱敏** | `pii_cfg` 一路透传 `_stream_process → _finalize_single_doc → _maybe_fill_gaps → _fill_gaps → _fill_one_gap`，全程用请求级配置，禁止回落 `self._config.pii` |
+| ③ | 代码 prompt 的 `file_path` / `related_snippets`（含外部 `context_root` 片段）/ `path_candidates` / `diagnostics` | refine/rewrite/repair/audit prompt 把上述字段拼进云端调用，未脱敏；其中 repair 诊断在脱敏前算（g++ `summary=output[:1000]` 带 caret 时回显含 PII 的源码行） | 请求级 `pii_cfg` 建 `redact_regex_only` 函数下传三类 refiner；在 `json.dumps` **之前**对这些字段按字段脱敏 |
+
+### 10.2 关键设计
+
+- **请求级配置单一真相源**：`pii_cfg = pii or self._config.pii`（`_stream_pipeline`）一次解析后，三模式分支与所有下游 helper 全用 `pii_cfg`；启动级 `self._config.pii` 仅作为「请求未带」时的回退默认，不在任何 helper 里二次读取。
+- **代码 prompt 先脱后序列化**：vector ③ 的脱敏发生在构造 dataclass / 拼 f-string **之前**，`json.dumps` 随后对占位符里任何引号（用户可自定义 placeholder / custom word code）正确转义 → 绝不破坏 JSON。snippets / path / diagnostics 只 `redact_regex_only`（结构化 PII + 凭据 + 自定义词，**不做实体替换**，避免误伤 import 路径 / namespace / 标识符，与 `_redact_code_pii` 正文处理同口径）。
+- **PPT 模式经核查为干净**：`_ppt_pipeline` 自 §9 起即正确透传 `pii_cfg`、producer 逐页 regex、每页精修前 `redact_snippet`、组装兜底 + fail-closed，无 `self._config.pii` 误读，本次不改。
+
+### 10.3 验收（已实现，2026-06-14）
+
+- [x] ②：请求级开 PII（`self._config.pii.enable=False`）时 gap-fill re-OCR 文本与最终输出确被脱敏 —— `test_request_level_pii_redacts_reocr_text` / `test_finalize_output_uses_request_pii_when_startup_off`（含「回退 bug 必失败」反验证）。
+- [x] ①：header 含 `<a@corp.com>` 时送 `detect_pii_entities` 的入参邮箱 / 手机已掩码、人名仍保留 —— `test_header_structured_pii_masked_before_detect`。
+- [x] ③：`file_path` / 外部参考片段 / `diagnostics` 里结构化 PII 在 prompt 中已脱敏且产物仍是合法 JSON —— `test_redact_masks_prompt_fields` / `test_file_path_redacted_in_refine_prompt` + 对照 `test_no_redact_leaves_prompt_fields_raw`。
+- [x] 门禁：`mypy --strict` / `ruff` / `typos` 全绿；PII + 代码模式相关测试 140 passed。
+
+## 11. 相关文档
 
 - [数据模型](data-models.md) - `RedactionRecord`, `PIIConfig`
 - [LLM 层](llm.md) - `CloudLLMRefiner.detect_pii_entities()`

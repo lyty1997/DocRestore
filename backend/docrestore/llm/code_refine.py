@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -39,6 +40,11 @@ if TYPE_CHECKING:
     from docrestore.processing.code_file_grouping import SourceFile
 
 logger = logging.getLogger(__name__)
+
+#: 文本→文本 的脱敏函数（通常是 ``PIIRedactor.redact_regex_only`` 的文本投影）。
+#: 用于把 ``file_path`` / 源码片段拼进云端 prompt 前做结构化 PII + 凭据/token +
+#: 自定义词脱敏（#36）。``None`` 表示未开 PII，原样不脱。
+RedactText = Callable[[str], str]
 
 _REFINE_CHUNK_MAX_CHARS = 3500
 _REFINE_CHUNK_MAX_LINES = 80
@@ -92,13 +98,22 @@ class CodeLLMRefiner:
         输出行数可不等于输入；解析键 ``rewritten_code``、``summary``
     """
 
-    def __init__(self, base: BaseLLMRefiner, *, mode: str = "refine") -> None:
+    def __init__(
+        self,
+        base: BaseLLMRefiner,
+        *,
+        mode: str = "refine",
+        redact: RedactText | None = None,
+    ) -> None:
         self._base = base
         if mode not in ("refine", "rewrite"):
             raise ValueError(
                 f"CodeLLMRefiner mode 必须是 refine|rewrite，收到 {mode!r}"
             )
         self._mode = mode
+        # #36：把 file_path（source.path）拼进云端 prompt 前的脱敏函数；
+        # None = 未开 PII，不脱。merged_code 已由 _redact_code_pii 在更上游脱过。
+        self._redact = redact
 
     @property
     def mode(self) -> str:
@@ -153,15 +168,17 @@ class CodeLLMRefiner:
     ) -> CodeRefineResult:
         """对一段代码做单次 LLM 修正。"""
 
+        # #36：file_path 拼进云端 prompt 前脱敏（merged 已在 _redact_code_pii 脱过）
+        file_path = self._redact(source.path) if self._redact else source.path
         if self._mode == "rewrite":
             messages = build_code_rewrite_prompt(
-                file_path=source.path,
+                file_path=file_path,
                 language=source.language,
                 merged_code=merged,
             )
         else:
             messages = build_code_refine_prompt(
-                file_path=source.path,
+                file_path=file_path,
                 language=source.language,
                 merged_code=merged,
             )

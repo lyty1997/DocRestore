@@ -195,6 +195,38 @@ class TestRedactCodePii:
         assert "xuantie_ext" in src.merged_text
 
     @pytest.mark.asyncio
+    async def test_header_structured_pii_masked_before_detect(self) -> None:
+        """#36：header 拼 combined 送 detect_pii_entities（云端）**前**，结构化
+        PII（邮箱/手机）已被 regex 脱敏；人名不被 regex 触及，仍保留供实体检测。
+        """
+        src = _build_source(
+            "// Copyright 2024 ACME\n"
+            "// Author: 张三 <zhangsan@acme.com> 13800138000\n"
+            "int x = 1;\n",
+        )
+        pii_cfg = PIIConfig(enable=True, redact_person_name=True)
+        captured: list[str] = []
+
+        async def _capture(text: str) -> tuple[list[str], list[str]]:
+            captured.append(text)
+            return (["张三"], [])
+
+        refiner = AsyncMock()
+        refiner.detect_pii_entities = AsyncMock(side_effect=_capture)
+        pipe = Pipeline.__new__(Pipeline)
+        await pipe._redact_code_pii([src], pii_cfg, refiner=refiner)
+
+        # detect_pii_entities 被调用，且送云端的文本里已无明文邮箱/手机
+        assert len(captured) == 1
+        sent = captured[0]
+        assert "zhangsan@acme.com" not in sent
+        assert "13800138000" not in sent
+        # 已替换为请求级 PIIConfig 占位符（派生自配置，非硬编码字面量）
+        assert pii_cfg.email_placeholder in sent
+        # 人名未被结构化 regex 触及，仍在送检文本里（实体检测据此工作）
+        assert "张三" in sent
+
+    @pytest.mark.asyncio
     async def test_disabled_short_circuit(self) -> None:
         src = _build_source("// alice@acme.com\nint x = 1;\n")
         original = src.merged_text

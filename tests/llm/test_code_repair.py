@@ -26,10 +26,14 @@ from docrestore.llm.code_repair import (
     parse_consistency_audit_response,
     parse_repair_response,
 )
-from docrestore.pipeline.config import LLMConfig
+from docrestore.pipeline.config import LLMConfig, PIIConfig
+from docrestore.privacy.redactor import PIIRedactor
 from docrestore.processing.code_assembly import CodeColumn, CodeLine
 from docrestore.processing.code_context import LocalCodeContextProvider
-from docrestore.processing.code_diagnostics import CodeDiagnostic
+from docrestore.processing.code_diagnostics import (
+    CodeDiagnostic,
+    CodeDiagnosticItem,
+)
 from docrestore.processing.code_file_grouping import PageColumn, SourceFile
 from docrestore.processing.ide_meta_extract import IDEMeta, PathCandidate
 
@@ -129,6 +133,72 @@ class TestRepairContext:
         )
         assert "reference: src/foo.py" in contexts[0].related_snippets[0]
         assert "helper_symbol" in contexts[0].related_snippets[0]
+
+    def test_redact_masks_prompt_fields(self, tmp_path: Path) -> None:
+        """#36：redact 非空时，repair context 拼进云端 prompt 的 file_path /
+        related_snippets（含外部参考片段）/ diagnostics 均已脱敏，且仍是合法 JSON。
+        """
+        cfg = PIIConfig(enable=True)
+        redactor = PIIRedactor(cfg)
+
+        def redact(text: str) -> str:
+            return redactor.redact_regex_only(text)[0]
+
+        # 外部参考源码树放含邮箱的片段（context_root 外发，vector ③b）
+        ref = tmp_path / "src" / "foo.py"
+        ref.parent.mkdir()
+        ref.write_text(
+            "def helper_symbol():\n"
+            "    # owner: leaker@corp.example\n"
+            "    return 1\n",
+            encoding="utf-8",
+        )
+        source = _source("def run():\n    return helper_symbol(")
+        source.path = "users/13800138000/foo.py"  # path 里塞结构化 PII（手机号）
+        # 诊断 summary/message 模拟编译器 caret 回显含邮箱的源码行（发现的额外泄漏）
+        diag = CodeDiagnostic(
+            path="users/13800138000/foo.py",
+            language="python", status="syntax_dirty", category="syntax",
+            summary="error: stray 'maintainer@corp.example'",
+            failing_lines=[2], syntax_errors=1,
+            items=[CodeDiagnosticItem(
+                line=2, message="near contact@corp.example",
+            )],
+        )
+        contexts = build_repair_contexts(
+            source, [diag], related_sources=[],
+            context_provider=LocalCodeContextProvider(tmp_path),
+            window_radius=1, redact=redact,
+        )
+        prompt_json = contexts[0].to_prompt_json()
+        # 明文 PII 一律不得出现在送云端的 prompt 里（file_path / 片段 / 诊断三处）
+        for leaked in (
+            "leaker@corp.example", "maintainer@corp.example",
+            "contact@corp.example", "13800138000",
+        ):
+            assert leaked not in prompt_json
+        # 占位符出现（派生自配置），且产物仍是合法 JSON（先脱后序列化的保证）
+        assert cfg.email_placeholder in prompt_json
+        assert cfg.phone_placeholder in prompt_json
+        json.loads(prompt_json)  # 不抛 = JSON 结构完好
+
+    def test_no_redact_leaves_prompt_fields_raw(self, tmp_path: Path) -> None:
+        """对照：redact=None（未开 PII）→ 外部参考片段保持原文，行为不变。"""
+        ref = tmp_path / "src" / "foo.py"
+        ref.parent.mkdir()
+        ref.write_text(
+            "def helper_symbol():\n"
+            "    # owner: leaker@corp.example\n"
+            "    return 1\n",
+            encoding="utf-8",
+        )
+        source = _source("def run():\n    return helper_symbol(")
+        contexts = build_repair_contexts(
+            source, [_diag(2)], related_sources=[],
+            context_provider=LocalCodeContextProvider(tmp_path),
+            window_radius=1,
+        )
+        assert "leaker@corp.example" in contexts[0].related_snippets[0]
 
 
 class TestScopedPatch:

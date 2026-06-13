@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from docrestore.models import Gap, MergedDocument
-from docrestore.pipeline.config import LLMConfig, PipelineConfig
+from docrestore.pipeline.config import LLMConfig, PIIConfig, PipelineConfig
 from docrestore.pipeline.pipeline import Pipeline
 
 
@@ -127,6 +127,7 @@ class TestFillGaps:
         result_doc, filled = await pipeline._fill_gaps(
             doc, [gap], page_map, page_order,
             None, refiner, lambda *_a, **_kw: None,
+            pii_cfg=PIIConfig(),
         )
 
         assert filled == 1
@@ -163,6 +164,7 @@ class TestFillGaps:
         result_doc, filled = await pipeline._fill_gaps(
             doc, [gap], {}, [],
             None, refiner, lambda *_a, **_kw: None,
+            pii_cfg=PIIConfig(),
         )
 
         assert filled == 0
@@ -190,6 +192,7 @@ class TestFillGaps:
             {"p1.jpg": Path("/imgs/p1.jpg")},
             ["p1.jpg"],
             None, refiner, lambda *_a, **_kw: None,
+            pii_cfg=PIIConfig(),
         )
 
         assert filled == 0
@@ -214,6 +217,7 @@ class TestFillGaps:
             {"p1.jpg": Path("/p1.jpg"), "p2.jpg": Path("/p2.jpg")},
             ["p1.jpg", "p2.jpg"],
             None, refiner, lambda *_a, **_kw: None,
+            pii_cfg=PIIConfig(),
         )
 
         assert filled == 0
@@ -261,6 +265,7 @@ class TestFillGaps:
         await pipeline._fill_gaps(
             doc, [gap1, gap2], page_map, page_order,
             None, refiner, lambda *_a, **_kw: None,
+            pii_cfg=PIIConfig(),
         )
 
         # 每个独立路径只 re-OCR 一次
@@ -304,6 +309,7 @@ class TestFillGaps:
         result = await pipeline._maybe_fill_gaps(
             doc, [gap], pages, Path("/out"),
             None, None, lambda *_a, **_kw: None,
+            pii_cfg=PIIConfig(),
         )
 
         # 直接返回原文档
@@ -335,6 +341,7 @@ class TestFillGaps:
         result = await pipeline._maybe_fill_gaps(
             doc, [gap], pages, Path("/out"),
             None, None, lambda *_a, **_kw: None,
+            pii_cfg=PIIConfig(),
         )
 
         assert result.markdown == "content"
@@ -358,7 +365,53 @@ class TestFillGaps:
             {"last.jpg": Path("/last.jpg")},
             ["last.jpg"],
             None, refiner, lambda *_a, **_kw: None,
+            pii_cfg=PIIConfig(),
         )
 
         assert filled == 1
         assert result_doc.markdown.rstrip().endswith("末尾补充")
+
+    @pytest.mark.asyncio
+    async def test_request_level_pii_redacts_reocr_text(self) -> None:
+        """#36：请求级开 PII 时，gap 补全的 re-OCR 文本送 fill_gap 云端前必须脱敏。
+
+        关键场景：启动级 ``self._config.pii.enable=False``（标准部署默认），用户
+        为单次任务在前端开 PII → 走请求级 ``pii_cfg``。旧 bug 在 _fill_one_gap
+        读 self._config.pii（恒 False），re-OCR 产生的全新文本（绕过 producer 逐页
+        regex）带结构化 PII 裸送云端。修复后用请求级 pii_cfg 脱敏。
+        """
+        pipeline = _make_pipeline()
+        # 前提：启动级 PII 关闭——旧 bug 读它则恒不脱敏
+        assert pipeline.config.pii.enable is False
+
+        # 构造含结构化 PII 的 re-OCR 文本（断言从输入派生，不写死占位符字面量）
+        raw_phone = "13800138000"
+        raw_email = "dev@corp.example"
+        reocr_text = f"联系 {raw_phone} 邮箱 {raw_email}"
+
+        engine = _make_mock_ocr_engine(reocr_result=reocr_text)
+        refiner = _make_mock_refiner(fill_result="补充")
+        pipeline.set_ocr_engine(engine)
+        pipeline.set_refiner(refiner)
+
+        doc = MergedDocument(markdown=_make_doc_with_markers(["p1.jpg"]))
+        gap = _make_gap(after_image="p1.jpg")
+
+        await pipeline._fill_gaps(
+            doc, [gap],
+            {"p1.jpg": Path("/p1.jpg")},
+            ["p1.jpg"],
+            None, refiner, lambda *_a, **_kw: None,
+            pii_cfg=PIIConfig(enable=True),  # 请求级开 PII
+        )
+
+        # fill_gap(gap, current_text, next_page_text, next_page_name)
+        refiner.fill_gap.assert_awaited_once()
+        sent_current = refiner.fill_gap.await_args.args[1]
+        # 原始结构化 PII 不得出现在送云端的文本里
+        assert raw_phone not in sent_current
+        assert raw_email not in sent_current
+        # 已替换为请求级 PIIConfig 的占位符（派生自配置，非硬编码字面量）
+        cfg = PIIConfig(enable=True)
+        assert cfg.phone_placeholder in sent_current
+        assert cfg.email_placeholder in sent_current
