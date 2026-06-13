@@ -123,7 +123,7 @@ bash scripts/start.sh frontend  # 前端页面：http://localhost:5173
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `BACKEND_HOST` | `0.0.0.0` | 后端监听地址 |
+| `BACKEND_HOST` | `127.0.0.1` | 后端监听地址。默认仅本机；要让手机/局域网设备访问改 `0.0.0.0`，此时务必配 token（见 §3.5） |
 | `BACKEND_PORT` | `8000` | 后端监听端口 |
 | `FRONTEND_PORT` | `5173` | 前端开发服务器端口 |
 | `PPOCR_GPU_ID` | 空（自动） | PaddleOCR server 使用的 GPU；留空时由 `gpu_detect.pick_best_gpu` 自动推荐 |
@@ -177,6 +177,50 @@ OPENAI_API_BASE=https://your-proxy.com/v1
 | llama.cpp | `llama-server -m model.gguf --port 8080` | `http://localhost:8080/v1` |
 
 本地模式下 `LocalLLMRefiner.detect_pii_entities` 默认返回空 → 跳过 LLM 实体识别，只跑 regex 脱敏；**数据不会发送到任何外部服务**。`.env` 里的 API Key 可留空。
+
+### 3.5 鉴权与网络暴露（安全）
+
+> 安全基线：**服务永不以「未鉴权」状态对外可达**（fail-closed）。这是面向「桌面服务 + 手机配对」形态设计的——手机需从局域网/远程够到桌面，所以不能用「仅绑 loopback」来兜底，改为「默认即自动生成 token，始终强制校验」。
+
+#### Token 三种来源（按优先级）
+
+| 优先级 | 触发条件 | 行为 |
+|--------|----------|------|
+| 1 | 设置了 `DOCRESTORE_API_TOKEN`（非空） | 用该 token 校验所有 HTTP/WS 请求 |
+| 2 | 未设 token，但 `DOCRESTORE_ALLOW_INSECURE=1` | **无鉴权逃生口**：仅供本机调试，且只允许绑定 loopback（见下方 bind 守卫），否则拒绝启动 |
+| 3 | 默认（未设 token，未开 insecure） | **自动生成**强随机 device token，持久化到本地配置目录并打印；重启复用，配对的手机不失效 |
+
+device token 持久化路径（跨平台）：
+
+- Linux/macOS：`$XDG_CONFIG_HOME/docrestore/device_token`，未设 `XDG_CONFIG_HOME` 时退化 `~/.config/docrestore/device_token`
+- Windows：`%APPDATA%\docrestore\device_token`
+- 文件权限 POSIX 下 `0600`（仅 owner 读写）；落地失败则本次用内存临时 token（重启后需重新配对，会打 warning）
+
+这个自动生成的 token 即将来**手机配对二维码**里的 pairing secret——`{服务地址, token}` 扫码即配对，传输层（mesh/中继）后续叠加，鉴权模型不变。
+
+#### 请求携带 token
+
+- HTTP：`Authorization: Bearer <token>`（标准），或 `?token=<token>` query（`<img src>` / `<a href>` 等无法设 Header 的场景）
+- WebSocket：仅 `?token=<token>`（浏览器原生 WS API 不支持自定义 Header）
+- 缺/错 token → `401 UNAUTHORIZED`（结构化错误体）
+
+#### bind 守卫（防误开放）
+
+`DOCRESTORE_ALLOW_INSECURE=1`（无鉴权）时，启动校验绑定地址 `DOCRESTORE_BIND_HOST`（由 `start.sh` 导出）：
+
+- 环回（`127.0.0.1` / `::1` / `localhost`）→ 放行，打高危 warning
+- 非环回（`0.0.0.0` / 局域网 IP 等）→ **拒绝启动**，提示「要对外暴露请配置 `DOCRESTORE_API_TOKEN`」
+- `DOCRESTORE_BIND_HOST` 未设（如直接 `uvicorn` 起、无法判定）→ 放行但打 warning，提醒 insecure 仅应用于 loopback
+
+有 token（模式 1 或 3）时，绑任意地址都安全（每个请求都校验），手机/局域网访问直接配 `BACKEND_HOST=0.0.0.0` 即可。
+
+#### CORS
+
+API 默认**不挂** CORS 中间件（最严格：浏览器跨源请求被拦）。主要客户端是手机 App / 同源 Web UI，通常无需 CORS。确有浏览器跨源场景时，用 `DOCRESTORE_CORS_ORIGINS`（逗号分隔的 origin allowlist）显式放行，默认空=不放行任何跨源。
+
+#### 与安全审查 issue #35 的偏离说明
+
+issue #35 原修复方案写的是「未配 token 时仅绑 loopback 或拒启」。因产品方向（桌面服务 + 手机配对需 LAN/远程可达），纯 loopback 会挡掉手机端，故改为**等价或更强**的「默认自动生成 token + 始终 fail-closed」：任何路径都不会出现「未鉴权且对外可达」，loopback-only 仅保留为 insecure 逃生口的约束。
 
 ## 4. OCR 引擎配置
 

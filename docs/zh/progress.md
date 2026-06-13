@@ -1833,3 +1833,29 @@ ultrareview 复审指出仍剩一个同类高危：C/C++ 中和逻辑只认 `#in
 
 **遗留**：security_audit_2026_06_13 清单里的 High（paddle_python exec / SSRF / output_dir rmtree /
 默认放行鉴权 / PII 上云脱敏绕过 / api_key 明文入库）尚未处理，另行排期。
+
+## 2026-06-13 - 安全审查 #35：默认放行鉴权 → fail-closed 自动生成 token + bind 守卫
+
+**背景**：security_audit High #35——未配 `DOCRESTORE_API_TOKEN` 即完全放行，叠加默认
+`BACKEND_HOST=0.0.0.0` → 开箱全网未授权可达，放大同批 RCE/SSRF/rmtree/PII 面。这是安全批次
+（LFI 已 PR #51 进 dev）的第一项 High 修复，从干净 dev 开 `bugfix/35-fail-closed-auth`。
+
+**设计偏离（用户确认）**：issue 原方案「仅绑 loopback 或拒启」会挡掉「桌面服务 + 手机配对」方向的
+手机端（手机需 LAN/远程够到桌面）。改为等价或更强的 fail-closed：默认自动生成持久 device token、
+始终强制校验、永不裸奔；loopback-only 仅保留为 insecure 逃生口的约束。详见 deployment.md §3.5。
+
+**改动**：
+- `auth.py`：`configure_auth_from_env()` 三选一（显式 token / insecure 逃生口 / 默认自动生成持久
+  token，`secrets.token_urlsafe(32)`，跨平台配置目录 + POSIX 0600）；`enforce_bind_safety()`
+  insecure+非环回拒启；保留底层 `configure_auth(token)` 不破坏现有测试。
+- `app.py::create_app`：接入解析层 + bind 守卫；可选 `DOCRESTORE_CORS_ORIGINS` allowlist（默认空）。
+- `start.sh`：默认 host 0.0.0.0 → 127.0.0.1；export `DOCRESTORE_BIND_HOST`。
+- 设计文档 `deployment.md` §3.5「鉴权与网络暴露」（三种 token 模式 + bind 守卫 + CORS + 偏离说明）。
+
+**验证**：`tests/api/test_auth.py` 19 passed（+11 新例：token 三来源 + bind 守卫）；`create_app()`
+三路集成冒烟过（显式起 / insecure+0.0.0.0 拒启 / 默认自动生成落地）；mypy --strict + ruff + typos
+全绿，tests/api 132 passed 9 skipped。详见 known-issues.md「#35」。
+
+**遗留**：High 余项 #32/#33（paddle_python RCE + api_base SSRF，同根因，建议同一 PR）、#34
+（output_dir rmtree）、#36（PII 绕过）、#37（api_key 明文）；手机配对完整传输层（二维码 + mesh/
+中继）待客户端形态敲定后单独设计。
