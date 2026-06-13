@@ -31,6 +31,7 @@ from fastapi.responses import FileResponse, Response
 from starlette.websockets import WebSocketDisconnect
 
 from docrestore.api.errors import APIErrorCode, ApiBusinessError
+from docrestore.api.url_guard import validate_outbound_api_base
 
 from docrestore.api.auth import require_auth_ws
 
@@ -542,19 +543,41 @@ def _requested_crop_boxes(
     }
 
 
+#: OCR 基础设施字段：绝不接受请求级覆盖（#32 RCE / #33 SSRF）。schema 层
+#: 已不暴露这些键，此处再做一道 sink 兜底——即便将来 OCRConfigRequest 误增
+#: 同名字段，也不会流进生效 OCRConfig（解释器/worker 脚本可控即 RCE，推理
+#: 服务地址可控即 SSRF）。这些值只取服务端配置。
+_OCR_INFRA_OVERRIDE_DENY = frozenset({
+    "paddle_python",
+    "paddle_server_python",
+    "paddle_worker_script",
+    "paddle_server_url",
+    "paddle_server_model_name",
+    "paddle_server_backend_config",
+    "deepseek_python",
+    "deepseek_worker_script",
+})
+
+
 def _resolve_ocr_config(
     req: CreateTaskRequest,
     default_ocr: OCRConfig,
 ) -> OCRConfig | None:
     """合成任务 OCR 配置：请求级覆盖 + 手动裁剪框（任务级生效）。
 
-    手动框随 OCR 配置入 DB 持久化，resume 自动沿用。
+    手动框随 OCR 配置入 DB 持久化，resume 自动沿用。基础设施字段
+    （解释器 / worker 脚本 / 推理服务地址）经 ``_OCR_INFRA_OVERRIDE_DENY``
+    剔除，绝不被请求覆盖（#32 / #33）。
     """
     ocr_cfg: OCRConfig | None = None
     if req.ocr is not None:
-        ocr_cfg = default_ocr.model_copy(
-            update=req.ocr.model_dump(exclude_none=True),
-        )
+        override = {
+            key: value
+            for key, value in req.ocr.model_dump(exclude_none=True).items()
+            if key not in _OCR_INFRA_OVERRIDE_DENY
+        }
+        if override:
+            ocr_cfg = default_ocr.model_copy(update=override)
     crop_boxes = _requested_crop_boxes(req)
     if crop_boxes:
         ocr_cfg = (ocr_cfg or default_ocr).model_copy(
@@ -579,6 +602,13 @@ async def create_task(
 
     llm_cfg: LLMConfig | None = None
     if req.llm is not None:
+        # 请求级 api_base 先过 SSRF 守卫：私网/链路本地/内网/非白名单拒，
+        # 环回放行（本地 LLM）。失败 400 fail-fast 不建任务，
+        # DNS 解析包进 to_thread（#33）。
+        if req.llm.api_base:
+            await asyncio.to_thread(
+                validate_outbound_api_base, req.llm.api_base,
+            )
         llm_cfg = defaults.llm.model_copy(
             update=req.llm.model_dump(exclude_none=True),
         )

@@ -99,6 +99,10 @@ class APIErrorCode(StrEnum):
     # ── 处理模式（文档 / 代码 / PPT 三选一互斥）──────
     MODE_CONFLICT = "MODE_CONFLICT"
 
+    # ── 出站安全（SSRF 守卫）─────────────────────────
+    #: 请求级 LLM api_base 被安全策略拒绝（私网 / 非白名单 / 非法地址）
+    LLM_API_BASE_REJECTED = "LLM_API_BASE_REJECTED"
+
 
 class ApiBusinessError(HTTPException):
     """业务异常：携带机器可读的 ``code`` + 可参数化 ``params``。

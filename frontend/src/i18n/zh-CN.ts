@@ -330,6 +330,9 @@ export const zhCN = {
 
   // ── API 业务错误（与后端 APIErrorCode 一一对应，code 小写后查 errors.api.<code>）──
   "errors.api.mode_conflict": "模式冲突：文档 / 代码 / PPT 三选一互斥",
+  "errors.api.llm_api_base_rejected":
+    "LLM 中转地址（api_base）被安全策略拒绝：必须是公网 http(s) 地址，" +
+    "或在服务端白名单内（禁止私网 / 内网 / 链路本地地址）",
   "errors.api.unauthorized": "缺少或无效的 API Token",
   "errors.api.service_not_initialized": "服务未初始化",
   "errors.api.engine_manager_not_initialized": "OCR 引擎管理器未初始化",
