@@ -21,7 +21,7 @@ DocRestore 启动脚本
 
 环境变量 (可在命令前导出覆盖默认值):
   后端:
-    BACKEND_HOST   后端监听地址 (默认 0.0.0.0)
+    BACKEND_HOST   后端监听地址 (默认 127.0.0.1 仅本机; 手机/局域网访问改 0.0.0.0 并配 DOCRESTORE_API_TOKEN)
     BACKEND_PORT   后端监听端口 (默认 8000)
   前端:
     FRONTEND_PORT  Vite dev server 端口 (默认 5173)
@@ -56,7 +56,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # 默认配置（可通过环境变量覆盖）
-BACKEND_HOST="${BACKEND_HOST:-0.0.0.0}"
+BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 
@@ -166,6 +166,9 @@ start_backend() {
 
     log "使用 conda 环境: ${backend_env}"
     conda activate "$backend_env"
+
+    # 把实际绑定地址传给后端 bind 守卫：insecure 无鉴权模式绑非环回则拒启
+    export DOCRESTORE_BIND_HOST="$BACKEND_HOST"
 
     # setsid 让 uvicorn 独立 session：SSH 断线 / VS Code 终端关闭时内核
     # 对 session leader 广播 SIGHUP 不再波及 uvicorn。start.sh 自己已 trap

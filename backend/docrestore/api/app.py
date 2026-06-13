@@ -28,8 +28,13 @@ from contextlib import asynccontextmanager
 from importlib.metadata import version as pkg_version
 
 from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-from docrestore.api.auth import configure_auth, require_auth
+from docrestore.api.auth import (
+    configure_auth_from_env,
+    enforce_bind_safety,
+    require_auth,
+)
 from docrestore.api.errors import (
     ApiBusinessError,
     api_business_error_handler,
@@ -176,7 +181,10 @@ def create_app(  # noqa: C901
     _auto_configure_paddle(config)
     _auto_configure_deepseek(config)
     _auto_configure_llm(config)
-    configure_auth(os.environ.get("DOCRESTORE_API_TOKEN", ""))
+    # 鉴权 fail-closed：显式 token / insecure 逃生口 / 默认自动生成持久 token
+    configure_auth_from_env()
+    # insecure 无鉴权模式禁止绑定非环回地址（bind host 由 start.sh 导出）
+    enforce_bind_safety()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -299,6 +307,22 @@ def create_app(  # noqa: C901
     app.add_exception_handler(
         ApiBusinessError, api_business_error_handler,  # type: ignore[arg-type]
     )
+    # CORS 默认不挂（最严格：浏览器跨源被拦）。确有跨源场景用
+    # DOCRESTORE_CORS_ORIGINS（逗号分隔 allowlist）显式放行。
+    cors_origins = [
+        origin.strip()
+        for origin in os.environ.get("DOCRESTORE_CORS_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+        logger.info("CORS allowlist 已启用: %s", cors_origins)
     _auth_deps = [Depends(require_auth)]
     app.include_router(router, prefix="/api/v1", dependencies=_auth_deps)
     app.include_router(
