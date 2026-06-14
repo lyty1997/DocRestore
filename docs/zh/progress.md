@@ -2048,3 +2048,27 @@ mypy/ruff/typos 干净。
 
 **下一步**：S3 本地 NER（LAC+GLiNER benchmark，本地优先）单独里程碑。`feature/pii-unify` 累计
 S1a+S1b+S2，暂未进 dev。
+
+## 2026-06-14 — PII 统一 S3 本地 NER 后端（选 spaCy；GLiNER/LAC 弃用）
+
+**方向**：人名/机构名检测从云端 LLM 改本地 NER，兑现「名字不出本机」。动手前调研推翻 §9 原定
+「LAC+GLiNER benchmark」——**GLiNER 弃用**（硬依赖 `transformers≥4.51.3` 撞 vllm/DeepSeek-OCR 锁定的
+`4.46.3`，装上破坏 OCR 环境）、**LAC 弃用**（2021 停更 + paddle 强耦合）；**选 spaCy CNN**（`zh/en_core_web_md`，
+禁 `trf`）零 torch/transformers 不撞 OCR venv。用户决策：双模默认 + 报错→提示→一键环境配置（点确认自动装）。
+设计文档 `docs/zh/backend/pii-local-ner.md`（已确认）。
+
+**落地（分支 `feature/pii-unify-s3` off dev）**：
+- **S3.1** `privacy/ner.py`：`SpacyEntityDetector`（进程级惰性单例，PERSON/ORG 并集去重）+ `probe_availability`
+  廉价探测（`find_spec` 不加载模型）+ `LocalEntityDetector` 协议 + `NERUnavailableError`。
+- **S3.2** `PIIGuard.detect_entities` + `PIIConfig.ner_backend(spacy|none)`/`ner_models`。
+- **S3.3** Pipeline 5 处检测改 `guard.detect_entities`（去 llm 依赖 + `asyncio.to_thread` 卸载阻塞）；
+  `_should_block_cloud` 补 `ner_backend==none` 短路；`_redact_code_pii` 去 refiner 参数。
+- **S3.4a** `GET /ner/status` + 任务创建 fail-fast 400 `NER_BACKEND_UNAVAILABLE`（`remediable=true`）。
+- **S3.4b** `NERSetupManager` 一键装包子进程（pip/spacy download 进当前 venv 免重启，concurrency 全规范
+  + 模型名白名单）+ `POST /ner/setup`/`GET /ner/setup/status`，挂 lifespan shutdown。
+
+**验证**：pipeline+privacy **328 passed**；api **204 passed**（含 ner 端点 15 例）；全量 **1327 passed**
+（3 个 DeepSeek 失败为 pre-existing 环境缺失，`git stash` 验证基线同样失败，非本次回归）；mypy/ruff/typos 干净。
+
+**下一步**：S3.5 前端一键配置 UX（截图验证）/ S3.6 `setup_ner.sh` + benchmark 留证（需装 spaCy 跑）/
+S3.7 文档收尾 + PR base dev。云端 `detect_pii_entities` 暂留待 S4 清理。
