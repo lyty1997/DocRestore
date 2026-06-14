@@ -2083,3 +2083,15 @@ S3.7 文档收尾 + PR base dev。云端 `detect_pii_entities` 暂留待 S4 清�
 **验证**：新增 `tests/components/TaskFormNer.test.tsx` 4 例（注入 mock，不依赖真实 spaCy）+ 既有 `TaskForm.test.tsx` mock 补 3 函数；前端门禁全绿（vitest **115 passed** / `tsc -b` / `eslint`）。Playwright 对真实后端（insecure 本机）实测：告警态、安装态（流式 pip 下载日志）两屏 live 通过；就绪态由 unit test 覆盖（真实模型走 GitHub release 下载较慢，live ready 截图待下载完成补录）。
 
 **遗留**：S3.6 benchmark（spaCy 模型安装完即可跑）/ S3.7 文档转已落地 + PR base dev。
+
+## 2026-06-14 — PII 统一 S3.6 本地 NER benchmark 留证（commit `3431bc2`）
+
+**落地**：切本地 NER 前的对照证据（pii-local-ner.md §7 三件套）。
+- 自建金标 `tests/privacy/fixtures/ner_eval.jsonl`（26 条中英文短句，**非用户数据集**，含人名/机构 + 电话/邮箱/身份证干扰项）。
+- `scripts/benchmark_ner.py`：PER/ORG 严格 P/R/F1 + 宽松召回（边界容忍）+ 主进程 CPU 测速 + 可选 `--cloud` 云端银标（失败优雅跳过）。
+- `scripts/setup_ner.sh`：幂等装 spaCy(`.[ner]`) + `zh/en_core_web_md`。
+- `docs/zh/backend/ner-benchmark.md`：实跑结论。
+
+**实测**（docrestore env，spaCy 已装 zh+en_core_web_md）：人名 PER 召回 **0.92**（严格＝宽松）/精确 0.67；机构 ORG 召回 0.74、宽松 0.87/精确 0.81；单段 **8.8ms** CPU、吞吐 ~4.7k 字符/秒。**判定达标，按计划切本地 NER**——人名（隐私最关键）召回高；机构名缺口由结构化正则 + 自定义词兜底；精确率偏低是 over-redact（多脱敏）方向，对隐私安全。云端银标因 `.env` 网关 key 与 `GLM_API_KEY` 不匹配本次跳过（脚本支持，待补正确 key 复跑）。
+
+**遗留**：S3.7 文档转已落地（pii-local-ner.md 状态、privacy.md/pipeline.md 同步、云端 detect_pii_entities 标死路）+ 整批 PR base dev（用户选「只做 S3.6」，S3.7 待确认）。
