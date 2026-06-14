@@ -2072,3 +2072,14 @@ S1a+S1b+S2，暂未进 dev。
 
 **下一步**：S3.5 前端一键配置 UX（截图验证）/ S3.6 `setup_ner.sh` + benchmark 留证（需装 spaCy 跑）/
 S3.7 文档收尾 + PR base dev。云端 `detect_pii_entities` 暂留待 S4 清理。
+
+## 2026-06-14 — PII 统一 S3.5 前端 NER 一键配置 UX（commit `b70dd01`）
+
+**落地**：TaskForm 开启隐私脱敏后探测本地 NER 并就地补环境（人名/机构名脱敏依赖本地模型，数据不出本机）。
+- `client.ts` 增 `getNerStatus`/`startNerSetup`/`getNerSetupStatus`；`schemas.ts` 两 zod schema（`NerStatusResponse`/`NerSetupStatusResponse`）。
+- `TaskForm.tsx`：开 PII → `GET /ner/status`；`available=false` 时内联告警 + 缺失模型列表 + 「一键配置本地 NER 环境」按钮，**并禁止提交**（与后端 fail-fast 一致，名字不裸送云端）。点按钮 → `POST /ner/setup` → 轮询 `GET /ner/setup/status` 显示 spinner + 日志尾行；`done` 复检清告警放行，`failed` 显错误 + 重试，`409` 转轮询；卸载清理定时器。
+- 3 语 i18n（`taskForm.ner*` + `errors.api.ner_*`）；`App.css` 告警/进度/就绪样式。
+
+**验证**：新增 `tests/components/TaskFormNer.test.tsx` 4 例（注入 mock，不依赖真实 spaCy）+ 既有 `TaskForm.test.tsx` mock 补 3 函数；前端门禁全绿（vitest **115 passed** / `tsc -b` / `eslint`）。Playwright 对真实后端（insecure 本机）实测：告警态、安装态（流式 pip 下载日志）两屏 live 通过；就绪态由 unit test 覆盖（真实模型走 GitHub release 下载较慢，live ready 截图待下载完成补录）。
+
+**遗留**：S3.6 benchmark（spaCy 模型安装完即可跑）/ S3.7 文档转已落地 + PR base dev。
