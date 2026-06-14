@@ -130,6 +130,21 @@ export const zhCN = {
   "taskForm.piiCodePlaceholder": "代号（可选，留空用默认占位符）",
   "taskForm.piiWordAdd": "添加",
   "taskForm.piiWordRemove": "移除 {word}",
+  // ── 本地 NER（人名/机构名脱敏依赖本地模型，数据不出本机）──
+  "taskForm.nerReady": "本地 NER 已就绪：人名 / 机构名将在本机识别脱敏",
+  "taskForm.nerUnavailableTitle": "人名 / 机构名脱敏需要本地 NER 环境",
+  "taskForm.nerUnavailableDesc":
+    "已开启隐私脱敏：人名 / 机构名用本地模型识别（数据不出本机，不上云）。当前未检测到 spaCy 或语言模型。一键配置后即可使用；配置完成前无法开始处理。",
+  "taskForm.nerMissingModels": "缺少模型：{models}",
+  "taskForm.nerSetupBtn": "一键配置本地 NER 环境",
+  "taskForm.nerSetupRetry": "重试配置",
+  "taskForm.nerSetupRunning":
+    "正在安装本地 NER 环境（首次需下载语言模型，请耐心等待）…",
+  "taskForm.nerSetupFailed": "配置失败：{error}",
+  "taskForm.nerSetupHint":
+    "将向后端当前 Python 环境安装 spaCy 与中英文语言模型（约 150MB），仅需一次。",
+  "taskForm.nerBlockedSubmit":
+    "请先完成本地 NER 环境配置，或在不需要人名 / 机构名脱敏时关闭隐私脱敏。",
   "taskForm.startProcessing": "开始处理",
 
   // ── 任务进度 ──
@@ -371,6 +386,10 @@ export const zhCN = {
   "errors.api.stage_symlink_failed": "创建符号链接失败：{path} → {reason}",
   "errors.api.browse_not_dir": "路径不是目录：{path}",
   "errors.api.browse_permission_denied": "无权限访问：{path}",
+  "errors.api.ner_backend_unavailable":
+    "本地 NER 未就绪：已开启人名 / 机构名脱敏但 spaCy 或语言模型未安装。请在任务表单中一键配置本地 NER 环境，或关闭隐私脱敏。",
+  "errors.api.ner_setup_in_progress": "本地 NER 环境安装进行中，请稍候。",
+  "errors.api.ner_setup_invalid_model": "非法的模型名，已拒绝安装。",
 
   // ── HTTP 状态码诊断 hint ──
   "errors.http.413":
