@@ -70,11 +70,12 @@ detect:     任务内一次 guard.detect_entities(累积文本) → lexicon（�
 cloud 边界: 任何送云端的文本一律 guard.redact_for_cloud(text, lexicon, profile)
               · 文档分段 / PPT 每页：lexicon 实体替换 + 结构化("full")幂等
               · 代码头部注释：redact_for_cloud(header, lexicon, "full")
-              · 代码正文 + file_path/片段/path_candidates/diagnostics：
-                redact_for_cloud(text, None, "tokens_only")
+              · 代码正文 body：redact_structured(text, "tokens_only")（不改坏代码）
+              · file_path/片段/path_candidates/diagnostics：保持 full（保 #36，§9.5）
+                redact_for_cloud(text, None, "full")
 ```
 
-对比现状：`_redact_code_pii` **保留但瘦身**为「header `full` + body `tokens_only`」并改由 `guard` 实现；`_make_regex_redactor` 删除（并入 `redact_for_cloud`）；`_finalize_single_doc`/`_fill_one_gap`/各 refiner 里的 bespoke 脱敏调用全部换成 `guard.redact_for_cloud`。
+对比现状：`_redact_code_pii` **保留但瘦身**为「header `full` + body `tokens_only`」并改由 `guard` 实现；`_make_regex_redactor` **保留**（prompt 字段仍走 `full`，内部已改走 `guard`，2026-06-14 决策见 §9.5）；`_finalize_single_doc`/`_fill_one_gap`/各 refiner 里的 bespoke 脱敏调用全部换成 `guard.redact_for_cloud`。
 
 ## 4. 结构化 PII：文档/PPT 前置 + 代码头部专扫（option 2 已否决）
 
@@ -92,6 +93,8 @@ producer 在 `cleaner.clean(page)` 后、入队前，对 `page.cleaned_text` 调
 | **正文 body** | `tokens_only` | 仅 `sk-`/`gh?_`/`AKIA`/JWT 高置信密钥 + 自定义词 | 拦硬编码密钥（正文真正危险的 PII），但**零误伤代码** |
 
 **为什么正文只留 token**：正文跑全量正则会**改坏代码**——`redact_credential` 的 KV 正则把 `password = get_secret()` 右侧吞成 `password = [凭据]`；16 位常量被当银行卡、`1[3-9]` 开头 11 位数字被当手机号。高置信 token 格式（20+ 字符固定前缀）**碰不到正常代码**，却正好拦住硬编码 `sk-`/`AKIA` 密钥——稳与不漏密钥两头占。自定义词是精确匹配、用户主动配，零误伤，正文也保留。
+
+**prompt 字段（file_path/片段/path_candidates/diagnostics）保持 `full`**（2026-06-14 决策，§9.5）：#36 刚把这些字段纳入脱敏面（vector ③），降 `tokens_only` 会让其中的邮箱/手机重新外发、削弱 #36。这些字段**不是会被执行的代码**，`full` 正则即便轻微改写外部片段，也只影响发给 LLM 的上下文质量、不影响最终产物，故选「PII 保护 > 上下文保真」。`_make_regex_redactor` 因此**保留**（产出 `full` 脱敏函数下传 refiner，内部已走 `guard`）。`tokens_only` 仅作用于会被当代码执行的 body。
 
 ### 4.3 为什么否决 option 2（producer 前置扫 `text_lines`）
 
@@ -137,7 +140,7 @@ LocalEntityDetector(Protocol):
 | 步 | 内容 | 验收 |
 |---|---|---|
 | **S1** | 抽 `PIIGuard`，把现有所有脱敏调用**原样收口**到它（`redact_structured`/`redact_for_cloud` 先包住现逻辑，`detect_entities` 暂仍委托云端）。**行为零变化**。 | 全量测试与现状逐字节一致；mypy/ruff/typos 绿 |
-| **S2** | 文档/PPT producer 走 `guard.redact_structured(_,"full")`；代码改「header `full` + body `tokens_only`」（`_redact_code_pii` 瘦身、`_make_regex_redactor` 并入 `redact_for_cloud`）；新增 `tokens_only` 正则原语。**不**前置扫 `text_lines`（option 2 否决）。 | 正文不再被全量正则改坏（`password=expr` 取证）；硬编码 `sk-` 仍被拦；#36 的 5 个回归仍绿 |
+| **S2** | 代码正文 body 降 `tokens_only`（`_redact_code_pii` body 行改档），header 仍 `full`；新增 `tokens_only` 正则原语（仅 `sk-`/`gh?_`/`AKIA`/JWT + 自定义词）。**prompt 字段（file_path/片段/诊断）保持 `full`，`_make_regex_redactor` 保留**（§9.5）。文档/PPT producer 已在 S1b 走 `guard.redact_structured`（`full`）。 | 正文不再被全量正则改坏（`password=expr` 取证）；硬编码 `sk-` 仍被拦；#36 回归（含 prompt 字段 full）仍绿 |
 | **S3** | 本地 NER：实现 `LocalEntityDetector`，LAC+GLiNER 都接，`detect_entities` 切本地；§5.4 benchmark 留证（本地优先，接受略低召回）。 | benchmark 证据；名字不再出现在云端调用入参（mock 取证） |
 | **S4** | 清理：删旧云端 `detect_pii_entities` 调用路径（或降级为可选）、更新 `privacy.md`/`pipeline.md`、补测试。 | 文档同步；全门禁绿 |
 
@@ -167,6 +170,7 @@ LocalEntityDetector(Protocol):
 2. **召回取舍**：**本地优先**——接受本地 NER 召回略低于云端 LLM，换「名字不出本机」（结构化正则仍兜底）；**不保留**云端检测路径（仅 PIIGuard 接口留口，benchmark 不过才回退）。
 3. **节奏**：**S1+S2 先落**，**S3 本地 NER 单独里程碑**。
 4. **代码正文范围**：代码**不扫正文全文**——正文只 `tokens_only`（高置信密钥 `sk-`/`AKIA`/JWT + 自定义词），头部注释全量；**option 2（producer 前置扫 `text_lines`）否决**（§4）。
+5. **代码 prompt 字段档位**：`file_path`/`related_snippets`/`path_candidates`/`diagnostics` **保持 `full`**（不随正文降 `tokens_only`）——保住 #36 vector ③ 的 PII 保护（否则片段/诊断/路径里的邮箱/手机重新外发）；`_make_regex_redactor` **保留**（不删）。`tokens_only` 仅作用于会被当代码执行的 body。
 
 ## 10. 相关文档
 
