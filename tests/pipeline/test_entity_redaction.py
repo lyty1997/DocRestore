@@ -14,13 +14,15 @@
 
 """全链路实体脱敏前置（人名/机构名）单测。
 
-覆盖 `docs/zh/backend/privacy.md §9` 的设计与验收：
+覆盖 `docs/zh/backend/privacy.md §9` + `pii-local-ner.md` 的设计与验收：
 - 核心：`_refine_segment_with_cache` 在词表非空时把人名/机构名替换在送精修器前；
   词表为 None 时不改（早窗口 / 关脱敏 / 检测失败）。
-- 助手：`_detect_entities` 在 name 开关关时返回 None（不调 LLM）、开时建词表。
+- 助手：`_detect_entities` 在 name 开关关时返回 None（不调本地 NER）、开时建词表。
 - PPT 集成：`_ppt_pipeline` 开脱敏 → 最终输出不含人名（输出兜底）；关脱敏 →
   原样保留且不调实体检测。
 
+S3：实体检测改本地 NER（`guard.detect_entities` → `get_detector`），故用注入的
+`_CountingDetector` 拦截 `get_detector`（不依赖 spaCy 是否安装）；refiner 只管精修。
 合成 stub，断言从构造输入派生，不写死数据集标识符。
 """
 
@@ -37,6 +39,7 @@ from docrestore.llm.cache import LLMCache
 from docrestore.models import Gap, PageOCR, RefineContext, RefinedResult
 from docrestore.pipeline.config import LLMConfig, PIIConfig, PipelineConfig
 from docrestore.pipeline.pipeline import Pipeline
+from docrestore.privacy import guard as guard_mod
 from docrestore.privacy.guard import PIIGuard
 from docrestore.privacy.redactor import EntityLexicon
 
@@ -46,18 +49,15 @@ _ORG = "某科技公司"
 
 
 class _RecordingRefiner:
-    """stub：记录 refine 收到的文本 + 按需返回实体；统计实体检测调用次数。"""
+    """stub：记录 refine 收到的文本，原样回显（未脱敏则人名会出现在收到文本里）。
 
-    def __init__(
-        self,
-        entities: tuple[list[str], list[str]] = ([], []),
-        *,
-        raise_on_detect: bool = False,
-    ) -> None:
+    S3：实体检测已改本地 NER，不再走 refiner.detect_pii_entities；该方法保留空实现
+    仅为满足 LLMRefiner 协议（实际检测由注入的 _CountingDetector 拦截）。
+    """
+
+    def __init__(self) -> None:
+        """记录 refine 收到的文本。"""
         self.received: list[str] = []
-        self.detect_calls = 0
-        self._entities = entities
-        self._raise_on_detect = raise_on_detect
 
     async def refine(
         self, text: str, context: RefineContext,
@@ -72,6 +72,7 @@ class _RecordingRefiner:
         next_page_text: str | None = None,
         next_page_name: str | None = None,
     ) -> str:
+        """gap 填充 stub（空）。"""
         del gap, current_page_text, next_page_text, next_page_name
         return ""
 
@@ -80,18 +81,48 @@ class _RecordingRefiner:
         chunk_index: int = 1, total_chunks: int = 1,
         retry_hint: str = "",
     ) -> RefinedResult:
+        """最终精修 stub（空）。"""
         del markdown, chunk_index, total_chunks, retry_hint
         return RefinedResult(markdown="")
 
     async def detect_pii_entities(
         self, text: str,
     ) -> tuple[list[str], list[str]]:
+        """已废弃（S3 检测改本地 NER）；保留空实现满足 LLMRefiner 协议。"""
         del text
-        self.detect_calls += 1
-        if self._raise_on_detect:
-            msg = "stub：模拟实体检测失败"
-            raise RuntimeError(msg)
-        return self._entities
+        return [], []
+
+
+class _CountingDetector:
+    """假本地 NER detector：返回预置实体 / 抛异常，并统计 detect 调用次数。"""
+
+    def __init__(
+        self,
+        persons: tuple[str, ...] = (),
+        orgs: tuple[str, ...] = (),
+        *,
+        raises: Exception | None = None,
+    ) -> None:
+        """记录预置实体与待抛异常，calls 计数置 0。"""
+        self.calls = 0
+        self._persons = persons
+        self._orgs = orgs
+        self._raises = raises
+
+    def detect(self, text: str) -> tuple[list[str], list[str]]:
+        """计数并返回预置实体；配置了 raises 则抛出。"""
+        del text
+        self.calls += 1
+        if self._raises is not None:
+            raise self._raises
+        return list(self._persons), list(self._orgs)
+
+
+def _patch_detector(
+    monkeypatch: pytest.MonkeyPatch, detector: _CountingDetector,
+) -> None:
+    """把 guard.get_detector 替换为返回指定 detector（拦截本地 NER 检测）。"""
+    monkeypatch.setattr(guard_mod, "get_detector", lambda models: detector)
 
 
 def _as_refiner(fake: _RecordingRefiner) -> LLMRefiner:
@@ -173,55 +204,63 @@ async def test_segment_no_lexicon_leaves_text_unchanged(
     assert refiner.received[0] == f"联系人 {_PERSON} 负责"
 
 
-# ---------------- 助手：实体检测 ----------------
+# ---------------- 助手：实体检测（本地 NER） ----------------
 
 
 @pytest.mark.asyncio
-async def test_detect_entities_off_returns_none_no_llm() -> None:
-    """两 name 开关都关 → 返回 None，且不调 LLM 检测。"""
+async def test_detect_entities_off_returns_none_no_detector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """两 name 开关都关 → 返回 None，且不调用本地 NER detector。"""
     pipe = Pipeline(PipelineConfig(llm=LLMConfig(model="m")))
-    stub = _RecordingRefiner(entities=([_PERSON], [_ORG]))
-    pipe.set_refiner(_as_refiner(stub))
+    detector = _CountingDetector(persons=(_PERSON,), orgs=(_ORG,))
+    _patch_detector(monkeypatch, detector)
 
     lex = await pipe._detect_entities(
-        "正文", None,
+        "正文",
         PIIConfig(
             enable=True, redact_person_name=False, redact_org_name=False,
         ),
     )
 
     assert lex is None
-    assert stub.detect_calls == 0
+    assert detector.calls == 0
 
 
 @pytest.mark.asyncio
-async def test_detect_entities_on_builds_lexicon() -> None:
-    """开 name 开关 → 调 LLM 建词表。"""
+async def test_detect_entities_on_builds_lexicon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """开 name 开关 → 调本地 NER 建词表。"""
     pipe = Pipeline(PipelineConfig(llm=LLMConfig(model="m")))
-    stub = _RecordingRefiner(entities=([_PERSON], [_ORG]))
-    pipe.set_refiner(_as_refiner(stub))
+    detector = _CountingDetector(persons=(_PERSON,), orgs=(_ORG,))
+    _patch_detector(monkeypatch, detector)
 
     lex = await pipe._detect_entities(
-        "正文", None, PIIConfig(enable=True, redact_person_name=True),
+        "正文", PIIConfig(enable=True, redact_person_name=True),
     )
 
     assert lex is not None
     assert _PERSON in lex.person_names
-    assert stub.detect_calls == 1
+    assert detector.calls == 1
 
 
 # ---------------- PPT 集成：输出兜底 + 关开关零改动 ----------------
 
 
 @pytest.mark.asyncio
-async def test_ppt_output_redacts_entities(tmp_path: Path) -> None:
+async def test_ppt_output_redacts_entities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """PPT 开脱敏：最终输出不含人名/机构名（短 PPT 走输出兜底）。"""
+    detector = _CountingDetector(persons=(_PERSON,), orgs=(_ORG,))
+    _patch_detector(monkeypatch, detector)
     out = tmp_path / "out"
     pages = [_make_page(out, "p1", f"报告人 {_PERSON} 代表 {_ORG} 发言")]
     pipe = Pipeline(
         PipelineConfig(llm=LLMConfig(model="m", enable_cache=False)),
     )
-    stub = _RecordingRefiner(entities=([_PERSON], [_ORG]))
+    stub = _RecordingRefiner()
     pipe.set_refiner(_as_refiner(stub))
 
     queue = await _queue_of(pages)
@@ -232,22 +271,24 @@ async def test_ppt_output_redacts_entities(tmp_path: Path) -> None:
         ),
     )
 
-    assert stub.detect_calls >= 1  # 开脱敏 → 调了实体检测
+    assert detector.calls >= 1  # 开脱敏 → 调了本地 NER
     assert _PERSON not in result.markdown
     assert _ORG not in result.markdown
 
 
 @pytest.mark.asyncio
 async def test_ppt_pii_off_preserves_and_skips_detect(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """PPT 关脱敏：原样保留人名，且不调实体检测（零改动）。"""
+    detector = _CountingDetector(persons=(_PERSON,), orgs=())
+    _patch_detector(monkeypatch, detector)
     out = tmp_path / "out"
     pages = [_make_page(out, "p1", f"报告人 {_PERSON} 发言")]
     pipe = Pipeline(
         PipelineConfig(llm=LLMConfig(model="m", enable_cache=False)),
     )
-    stub = _RecordingRefiner(entities=([_PERSON], []))
+    stub = _RecordingRefiner()
     pipe.set_refiner(_as_refiner(stub))
 
     queue = await _queue_of(pages)
@@ -257,7 +298,7 @@ async def test_ppt_pii_off_preserves_and_skips_detect(
     )
 
     assert _PERSON in result.markdown  # 未脱敏
-    assert stub.detect_calls == 0  # 关 PII → 不调实体检测
+    assert detector.calls == 0  # 关 PII → 不调实体检测
 
 
 # ------- fail-closed：检测失败阻断云端（block_cloud_on_detect_failure） -------
@@ -292,9 +333,18 @@ def test_should_block_cloud_false_when_lexicon_present() -> None:
 
 
 def test_should_block_cloud_false_when_name_redaction_off() -> None:
-    """未开人名/机构名脱敏 → lexicon=None 属正常（无需 LLM 检测），不算失败。"""
+    """未开人名/机构名脱敏 → lexicon=None 属正常（无需检测），不算失败。"""
     cfg = PIIConfig(
         enable=True, redact_person_name=False, redact_org_name=False,
+        block_cloud_on_detect_failure=True,
+    )
+    assert Pipeline._should_block_cloud(None, cfg) is False
+
+
+def test_should_block_cloud_false_when_backend_none() -> None:
+    """S3：ner_backend="none"（知情放弃本地 NER）→ lexicon=None 不算失败，不阻断。"""
+    cfg = PIIConfig(
+        enable=True, redact_person_name=True, ner_backend="none",
         block_cloud_on_detect_failure=True,
     )
     assert Pipeline._should_block_cloud(None, cfg) is False
@@ -309,13 +359,15 @@ async def test_ppt_detect_failure_blocks_cloud_when_fail_closed(
 
     # 阈值降到 1：单页即触发实体检测（在按页精修之前），便于断言阻断生效
     monkeypatch.setattr(pipeline_mod, "_PII_DETECT_THRESHOLD", 1)
+    detector = _CountingDetector(raises=RuntimeError("stub：模拟检测失败"))
+    _patch_detector(monkeypatch, detector)
 
     out = tmp_path / "out"
     pages = [_make_page(out, "p1", f"报告人 {_PERSON} 代表 {_ORG} 发言")]
     pipe = Pipeline(
         PipelineConfig(llm=LLMConfig(model="m", enable_cache=False)),
     )
-    stub = _RecordingRefiner(raise_on_detect=True)
+    stub = _RecordingRefiner()
     pipe.set_refiner(_as_refiner(stub))
 
     queue = await _queue_of(pages)
@@ -327,7 +379,7 @@ async def test_ppt_detect_failure_blocks_cloud_when_fail_closed(
         ),
     )
 
-    assert stub.detect_calls >= 1  # 检测被尝试
+    assert detector.calls >= 1  # 检测被尝试
     assert stub.received == []  # 该页未送云端精修（fail-closed 生效）
     # 名字未外发到云端；输出退原文（仍含名字，但留在本地，未传第三方）
     assert _PERSON in result.markdown
@@ -341,13 +393,15 @@ async def test_ppt_detect_failure_still_refines_when_flag_off(
     import docrestore.pipeline.pipeline as pipeline_mod
 
     monkeypatch.setattr(pipeline_mod, "_PII_DETECT_THRESHOLD", 1)
+    detector = _CountingDetector(raises=RuntimeError("stub：模拟检测失败"))
+    _patch_detector(monkeypatch, detector)
 
     out = tmp_path / "out"
     pages = [_make_page(out, "p1", f"报告人 {_PERSON} 发言")]
     pipe = Pipeline(
         PipelineConfig(llm=LLMConfig(model="m", enable_cache=False)),
     )
-    stub = _RecordingRefiner(raise_on_detect=True)
+    stub = _RecordingRefiner()
     pipe.set_refiner(_as_refiner(stub))
 
     queue = await _queue_of(pages)
@@ -359,6 +413,6 @@ async def test_ppt_detect_failure_still_refines_when_flag_off(
         ),
     )
 
-    assert stub.detect_calls >= 1
+    assert detector.calls >= 1
     # flag=False：检测失败不阻断 → 该页仍送云端精修（旧行为）
     assert any(_PERSON in r for r in stub.received)
