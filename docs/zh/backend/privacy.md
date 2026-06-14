@@ -88,9 +88,13 @@ class EntityLexicon:
 - 身份证：`[身份证号]`（`id_card_placeholder`）
 - 银行卡：`[银行卡号]`（`bank_card_placeholder`）
 
-### 4.2 实体检测（LLM）
+### 4.2 实体检测（本地 NER，原云端 LLM）
 
-仅在云端模式下可选启用：
+> **S3（2026-06-14）起改本地 NER**：`PIIGuard.detect_entities`（spaCy）取代下述云端
+> `detect_pii_entities`（已标 deprecated 死路，待 S4 删），名字不出本机。详见 §10.5。
+> 以下云端路径仅存历史。
+
+原云端可选路径（已废弃）：
 - 调用 `CloudLLMRefiner.detect_pii_entities()` 检测人名/组织名
 - 返回 JSON：`{"person_names": [...], "org_names": [...]}`
 - 构建 EntityLexicon 并替换实体
@@ -243,9 +247,29 @@ MergedDocument（合并后）
   代码**头部注释**仍 `full`（真 PII 都在注释里）。**prompt 字段（file_path/片段/path_candidates/
   diagnostics）保持 `full`**，不削弱 #36 vector ③ 的保护；文档/PPT 正文不变（仍 `full`）。
 
+### 10.5 本地 NER：人名/机构名不出本机（S3，2026-06-14 已落地）
+
+实体检测从**云端 LLM**（`refiner.detect_pii_entities`）迁到**本地 NER**（spaCy `zh/en_core_web_md`，
+CNN，零 torch/transformers，不撞 OCR venv），兑现「名字不出本机」。接缝从 LLM 层下移到隐私层：
+
+- `PIIGuard.detect_entities(text) -> EntityLexicon | None`（`privacy/ner.py::SpacyEntityDetector`，
+  进程级惰性单例，PERSON→persons / ORG→orgs）**取代** `CloudLLMRefiner.detect_pii_entities`；
+  Pipeline 5 处检测调用点全部改接，`asyncio.to_thread` 卸载阻塞；新增
+  `PIIConfig.ner_backend ("spacy"|"none")` + `ner_models`。
+- **fail-fast**：开人名/机构名脱敏但 spaCy/模型未装 → 建任务 400 `NER_BACKEND_UNAVAILABLE`
+  （`remediable=true`）；`GET /ner/status` 探测 + `POST /ner/setup` 一键装环境（前端 TaskForm 三态 UX）。
+- **fail-closed**：运行期检测异常 → `lexicon=None`，`block_cloud_on_detect_failure` 阻断云端精修。
+- **死路（待 S4 删）**：§3.1 `PIIRedactor.redact_for_cloud(refiner)`、§4.2/§8 的云端
+  `detect_pii_entities`、§9.3「检测沿用所配置 refiner」约束 —— 均已被本地 NER 取代，
+  代码侧已标 `deprecated`（`llm/cloud.py`/`base.py`/`privacy/redactor.py`）。
+- 选型（spaCy 而非 LAC/GLiNER，含环境冲突原委）与 benchmark 留证：见
+  [pii-local-ner.md](pii-local-ner.md) §1 / [ner-benchmark.md](ner-benchmark.md)（人名召回 0.92 达标）。
+
 ## 11. 相关文档
 
 - [PII 统一设计](pii-unification.md) - PIIGuard 收口 + 代码正文 tokens_only + 本地 NER 规划
+- [PII 本地 NER 详细设计](pii-local-ner.md) - S3 spaCy 选型 + 接缝 + 一键环境配置
+- [NER benchmark 留证](ner-benchmark.md) - S3.6 spaCy 召回/速度实测
 - [数据模型](data-models.md) - `RedactionRecord`, `PIIConfig`
-- [LLM 层](llm.md) - `CloudLLMRefiner.detect_pii_entities()`
+- [LLM 层](llm.md) - `CloudLLMRefiner.detect_pii_entities()`（S3 起死路，本地 NER 取代）
 - [Pipeline](pipeline.md) - PII 脱敏在数据流中的位置

@@ -168,10 +168,12 @@ Pipeline 是“全知”层，直接依赖所有处理模块：
 | `processing/segmenter.py` | `StreamSegmentExtractor`（流式增量切段） |
 | `pipeline/rate_controller.py` | `RateController`（运行时自适应段长 L*，OCR/LLM 速率配速） |
 | `llm/base.py` | `LLMRefiner` Protocol |
-| `llm/cloud.py` | `CloudLLMRefiner`（云端实现：refine/fill_gap/final_refine + PII 实体检测） |
+| `llm/cloud.py` | `CloudLLMRefiner`（云端实现：refine/fill_gap/final_refine；`detect_pii_entities` S3 起死路，本地 NER 取代） |
 | `llm/local.py` | `LocalLLMRefiner`（本地实现：refine/fill_gap/final_refine） |
 | `privacy/patterns.py` | 结构化 PII 正则（手机/邮箱/证件/银行卡等） |
-| `privacy/redactor.py` | `PIIRedactor`（regex 脱敏 +（可选）云端实体检测 + 替换记录） |
+| `privacy/guard.py` | `PIIGuard`（统一脱敏闸口：`redact_structured`/`redact_for_cloud`/`detect_entities`） |
+| `privacy/ner.py` | `SpacyEntityDetector`（本地 NER 人名/机构名检测，S3 起取代云端 detect） |
+| `privacy/redactor.py` | `PIIRedactor`（regex 脱敏 + 替换记录；`redact_for_cloud(refiner)` 死路待 S4） |
 | `output/renderer.py` | `Renderer`（渲染并写入最终 `document.md`） |
 
 ## 5. 编排流程图（流式：OCR 生产者 ∥ 流式消费者）
@@ -201,7 +203,7 @@ Pipeline.process_many(image_dir, output_dir, ...) → PipelineResult（单文档
     │       while (page := await page_queue.get()) is not None:
     │         merger.add_page(page)                       # 逐页增量合并去重
     │         if pii.enable and merger.page_count >= 5 and 未做过:
-    │           entity_lexicon = _delayed_pii_detect(...)  # 收够页再拿 LLM lexicon
+    │           entity_lexicon = _delayed_pii_detect(...)  # 收够页拿本地 NER lexicon（S3）
     │         _try_extract_and_refine(...)                 # 按 controller.target(L*) 切段
     │           → extractor.try_extract → refiner.refine（LLMCache 命中跳过；失败回退原文）
     │           → 累积 refined_results / all_gaps；controller.record_llm 反馈配速
@@ -221,7 +223,7 @@ Pipeline.process_many(image_dir, output_dir, ...) → PipelineResult（单文档
 说明：
 
 - **生产者/消费者解耦**：`page_queue` 作背压通道，`controller.set_queue_depth(qsize)` 反馈给配速器。
-- **PII 流式策略**：OCR 生产阶段逐页 `redact_regex_only` 先行；满 `_PII_DETECT_THRESHOLD`（5）页后异步取一次 `EntityLexicon`，供 gap fill re-OCR 片段复用（详见 [privacy.md](privacy.md)）。
+- **PII 流式策略**：OCR 生产阶段逐页 `redact_regex_only` 先行；满 `_PII_DETECT_THRESHOLD`（5）页后异步取一次 `EntityLexicon`（**本地 NER**，S3 起，原云端 detect；`asyncio.to_thread` 卸载），供 gap fill re-OCR 片段复用（详见 [privacy.md](privacy.md)）。
 - **debug 中间产物**：定位各阶段差异，文件名以实现为准（`{stem}_cleaned.md` / `merged_raw.md` / `reassembled.md` / `rate_controller.json` 等）。
 - **截断检测（truncation detection）**：识别 LLM 输出被长度截断的风险，以 warnings 透出，不中断流程。阈值见 [llm.md §6](llm.md#6-截断检测truncation-detection)。
 - **代码模式**：`CodeRestoreConfig.enable=True` 时消费者换成 `_code_pipeline`，不做流式精修（详见 §10）。
@@ -275,9 +277,9 @@ LLM 负责在精修时处理段间重叠的去重，`_reassemble()` 只做简单
 - 重试仍失败则该段/该阶段回退到未精修的原始 markdown，继续后续流程
 - 最终产物可能有部分未精修段落，但尽量不丢内容
 
-### 8.3 PII 脱敏失败策略（云端实体检测）
+### 8.3 PII 脱敏失败策略（本地 NER 实体检测）
 
-当启用 PII 脱敏且需要云端实体检测时：
+当启用 PII 脱敏且需要本地 NER 实体检测时（S3 起，原云端 `detect_pii_entities`）：
 
 - 若实体检测失败：
   - `PIIConfig.block_cloud_on_detect_failure=True` 时：标记 `cloud_blocked=True`，**跳过所有云端 LLM 阶段**（分段精修/缺口补充/整篇精修），仅产出 regex 脱敏后的结果，并记录 warning。
