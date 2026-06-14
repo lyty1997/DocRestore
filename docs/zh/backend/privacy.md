@@ -232,8 +232,20 @@ MergedDocument（合并后）
 - [x] ③：`file_path` / 外部参考片段 / `diagnostics` 里结构化 PII 在 prompt 中已脱敏且产物仍是合法 JSON —— `test_redact_masks_prompt_fields` / `test_file_path_redacted_in_refine_prompt` + 对照 `test_no_redact_leaves_prompt_fields_raw`。
 - [x] 门禁：`mypy --strict` / `ruff` / `typos` 全绿；PII + 代码模式相关测试 140 passed。
 
+### 10.4 后续统一（PIIGuard 收口 + 代码正文 tokens_only，2026-06-14）
+
+#36 修复后把三模式脱敏统一到 `PIIGuard`（`redact_structured` / `redact_for_cloud`，详见
+[PII 统一设计](pii-unification.md)）：
+
+- **S1**：所有脱敏调用点收口到 `PIIGuard`，行为逐字节不变。
+- **S2 代码档位差异化**：代码**正文 body** 降 `tokens_only`（仅高置信密钥 `sk-`/`gh?_`/`AKIA`/JWT
+  + 自定义词），不再跑 KV/手机/邮箱全量正则——否则 `password = get_secret()` 右侧被吞坏代码；
+  代码**头部注释**仍 `full`（真 PII 都在注释里）。**prompt 字段（file_path/片段/path_candidates/
+  diagnostics）保持 `full`**，不削弱 #36 vector ③ 的保护；文档/PPT 正文不变（仍 `full`）。
+
 ## 11. 相关文档
 
+- [PII 统一设计](pii-unification.md) - PIIGuard 收口 + 代码正文 tokens_only + 本地 NER 规划
 - [数据模型](data-models.md) - `RedactionRecord`, `PIIConfig`
 - [LLM 层](llm.md) - `CloudLLMRefiner.detect_pii_entities()`
 - [Pipeline](pipeline.md) - PII 脱敏在数据流中的位置

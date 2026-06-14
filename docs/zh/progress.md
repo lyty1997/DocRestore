@@ -2022,3 +2022,29 @@ finalize 输出兜底 / `_redact_code_pii`（header+body）/ PPT 每页；线程
 **下一步**：S1（收口）完成 → **S2**（代码 header `full` / body `tokens_only` 分档 + 新增 `tokens_only`
 正则原语 + 删 `_make_regex_redactor`，**行为变更**：正文不再被全量正则改坏 `password=expr`）；S3 本地 NER
 单独里程碑。`feature/pii-unify` 暂未进 dev。
+
+## 2026-06-14 — PII 统一 S2（代码正文降 tokens_only，行为变更）
+
+**变更**：代码**正文 body** 的结构化脱敏从 `full`（全量正则）降为 `tokens_only`——仅高置信密钥 token
+（`sk-`/`gh?_`/`AKIA`/JWT）+ 自定义词，**不再跑** KV/手机/邮箱/卡/host/url 全量正则。核心收益：正文不再
+被改坏（`password = get_secret()` 右侧不再被 KV 正则吞成 `[凭据]`），硬编码 `sk-`/`AKIA` 密钥仍被拦。
+代价（用户「稳一点」取舍）：正文里的非 token PII（邮箱/手机/字面量密码）不再脱。
+
+**范围决策（§9.5，2026-06-14 用户确认「只降正文」）**：仅代码 body 降档；代码**头部注释**仍 `full`；代码
+**prompt 字段**（`file_path`/`related_snippets`/`path_candidates`/`diagnostics`）**保持 `full`**——不削弱
+#36 vector ③ 的 PII 保护，`_make_regex_redactor` **保留**（不删，原计划的「删/并入」否决）；文档/PPT 正文
+不变（仍 `full`）。
+
+**落地**：
+- `patterns.py`：新增 `redact_tokens_only_pii`（仅 `_TOKEN_FORMAT_RE`，受 `redact_credential` 开关）。
+- `redactor.py`：新增 `PIIRedactor.redact_tokens_only`（token 原语 + 自定义词，无实体替换）。
+- `guard.py`：`profile="tokens_only"` 落地（`redact_structured`/`redact_for_cloud` 删 NotImplementedError）。
+- `pipeline.py`：`_redact_code_pii` body 行改 `redact_structured(body, profile="tokens_only")`（唯一行为改动）。
+
+**验证**：privacy + 代码 PII + #36 回归 **141 passed**（含 #36 prompt 字段 full 的
+`test_redact_masks_prompt_fields` 仍绿，证明 vector ③ 未削弱）+ 新增 tokens_only 单测（patterns/redactor/
+guard）覆盖「token 脱 / KV 代码不改坏 / 手机邮箱不脱 / 开关关闭」；`pipeline`/`llm`/`api` **582 全绿**；
+mypy/ruff/typos 干净。
+
+**下一步**：S3 本地 NER（LAC+GLiNER benchmark，本地优先）单独里程碑。`feature/pii-unify` 累计
+S1a+S1b+S2，暂未进 dev。
