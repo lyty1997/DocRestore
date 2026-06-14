@@ -107,6 +107,11 @@ class PIIRedactor:
 
         返回 (脱敏文本, 脱敏记录, 实体词典)。
         实体词典可传给 redact_snippet() 复用。
+
+        .. deprecated:: S3
+            **死路，待 S4 删除。** S3 起实体检测改本地 NER
+            （``PIIGuard.detect_entities``，见 privacy/ner.py），生产路径已不再
+            经此 ``refiner.detect_pii_entities`` 分支。当前仅保留供历史调用兼容。
         """
         # 1. regex 替换结构化 PII
         text, records = redact_structured_pii(

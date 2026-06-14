@@ -82,6 +82,11 @@ class CloudLLMRefiner(BaseLLMRefiner):
 
         返回 (person_names, org_names)。
         解析失败抛 RuntimeError。
+
+        .. deprecated:: S3
+            **死路，待 S4 删除。** S3 起人名/机构名检测改本地 NER（spaCy，
+            ``privacy/ner.py::PIIGuard.detect_entities``），名字不再出本机；Pipeline
+            已不再调用本云端方法。保留仅为接口兼容，S4 连同基类默认实现一并清理。
         """
         messages = build_pii_detect_prompt(text)
         kwargs = self._build_kwargs(messages)

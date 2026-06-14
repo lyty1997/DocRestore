@@ -5,7 +5,8 @@ Licensed under the Apache License, Version 2.0 (the "License").
 
 # PII 本地 NER 详细设计（S3）
 
-> 状态：**设计待确认**（2026-06-14）
+> 状态：**已落地**（2026-06-14，分支 `feature/pii-unify-s3`）——S3.1–S3.6 全部完成。
+> benchmark 留证见 [ner-benchmark.md](ner-benchmark.md)（人名召回 0.92、机构名 0.74/宽松 0.87，单段 8.8ms CPU → 达标按计划切）。
 > 上游：[pii-unification.md](pii-unification.md) §5（本地 NER）、§6 迁移计划 S3、§9 决策。
 > 脊柱决策：**spaCy 主进程**（2026-06-14 用户确认，详见 §1.1 为何偏离 §9 原定 LAC+GLiNER）。
 

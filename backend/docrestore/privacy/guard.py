@@ -43,12 +43,12 @@ RedactProfile = Literal["full", "tokens_only"]
 class PIIGuard:
     """PII 脱敏统一闸口。请求级 ``pii_cfg`` 构造，贯穿整个任务。
 
-    三个职责（S1 先落前两个的 ``full`` 档）：
+    三个职责：
     - ``redact_structured(text, profile)``：纯本地正则结构化脱敏（不调用 LLM/NER）。
     - ``redact_for_cloud(text, lexicon, profile)``：送任何云端调用前的统一闸口
-      （结构化 + 可选实体替换）。
-    - ``detect_entities``：人名/机构名检测，S3 改本地 NER（当前仍由 Pipeline 侧
-      ``_detect_entities`` 委托配置的 refiner，故本类暂不含）。
+      （结构化 + 可选实体替换；实体词典预先由 ``detect_entities`` 算好后传入）。
+    - ``detect_entities(text)``：人名/机构名检测，S3 起走**本地 NER**（spaCy，
+      ``privacy/ner.py``），取代原云端 ``refiner.detect_pii_entities``——名字不出本机。
     """
 
     def __init__(self, pii_cfg: PIIConfig) -> None:
