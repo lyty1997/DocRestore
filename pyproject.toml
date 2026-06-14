@@ -36,6 +36,12 @@ ocr = [
     "easydict",
     "addict",
 ]
+ner = [
+    # 本地 NER（人名/机构名上云前脱敏，pii-local-ner.md）。spaCy CNN 模型零
+    # torch/transformers 依赖，与 OCR venv 不冲突。模型（zh_core_web_md /
+    # en_core_web_md）是带 URL 的独立 wheel，需 `python -m spacy download` 单独装。
+    "spacy>=3.8,<4",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["backend/docrestore"]
@@ -68,7 +74,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["S101", "ARG001", "ARG002", "T201"]
+"tests/**/*.py" = ["S101", "ARG001", "ARG002", "ARG005", "T201"]
 "scripts/**/*.py" = [
     "T201", "E501", "SIM105", "S110", "S603", "S607",
     "BLE001", "C901", "B007", "E741", "F401", "ARG001",
@@ -93,6 +99,7 @@ module = [
     "torch.*", "torchvision.*", "transformers.*",
     "paddleocr", "paddleocr.*",
     "cv2", "cv2.*",
+    "spacy", "spacy.*",
 ]
 ignore_missing_imports = true
 
