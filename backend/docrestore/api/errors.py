@@ -111,6 +111,10 @@ class APIErrorCode(StrEnum):
     #: 开启了人名/机构名脱敏但本地 NER（spaCy/模型）未就绪。fail-fast 拒绝建任务，
     #: 避免名字裸送云端或白跑 OCR；响应 params.remediable=true，前端弹一键配置入口。
     NER_BACKEND_UNAVAILABLE = "NER_BACKEND_UNAVAILABLE"
+    #: 一键安装已有任务在跑（单任务串行），第二次启动 409。
+    NER_SETUP_IN_PROGRESS = "NER_SETUP_IN_PROGRESS"
+    #: 待装 spaCy 模型名不在白名单（配置异常），拒绝执行 400。
+    NER_SETUP_INVALID_MODEL = "NER_SETUP_INVALID_MODEL"
 
 
 class ApiBusinessError(HTTPException):

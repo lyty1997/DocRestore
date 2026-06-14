@@ -52,6 +52,7 @@ from docrestore.api.schemas import (
     DirEntry,
     GPUInfoResponse,
     GPUListResponse,
+    NERSetupStatusResponse,
     NERStatusResponse,
     OCRStatusResponse,
     OCRWarmupRequest,
@@ -94,6 +95,7 @@ from docrestore.processing.content_crop import (
 if TYPE_CHECKING:
     from docrestore.ocr.engine_manager import EngineManager
     from docrestore.pipeline.task_manager import TaskManager
+    from docrestore.privacy.ner_install import NERSetupManager
 
 logger = logging.getLogger(__name__)
 
@@ -1753,6 +1755,47 @@ async def get_ner_status() -> NERStatusResponse:
         configured_models=list(pii_cfg.ner_models),
         installed_models=installed,
         missing_models=missing,
+    )
+
+
+def _get_ner_setup(request: Request) -> NERSetupManager:
+    """从 app.state 获取 NERSetupManager（lifespan 注入）。"""
+    mgr: NERSetupManager | None = getattr(
+        request.app.state, "ner_setup", None,
+    )
+    if mgr is None:
+        raise HTTPException(status_code=500, detail="NER 安装管理器未初始化")
+    return mgr
+
+
+@router.post("/ner/setup", response_model=NERSetupStatusResponse)
+async def start_ner_setup(request: Request) -> NERSetupStatusResponse:
+    """一键安装本地 NER 环境（spaCy + 模型，装进当前 venv）。
+
+    单任务串行：已有安装在跑 → 409。模型集取服务端配置 ``pii.ner_models``（白名单），
+    pip / spacy download 幂等（已装跳过）。进度轮询 ``GET /ner/setup/status``。
+    """
+    mgr = _get_ner_setup(request)
+    pii_cfg = _get_manager().pipeline.config.pii
+    try:
+        started = await mgr.start(pii_cfg.ner_models)
+    except ValueError as exc:
+        raise ApiBusinessError(
+            APIErrorCode.NER_SETUP_INVALID_MODEL, 400, str(exc),
+        ) from exc
+    if not started:
+        raise ApiBusinessError(
+            APIErrorCode.NER_SETUP_IN_PROGRESS, 409,
+            "本地 NER 环境安装已在进行中，请等待完成",
+        )
+    return NERSetupStatusResponse.model_validate(mgr.status())
+
+
+@router.get("/ner/setup/status", response_model=NERSetupStatusResponse)
+async def get_ner_setup_status(request: Request) -> NERSetupStatusResponse:
+    """轮询本地 NER 环境安装进度（state / log / error）。"""
+    return NERSetupStatusResponse.model_validate(
+        _get_ner_setup(request).status(),
     )
 
 

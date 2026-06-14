@@ -477,6 +477,14 @@ class NERStatusResponse(BaseModel):
     missing_models: list[str]
 
 
+class NERSetupStatusResponse(BaseModel):
+    """本地 NER 环境安装状态（POST /ner/setup 受理 + GET /ner/setup/status 轮询）。"""
+
+    state: Literal["idle", "running", "done", "failed"]
+    log: list[str]  # 安装日志尾部（pip / spacy download 输出）
+    error: str  # 失败时的错误摘要，成功/进行中为空串
+
+
 # ── GPU 列表 ──────────────────────────────────────────────
 
 

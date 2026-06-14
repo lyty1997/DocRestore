@@ -33,6 +33,7 @@ from docrestore.ocr.base import OCR_RESULT_FILENAME
 from docrestore.pipeline.config import PipelineConfig
 from docrestore.pipeline.pipeline import Pipeline
 from docrestore.pipeline.task_manager import TaskManager
+from docrestore.privacy.ner_install import NERSetupManager
 
 from .support.ocr_engine import FixtureOCREngine
 
@@ -313,6 +314,7 @@ async def api_client() -> AsyncIterator[AsyncClient]:
     app = FastAPI()
     app.include_router(router, prefix="/api/v1")
     app.include_router(upload_router, prefix="/api/v1")
+    app.state.ner_setup = NERSetupManager()
 
     transport = ASGITransport(app=app)
     async with AsyncClient(
@@ -321,6 +323,7 @@ async def api_client() -> AsyncIterator[AsyncClient]:
     ) as ac:
         yield ac
 
+    await app.state.ner_setup.shutdown()
     await pipeline.shutdown()
     set_task_manager(None)
 
