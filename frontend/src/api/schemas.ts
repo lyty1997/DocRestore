@@ -223,6 +223,29 @@ export const OcrWarmupResponseSchema = z.object({
 });
 export type OcrWarmupResponse = z.infer<typeof OcrWarmupResponseSchema>;
 
+/** 本地 NER 可用性探测响应（GET /ner/status，不加载模型）。
+ *
+ * 前端在开启 PII（人名/机构名脱敏默认随之开启）时拉取；``available=false``
+ * 时弹「一键配置本地 NER 环境」入口并在配好前禁止提交。 */
+export const NerStatusResponseSchema = z.object({
+  available: z.boolean(),
+  spacy_installed: z.boolean(),
+  configured_models: z.array(z.string()),
+  installed_models: z.array(z.string()),
+  missing_models: z.array(z.string()),
+});
+export type NerStatusResponse = z.infer<typeof NerStatusResponseSchema>;
+
+/** 本地 NER 环境安装状态（POST /ner/setup 受理 + GET /ner/setup/status 轮询）。 */
+export const NerSetupStatusResponseSchema = z.object({
+  state: z.enum(["idle", "running", "done", "failed"]),
+  log: z.array(z.string()),
+  error: z.string(),
+});
+export type NerSetupStatusResponse = z.infer<
+  typeof NerSetupStatusResponseSchema
+>;
+
 /** 代码模式 files-index 单条记录 */
 export const SourcePageRangeSchema = z.object({
   page: z.string(),

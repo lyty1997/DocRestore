@@ -22,6 +22,8 @@ import {
   UploadSessionResponseSchema,
   OcrStatusResponseSchema,
   OcrWarmupResponseSchema,
+  NerStatusResponseSchema,
+  NerSetupStatusResponseSchema,
   GpuListResponseSchema,
   CropDetectResponseSchema,
   CropFigureResponseSchema,
@@ -44,6 +46,8 @@ import {
   type UploadSessionResponse,
   type OcrStatusResponse,
   type OcrWarmupResponse,
+  type NerStatusResponse,
+  type NerSetupStatusResponse,
   type GpuListResponse,
   type CropBox,
   type CropQuad,
@@ -657,4 +661,34 @@ export async function listGpus(): Promise<GpuListResponse> {
     headers: apiHeaders(),
   });
   return handleResponse(response, GpuListResponseSchema);
+}
+
+/** 探测本地 NER 可用性（spaCy + 模型是否就绪）；不加载模型，廉价。 */
+export async function getNerStatus(): Promise<NerStatusResponse> {
+  const response = await fetch(`${API_BASE}/ner/status`, {
+    headers: apiHeaders(),
+  });
+  return handleResponse(response, NerStatusResponseSchema);
+}
+
+/**
+ * 一键安装本地 NER 环境（spaCy + 缺失模型，装进后端当前 venv）。
+ *
+ * 后端单任务串行：已有安装在跑会抛 ``ApiError``（code=NER_SETUP_IN_PROGRESS，
+ * HTTP 409）；调用方据此直接转入轮询即可。返回受理时的安装状态。
+ */
+export async function startNerSetup(): Promise<NerSetupStatusResponse> {
+  const response = await fetch(`${API_BASE}/ner/setup`, {
+    method: "POST",
+    headers: apiHeaders(),
+  });
+  return handleResponse(response, NerSetupStatusResponseSchema);
+}
+
+/** 轮询本地 NER 环境安装进度（state / log / error）。 */
+export async function getNerSetupStatus(): Promise<NerSetupStatusResponse> {
+  const response = await fetch(`${API_BASE}/ner/setup/status`, {
+    headers: apiHeaders(),
+  });
+  return handleResponse(response, NerSetupStatusResponseSchema);
 }
