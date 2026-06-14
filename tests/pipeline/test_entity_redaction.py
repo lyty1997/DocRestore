@@ -37,7 +37,8 @@ from docrestore.llm.cache import LLMCache
 from docrestore.models import Gap, PageOCR, RefineContext, RefinedResult
 from docrestore.pipeline.config import LLMConfig, PIIConfig, PipelineConfig
 from docrestore.pipeline.pipeline import Pipeline
-from docrestore.privacy.redactor import EntityLexicon, PIIRedactor
+from docrestore.privacy.guard import PIIGuard
+from docrestore.privacy.redactor import EntityLexicon
 
 #: 测试用人名 / 机构名（仅本测试内构造，非数据集标识符）
 _PERSON = "张三"
@@ -139,13 +140,13 @@ def _disabled_cache(tmp_path: Path) -> LLMCache:
 async def test_segment_redacts_entity_before_refine(tmp_path: Path) -> None:
     """词表非空：人名在送精修器前被替换（送云端前脱敏）。"""
     refiner = _RecordingRefiner()
-    redactor = PIIRedactor(PIIConfig(enable=True, redact_person_name=True))
+    guard = PIIGuard(PIIConfig(enable=True, redact_person_name=True))
     lexicon = EntityLexicon(person_names=(_PERSON,), org_names=())
 
     result, used = await Pipeline._refine_segment_with_cache(
         _as_refiner(refiner), f"联系人 {_PERSON} 负责", 0, 1,
         _disabled_cache(tmp_path), LLMConfig(model="m", api_key="k"), None,
-        redactor=redactor, entity_lexicon=lexicon,
+        guard=guard, entity_lexicon=lexicon,
     )
 
     assert used is True
@@ -161,12 +162,12 @@ async def test_segment_no_lexicon_leaves_text_unchanged(
 ) -> None:
     """词表为 None（早窗口 / 关脱敏 / 检测失败）→ 不改文本。"""
     refiner = _RecordingRefiner()
-    redactor = PIIRedactor(PIIConfig(enable=True, redact_person_name=True))
+    guard = PIIGuard(PIIConfig(enable=True, redact_person_name=True))
 
     await Pipeline._refine_segment_with_cache(
         _as_refiner(refiner), f"联系人 {_PERSON} 负责", 0, 1,
         _disabled_cache(tmp_path), LLMConfig(model="m", api_key="k"), None,
-        redactor=redactor, entity_lexicon=None,
+        guard=guard, entity_lexicon=None,
     )
 
     assert refiner.received[0] == f"联系人 {_PERSON} 负责"
