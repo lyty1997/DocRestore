@@ -14,9 +14,10 @@
 
 """早窗口防泄漏：开 PII 实体脱敏时，词表就绪前不送任何分段/页去云端精修。
 
-构造一个 stub refiner：``detect_pii_entities`` 返回固定人名，``refine`` 记录每次
-收到的文本。断言所有送进云端精修的文本里都不含未脱敏的人名（即词表就绪后才精修）。
-不写死数据集标识符，断言从构造输入派生。
+注入一个本地 NER detector（返回固定人名）+ stub refiner（``refine`` 记录每次收到
+的文本）。断言所有送进云端精修的文本里都不含未脱敏的人名（即词表就绪后才精修）。
+S3：检测改本地 NER，故 monkeypatch ``guard.get_detector`` 注入 detector（不依赖
+spaCy 是否安装）。不写死数据集标识符，断言从构造输入派生。
 """
 
 from __future__ import annotations
@@ -24,6 +25,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from typing import cast
+
+import pytest
 
 from docrestore.llm.base import LLMRefiner
 from docrestore.llm.cache import LLMCache
@@ -35,6 +38,7 @@ from docrestore.pipeline.config import (
 )
 from docrestore.pipeline.pipeline import Pipeline
 from docrestore.pipeline.rate_controller import RateController
+from docrestore.privacy import guard as guard_mod
 from docrestore.privacy.redactor import EntityLexicon
 from docrestore.processing.dedup import IncrementalMerger
 
@@ -87,6 +91,28 @@ def _as_refiner(fake: _RecordingRefiner) -> LLMRefiner:
     return cast("LLMRefiner", fake)
 
 
+class _FakeDetector:
+    """假本地 NER detector：返回固定人名词表（替代 refiner.detect_pii_entities）。"""
+
+    def __init__(self, persons: list[str]) -> None:
+        """记录固定人名。"""
+        self._persons = persons
+
+    def detect(self, text: str) -> tuple[list[str], list[str]]:
+        """返回固定人名（org 空）。"""
+        del text
+        return list(self._persons), []
+
+
+def _patch_detector(
+    monkeypatch: pytest.MonkeyPatch, persons: list[str],
+) -> None:
+    """注入本地 NER detector（返回固定人名），拦截 guard.get_detector。"""
+    monkeypatch.setattr(
+        guard_mod, "get_detector", lambda models: _FakeDetector(persons),
+    )
+
+
 def _make_page(output_dir: Path, stem: str, raw_text: str) -> PageOCR:
     """构造一页 PageOCR（rewrite 用 cleaned_text or raw_text → 设 raw_text 即可）。"""
     ocr_dir = output_dir / f"{stem}_OCR"
@@ -136,9 +162,10 @@ def test_entity_redaction_pending_gate() -> None:
 
 
 async def test_ppt_early_window_redacts_name_before_cloud(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """PPT：早窗口页的人名在送云端精修前已被词表脱敏（不外发）。"""
+    _patch_detector(monkeypatch, [_NAME])
     out = tmp_path / "out"
     pages = [
         _make_page(out, "pageA", f"项目负责人{_NAME}介绍ALPHA"),
@@ -167,9 +194,10 @@ async def test_ppt_early_window_redacts_name_before_cloud(
 
 
 async def test_doc_early_window_redacts_name_before_cloud(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """文档：早窗口分段的人名在送云端精修前已被词表脱敏（不外发）。"""
+    _patch_detector(monkeypatch, [_NAME])
     out = tmp_path / "out"
     # 单页 >1500 字符且含换行（供 segmenter 切点）→ 不开防护时会在词表就绪前
     # 就切段送云端，暴露开头的人名。
