@@ -20,8 +20,12 @@ PIIRedactor.redact_regex_only / redact_snippet，断言由「两者比较」给�
 
 from __future__ import annotations
 
+import pytest
+
 from docrestore.pipeline.config import PIIConfig
+from docrestore.privacy import guard as guard_mod
 from docrestore.privacy.guard import PIIGuard
+from docrestore.privacy.ner import NERUnavailableError
 from docrestore.privacy.redactor import EntityLexicon, PIIRedactor
 
 # 含多类结构化 PII + 人名的样本（构造输入，断言从输入派生）
@@ -113,3 +117,100 @@ def test_redact_for_cloud_tokens_only_ignores_lexicon() -> None:
     )
     assert _PLANTED_SK not in out  # token 脱
     assert "张三" in out  # 实体未替（lexicon 忽略，保护标识符）
+
+
+# --- S3：PIIGuard.detect_entities（本地 NER 接缝，注入 fake detector）---------
+
+
+class _FakeDetector:
+    """假本地检测器：返回预置实体，或在 detect 时抛指定异常（测 fail-closed）。"""
+
+    def __init__(
+        self,
+        persons: tuple[str, ...] = (),
+        orgs: tuple[str, ...] = (),
+        *,
+        raises: Exception | None = None,
+    ) -> None:
+        """记录预置实体或待抛异常。"""
+        self._persons = persons
+        self._orgs = orgs
+        self._raises = raises
+
+    def detect(self, text: str) -> tuple[list[str], list[str]]:
+        """返回预置 (persons, orgs)；若配置了 raises 则抛出。"""
+        if self._raises is not None:
+            raise self._raises
+        return list(self._persons), list(self._orgs)
+
+
+def test_detect_entities_off_returns_none() -> None:
+    """人名/机构名脱敏全关 → None（不请求实体检测）。"""
+    cfg = PIIConfig(
+        enable=True, redact_person_name=False, redact_org_name=False,
+    )
+    assert PIIGuard(cfg).detect_entities("张三 在 示例集团") is None
+
+
+def test_detect_entities_backend_none_skips_detector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ner_backend="none" → None 且不构造 detector（知情放弃，即便可用也不调）。"""
+    calls = {"n": 0}
+
+    def _factory(models: list[str]) -> _FakeDetector:
+        """计数版 get_detector 替身。"""
+        calls["n"] += 1
+        return _FakeDetector(persons=("张三",))
+
+    monkeypatch.setattr(guard_mod, "get_detector", _factory)
+    cfg = PIIConfig(enable=True, redact_person_name=True, ner_backend="none")
+    assert PIIGuard(cfg).detect_entities("张三") is None
+    assert calls["n"] == 0
+
+
+def test_detect_entities_builds_lexicon(monkeypatch: pytest.MonkeyPatch) -> None:
+    """检测到实体 → EntityLexicon（persons/orgs 来自 detector）。"""
+    monkeypatch.setattr(
+        guard_mod, "get_detector",
+        lambda models: _FakeDetector(persons=("张三",), orgs=("示例集团",)),
+    )
+    cfg = PIIConfig(enable=True, redact_person_name=True, redact_org_name=True)
+    lex = PIIGuard(cfg).detect_entities("张三 在 示例集团")
+    assert lex == EntityLexicon(person_names=("张三",), org_names=("示例集团",))
+
+
+def test_detect_entities_empty_result_is_lexicon_not_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """检测成功但没找到实体 → 空 EntityLexicon（非 None，与失败区分）。"""
+    monkeypatch.setattr(
+        guard_mod, "get_detector", lambda models: _FakeDetector(),
+    )
+    cfg = PIIConfig(enable=True, redact_person_name=True)
+    lex = PIIGuard(cfg).detect_entities("没有任何实体")
+    assert lex == EntityLexicon(person_names=(), org_names=())
+
+
+def test_detect_entities_unavailable_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """detector 抛 NERUnavailableError → None（上层据此 fail-closed）。"""
+    monkeypatch.setattr(
+        guard_mod, "get_detector",
+        lambda models: _FakeDetector(raises=NERUnavailableError("no spacy")),
+    )
+    cfg = PIIConfig(enable=True, redact_person_name=True)
+    assert PIIGuard(cfg).detect_entities("张三") is None
+
+
+def test_detect_entities_runtime_error_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """detector 运行期异常 → None（fail-closed 兜底，绝不外泄）。"""
+    monkeypatch.setattr(
+        guard_mod, "get_detector",
+        lambda models: _FakeDetector(raises=RuntimeError("model crashed")),
+    )
+    cfg = PIIConfig(enable=True, redact_org_name=True)
+    assert PIIGuard(cfg).detect_entities("示例集团") is None
