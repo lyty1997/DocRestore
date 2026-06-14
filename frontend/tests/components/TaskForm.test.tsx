@@ -14,6 +14,9 @@ vi.mock("../../src/api/client", () => ({
   getOcrStatus: vi.fn(),
   listGpus: vi.fn(),
   warmupOcrEngine: vi.fn(),
+  getNerStatus: vi.fn(),
+  startNerSetup: vi.fn(),
+  getNerSetupStatus: vi.fn(),
 }));
 
 vi.mock("../../src/components/SourcePicker", () => ({

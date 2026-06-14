@@ -127,6 +127,23 @@ export const en: Record<TranslationKey, string> = {
   "taskForm.piiCodePlaceholder": "Code (optional, falls back to default placeholder)",
   "taskForm.piiWordAdd": "Add",
   "taskForm.piiWordRemove": "Remove {word}",
+  // ── Local NER (person/org redaction runs on-device) ──
+  "taskForm.nerReady":
+    "Local NER ready: person / organization names are redacted on-device",
+  "taskForm.nerUnavailableTitle":
+    "Person / organization redaction needs a local NER environment",
+  "taskForm.nerUnavailableDesc":
+    "Privacy redaction is on: person / organization names are detected by a local model (data never leaves this machine, never goes to the cloud). spaCy or the language models were not found. Set it up with one click to enable; processing is blocked until setup completes.",
+  "taskForm.nerMissingModels": "Missing models: {models}",
+  "taskForm.nerSetupBtn": "Set up local NER environment",
+  "taskForm.nerSetupRetry": "Retry setup",
+  "taskForm.nerSetupRunning":
+    "Installing local NER environment (first run downloads language models, please wait)…",
+  "taskForm.nerSetupFailed": "Setup failed: {error}",
+  "taskForm.nerSetupHint":
+    "Installs spaCy and the Chinese/English language models (~150MB) into the backend's current Python environment. One time only.",
+  "taskForm.nerBlockedSubmit":
+    "Finish setting up the local NER environment first, or turn off privacy redaction if you don't need person / organization redaction.",
   "taskForm.startProcessing": "Start Processing",
 
   // ── Task progress ──
@@ -385,6 +402,12 @@ export const en: Record<TranslationKey, string> = {
   "errors.api.stage_symlink_failed": "Failed to create symlink: {path} → {reason}",
   "errors.api.browse_not_dir": "Path is not a directory: {path}",
   "errors.api.browse_permission_denied": "Permission denied: {path}",
+  "errors.api.ner_backend_unavailable":
+    "Local NER not ready: person/organization redaction is enabled but spaCy or the language models are not installed. Set up the local NER environment from the task form, or turn off privacy redaction.",
+  "errors.api.ner_setup_in_progress":
+    "Local NER environment installation is in progress, please wait.",
+  "errors.api.ner_setup_invalid_model":
+    "Invalid model name; installation rejected.",
 
   // ── HTTP status diagnostic hints ──
   "errors.http.413":

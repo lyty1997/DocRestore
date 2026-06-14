@@ -4,10 +4,18 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { getOcrStatus, listGpus, warmupOcrEngine } from "../api/client";
+import {
+  ApiError,
+  getNerSetupStatus,
+  getNerStatus,
+  getOcrStatus,
+  listGpus,
+  startNerSetup,
+  warmupOcrEngine,
+} from "../api/client";
 import { retryUntilSuccess } from "../lib/retry";
-import type { CropBox, GpuInfo } from "../api/schemas";
-import { useTranslation } from "../i18n";
+import type { CropBox, GpuInfo, NerStatusResponse } from "../api/schemas";
+import { fromUnknown, renderLocalized, useTranslation } from "../i18n";
 import { CropPanel } from "./CropPanel";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { SourcePicker } from "./SourcePicker";
@@ -247,6 +255,19 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
   const [wordDraft, setWordDraft] = useState("");
   const [codeDraft, setCodeDraft] = useState("");
 
+  /* 本地 NER 环境：开 PII 后人名/机构名脱敏走本地模型（数据不出本机）。
+     nerStatus=undefined 表示尚未探测；available=false 时弹一键配置入口并禁止提交。
+     nerSetupState 镜像后端安装状态机（idle/running/done/failed）。 */
+  const [nerStatus, setNerStatus] = useState<NerStatusResponse | undefined>();
+  const [nerSetupState, setNerSetupState] = useState<
+    "idle" | "running" | "done" | "failed"
+  >("idle");
+  const [nerSetupLog, setNerSetupLog] = useState<readonly string[]>([]);
+  const [nerSetupError, setNerSetupError] = useState("");
+  const nerPollRef = useRef<ReturnType<typeof setInterval> | undefined>(
+    undefined,
+  );
+
   /** 将当前 LLM 配置同步到 localStorage */
   const persistLlmConfig = useCallback(
     (
@@ -307,6 +328,76 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
     setSensitiveWords((prev) => prev.filter((w) => w.word !== word));
   };
 
+  /** 停止本地 NER 安装进度轮询。 */
+  const stopNerPolling = useCallback((): void => {
+    if (nerPollRef.current !== undefined) {
+      clearInterval(nerPollRef.current);
+      nerPollRef.current = undefined;
+    }
+  }, []);
+
+  /** 重新探测本地 NER 可用性（安装完成后调用，available→true 自动清告警）。 */
+  const refreshNerStatus = useCallback(async (): Promise<void> => {
+    const s = await getNerStatus();
+    setNerStatus(s);
+  }, []);
+
+  /** 轮询安装进度直至 done/failed；done 后重新探测，failed 暴露错误。 */
+  const startNerSetupPolling = useCallback((): void => {
+    stopNerPolling();
+    const id = setInterval(() => {
+      void (async (): Promise<void> => {
+        try {
+          const st = await getNerSetupStatus();
+          setNerSetupState(st.state);
+          setNerSetupLog(st.log);
+          if (st.state === "done") {
+            stopNerPolling();
+            setNerSetupError("");
+            await refreshNerStatus();
+          } else if (st.state === "failed") {
+            stopNerPolling();
+            setNerSetupError(st.error);
+          }
+        } catch {
+          /* 轮询静默重试，下一拍再查 */
+        }
+      })().catch((): void => {
+        /* 异常已在轮询体内处理；兜底满足 Promise 消费约束 */
+      });
+    }, 1500);
+    nerPollRef.current = id;
+  }, [stopNerPolling, refreshNerStatus]);
+
+  /** 一键配置本地 NER 环境：POST /ner/setup 后轮询进度（409=已在跑 → 直接轮询）。 */
+  const handleNerSetup = useCallback((): void => {
+    setNerSetupState("running");
+    setNerSetupError("");
+    setNerSetupLog([]);
+    void (async (): Promise<void> => {
+      try {
+        const accepted = await startNerSetup();
+        setNerSetupState(accepted.state);
+        setNerSetupLog(accepted.log);
+      } catch (error_: unknown) {
+        if (
+          error_ instanceof ApiError &&
+          error_.code === "NER_SETUP_IN_PROGRESS"
+        ) {
+          /* 已有安装在跑 → 转入轮询即可 */
+          setNerSetupState("running");
+        } else {
+          setNerSetupState("failed");
+          setNerSetupError(renderLocalized(fromUnknown(error_), t));
+          return;
+        }
+      }
+      startNerSetupPolling();
+    })().catch((): void => {
+      /* 异常已在配置流程内处理；兜底满足 Promise 消费约束 */
+    });
+  }, [startNerSetupPolling, t]);
+
   useEffect(() => {
     selectedWarmupTargetRef.current = { model: ocrModel, gpuId };
   }, [ocrModel, gpuId]);
@@ -335,6 +426,26 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
       stopWarmupPolling();
     };
   }, [stopWarmupPolling]);
+
+  /* 开启 PII 时探测本地 NER（人名/机构名脱敏依赖本地模型）；后端未就绪退避重试。
+     仅在尚未探测（nerStatus===undefined）时拉取，避免 setState 触发重复请求；
+     安装完成后的复检走 refreshNerStatus 直调。 */
+  useEffect(() => {
+    if (!piiEnabled) return;
+    if (nerStatus !== undefined) return;
+    return retryUntilSuccess(async (isCancelled) => {
+      const s = await getNerStatus();
+      if (isCancelled()) return;
+      setNerStatus(s);
+    });
+  }, [piiEnabled, nerStatus]);
+
+  /* 卸载时停止 NER 安装轮询 */
+  useEffect(() => {
+    return (): void => {
+      stopNerPolling();
+    };
+  }, [stopNerPolling]);
 
   /** 轮询引擎状态直到就绪或超时 */
   const pollEngineReady = useCallback(
@@ -507,7 +618,11 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
     );
   };
 
-  const canSubmit = !disabled && imageDir.trim() !== "";
+  /* 开了 PII 但本地 NER 明确不可用 → 禁止提交（与后端 fail-fast 一致，名字不裸送云端）。
+     探测中（nerStatus===undefined）不拦，由后端 400 兜底。 */
+  const nerBlocksSubmit =
+    piiEnabled && nerStatus !== undefined && !nerStatus.available;
+  const canSubmit = !disabled && imageDir.trim() !== "" && !nerBlocksSubmit;
 
   return (
     <div className="task-form">
@@ -902,6 +1017,58 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
           {t("taskForm.piiDesc")}
         </p>
 
+        {/* 本地 NER：开 PII 后人名/机构名走本地模型；未就绪则一键配置并禁止提交 */}
+        {piiEnabled && nerStatus !== undefined && nerStatus.available && (
+          <p className="ner-ready">✓ {t("taskForm.nerReady")}</p>
+        )}
+        {piiEnabled && nerStatus !== undefined && !nerStatus.available && (
+          <div className="ner-warning" role="alert">
+            <p className="ner-warning-title">
+              {t("taskForm.nerUnavailableTitle")}
+            </p>
+            <p className="ner-warning-desc">
+              {t("taskForm.nerUnavailableDesc")}
+            </p>
+            {nerStatus.missing_models.length > 0 && (
+              <p className="ner-missing">
+                {t("taskForm.nerMissingModels", {
+                  models: nerStatus.missing_models.join(", "),
+                })}
+              </p>
+            )}
+            {nerSetupState === "running" ? (
+              <div className="ner-setup-progress">
+                <span className="ner-spinner" aria-hidden="true" />
+                <span className="ner-setup-running">
+                  {t("taskForm.nerSetupRunning")}
+                </span>
+                {nerSetupLog.length > 0 && (
+                  <pre className="ner-setup-log">{nerSetupLog.at(-1)}</pre>
+                )}
+              </div>
+            ) : (
+              <div className="ner-setup-actions">
+                <button
+                  type="button"
+                  className="btn-ner-setup"
+                  onClick={handleNerSetup}
+                  disabled={disabled}
+                >
+                  {nerSetupState === "failed"
+                    ? t("taskForm.nerSetupRetry")
+                    : t("taskForm.nerSetupBtn")}
+                </button>
+                {nerSetupState === "failed" && nerSetupError !== "" && (
+                  <p className="ner-setup-error">
+                    {t("taskForm.nerSetupFailed", { error: nerSetupError })}
+                  </p>
+                )}
+              </div>
+            )}
+            <p className="ner-setup-hint">{t("taskForm.nerSetupHint")}</p>
+          </div>
+        )}
+
         {/* 自定义敏感词（word + 可选代号） */}
         <div className="sensitive-word-input">
           <input
@@ -976,6 +1143,11 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
       >
         {t("taskForm.startProcessing")}
       </button>
+      {nerBlocksSubmit && (
+        <p className="submit-blocked-hint" role="status">
+          {t("taskForm.nerBlockedSubmit")}
+        </p>
+      )}
 
       {/* 目录选择器弹窗 */}
       {showDirPicker && (
