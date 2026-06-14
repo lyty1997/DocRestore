@@ -107,6 +107,11 @@ class APIErrorCode(StrEnum):
     #: 请求级 output_dir 不在受信工作根下（防 DELETE 任务 rmtree 任意目录）
     OUTPUT_DIR_REJECTED = "OUTPUT_DIR_REJECTED"
 
+    # ── 本地 NER（人名/机构名上云前脱敏）─────────────
+    #: 开启了人名/机构名脱敏但本地 NER（spaCy/模型）未就绪。fail-fast 拒绝建任务，
+    #: 避免名字裸送云端或白跑 OCR；响应 params.remediable=true，前端弹一键配置入口。
+    NER_BACKEND_UNAVAILABLE = "NER_BACKEND_UNAVAILABLE"
+
 
 class ApiBusinessError(HTTPException):
     """业务异常：携带机器可读的 ``code`` + 可参数化 ``params``。
