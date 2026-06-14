@@ -1197,7 +1197,7 @@ class Pipeline:
                 and len(raw_accum) >= _PII_DETECT_THRESHOLD
             ):
                 entity_lexicon = await self._detect_entities(
-                    "\n".join(raw_accum), llm, pii,
+                    "\n".join(raw_accum), pii,
                 )
                 pii_done = True
                 if self._should_block_cloud(entity_lexicon, pii):
@@ -1226,7 +1226,7 @@ class Pipeline:
         # 短 PPT 兜底：页数不足阈值时上面未建过词表，这里补建一次（name 开关关 → None）
         if guard is not None and not pii_done:
             entity_lexicon = await self._detect_entities(
-                "\n".join(raw_accum), llm, pii,
+                "\n".join(raw_accum), pii,
             )
             pii_done = True
             if self._should_block_cloud(entity_lexicon, pii):
@@ -1488,7 +1488,7 @@ class Pipeline:
         pii_block_cloud = False
         if pii_cfg.enable and sources:
             pii_block_cloud = await self._redact_code_pii(
-                sources, pii_cfg, base_refiner_obj,
+                sources, pii_cfg,
             )
 
         # 4. 可选 LLM 字符级精修（每个 SourceFile 独立调用，失败回退原文）；
@@ -1623,7 +1623,6 @@ class Pipeline:
         self,
         sources: list[SourceFile],
         pii_cfg: PIIConfig,
-        refiner: BaseLLMRefiner | None,
     ) -> bool:
         """对每个 SourceFile 脱敏（in-place），送云端 refine/repair/audit 前执行。
 
@@ -1638,15 +1637,13 @@ class Pipeline:
           KV/手机/邮箱等全量正则——否则 ``password = get_secret()`` 右侧被吞坏代码
           （pii-unification.md §4.2，2026-06-14「稳一点」决策）。
 
-        无 header 的文件也照常脱正文。``refiner=None`` 时跳过实体检测，仅 regex +
-        自定义词。
+        无 header 的文件也照常脱正文。实体检测改本地 NER（``guard.detect_entities``，
+        名字不出本机）；不可用 / 未请求时仅 regex + 自定义词。
 
         返回 ``block_cloud``：实体检测**已尝试且失败** + ``block_cloud_on_detect_
         failure`` 为真时返回 True，调用方据此跳过后续代码精修的云端调用
         （fail-closed，避免 header 里未脱敏的人名/机构名外发）。其余返回 False。
         """
-        from docrestore.privacy.redactor import EntityLexicon
-
         if not sources:
             return False
 
@@ -1655,29 +1652,21 @@ class Pipeline:
         split = [_split_leading_comment(s.merged_text) for s in sources]
 
         # 实体检测仅用所有非空 header 拼接（来源限注释，不取正文标识符）。
-        # #36：拼接送 detect_pii_entities（云端）**之前**，先对每个 header 做
-        # 全量结构化脱敏（结构化 PII + 凭据/token + 自定义词先掉）——否则注释里
-        # 的 `Author: 张三 <a@corp.com>` 的邮箱/手机会随 combined 裸送云端。人名/
-        # 机构名不被 regex 触及，实体检测仍基于（已结构化脱敏的）注释正常工作。
+        # #36：拼接做实体检测**之前**，先对每个 header 做全量结构化脱敏（结构化
+        # PII + 凭据/token + 自定义词先掉）——否则注释里 `Author: 张三 <a@corp.com>`
+        # 的邮箱/手机会随 combined 外发。人名/机构名不被 regex 触及，实体检测仍基于
+        # （已结构化脱敏的）注释正常工作。检测改本地 NER（guard.detect_entities，名字
+        # 不出本机），CPU 阻塞用 to_thread 卸载。
         lexicon: EntityLexicon | None = None
         detect_failed = False
-        needs_lex = pii_cfg.redact_person_name or pii_cfg.redact_org_name
         combined = "\n\n".join(
             guard.redact_structured(h) for h, _ in split if h
         )
-        if needs_lex and refiner is not None and combined:
-            try:
-                person, org = await refiner.detect_pii_entities(combined)
-                lexicon = EntityLexicon(
-                    person_names=tuple(person),
-                    org_names=tuple(org),
-                )
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "代码模式 PII 头部实体检测失败，仅 regex + 自定义词生效",
-                    exc_info=True,
-                )
-                detect_failed = True
+        if combined:
+            lexicon = await asyncio.to_thread(guard.detect_entities, combined)
+            # combined 非空即"已尝试检测"：lexicon=None 仅当已请求实体脱敏却失败
+            # （ner_backend=none 属知情放弃，_should_block_cloud 已排除，不阻断）。
+            detect_failed = self._should_block_cloud(lexicon, pii_cfg)
 
         for i, (header, body) in enumerate(split):
             new_header = (
@@ -1687,7 +1676,8 @@ class Pipeline:
             sources[i].merged_text = new_header + new_body
 
         # 检测已尝试且失败 + fail-closed → 通知调用方跳过后续云端精修
-        return detect_failed and pii_cfg.block_cloud_on_detect_failure
+        # （_should_block_cloud 已含 block_cloud_on_detect_failure 与 none 排除）
+        return detect_failed
 
     async def _resolve_ocr_engine(
         self,
@@ -1879,7 +1869,7 @@ class Pipeline:
                     and merger.page_count >= _PII_DETECT_THRESHOLD
                 ):
                     entity_lexicon = await self._delayed_pii_detect(
-                        merger, llm, pii_cfg,
+                        merger, pii_cfg,
                     )
                     pii_entity_done = True
                     if self._should_block_cloud(entity_lexicon, pii_cfg):
@@ -1909,7 +1899,7 @@ class Pipeline:
         # 让尾段脱敏与最终输出兜底拿到词表（仅开 name 开关时实际检测，否则 None）。
         if pii_cfg.enable and entity_lexicon is None:
             entity_lexicon = await self._detect_entities(
-                merger.get_markdown(), llm, pii_cfg,
+                merger.get_markdown(), pii_cfg,
             )
             if self._should_block_cloud(entity_lexicon, pii_cfg):
                 refiner = None
@@ -2258,44 +2248,32 @@ class Pipeline:
     async def _detect_entities(
         self,
         text: str,
-        llm: LLMConfig | None,
         pii_cfg: PIIConfig,
     ) -> EntityLexicon | None:
-        """对给定文本做一次 LLM 人名/机构名实体检测，返回 EntityLexicon。
+        """对给定文本做一次本地 NER 人名/机构名实体检测，返回 EntityLexicon。
 
-        不受精修开关约束（`for_refine=False`）：用户"关精修 + 开脱敏"时仍需 LLM
-        检测人名/机构名（正则只兜手机/邮箱/身份证/银行卡）。未开 name 开关 / 无可用
-        refiner / 检测异常 → 返回 None（调用方判空，退化为仅正则，不阻断精修）。
+        取代原云端 ``refiner.detect_pii_entities``——人名/机构名不出本机
+        （pii-local-ner.md §3）。委托 ``PIIGuard.detect_entities``：未开 name 开关 /
+        ``ner_backend="none"`` / 检测异常 → 返回 None（调用方按 ``_should_block_cloud``
+        fail-closed，退化为仅正则结构化 PII）；成功（含查无实体）→ EntityLexicon。
+        spaCy NER 为 CPU 阻塞 → ``to_thread`` 卸载，不阻塞事件循环（detector 内部
+        ``threading.Lock`` 串行化首次加载）。
         """
-        if not (pii_cfg.redact_person_name or pii_cfg.redact_org_name):
-            return None
-        refiner = self._get_refiner(llm, for_refine=False)
-        if refiner is None:
-            return None
-        try:
-            person_names, org_names = await refiner.detect_pii_entities(text)
-        except Exception:
-            logger.warning("PII 实体检测失败", exc_info=True)
-            return None
-        return EntityLexicon(
-            person_names=tuple(person_names),
-            org_names=tuple(org_names),
+        return await asyncio.to_thread(
+            PIIGuard(pii_cfg).detect_entities, text,
         )
 
     async def _delayed_pii_detect(
         self,
         merger: IncrementalMerger,
-        llm: LLMConfig | None,
         pii_cfg: PIIConfig,
     ) -> EntityLexicon | None:
-        """积累到阈值后做一次 LLM 实体检测获取 lexicon（委托 _detect_entities）。
+        """积累到阈值后做一次本地 NER 实体检测获取 lexicon（委托 _detect_entities）。
 
         成功：返回 EntityLexicon（gap fill re-OCR + 主分段/输出兜底复用）；
-        失败：返回 None，仅靠 regex PII 保护（不阻断云端 LLM 精修）。
+        失败/未请求：返回 None（仅靠 regex PII 保护，按 _should_block_cloud 处理）。
         """
-        return await self._detect_entities(
-            merger.get_markdown(), llm, pii_cfg,
-        )
+        return await self._detect_entities(merger.get_markdown(), pii_cfg)
 
     @staticmethod
     def _should_block_cloud(
@@ -2316,6 +2294,9 @@ class Pipeline:
         if not pii_cfg.enable:
             return False
         if not (pii_cfg.redact_person_name or pii_cfg.redact_org_name):
+            return False
+        if pii_cfg.ner_backend == "none":
+            # 用户显式关本地 NER（知情放弃实体脱敏）→ 不算检测失败，不阻断云端
             return False
         return pii_cfg.block_cloud_on_detect_failure
 
