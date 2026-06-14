@@ -339,6 +339,18 @@ class PIIConfig(BaseModel):
     # 实体检测失败时阻断云端调用（保证不外泄）
     block_cloud_on_detect_failure: bool = True
 
+    # 本地 NER（人名/机构名检测，上云前脱敏，pii-local-ner.md）
+    #: 本地 NER 后端。"spacy"=spaCy CNN 模型（唯一实现）；"none"=显式关闭本地实体
+    #: 检测（结构化正则仍跑、不阻断云端，属知情放弃）。GLiNER 已弃用（transformers
+    #: 撞 OCR venv，破坏环境），不设取值。
+    ner_backend: Literal["spacy", "none"] = "spacy"
+    #: 本地 NER 模型集（spaCy 模型名）。默认中英双模覆盖中文文档 + 代码英文名。≥1 个
+    #: 加载成功即"可用"（缺的告警跳过，属召回边界）；全缺则 fail-closed。必须用 CNN
+    #: 模型（*_md/_sm/_lg），禁用 *_trf（依赖 transformers，撞 OCR venv）。
+    ner_models: list[str] = Field(
+        default_factory=lambda: ["zh_core_web_md", "en_core_web_md"],
+    )
+
 
 class CodeRestoreConfig(BaseModel):
     """AGE-8 IDE 代码照片 → 源文件还原配置

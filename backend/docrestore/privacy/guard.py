@@ -26,10 +26,14 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 from docrestore.pipeline.config import PIIConfig
+from docrestore.privacy.ner import NERUnavailableError, get_detector
 from docrestore.privacy.redactor import EntityLexicon, PIIRedactor
+
+logger = logging.getLogger(__name__)
 
 #: 结构化脱敏档位。``full``=全量正则+自定义词（文档/PPT、代码头部）；
 #: ``tokens_only``=仅高置信密钥+自定义词（代码正文，S2 落地，零误伤代码）。
@@ -93,3 +97,30 @@ class PIIGuard:
             return text_out
         text_out, _ = self._redactor.redact_snippet(text, lexicon)
         return text_out
+
+    def detect_entities(self, text: str) -> EntityLexicon | None:
+        """本地 NER 检测人名/机构名 → EntityLexicon；不检测 / 检测失败 → None。
+
+        取代原 ``refiner.detect_pii_entities`` 的云端检测（名字不再出本机）。返回
+        None 的三种情形：① 未请求实体脱敏（``redact_person_name``/``org`` 全 False）；
+        ② ``ner_backend="none"``（用户显式关本地 NER，属知情放弃——上层不应据此阻断
+        云端）；③ 检测异常（库不可用 / 模型崩溃）——上层据此按
+        ``block_cloud_on_detect_failure`` fail-closed，绝不放未脱敏名字上云。检测成功
+        （含没找到任何实体）→ ``EntityLexicon``（person/org 可能为空元组）。
+        """
+        cfg = self._cfg
+        if not (cfg.redact_person_name or cfg.redact_org_name):
+            return None
+        if cfg.ner_backend == "none":
+            return None
+        try:
+            persons, orgs = get_detector(cfg.ner_models).detect(text)
+        except NERUnavailableError:
+            logger.warning("本地 NER 不可用，实体检测跳过（上层将 fail-closed）")
+            return None
+        except Exception:  # 运行期模型异常 → 同失败处理，fail-closed
+            logger.warning("本地 NER 检测异常，实体检测跳过", exc_info=True)
+            return None
+        return EntityLexicon(
+            person_names=tuple(persons), org_names=tuple(orgs),
+        )
