@@ -1998,3 +1998,27 @@ api 189 passed 9 skipped）+ mypy --strict + ruff + typos。`deployment.md` §3.
 送检之前（顺序写反等于没脱）、覆盖所有进 prompt 的字段（路径 / 外部片段 / 诊断同样外发）；结构化字段脱敏放在
 `json.dumps` 之前，序列化层兜住占位符转义。dev 领先 main **11 个 commit**（前 10 + 本次 #36）；**6 个 High
 安全 issue（#32–#37）全部修复进 dev**，下一步整批一个 release PR 收口 dev→main（届时 `Fixes #N` 自动关闭）。
+
+## 2026-06-14 — PII 脱敏统一重构 S1（PIIGuard 抽取 + 收口，行为不变）
+
+**背景**：#36 修复后用户提「文档/代码/PPT 三模式统一 PII 路径，不要分模式管理」→ 设计文档
+`docs/zh/backend/pii-unification.md`（已确认）：统一到一个 `PIIGuard`；结构化 PII 文档/PPT 前置、代码
+header `full` + body `tokens_only`；人名/机构名改本地 NER。分步 S1→S2→S3→S4，分支 `feature/pii-unify`。
+
+**S1a**（commit `5efa655`）：新建 `backend/docrestore/privacy/guard.py::PIIGuard`——`redact_structured`
+（= 现 `redact_regex_only`）+ `redact_for_cloud`（= 现 `redact_snippet`），`profile="full"` 逐字节包住现
+行为，`profile="tokens_only"` 留 S2（显式 NotImplementedError）。`tests/privacy/test_guard.py` 6 个等价性
+单测证明 guard == `PIIRedactor`（逐字节）。
+
+**S1b**（commit `62ea9d5`）：`pipeline.py` 所有脱敏调用点收口到 guard——producer 逐页 / 段精修 / gap-fill /
+finalize 输出兜底 / `_redact_code_pii`（header+body）/ PPT 每页；线程态形参 `redactor: PIIRedactor|None`
+改名 `guard: PIIGuard|None`（`_try_extract_and_refine` / `_refine_segment_with_cache`）。改完 `pipeline.py`
+**零**直接构造 `PIIRedactor` / 直调 `redact_regex_only` / `redact_snippet`。`_make_regex_redactor` 暂留
+（S2 删）内部改走 guard；`test_entity_redaction.py` 2 处直调 helper 随形参改名同步更新。
+
+**验证**：脱敏链路 157 + `pipeline`/`llm`/`api` 582 测试全绿；mypy/ruff/typos 干净（pre-commit Passed；
+`ocr/ngram_filter.py`+`ocr/preprocessor.py` 3 处 torch Tensor 子类型告警为既有，另排）。**行为零变化**。
+
+**下一步**：S1（收口）完成 → **S2**（代码 header `full` / body `tokens_only` 分档 + 新增 `tokens_only`
+正则原语 + 删 `_make_regex_redactor`，**行为变更**：正文不再被全量正则改坏 `password=expr`）；S3 本地 NER
+单独里程碑。`feature/pii-unify` 暂未进 dev。
