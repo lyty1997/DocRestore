@@ -334,3 +334,33 @@ class TestEntityReplaceSafety:
         assert count == 60
         assert out == "X" * 60
         assert any("异常高" in r.message for r in caplog.records)
+
+
+class TestRedactTokensOnly:
+    """``redact_tokens_only``（S2 代码正文档位）。
+
+    仅高置信 token + 自定义词，不碰 KV/手机/邮箱。
+    """
+
+    def test_token_and_custom_word_redacted_kv_kept(self) -> None:
+        """高置信 token 与自定义词脱；KV/手机不脱（保正文不被改坏）。"""
+        cfg = PIIConfig(
+            enable=True,
+            custom_sensitive_words=[CustomWord(word="ProjectNova")],
+        )
+        redactor = PIIRedactor(cfg)
+        text = (
+            "ProjectNova key sk-abcdefghijklmnopqrstuvwxyz0123 "
+            "password = get_secret() phone 13812345678"
+        )
+        result, records = redactor.redact_tokens_only(text)
+        # token + 自定义词脱
+        assert "sk-abcdefghijklmnopqrstuvwxyz0123" not in result
+        assert "ProjectNova" not in result
+        # KV 代码表达式 / 手机不脱（tokens_only 不跑全量正则）
+        assert "password = get_secret()" in result
+        assert "13812345678" in result
+        # 记录含 credential（token）与 custom_word
+        kinds = {r.kind for r in records}
+        assert "credential" in kinds
+        assert "custom_word" in kinds
