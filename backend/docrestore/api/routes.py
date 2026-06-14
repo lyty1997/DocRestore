@@ -52,6 +52,7 @@ from docrestore.api.schemas import (
     DirEntry,
     GPUInfoResponse,
     GPUListResponse,
+    NERStatusResponse,
     OCRStatusResponse,
     OCRWarmupRequest,
     ProgressResponse,
@@ -82,6 +83,7 @@ from docrestore.pipeline.path_guard import (
     OutputDirRejected,
     validate_output_dir,
 )
+from docrestore.privacy.ner import probe_availability
 from docrestore.processing.content_crop import (
     DegenerateQuadError,
     crop_quad_to_images,
@@ -614,6 +616,36 @@ def _resolve_output_dir(req: CreateTaskRequest) -> str | None:
     return output_dir
 
 
+def _guard_ner_backend(pii_cfg: PIIConfig) -> None:
+    """请求级 fail-fast：开实体脱敏但本地 NER 不可用 → 400（名字不裸送云端）。
+
+    仅当 ``enable`` + (人名|机构名) + ``ner_backend="spacy"`` + spaCy 或配置模型不可用
+    时拒绝。响应 ``params.remediable=true`` + ``missing_models``，前端据此弹一键配置
+    入口（POST /ner/setup，S3.4b）。``ner_backend="none"`` 或关实体脱敏均放行（知情
+    放弃）。探测不加载模型（``find_spec``，廉价）。详见 pii-local-ner.md §5。
+    """
+    if not pii_cfg.enable:
+        return
+    if not (pii_cfg.redact_person_name or pii_cfg.redact_org_name):
+        return
+    if pii_cfg.ner_backend != "spacy":
+        return
+    spacy_installed, installed, missing = probe_availability(pii_cfg.ner_models)
+    if spacy_installed and installed:
+        return
+    raise ApiBusinessError(
+        APIErrorCode.NER_BACKEND_UNAVAILABLE, 400,
+        "本地 NER 未就绪：开启了人名/机构名脱敏但 spaCy 或模型未安装。请一键配置"
+        "本地 NER 环境，或关闭人名/机构名脱敏 / 将 ner_backend 设为 none。",
+        params={
+            "remediable": True,
+            "spacy_installed": spacy_installed,
+            "missing_models": missing,
+            "models": list(pii_cfg.ner_models),
+        },
+    )
+
+
 @router.post("/tasks", response_model=TaskResponse)
 async def create_task(
     req: CreateTaskRequest,
@@ -654,6 +686,10 @@ async def create_task(
                 _to_custom_words(req.pii.custom_sensitive_words)
             )
         pii_cfg = defaults.pii.model_copy(update=pii_update)
+
+    # 本地 NER fail-fast（S3）：开人名/机构名脱敏但 spaCy/模型未就绪 → 400 不建任务，
+    # 避免名字裸送云端或白跑 OCR。校验"有效"配置（请求级覆盖后；ner_* 仍走 defaults）。
+    _guard_ner_backend(pii_cfg if pii_cfg is not None else defaults.pii)
 
     code_cfg: CodeRestoreConfig | None = None
     if req.code is not None:
@@ -1703,6 +1739,20 @@ async def get_ocr_status(request: Request) -> OCRStatusResponse:
         current_gpu_name=em.current_gpu_name,
         is_ready=em.is_ready,
         is_switching=em.is_switching,
+    )
+
+
+@router.get("/ner/status", response_model=NERStatusResponse)
+async def get_ner_status() -> NERStatusResponse:
+    """本地 NER 可用性探测（不加载模型）。前端开人名/机构名脱敏时拉取。"""
+    pii_cfg = _get_manager().pipeline.config.pii
+    spacy_installed, installed, missing = probe_availability(pii_cfg.ner_models)
+    return NERStatusResponse(
+        available=spacy_installed and bool(installed),
+        spacy_installed=spacy_installed,
+        configured_models=list(pii_cfg.ner_models),
+        installed_models=installed,
+        missing_models=missing,
     )
 
 

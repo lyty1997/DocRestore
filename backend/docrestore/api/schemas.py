@@ -460,6 +460,23 @@ class OCRStatusResponse(BaseModel):
     is_switching: bool
 
 
+# ── 本地 NER 可用性 ───────────────────────────────────────
+
+
+class NERStatusResponse(BaseModel):
+    """本地 NER 可用性探测响应（GET /ner/status，不加载模型）。
+
+    前端在开启 PII + 人名/机构名脱敏时拉取；``available=False`` 时弹「一键配置本地
+    NER 环境」入口（POST /ner/setup）。
+    """
+
+    available: bool  # spaCy 已装 且 ≥1 个配置模型就绪
+    spacy_installed: bool
+    configured_models: list[str]
+    installed_models: list[str]
+    missing_models: list[str]
+
+
 # ── GPU 列表 ──────────────────────────────────────────────
 
 
