@@ -18,9 +18,10 @@
 分支（文档/代码/PPT）里不再各写各的脱敏代码——#36 的三个洞正是「散」的代价。
 设计见 ``docs/zh/backend/pii-unification.md``。
 
-本文件是 **S1 阶段**实现：行为保持的重构，只提供 ``profile="full"``（包住现有
-``PIIRedactor`` 的行为，与现状逐字节一致）。``profile="tokens_only"``（代码正文
-只拦高置信密钥）在 **S2** 落地；本地 NER 取代云端实体检测在 **S3** 落地。
+``profile="full"`` 包住现有 ``PIIRedactor`` 的行为（与现状逐字节一致）；
+``profile="tokens_only"``（**S2** 落地）给代码正文用，仅拦高置信密钥
+（``sk-``/``gh?_``/``AKIA``/JWT）+ 自定义词，零误伤正常代码；本地 NER 取代
+云端实体检测在 **S3** 落地。
 """
 
 from __future__ import annotations
@@ -64,11 +65,11 @@ class PIIGuard:
         ``profile="full"``：全量（手机/邮箱/证件/卡/凭据/host/内链 + 自定义词），
         给文档/PPT producer 逐页与代码头部注释用。
         ``profile="tokens_only"``：仅高置信密钥（``sk-``/``AKIA``/JWT）+ 自定义词，
-        给代码正文用（S2 落地）——绝不误伤 ``password = get_secret()`` 这类正常代码。
+        给代码正文用——绝不误伤 ``password = get_secret()`` 这类正常代码。
         """
         if profile == "tokens_only":
-            msg = "tokens_only profile 在 S2 落地（见 pii-unification.md §4.2）"
-            raise NotImplementedError(msg)
+            text_out, _ = self._redactor.redact_tokens_only(text)
+            return text_out
         text_out, _ = self._redactor.redact_regex_only(text)
         return text_out
 
@@ -87,7 +88,8 @@ class PIIGuard:
         保护标识符）。
         """
         if profile == "tokens_only":
-            msg = "tokens_only profile 在 S2 落地（见 pii-unification.md §4.2）"
-            raise NotImplementedError(msg)
+            # tokens_only 不做实体替换（保护标识符），lexicon 被忽略
+            text_out, _ = self._redactor.redact_tokens_only(text)
+            return text_out
         text_out, _ = self._redactor.redact_snippet(text, lexicon)
         return text_out

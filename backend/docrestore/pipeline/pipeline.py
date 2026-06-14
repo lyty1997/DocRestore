@@ -1628,14 +1628,15 @@ class Pipeline:
         """对每个 SourceFile 脱敏（in-place），送云端 refine/repair/audit 前执行。
 
         分 header / body 两段差异化处理（``_split_leading_comment`` 切分）：
-        - **leading comment header**：``redact_snippet`` = regex（结构化 PII +
-          凭据/token）+ 实体 lexicon（人名/机构名）+ 自定义词。lexicon 只从所有
-          非空 header 拼接检测，``person_names`` / ``org_names`` 来自注释，不会
-          污染正文标识符。
-        - **正文 body**：``redact_regex_only`` = regex（结构化 PII + 凭据/token）
-          + 自定义词，**不做实体脱敏**——避免把 import 路径 / namespace / 变量名
-          误当人名/机构名替换（AGE-50）。凭据 KV（``password=<expr>``）在正文里
-          可能误伤右侧表达式，属"宁多勿漏"取舍，``redact_credential`` 可关。
+        - **leading comment header**：``redact_for_cloud(..., "full")`` = 全量结构化
+          PII（手机/邮箱/证件/卡/凭据/host/内链）+ 实体 lexicon（人名/机构名）+
+          自定义词。lexicon 只从所有非空 header 拼接检测，``person_names`` /
+          ``org_names`` 来自注释，不会污染正文标识符。
+        - **正文 body**：``redact_structured(..., "tokens_only")`` = 仅高置信密钥
+          token（``sk-``/``gh?_``/``AKIA``/JWT）+ 自定义词，**不做实体脱敏**——避免把
+          import 路径 / namespace / 变量名误当人名/机构名替换（AGE-50）；也**不跑**
+          KV/手机/邮箱等全量正则——否则 ``password = get_secret()`` 右侧被吞坏代码
+          （pii-unification.md §4.2，2026-06-14「稳一点」决策）。
 
         无 header 的文件也照常脱正文。``refiner=None`` 时跳过实体检测，仅 regex +
         自定义词。
@@ -1655,7 +1656,7 @@ class Pipeline:
 
         # 实体检测仅用所有非空 header 拼接（来源限注释，不取正文标识符）。
         # #36：拼接送 detect_pii_entities（云端）**之前**，先对每个 header 做
-        # redact_regex_only（结构化 PII + 凭据/token + 自定义词先掉）——否则注释里
+        # 全量结构化脱敏（结构化 PII + 凭据/token + 自定义词先掉）——否则注释里
         # 的 `Author: 张三 <a@corp.com>` 的邮箱/手机会随 combined 裸送云端。人名/
         # 机构名不被 regex 触及，实体检测仍基于（已结构化脱敏的）注释正常工作。
         lexicon: EntityLexicon | None = None
@@ -1682,7 +1683,7 @@ class Pipeline:
             new_header = (
                 guard.redact_for_cloud(header, lexicon) if header else ""
             )
-            new_body = guard.redact_structured(body)
+            new_body = guard.redact_structured(body, profile="tokens_only")
             sources[i].merged_text = new_header + new_body
 
         # 检测已尝试且失败 + fail-closed → 通知调用方跳过后续云端精修

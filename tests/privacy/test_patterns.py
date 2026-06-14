@@ -17,7 +17,10 @@
 from __future__ import annotations
 
 from docrestore.pipeline.config import PIIConfig
-from docrestore.privacy.patterns import redact_structured_pii
+from docrestore.privacy.patterns import (
+    redact_structured_pii,
+    redact_tokens_only_pii,
+)
 
 
 class TestPhoneRedaction:
@@ -402,3 +405,45 @@ class TestInternalUrlRedaction:
         result, records = redact_structured_pii(text, cfg)
         assert "192.168.1.1" in result
         assert not any(r.kind == "internal_url" for r in records)
+
+
+class TestTokensOnlyRedaction:
+    """``redact_tokens_only_pii``：仅高置信密钥 token，不碰 KV/手机/邮箱等（S2）。"""
+
+    def test_redacts_high_confidence_tokens(self) -> None:
+        """sk- / AKIA / JWT 三类高置信密钥都脱，记为 credential。"""
+        cfg = PIIConfig(enable=True)
+        text = (
+            "openai sk-abcdefghijklmnopqrstuvwxyz0123 "
+            "aws AKIAIOSFODNN7EXAMPLE jwt "
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3OCJ9.SflKxwRJSMeKKF2QT4"
+        )
+        result, records = redact_tokens_only_pii(text, cfg)
+        assert "sk-abcdefghijklmnopqrstuvwxyz0123" not in result
+        assert "AKIAIOSFODNN7EXAMPLE" not in result
+        assert "eyJhbGciOiJIUzI1NiJ9" not in result
+        assert cfg.credential_placeholder in result
+        assert any(r.kind == "credential" for r in records)
+
+    def test_keeps_kv_credential_and_code(self) -> None:
+        """KV 凭据正则不跑 → ``password = get_secret()`` 不被改坏（核心收益）。"""
+        cfg = PIIConfig(enable=True)
+        text = "password = get_secret()"
+        result, records = redact_tokens_only_pii(text, cfg)
+        assert result == text
+        assert records == []
+
+    def test_keeps_phone_email_card(self) -> None:
+        """手机/邮箱/银行卡（非 token PII）一律保留 —— 与 full 的差异点。"""
+        cfg = PIIConfig(enable=True)
+        text = "13812345678 dev@corp.example 6222021234567890123"
+        result, _ = redact_tokens_only_pii(text, cfg)
+        assert result == text
+
+    def test_toggle_off_redact_credential(self) -> None:
+        """redact_credential=False 时连高置信 token 也不脱（token 属凭据类）。"""
+        cfg = PIIConfig(enable=True, redact_credential=False)
+        text = "key sk-abcdefghijklmnopqrstuvwxyz0123"
+        result, records = redact_tokens_only_pii(text, cfg)
+        assert "sk-abcdefghijklmnopqrstuvwxyz0123" in result
+        assert records == []
