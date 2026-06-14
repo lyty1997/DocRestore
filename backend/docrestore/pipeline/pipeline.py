@@ -94,7 +94,8 @@ from docrestore.pipeline.profiler import (
     set_current_profiler,
 )
 from docrestore.pipeline.rate_controller import RateController
-from docrestore.privacy.redactor import EntityLexicon, PIIRedactor
+from docrestore.privacy.guard import PIIGuard
+from docrestore.privacy.redactor import EntityLexicon
 from docrestore.processing.cleaner import OCRCleaner
 from docrestore.processing.dedup import (
     IncrementalMerger,
@@ -390,10 +391,10 @@ def _make_regex_redactor(
     """
     if not pii_cfg.enable:
         return None
-    redactor = PIIRedactor(pii_cfg)
+    guard = PIIGuard(pii_cfg)
 
     def _redact(text: str) -> str:
-        return redactor.redact_regex_only(text)[0]
+        return guard.redact_structured(text)
 
     return _redact
 
@@ -1141,7 +1142,7 @@ class Pipeline:
         # 实体脱敏：开 PII 时按已收页文本建一次 lexicon，每页送云端精修前替换
         # 人名/机构名；结构化 PII 已由 producer 入队前正则脱敏。
         pii = pii_cfg if pii_cfg is not None else PIIConfig()
-        redactor = PIIRedactor(pii) if pii.enable else None
+        guard = PIIGuard(pii) if pii.enable else None
         entity_lexicon: EntityLexicon | None = None
         pii_done = False
         raw_accum: list[str] = []
@@ -1165,7 +1166,7 @@ class Pipeline:
                 result, _used = await self._refine_segment_with_cache(
                     refiner, bodies[bi], bi, total, cache, llm_cfg, quality,
                     slide_mode=True,
-                    redactor=redactor, entity_lexicon=entity_lexicon,
+                    guard=guard, entity_lexicon=entity_lexicon,
                 )
                 bodies[bi] = result.markdown
             # 进度文案区分是否真精修：关精修时只是逐页组装，不报"精修"误导用户
@@ -1191,7 +1192,7 @@ class Pipeline:
             raw_accum.append(body)
             # 积累阈值页后建一次实体词表（仅开 name 开关时实际检测，否则 None）
             if (
-                redactor is not None
+                guard is not None
                 and not pii_done
                 and len(raw_accum) >= _PII_DETECT_THRESHOLD
             ):
@@ -1223,7 +1224,7 @@ class Pipeline:
             raise RuntimeError(msg)
 
         # 短 PPT 兜底：页数不足阈值时上面未建过词表，这里补建一次（name 开关关 → None）
-        if redactor is not None and not pii_done:
+        if guard is not None and not pii_done:
             entity_lexicon = await self._detect_entities(
                 "\n".join(raw_accum), llm, pii,
             )
@@ -1242,9 +1243,9 @@ class Pipeline:
 
         # 实体脱敏输出兜底：词表就绪前已精修的早窗口页可能漏掉实体，对组装正文
         # 再脱敏一遍（已脱敏页为占位符，幂等无副作用）。
-        if entity_lexicon is not None and redactor is not None:
+        if entity_lexicon is not None and guard is not None:
             bodies = [
-                redactor.redact_snippet(b, entity_lexicon)[0] for b in bodies
+                guard.redact_for_cloud(b, entity_lexicon) for b in bodies
             ]
 
         report_fn(
@@ -1643,12 +1644,12 @@ class Pipeline:
         failure`` 为真时返回 True，调用方据此跳过后续代码精修的云端调用
         （fail-closed，避免 header 里未脱敏的人名/机构名外发）。其余返回 False。
         """
-        from docrestore.privacy.redactor import EntityLexicon, PIIRedactor
+        from docrestore.privacy.redactor import EntityLexicon
 
         if not sources:
             return False
 
-        redactor = PIIRedactor(pii_cfg)
+        guard = PIIGuard(pii_cfg)
         # 每个文件切出 (header, body)，header + body == merged_text
         split = [_split_leading_comment(s.merged_text) for s in sources]
 
@@ -1661,7 +1662,7 @@ class Pipeline:
         detect_failed = False
         needs_lex = pii_cfg.redact_person_name or pii_cfg.redact_org_name
         combined = "\n\n".join(
-            redactor.redact_regex_only(h)[0] for h, _ in split if h
+            guard.redact_structured(h) for h, _ in split if h
         )
         if needs_lex and refiner is not None and combined:
             try:
@@ -1679,9 +1680,9 @@ class Pipeline:
 
         for i, (header, body) in enumerate(split):
             new_header = (
-                redactor.redact_snippet(header, lexicon)[0] if header else ""
+                guard.redact_for_cloud(header, lexicon) if header else ""
             )
-            new_body, _ = redactor.redact_regex_only(body)
+            new_body = guard.redact_structured(body)
             sources[i].merged_text = new_header + new_body
 
         # 检测已尝试且失败 + fail-closed → 通知调用方跳过后续云端精修
@@ -1730,8 +1731,8 @@ class Pipeline:
         try:
             engine = await self._resolve_ocr_engine(ocr, report_fn)
             cleaner = OCRCleaner()
-            redactor = (
-                PIIRedactor(pii_cfg) if pii_cfg.enable else None
+            guard = (
+                PIIGuard(pii_cfg) if pii_cfg.enable else None
             )
             for i, img in enumerate(images):
                 t0 = time.perf_counter()
@@ -1795,8 +1796,8 @@ class Pipeline:
                         cleaned_text=page.cleaned_text,
                     )
 
-                if redactor is not None:
-                    page.cleaned_text, _ = redactor.redact_regex_only(
+                if guard is not None:
+                    page.cleaned_text = guard.redact_structured(
                         page.cleaned_text,
                     )
 
@@ -1847,7 +1848,7 @@ class Pipeline:
         llm_cfg = llm if llm is not None else self._config.llm
         # 实体脱敏器：开 PII 时复用 lexicon 把人名/机构名替换在送云端精修前
         # （结构化 PII 已由 producer 入队前正则脱敏）。
-        redactor = PIIRedactor(pii_cfg) if pii_cfg.enable else None
+        guard = PIIGuard(pii_cfg) if pii_cfg.enable else None
         # LLM 精修缓存：resume 任务复用 output_dir → 直接命中已精修段，省时间
         cache = LLMCache(
             output_dir / ".llm_cache",
@@ -1899,7 +1900,7 @@ class Pipeline:
                             segmented_offset, segment_index,
                             refined_results, all_gaps, report_fn,
                             cache, llm_cfg, quality,
-                            redactor=redactor, entity_lexicon=entity_lexicon,
+                            guard=guard, entity_lexicon=entity_lexicon,
                         )
                     )
 
@@ -1926,7 +1927,7 @@ class Pipeline:
                     segmented_offset, segment_index,
                     refined_results, all_gaps, report_fn,
                     cache, llm_cfg, quality,
-                    redactor=redactor, entity_lexicon=entity_lexicon,
+                    guard=guard, entity_lexicon=entity_lexicon,
                 )
             )
 
@@ -1945,7 +1946,7 @@ class Pipeline:
                         await self._refine_segment_with_cache(
                             refiner, remaining, segment_index, 0,
                             cache, llm_cfg, quality,
-                            redactor=redactor,
+                            guard=guard,
                             entity_lexicon=entity_lexicon,
                         )
                     )
@@ -1996,12 +1997,12 @@ class Pipeline:
         llm_cfg: LLMConfig,
         quality: QualityReport | None = None,
         *,
-        redactor: PIIRedactor | None = None,
+        guard: PIIGuard | None = None,
         entity_lexicon: EntityLexicon | None = None,
     ) -> tuple[int, int]:
         """合并器有新文本时按 controller.target L* 尝试切段精修。
 
-        `redactor` + `entity_lexicon` 透传到段级精修：词表就绪后的分段送云端前
+        `guard` + `entity_lexicon` 透传到段级精修：词表就绪后的分段送云端前
         脱敏人名/机构名（早窗口段词表未就绪 → 由最终输出兜底覆盖）。
         """
         profiler = current_profiler()
@@ -2033,7 +2034,7 @@ class Pipeline:
                     await self._refine_segment_with_cache(
                         refiner, seg_text, segment_index, 0,
                         cache, llm_cfg, quality,
-                        redactor=redactor, entity_lexicon=entity_lexicon,
+                        guard=guard, entity_lexicon=entity_lexicon,
                     )
                 )
             elapsed = time.perf_counter() - t0
@@ -2218,7 +2219,7 @@ class Pipeline:
         # 组装结果再脱敏一遍（lexicon=None 时跳过；结构化 PII 已在 producer 完成）。
         # 用请求级 pii_cfg（#36）：回落 self._config.pii 时标准部署恒 False → 兜底失效。
         if entity_lexicon is not None and pii_cfg.enable:
-            redacted_md, _ = PIIRedactor(pii_cfg).redact_snippet(
+            redacted_md = PIIGuard(pii_cfg).redact_for_cloud(
                 doc.markdown, entity_lexicon,
             )
             if redacted_md != doc.markdown:
@@ -2340,7 +2341,7 @@ class Pipeline:
         quality: QualityReport | None = None,
         *,
         slide_mode: bool = False,
-        redactor: PIIRedactor | None = None,
+        guard: PIIGuard | None = None,
         entity_lexicon: EntityLexicon | None = None,
     ) -> tuple[RefinedResult, bool]:
         """段级精修带磁盘缓存。返回 `(result, used_refiner)`。
@@ -2359,12 +2360,12 @@ class Pipeline:
         `slide_mode=True`（PPT 按页精修）：ctx 标记 is_slide → 用 slide prompt
         （不跨页去重），缓存走独立 slide 命名空间，与文档分段缓存互不串味。
 
-        `redactor` + `entity_lexicon` 非空时，先把人名/机构名替换在送云端精修前
+        `guard` + `entity_lexicon` 非空时，先把人名/机构名替换在送云端精修前
         （缓存键也用脱敏后文本，resume 一致）；`entity_lexicon=None`（早窗口/未开
         脱敏/检测失败）则跳过——结构化 PII 已由 producer 入队前正则脱敏。
         """
-        if redactor is not None and entity_lexicon is not None:
-            text, _ = redactor.redact_snippet(text, entity_lexicon)
+        if guard is not None and entity_lexicon is not None:
+            text = guard.redact_for_cloud(text, entity_lexicon)
         if cache.enabled:
             cached = cache.get_segment(
                 model=llm_cfg.model,
@@ -3108,12 +3109,12 @@ class Pipeline:
 
         # PII 脱敏 re-OCR 文本（轻量模式，不调用 LLM）；用请求级 pii_cfg（#36）
         if pii_cfg.enable:
-            redactor = PIIRedactor(pii_cfg)
-            current_text, _ = redactor.redact_snippet(
+            guard = PIIGuard(pii_cfg)
+            current_text = guard.redact_for_cloud(
                 current_text, entity_lexicon,
             )
             if next_page_text is not None:
-                next_page_text, _ = redactor.redact_snippet(
+                next_page_text = guard.redact_for_cloud(
                     next_page_text, entity_lexicon,
                 )
 
