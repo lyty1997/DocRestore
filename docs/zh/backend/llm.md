@@ -22,7 +22,13 @@ LLM 精修层负责对 OCR 合并去重后的 markdown 进行“格式修复 + �
 
 - **缺口自动补充（Gap fill）**：当精修检测到内容跳跃时，结合 re-OCR 结果从原始文本中提取缺失片段并插回。
 - **整篇文档级精修（Final refine）**：对分段精修重组后的整篇 markdown 再做一遍跨段去重与全局格式清理。
-- **（云端专有）PII 实体检测**：为隐私脱敏阶段提供人名/机构名的实体词典来源。
+- **（已废弃，待 S4 删）PII 实体检测**：原为隐私脱敏阶段提供人名/机构名实体词典来源。
+
+> **⚠️ `detect_pii_entities` 已是死路（S3，2026-06-14）**：人名/机构名检测改**本地 NER**
+> （`privacy/ner.py::PIIGuard.detect_entities`，spaCy，名字不出本机）。Pipeline 已不再调用本层的
+> `detect_pii_entities`；本文 §3/§5 中所有相关描述均为历史，代码侧已标 `deprecated`，待 S4 连同
+> `CloudLLMRefiner.detect_pii_entities` 与基类默认实现一并删除。详见
+> [privacy.md](privacy.md) §10.5 / [pii-local-ner.md](pii-local-ner.md)。
 
 同时支持 **云端与本地两种 provider**：
 

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License").
 
 # PII 脱敏统一设计（PIIGuard + 本地 NER）
 
-> 状态：**已确认**（2026-06-14），按 §9 决策分步落地。
+> 状态：**S1–S3 已落地**（2026-06-14，分支 `feature/pii-unify-s3`）；S4（删云端 detect 死路）待办（§6）。
 > 触发：#36 修复后用户提出「文档/代码/PPT 三模式统一 PII 路径，不要分模式管理」。
 > 决策已拍板：① 统一到一个 `PIIGuard`；② 结构化 PII **一次前置**（含代码 `text_lines`，即 option 2）；③ 加**本地 NER**，人名/机构名也不出本机。
 
@@ -115,6 +115,8 @@ producer 在 `cleaner.clean(page)` 后、入队前，对 `page.cleaned_text` 调
 
 **决策（2026-06-14）：benchmark 后再定**——S3 阶段 LAC 与 GLiNER **都接上**，用 test_images 真实样本测召回/速度/依赖代价（§5.4）再选,不盲选。LAC 中文最契合 + 复用 paddle；GLiNER 零新增依赖（transformers 已在环境）+ 补代码英文名。
 
+> **⚠️ 已被取代（S3 落地，2026-06-14）**：S3 动手前按「不造轮子先调研」核实**推翻**本决策——GLiNER 硬依赖 `transformers≥4.51.3`，撞 vllm/DeepSeek-OCR 锁定的 `4.46.3`（装上破坏 OCR 环境，上文「transformers 已在环境」判断有误）；LAC 2021 停更 + 强耦合老 paddle，且 PaddleOCR 的 paddle 在子进程、主进程「复用」红利不成立。二者均不可用 → 最终**选 spaCy CNN**（`zh/en_core_web_md`，零 torch/transformers，不撞 OCR venv）。详见 [pii-local-ner.md](pii-local-ner.md) §1。
+
 ### 5.2 接口与放置
 
 ```
@@ -141,8 +143,8 @@ LocalEntityDetector(Protocol):
 |---|---|---|
 | **S1** | 抽 `PIIGuard`，把现有所有脱敏调用**原样收口**到它（`redact_structured`/`redact_for_cloud` 先包住现逻辑，`detect_entities` 暂仍委托云端）。**行为零变化**。 | 全量测试与现状逐字节一致；mypy/ruff/typos 绿 |
 | **S2** | 代码正文 body 降 `tokens_only`（`_redact_code_pii` body 行改档），header 仍 `full`；新增 `tokens_only` 正则原语（仅 `sk-`/`gh?_`/`AKIA`/JWT + 自定义词）。**prompt 字段（file_path/片段/诊断）保持 `full`，`_make_regex_redactor` 保留**（§9.5）。文档/PPT producer 已在 S1b 走 `guard.redact_structured`（`full`）。 | 正文不再被全量正则改坏（`password=expr` 取证）；硬编码 `sk-` 仍被拦；#36 回归（含 prompt 字段 full）仍绿 |
-| **S3** | 本地 NER：实现 `LocalEntityDetector`，LAC+GLiNER 都接，`detect_entities` 切本地；§5.4 benchmark 留证（本地优先，接受略低召回）。 | benchmark 证据；名字不再出现在云端调用入参（mock 取证） |
-| **S4** | 清理：删旧云端 `detect_pii_entities` 调用路径（或降级为可选）、更新 `privacy.md`/`pipeline.md`、补测试。 | 文档同步；全门禁绿 |
+| **S3** ✅已落地 | 本地 NER：`privacy/ner.py::SpacyEntityDetector`（spaCy，**非** LAC/GLiNER，见 [pii-local-ner.md](pii-local-ner.md) §1.1）；`PIIGuard.detect_entities` 切本地 + 一键环境配置（`GET/POST /ner/*` + 前端 TaskForm）；§5.4 benchmark 留证。 | ✅ [ner-benchmark.md](ner-benchmark.md)（人名召回 0.92）；名字不再出现在云端调用入参（mock 取证）；前端三态 Playwright 验证 |
+| **S4** | 清理：删旧云端 `detect_pii_entities` 调用路径 + `PIIRedactor.redact_for_cloud(refiner)`（S3.7 已**标 deprecated 死路**）；文档 `privacy.md`/`pipeline.md`/`llm.md` 已在 S3.7 同步。 | 删死路代码 + 全门禁绿（文档 S3.7 已同步） |
 
 每步一个 `feature/pii-unify-sN` 分支，独立 PR，逐个闭环（禁止多个半成品并行）。
 
