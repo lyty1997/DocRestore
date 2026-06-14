@@ -22,7 +22,10 @@ from dataclasses import dataclass
 from docrestore.llm.base import LLMRefiner
 from docrestore.models import RedactionRecord
 from docrestore.pipeline.config import PIIConfig
-from docrestore.privacy.patterns import redact_structured_pii
+from docrestore.privacy.patterns import (
+    redact_structured_pii,
+    redact_tokens_only_pii,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +156,20 @@ class PIIRedactor:
         逐页调用（此时实体检测尚未发生，lexicon 还没拿到）。
         """
         return self.redact_snippet(text, lexicon=None)
+
+    def redact_tokens_only(
+        self,
+        text: str,
+    ) -> tuple[str, list[RedactionRecord]]:
+        """代码正文档位：仅高置信密钥 token + 自定义敏感词，零误伤正常代码。
+
+        不跑 KV / 手机 / 邮箱 / 卡 / host / url 全量正则（会把 ``password =
+        get_secret()`` 改坏），不做实体替换（保护 import 路径 / 标识符）。幂等。
+        """
+        text, records = redact_tokens_only_pii(text, self._config)
+        text, custom_records = self._replace_custom_words(text)
+        records.extend(custom_records)
+        return text, records
 
     def redact_snippet(
         self,

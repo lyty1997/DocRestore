@@ -231,6 +231,38 @@ def redact_structured_pii(
     return text, records
 
 
+def redact_tokens_only_pii(
+    text: str,
+    config: PIIConfig,
+) -> tuple[str, list[RedactionRecord]]:
+    """仅替换高置信密钥 token（``sk-`` / ``gh?_`` / ``AKIA`` / JWT），其余正则不跑。
+
+    给**代码正文**用：固定前缀 + 20+ 字符的 token 格式碰不到正常代码，却拦得住
+    硬编码 API key；而 KV 凭据 / 手机 / 邮箱 / 卡 / host / url 等全量正则会把
+    ``password = get_secret()`` 之类正常代码改坏（见 pii-unification.md §4.2），
+    故正文不跑。受 ``config.redact_credential`` 开关控制（token 属凭据类）。
+    """
+    if not config.redact_credential:
+        return text, []
+    count = 0
+
+    def _repl(_m: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        return config.credential_placeholder
+
+    text = _TOKEN_FORMAT_RE.sub(_repl, text)
+    records: list[RedactionRecord] = []
+    if count > 0:
+        records.append(
+            RedactionRecord(
+                kind="credential", method="regex",
+                placeholder=config.credential_placeholder, count=count,
+            )
+        )
+    return text, records
+
+
 def _replace_id_card(
     text: str, config: PIIConfig,
 ) -> tuple[str, int]:

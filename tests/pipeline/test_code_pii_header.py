@@ -10,8 +10,8 @@
 
 覆盖：
   - ``_split_leading_comment``：跨语言注释块识别，无注释直通
-  - ``_redact_code_pii``：header 全量脱敏 + 正文 regex（结构化 PII + 凭据/token）
-    与自定义词脱敏，但不做实体脱敏（import 路径 / namespace / 标识符不动）
+  - ``_redact_code_pii``：header 全量脱敏（full）+ 正文 tokens_only（仅高置信密钥
+    token + 自定义词，不跑 KV/手机/邮箱全量正则、不做实体脱敏），import/标识符不动
 """
 
 from __future__ import annotations
@@ -136,40 +136,53 @@ class TestRedactCodePii:
     """端到端：header 全量脱敏 + 正文 regex/凭据脱敏，import/标识符不动。"""
 
     @pytest.mark.asyncio
-    async def test_email_redacted_in_header_and_body(self) -> None:
-        """header 与正文里的结构化 PII（邮箱）都脱敏；import 路径不被误伤。"""
+    async def test_header_full_body_tokens_only(self) -> None:
+        """S2：header 全量（邮箱掉），正文 tokens_only（邮箱留、高置信 token 掉）。
+
+        正文不跑全量正则以防改坏代码（§4.2）；import 路径不被误伤。
+        """
         src = _build_source(
             "// Copyright 2024 ACME\n"
             "// Author: alice@acme.com\n"
             "\n"
             "#include \"third_party/acme/headers.h\"\n"
+            'const char* k = "sk-abcdefghijklmnopqrstuvwxyz0123";\n'
             "// runtime contact: bob@acme.com\n",
         )
         pii_cfg = PIIConfig(enable=True)
         pipe = Pipeline.__new__(Pipeline)  # 跳过 __init__；只测 _redact_code_pii
         await pipe._redact_code_pii([src], pii_cfg, refiner=None)
-        # header 与正文邮箱都 → 占位符（正文走 redact_regex_only）
+        # header 邮箱：full → 脱
         assert "alice@acme.com" not in src.merged_text
-        assert "bob@acme.com" not in src.merged_text
+        # 正文高置信 token：tokens_only → 脱
+        assert "sk-abcdefghijklmnopqrstuvwxyz0123" not in src.merged_text
+        assert pii_cfg.credential_placeholder in src.merged_text
+        # 正文邮箱：tokens_only 不脱（§4.2 取舍，保正文不被改坏）
+        assert "bob@acme.com" in src.merged_text
         # import 路径不被结构化 regex 误伤
         assert "third_party/acme/headers.h" in src.merged_text
 
     @pytest.mark.asyncio
-    async def test_body_credential_redacted_identifier_intact(self) -> None:
-        """正文里的硬编码凭据/token 被脱敏；变量名/namespace 等标识符不动。"""
+    async def test_body_token_redacted_code_expr_intact(self) -> None:
+        """S2 正文 tokens_only：高置信 token 脱；KV 代码表达式/标识符不被改坏。
+
+        正文不跑 KV 正则（否则 ``password = get_secret()`` 右侧被吞坏代码，§4.2）——
+        代价是字符串字面量密码不脱，属「稳一点」取舍。
+        """
         src = _build_source(
             "// header\n"
-            'const char* password = "hunter2secret";\n'
+            "const char* password = get_secret();\n"
             'std::string apikey = "sk-abcdefghijklmnopqrstuvwxyz0123";\n'
             "namespace acme { int Zhang = 1; }\n",
         )
         pii_cfg = PIIConfig(enable=True)
         pipe = Pipeline.__new__(Pipeline)
         await pipe._redact_code_pii([src], pii_cfg, refiner=None)
-        # 凭据值 / token 被替换
-        assert "hunter2secret" not in src.merged_text
+        # 高置信 token 被替换
         assert "sk-abcdefghijklmnopqrstuvwxyz0123" not in src.merged_text
         assert pii_cfg.credential_placeholder in src.merged_text
+        # 核心 S2 收益：KV 代码表达式不被改坏，get_secret() 原样保留
+        assert "password = get_secret();" in src.merged_text
         # 正文不做实体脱敏（无 lexicon）：namespace / 变量名保留（AGE-50）
         assert "namespace acme" in src.merged_text
         assert "Zhang" in src.merged_text

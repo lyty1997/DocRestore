@@ -20,14 +20,16 @@ PIIRedactor.redact_regex_only / redact_snippet，断言由「两者比较」给�
 
 from __future__ import annotations
 
-import pytest
-
 from docrestore.pipeline.config import PIIConfig
 from docrestore.privacy.guard import PIIGuard
 from docrestore.privacy.redactor import EntityLexicon, PIIRedactor
 
 # 含多类结构化 PII + 人名的样本（构造输入，断言从输入派生）
 _SAMPLE = "负责人张三 13800138000 邮箱 dev@corp.example 卡 6222021234567890123"
+
+# 合成高置信密钥 token（sk- + 30 位字母数字）与正文 KV 代码表达式（不该被改坏）
+_PLANTED_SK = "sk-abcdefghijklmnopqrstuvwxyz0123"
+_CODE_KV = "password = get_secret()"
 
 
 def test_enabled_reflects_config() -> None:
@@ -70,10 +72,44 @@ def test_redact_idempotent() -> None:
     assert once == twice
 
 
-def test_tokens_only_profile_not_yet_implemented() -> None:
-    """S1 边界：tokens_only 档位留给 S2，显式 NotImplementedError。"""
+def test_tokens_only_redacts_high_confidence_token() -> None:
+    """tokens_only 脱高置信密钥 token（sk-/AKIA/JWT）。"""
+    cfg = PIIConfig(enable=True)
+    guard = PIIGuard(cfg)
+    out = guard.redact_structured(f"key = {_PLANTED_SK}", profile="tokens_only")
+    assert _PLANTED_SK not in out
+    assert cfg.credential_placeholder in out
+
+
+def test_tokens_only_keeps_kv_and_structured_pii() -> None:
+    """tokens_only 不跑 KV/手机/邮箱全量正则 → 正文代码与非 token PII 原样保留。"""
+    cfg = PIIConfig(enable=True)
+    guard = PIIGuard(cfg)
+    out = guard.redact_structured(f"{_SAMPLE}\n{_CODE_KV}", profile="tokens_only")
+    # 手机/邮箱（结构化 PII）未脱 —— 断言派生自输入
+    assert "13800138000" in out
+    assert "dev@corp.example" in out
+    # KV 代码表达式不被改坏（核心：password = get_secret() 原样保留）
+    assert _CODE_KV in out
+
+
+def test_full_vs_tokens_only_differ_on_structured_pii() -> None:
+    """同一输入：full 脱手机、tokens_only 不脱 —— 证明档位真实生效、非空转。"""
     guard = PIIGuard(PIIConfig(enable=True))
-    with pytest.raises(NotImplementedError):
-        guard.redact_structured("x", profile="tokens_only")
-    with pytest.raises(NotImplementedError):
-        guard.redact_for_cloud("x", None, profile="tokens_only")
+    full_out = guard.redact_structured(_SAMPLE, profile="full")
+    tok_out = guard.redact_structured(_SAMPLE, profile="tokens_only")
+    assert "13800138000" not in full_out  # full 脱手机
+    assert "13800138000" in tok_out  # tokens_only 不脱
+    assert full_out != tok_out
+
+
+def test_redact_for_cloud_tokens_only_ignores_lexicon() -> None:
+    """redact_for_cloud(tokens_only)：脱 token，但忽略 lexicon（不替实体保标识符）。"""
+    cfg = PIIConfig(enable=True, redact_person_name=True)
+    guard = PIIGuard(cfg)
+    lexicon = EntityLexicon(person_names=("张三",), org_names=())
+    out = guard.redact_for_cloud(
+        f"张三 写了 key = {_PLANTED_SK}", lexicon, profile="tokens_only",
+    )
+    assert _PLANTED_SK not in out  # token 脱
+    assert "张三" in out  # 实体未替（lexicon 忽略，保护标识符）
