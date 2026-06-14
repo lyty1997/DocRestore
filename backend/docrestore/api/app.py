@@ -55,6 +55,7 @@ from docrestore.pipeline.config import PipelineConfig
 from docrestore.pipeline.pipeline import Pipeline
 from docrestore.pipeline.scheduler import PipelineScheduler
 from docrestore.pipeline.task_manager import TaskManager
+from docrestore.privacy.ner_install import NERSetupManager
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +266,9 @@ def create_app(  # noqa: C901
         app.state.engine_manager = engine_manager
         app.state.scheduler = scheduler
         app.state.db = db
+        # 本地 NER 一键安装管理器（POST /ner/setup 驱动；shutdown 时 cancel 子进程）
+        ner_setup = NERSetupManager()
+        app.state.ner_setup = ner_setup
 
         # 启动上传会话清理后台任务：provider 从 TaskManager 收集活跃
         # 任务的 image_dir，清理循环据此跳过仍被引用的 upload_dir，避免
@@ -280,6 +284,9 @@ def create_app(  # noqa: C901
             warmup_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await warmup_task
+
+        # 取消运行中的 NER 一键安装子进程（cancel+await+killpg，避免孤儿 pip）
+        await ner_setup.shutdown()
 
         # 先 cancel 运行中的 OCR 任务，避免它们与 pipeline.shutdown 并发
         # 抢占 worker stdin/stdout（会导致 StreamReader 冲突或长时间阻塞）
