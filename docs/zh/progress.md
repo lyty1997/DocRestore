@@ -2140,4 +2140,6 @@ S3.7 文档收尾 + PR base dev。云端 `detect_pii_entities` 暂留待 S4 清�
 
 **验证**：`scripts/check_quality.sh` 全绿（mypy --strict / ruff / typos / 前端 typecheck+lint / **pytest 1319 passed, 45 skipped**）。#36 的 code/实体回归全过。
 
-**遗留**：可选字段级加固（`_make_regex_redactor`/`_redact_diag_dict` 接 lexicon，纵深防御，非必须，闸口已覆盖 N2）；commit/PR 待用户授权；dev→main release 时 `Fixes #67`。
+**字段级加固（2026-06-16 追加，纵深防御）**：`_make_regex_redactor(pii_cfg, lexicon)` 非空时走 `redact_for_cloud`（结构化+实体）；`_code_pipeline` 传 `code_lexicon`；`build_consistency_audit_context` 经新 `_redact_unresolved_item` 对 `unresolved_items.context/note` 脱敏（**闸口够不到结构化 PII 的唯一缝**——闸口只兜底实体）。+5 测试（unresolved 脱敏 with/without redact、`_make_regex_redactor` lexicon/无 lexicon/未开）。设计文档 §5 标已落地 + 加 PlantUML 出云闸口时序图（`extract_and_compile.sh` 编译 exit 0）。
+
+**遗留**：commit/PR 待用户授权后合 dev；dev→main release 时 `Fixes #67`。
