@@ -2122,3 +2122,22 @@ S3.7 文档收尾 + PR base dev。云端 `detect_pii_entities` 暂留待 S4 清�
 **验证**：净删除 16 文件 +34/−548 行（1 文件删）；`mypy --strict` 74 文件 0 错 / ruff / typos（含 docs）/ **pytest 1307 passed, 45 skipped, 0 failed**；grep 确认 `detect_pii_entities` / `build_pii_detect_prompt` / `PIIRedactor.redact_for_cloud(refiner)` 代码零残留（仅余说明性注释）。
 
 **遗留**：PR base dev 待提/合；dev→main 整批 release 时关 #36 相关。
+
+## 2026-06-15 — #67 出云闸口下沉（PII 统一 S5，分支 `feature/s-cloud-egress-gate`）
+
+**触发**：dev→main release 评审揪出两个 PII fail-closed 绕过实证——N1（dup-H2 重试在 `block_cloud` 守卫外，fail-closed 时仍发整篇 markdown 上云）、N2（实体 lexicon 从未线程化到 code 诊断，g++/clang 回显源码行里的人名照样上云）。根因：`pii-unification.md` §3.1「所有云端调用点只走闸口」是**约定**而非结构强制。
+
+**设计**（先行 + 用户确认，落 `docs/zh/backend/pii-cloud-egress-gate.md`）：把 fail-closed 与实体兜底**下沉到全后端唯一出云点 `BaseLLMRefiner._call_llm`**（grep 证实零旁路）。机制经用户拍板选**方案 A / ContextVar**（与 `_call_llm` 既有 `current_profiler()` 惯例一致、task-local 正解并发子目录串味、零 Protocol/调用点签名改动）。关键判断：**闸口只做「仅实体 lexicon 替换」**（精确串替换，对代码标识符/import 路径一律安全），结构化脱敏的 profile 分档继续留字段级上游——彻底化解「共享出口无法分档」与 #36 tokens_only 回归两难。
+
+**落地**：
+- 新建 `llm/egress_gate.py`：`CloudEgressPolicy`（block_cloud/lexicon/guard，task 内 mutate）+ `_egress_policy` ContextVar + `egress_scope()`/`update_egress_policy()`/`current_egress_policy()` + `CloudEgressBlockedError`（仿 `LLMCircuitOpenError` 继承 RuntimeError）+ `enforce_egress(kwargs, provider)`（local/无策略短路 → block_cloud 抛错 → messages 非 system + prediction.content 仅实体兜底）。
+- `privacy/redactor.py` 暴露 `apply_lexicon`；`privacy/guard.py` 加 `redact_entities_only(text, lexicon)`（仅实体、不跑结构化）。
+- `llm/base.py._call_llm` 入口（熔断前）调 `enforce_egress`。
+- `pipeline/pipeline.py`：`process_many` 每 leaf 安装 `egress_scope`（task-local 隔离）；doc(`_stream_process` finalize 前)/code(`_redact_code_pii` 改返 `(block_cloud, lexicon)` + `_code_pipeline` 同步)/ppt(两检测点) 三模式 `update_egress_policy`；N1 源头双保险 `if not truncated and not block_cloud`。
+- 文档：`pii-unification.md` 补 S5 状态指针 + §3.1「约定→强制」更正注脚。
+
+**测试**：新增 `tests/llm/test_egress_gate.py` 12 例（block 全入口 0 出云 / 实体兜底 / system 不脱 / prediction 脱 / local 不脱不拒 / guard None 不脱 / 幂等 / **并发隔离两 leaf 互不串味**）；`test_code_pii_header.py` 适配元组返回 + 强化 lexicon 回传断言。
+
+**验证**：`scripts/check_quality.sh` 全绿（mypy --strict / ruff / typos / 前端 typecheck+lint / **pytest 1319 passed, 45 skipped**）。#36 的 code/实体回归全过。
+
+**遗留**：可选字段级加固（`_make_regex_redactor`/`_redact_diag_dict` 接 lexicon，纵深防御，非必须，闸口已覆盖 N2）；commit/PR 待用户授权；dev→main release 时 `Fixes #67`。
