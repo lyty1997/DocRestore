@@ -98,6 +98,21 @@ class PIIGuard:
         text_out, _ = self._redactor.redact_snippet(text, lexicon)
         return text_out
 
+    def redact_entities_only(
+        self, text: str, lexicon: EntityLexicon | None,
+    ) -> str:
+        """仅实体（人名/机构名）替换，**不跑结构化正则**——供出云闸口（#67）统一兜底。
+
+        精确串替换，对代码标识符 / import 路径安全（只替 ``lexicon`` 里的人名/机构串）。
+        未启用 PII 或 ``lexicon`` 为空 → 原样返回。幂等（占位符不被二次匹配）。
+        与 ``redact_for_cloud`` 的区别：后者含结构化 regex（会改坏代码正文），
+        本方法只做实体替换，故可对任何出云文本（含代码诊断/正文）无差别施加。
+        """
+        if not self._cfg.enable or lexicon is None:
+            return text
+        text_out, _ = self._redactor.apply_lexicon(text, lexicon)
+        return text_out
+
     def detect_entities(self, text: str) -> EntityLexicon | None:
         """本地 NER 检测人名/机构名 → EntityLexicon；不检测 / 检测失败 → None。
 

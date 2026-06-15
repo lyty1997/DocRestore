@@ -322,7 +322,7 @@ class TestRedactCodePiiFailClosed:
             _FakeDetector(raises=NERUnavailableError("spacy unavailable")),
         )
         pipe = Pipeline.__new__(Pipeline)
-        block = await pipe._redact_code_pii([src], pii_cfg)
+        block, _lexicon = await pipe._redact_code_pii([src], pii_cfg)
         assert block is True
 
     @pytest.mark.asyncio
@@ -340,7 +340,7 @@ class TestRedactCodePiiFailClosed:
             _FakeDetector(raises=NERUnavailableError("spacy unavailable")),
         )
         pipe = Pipeline.__new__(Pipeline)
-        block = await pipe._redact_code_pii([src], pii_cfg)
+        block, _lexicon = await pipe._redact_code_pii([src], pii_cfg)
         assert block is False
 
     @pytest.mark.asyncio
@@ -355,8 +355,11 @@ class TestRedactCodePiiFailClosed:
         )
         _patch_detector(monkeypatch, _FakeDetector(orgs=("someone",)))
         pipe = Pipeline.__new__(Pipeline)
-        block = await pipe._redact_code_pii([src], pii_cfg)
+        block, lexicon = await pipe._redact_code_pii([src], pii_cfg)
         assert block is False
+        # #67：检测出的 lexicon 须回传，供出云闸口对 code 诊断施实体兜底（堵 N2）
+        assert lexicon is not None
+        assert "someone" in lexicon.org_names
 
     @pytest.mark.asyncio
     async def test_backend_none_returns_false(
@@ -374,5 +377,5 @@ class TestRedactCodePiiFailClosed:
             _FakeDetector(raises=NERUnavailableError("不应被调用")),
         )
         pipe = Pipeline.__new__(Pipeline)
-        block = await pipe._redact_code_pii([src], pii_cfg)
+        block, _lexicon = await pipe._redact_code_pii([src], pii_cfg)
         assert block is False

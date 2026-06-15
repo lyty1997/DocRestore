@@ -6,6 +6,10 @@ Licensed under the Apache License, Version 2.0 (the "License").
 # PII 脱敏统一设计（PIIGuard + 本地 NER）
 
 > 状态：**S1–S4 已落地**（S4 于 2026-06-15 删除云端 detect 死路代码，全门禁绿，§6）。
+> **S5 出云闸口下沉（#67，设计中）**：2026-06-15 评审证明 §3.1「所有云端调用点只走闸口」是**约定**
+> 而非结构强制——N1（dup-H2 重试在 `block_cloud` 守卫外）/N2（实体 lexicon 从未接进 code 诊断）两个绕过实证。
+> S5 把 fail-closed 与实体兜底**下沉到 `BaseLLMRefiner._call_llm` 单点强制**，调用点无法绕过。
+> 详见 [pii-cloud-egress-gate.md](pii-cloud-egress-gate.md)。
 > 触发：#36 修复后用户提出「文档/代码/PPT 三模式统一 PII 路径，不要分模式管理」。
 > 决策已拍板：① 统一到一个 `PIIGuard`；② 结构化 PII **一次前置**（含代码 `text_lines`，即 option 2）；③ 加**本地 NER**，人名/机构名也不出本机。
 
@@ -59,6 +63,10 @@ PIIGuard(pii_cfg)                                    # 请求级配置构造，�
 - **`redact_structured`**：本地正则，幂等（占位符不被二次匹配）。`profile="full"` 给文档/PPT 与代码**头部注释**；`profile="tokens_only"` 给代码**正文**——只拦硬编码密钥（`sk-`/`AKIA`/JWT）+ 自定义词，绝不误伤 `password = get_secret()` 这类正常代码（用户决策 2026-06-14「稳一点」，见 §4.2）。
 - **`detect_entities`**：改为**本地 NER**，不再上云（§5）。任务内调一次（流式可增量累积）。
 - **`redact_for_cloud`**：所有云端调用点（分段精修 / gap-fill / PPT 每页 / code refine·repair·audit / file_path·片段·诊断）**只认这一个闸口**。文档/PPT 与代码头部传 lexicon 做实体替换；代码正文 `lexicon=None` + `profile="tokens_only"`（不替实体保护标识符）。
+
+> ⚠️ **「只认这一个闸口」当前是约定，非结构强制**（2026-06-15 S5 修正）：调用点仍需「自觉」调用
+> `redact_for_cloud`，漏一处即泄一处（N1/N2 实证）。S5（#67）把强制点下沉到 `_call_llm`
+> 出云单点，使「不可绕过」名副其实。详见 [pii-cloud-egress-gate.md](pii-cloud-egress-gate.md)。
 
 ### 3.2 调用拓扑（模式分支零脱敏代码）
 
