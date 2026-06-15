@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from docrestore.llm.base import BaseLLMRefiner
-from docrestore.llm.code_refine import CodeRefineResult
+from docrestore.llm.code_refine import CodeRefineResult, CodeUnresolved
 from docrestore.llm.code_repair import (
     CodeEditRange,
     CodeConsistencyAuditor,
@@ -27,7 +27,8 @@ from docrestore.llm.code_repair import (
     parse_repair_response,
 )
 from docrestore.pipeline.config import LLMConfig, PIIConfig
-from docrestore.privacy.redactor import PIIRedactor
+from docrestore.privacy.guard import PIIGuard
+from docrestore.privacy.redactor import EntityLexicon, PIIRedactor
 from docrestore.processing.code_assembly import CodeColumn, CodeLine
 from docrestore.processing.code_context import LocalCodeContextProvider
 from docrestore.processing.code_diagnostics import (
@@ -366,6 +367,54 @@ class TestConsistencyAudit:
             int(excerpt.split(":", 1)[0]) not in editable_lines
             for excerpt in context.read_only_excerpts
         )
+
+    def test_unresolved_items_redacted(self) -> None:
+        """#67：unresolved 的 context/note 自由文本送云前脱敏（结构化 + 实体）。
+
+        闸口只兜底实体；此处字段级补结构化（手机/邮箱）——覆盖闸口够不到的
+        unresolved 自由文本。redact 用带 lexicon 的 redact_for_cloud（同生产口径）。
+        """
+        cfg = PIIConfig(enable=True, redact_person_name=True)
+        guard = PIIGuard(cfg)
+        lexicon = EntityLexicon(person_names=("张三",), org_names=())
+
+        def redact(text: str) -> str:
+            return guard.redact_for_cloud(text, lexicon)
+
+        source = _source("def run():\n    return 1\n")
+        prev = CodeRefineResult(
+            refined_text=source.merged_text,
+            unresolved=[
+                CodeUnresolved(
+                    line=2,
+                    context="联系 张三 13800138000",
+                    note="作者 leaker@corp.example",
+                ),
+            ],
+        )
+        context = build_consistency_audit_context(
+            source, [], previous_result=prev,
+            related_sources=[], redact=redact,
+        )
+        prompt_json = context.to_prompt_json()
+        for leaked in ("张三", "13800138000", "leaker@corp.example"):
+            assert leaked not in prompt_json
+        assert cfg.person_name_placeholder in prompt_json  # 实体确被替
+        json.loads(prompt_json)  # 仍是合法 JSON
+
+    def test_unresolved_items_raw_without_redact(self) -> None:
+        """对照：redact=None（未开 PII）→ unresolved 原文保留，行为不变。"""
+        source = _source("def run():\n    return 1\n")
+        prev = CodeRefineResult(
+            refined_text=source.merged_text,
+            unresolved=[
+                CodeUnresolved(line=2, context="联系 张三", note="x"),
+            ],
+        )
+        context = build_consistency_audit_context(
+            source, [], previous_result=prev, related_sources=[],
+        )
+        assert "张三" in context.to_prompt_json()
 
     def test_parse_keeps_readonly_patch_for_later_rejection(self) -> None:
         source = _source("a = 1\nb = 2\nbad = 3\nc = 4\nz = 5")

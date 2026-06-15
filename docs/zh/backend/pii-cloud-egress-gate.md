@@ -89,6 +89,51 @@ N2 是漏了一条 lexicon 支路。治本 = 把强制点收敛成**唯一一个
 `provider == "local"`：整段闸口**短路**（既不查 block_cloud 也不脱敏——本地数据不出本机，无需脱）。
 策略缺失（`None`，如单元测试直接构造 refiner）：闸口**不介入**，保持旧行为（向后兼容）。
 
+```plantuml
+@startuml
+title 出云闸口（#67）：_call_llm 单点强制
+skinparam shadowing false
+participant "精修调用点\n(refine、fill_gap、final_refine、code repair·audit)" as Caller
+participant "BaseLLMRefiner._call_llm" as Call
+participant "enforce_egress (egress_gate)" as Gate
+participant "ContextVar _egress_policy" as Ctx
+participant "PIIGuard.redact_entities_only" as Guard
+participant "熔断器 + litellm.acompletion" as Cloud
+
+Caller -> Call : kwargs（messages、prediction）
+activate Call
+
+Call -> Gate : enforce_egress(kwargs, provider)
+activate Gate
+alt provider == local 或 无策略
+  Gate --> Call : 放行（本地/兼容：不脱不拒）
+else provider == cloud 且策略存在
+  Gate -> Ctx : 读任务级策略
+  Ctx --> Gate : CloudEgressPolicy
+  alt block_cloud == true
+    Gate --> Call : raise CloudEgressBlockedError
+  else 正常出云
+    Gate -> Guard : 脱 messages（非 system）+ prediction.content
+    Guard --> Gate : 仅实体替换（不跑结构化）
+    Gate --> Call : 放行（已脱敏）
+  end
+end
+deactivate Gate
+
+alt 未被拒发
+  Call -> Cloud : acompletion(脱敏后 kwargs)
+  activate Cloud
+  Cloud --> Call : 响应
+  deactivate Cloud
+  Call --> Caller : RefinedResult
+else block_cloud 拒发
+  Call --> Caller : 既有 except 回退原文（堵 N1）
+  note right of Caller : 不占 semaphore、不计熔断
+end
+deactivate Call
+@enduml
+```
+
 ### 3.3 为什么「仅实体 lexicon」是安全的兜底（零 #36 回归，化解 critique high #3）
 
 闸口是 doc/code/PPT **共享**出口，`kwargs` 里没有可靠信号区分「这是 code 路径」。
@@ -168,12 +213,13 @@ N2 是漏了一条 lexicon 支路。治本 = 把强制点收敛成**唯一一个
   `code_repair.py`/`code_refine.py`**（方案 A 下 code 路径经 `self._base._call_llm` 自动覆盖）。
   `lexicon` 出现次数从 0 变正数（在闸口侧）。
 
-- **可选字段级加固（纵深防御，非必须）**：若要在「送进闸口前」就脱（更早、双保险），可让 code 模式的
-  `prompt_redact` 也带 lexicon：①`_redact_code_pii`（`1490`，现仅返回 `block_cloud: bool`）把检测到的
-  `lexicon`（`1666`，现仅喂 header `1673`）一并返回；②`_make_regex_redactor`（`383`）改签名接 `lexicon`，
-  非空时内部走 `guard.redact_for_cloud(text, lexicon)` 替代 `redact_structured`；
-  ③`code_repair.py` 的 `build_consistency_audit_context` 把 `unresolved_items.context/note` 也过 `redact`。
-  **本次可只做主修**（闸口已覆盖）；字段级加固列为后续 hardening，避免一次改动面过大。
+- **字段级加固（纵深防御，已落地 2026-06-16）**：在「送进闸口前」就脱（更早、双保险），让 code 模式的
+  `prompt_redact` 也带 lexicon：①`_redact_code_pii` 把检测到的 `lexicon`（原仅喂 header）一并返回（已改为
+  返回 `(block_cloud, lexicon)`）；②`_make_regex_redactor(pii_cfg, lexicon)` 非空时内部走
+  `guard.redact_for_cloud(text, lexicon)`（结构化 + 实体）替代 `redact_structured`；③`code_repair.py` 的
+  `build_consistency_audit_context` 经新 helper `_redact_unresolved_item` 把 `unresolved_items.context/note`
+  也过 `redact`——**这一项尤其重要**：unresolved 自由文本是闸口够不到结构化 PII 的唯一缝（闸口只兜底实体），
+  字段级在此补结构化（手机/邮箱）。结构化分档不变（prompt 字段仍 `full`，§9.5）。
 
 ## 6. 迁移清单（方案 A / ContextVar 口径）
 

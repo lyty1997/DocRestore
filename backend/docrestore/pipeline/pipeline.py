@@ -387,19 +387,26 @@ def _stitch_final_chunks(chunks: list[str]) -> str:
 
 def _make_regex_redactor(
     pii_cfg: PIIConfig,
+    lexicon: EntityLexicon | None = None,
 ) -> Callable[[str], str] | None:
-    """构造 ``redact_regex_only`` 的文本投影函数（#36），未开 PII 返回 None。
+    """构造代码模式 prompt 字段（file_path / 源码片段 / 诊断）送云脱敏投影函数
+    （#36 + #67 字段级加固），未开 PII 返回 None。
 
-    代码模式把 ``file_path`` / 源码片段 / 诊断拼进云端 prompt 前用它脱敏：结构化
-    PII + 凭据/token + 自定义词，**不做实体（人名/机构名）替换**——避免误伤
-    import 路径 / namespace / 标识符（与 _redact_code_pii 的正文处理同口径）。
+    结构化 PII（手机/邮箱/证件/卡/凭据/host/内链）+ 自定义词走 ``full``（§9.5：
+    prompt 字段不随正文降 ``tokens_only``）；``lexicon`` 非空时**额外施实体替换**
+    （人名/机构名）——实体是精确串替换，不误伤 import 路径/namespace/标识符（误伤
+    风险只来自结构化正则，与实体无关）。lexicon 由 ``_redact_code_pii`` 检测后回传。
+
+    与出云闸口（#67）的关系：闸口在 ``_call_llm`` 已对全部出云内容兜底实体替换；
+    此处字段级**额外**补结构化脱敏（闸口不跑结构化）——尤其覆盖闸口够不到的
+    ``unresolved_items`` 自由文本，属纵深防御。
     """
     if not pii_cfg.enable:
         return None
     guard = PIIGuard(pii_cfg)
 
     def _redact(text: str) -> str:
-        return guard.redact_structured(text)
+        return guard.redact_for_cloud(text, lexicon)
 
     return _redact
 
@@ -1539,7 +1546,7 @@ class Pipeline:
             # #36：file_path / 源码片段 / 诊断拼进云端 prompt 前的脱敏函数（请求级
             # pii_cfg；未开 PII 则 None，不脱）。三类 refiner（refine/repair/audit）
             # 共用，确保任何送云端的 prompt 字段都先 redact_regex_only。
-            prompt_redact = _make_regex_redactor(pii_cfg)
+            prompt_redact = _make_regex_redactor(pii_cfg, code_lexicon)
             code_refiner = CodeLLMRefiner(
                 base_refiner_obj, mode=refine_mode, redact=prompt_redact,
             )

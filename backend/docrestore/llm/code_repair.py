@@ -492,8 +492,9 @@ def build_consistency_audit_context(
 ) -> CodeConsistencyAuditContext:
     """组织全文件一致性审计上下文。
 
-    ``redact`` 非空（#36）：file_path / related_snippets / diagnostics 在
-    ``json.dumps`` 前按字段脱敏；其余字段派生自已脱敏的 ``source.merged_text``。
+    ``redact`` 非空（#36 + #67）：file_path / related_snippets / diagnostics /
+    unresolved_items（context·note 自由文本）在 ``json.dumps`` 前按字段脱敏；
+    其余字段派生自已脱敏的 ``source.merged_text``。
     """
     lines = source.merged_text.split("\n")
     editable_ranges = _audit_editable_ranges(
@@ -519,7 +520,8 @@ def build_consistency_audit_context(
         previous_repairs=list(previous_result.flags),
         repeated_ocr_confusions=_find_repeated_ocr_confusions(lines),
         unresolved_items=[
-            asdict(item) for item in previous_result.unresolved
+            _redact_unresolved_item(item, redact)
+            for item in previous_result.unresolved
         ],
         related_snippets=related,
         constraints=[
@@ -896,6 +898,26 @@ def _redact_diag_dict(
             else:
                 redacted_items.append(item)
         out["items"] = redacted_items
+    return out
+
+
+def _redact_unresolved_item(
+    item: CodeUnresolved, redact: RedactText | None,
+) -> dict[str, object]:
+    """unresolved 项转 dict 并对自由文本 ``context``/``note`` 脱敏（#67 字段级加固）。
+
+    ``context``/``note`` 是 LLM 标注的不可识别字符处上下文（OCR 源码片段），可能含
+    结构化 PII（手机/邮箱）或注释里的人名。出云闸口（``_call_llm``）只兜底实体替换、
+    不跑结构化，故此处补结构化 + 实体（``redact`` 已是带 lexicon 的 ``redact_for_cloud``
+    闭包）。``redact`` 为 None（未开 PII）→ 按原样转 dict。返回新 dict，不改原对象。
+    """
+    out = asdict(item)
+    if redact is None:
+        return out
+    for key in ("context", "note"):
+        value = out.get(key)
+        if isinstance(value, str):
+            out[key] = redact(value)
     return out
 
 
