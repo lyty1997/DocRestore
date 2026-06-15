@@ -2095,3 +2095,13 @@ S3.7 文档收尾 + PR base dev。云端 `detect_pii_entities` 暂留待 S4 清�
 **实测**（docrestore env，spaCy 已装 zh+en_core_web_md）：人名 PER 召回 **0.92**（严格＝宽松）/精确 0.67；机构 ORG 召回 0.74、宽松 0.87/精确 0.81；单段 **8.8ms** CPU、吞吐 ~4.7k 字符/秒。**判定达标，按计划切本地 NER**——人名（隐私最关键）召回高；机构名缺口由结构化正则 + 自定义词兜底；精确率偏低是 over-redact（多脱敏）方向，对隐私安全。云端银标因 `.env` 网关 key 与 `GLM_API_KEY` 不匹配本次跳过（脚本支持，待补正确 key 复跑）。
 
 **遗留**：S3.7 文档转已落地（pii-local-ner.md 状态、privacy.md/pipeline.md 同步、云端 detect_pii_entities 标死路）+ 整批 PR base dev（用户选「只做 S3.6」，S3.7 待确认）。
+
+## 2026-06-14 — PII 统一 S3.7 收口 + 整批 PR（commit `4077657`/`4393e38`，PR #59）
+
+**落地**（无行为改动，文档 + docstring）：
+- 文档转「已落地」：`pii-local-ner.md` 状态、`pii-unification.md`（§5.1 spaCy 取代 LAC/GLiNER 超代记 + §6 S3 已落地/S4 待删）、`privacy.md`（§10.5 本地 NER 接缝 + §4.2 banner）、`pipeline.md`（模块表补 guard/ner + §8.3）、`llm.md`（detect 死路 banner）；en/ 三篇镜像同步。
+- 代码 docstring：`guard.py` 修正过期「本类暂不含 detect_entities」；`cloud.py`/`redactor.py` 的 `detect_pii_entities` / `redact_for_cloud(refiner)` 标 `deprecated` 死路待 S4。
+
+**整批 PR**：`feature/pii-unify-s3`（S3.1–S3.7，~14 commit）→ **PR #59 base dev**。门禁全绿：mypy 72 文件 0 错 / ruff / 前端 vitest 115 + tsc + eslint / pytest **1329 passed, 42 skipped**（除 3 个 pre-existing DeepSeek 环境缺失）。
+
+**遗留（S4）**：删云端 `detect_pii_entities`（base/cloud）+ `PIIRedactor.redact_for_cloud(refiner)` 死路代码。PR #59 合 dev 后，整批 S1–S3 随 dev→main 时关 #36 相关。
