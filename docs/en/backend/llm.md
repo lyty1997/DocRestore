@@ -22,7 +22,9 @@ The LLM refinement layer performs "format repair + structure restoration + gap d
 
 - **Automatic gap filling (Gap fill)**: When refinement detects a content jump, it extracts the missing fragment from re-OCR results and inserts it back.
 - **Whole-document refinement (Final refine)**: Performs a second pass of cross-segment deduplication and global format cleanup on the reassembled markdown.
-- **(Cloud-only) PII entity detection**: Provides person/organization name entity dictionaries for the privacy redaction stage.
+- **(Deprecated, removed in S4) PII entity detection**: Previously provided person/organization name dictionaries for the privacy redaction stage.
+
+> **⚠️ `detect_pii_entities` is a dead path (S3, 2026-06-14)**: person/organization detection moved to **local NER** (`privacy/ner.py::PIIGuard.detect_entities`, spaCy -- names never leave the machine). The Pipeline no longer calls this layer's `detect_pii_entities`; the descriptions in §3/§5 below are historical (code marked `deprecated`, pending removal in S4). See [privacy.md](privacy.md).
 
 Two **providers** are supported -- cloud and local:
 

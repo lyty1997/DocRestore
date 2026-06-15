@@ -167,10 +167,12 @@ Pipeline is the "omniscient" layer, directly depending on all processing modules
 | `processing/segmenter.py` | `StreamSegmentExtractor` (streaming incremental segmentation) |
 | `pipeline/rate_controller.py` | `RateController` (runtime-adaptive segment length L*, OCR/LLM rate pacing) |
 | `llm/base.py` | `LLMRefiner` Protocol |
-| `llm/cloud.py` | `CloudLLMRefiner` (cloud implementation: refine/fill_gap/final_refine + PII entity detection) |
+| `llm/cloud.py` | `CloudLLMRefiner` (cloud implementation: refine/fill_gap/final_refine; `detect_pii_entities` is a dead path as of S3, replaced by local NER) |
 | `llm/local.py` | `LocalLLMRefiner` (local implementation: refine/fill_gap/final_refine) |
 | `privacy/patterns.py` | Structured PII regexes (phone/email/ID/bank card, etc.) |
-| `privacy/redactor.py` | `PIIRedactor` (regex redaction + (optional) cloud entity detection + redaction records) |
+| `privacy/guard.py` | `PIIGuard` (unified redaction gateway: `redact_structured`/`redact_for_cloud`/`detect_entities`) |
+| `privacy/ner.py` | `SpacyEntityDetector` (local NER person/org detection, replaces cloud detect as of S3) |
+| `privacy/redactor.py` | `PIIRedactor` (regex redaction + redaction records; `redact_for_cloud(refiner)` is a dead path pending S4) |
 | `output/renderer.py` | `Renderer` (renders and writes the final `document.md`) |
 
 ## 5. Orchestration Flow Diagram (Streaming: OCR Producer ∥ Streaming Consumer)
@@ -275,9 +277,9 @@ If any photo's OCR fails (GPU OOM, corrupted image, etc.), the entire task is im
 - If retries are exhausted, the segment/stage falls back to the unrefined original markdown and continues the remaining pipeline
 - The final output may contain some unrefined segments, but content loss is minimized
 
-### 8.3 PII Redaction Failure Strategy (Cloud Entity Detection)
+### 8.3 PII Redaction Failure Strategy (Local NER Entity Detection)
 
-When PII redaction is enabled and cloud entity detection is required:
+When PII redaction is enabled and local NER entity detection is required (S3+, formerly cloud `detect_pii_entities`):
 
 - If entity detection fails:
   - `PIIConfig.block_cloud_on_detect_failure=True`: Sets `cloud_blocked=True`, **skips all cloud LLM stages** (segment refinement/gap fill/final refinement), outputs only regex-redacted results, and logs a warning.
