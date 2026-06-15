@@ -14,7 +14,7 @@ Licensed under the Apache License, Version 2.0 (the "License").
 
 S3 是 [pii-unification.md](pii-unification.md) §6 迁移计划的第三步，也是唯一引入「新组件」的一步。上游 §5/§9 已拍**架构层**：人名/机构名检测改本地 NER、本地优先（接受略低召回、结构化正则兜底）、强制 benchmark、fail-closed。本文细化**模块层**：选定 spaCy、定义代码接缝、依赖门控、失败/降级策略、benchmark 工程、测试与迁移步骤。
 
-S1（PIIGuard 收口）、S2（代码正文 `tokens_only`）已落地进 dev（PR #58）。S3 之后还有 S4（清理云端 `detect_pii_entities` 死路 + 文档收尾），不在本文范围。
+S1（PIIGuard 收口）、S2（代码正文 `tokens_only`）已落地进 dev（PR #58）。S3 之后的 S4（清理云端 `detect_pii_entities` 链路 + 文档收尾）已于 S4 删除完成（2026-06-15），不在本文范围。
 
 ## 1. 选型结论（spaCy，2026-06-14 确认）
 
@@ -140,7 +140,7 @@ class _SpacyNLP(Protocol):
 
 **保留不动**：
 - `block_cloud_on_detect_failure` 的调用点逻辑（检测返回 None → 按开关阻断云端精修）原样保留——只是「None」的来源从「云端抛异常」变成「本地 detector 抛异常/不可用」。
-- 云端 `CloudLLMRefiner.detect_pii_entities` + `BaseLLMRefiner.detect_pii_entities` + `build_pii_detect_prompt` **暂留**（S3 只是绕过不调用），由 S4 清理。§9.2 已决「不保留云端检测路径」，但物理删除与 prompt 清理归 S4，避免 S3 改动面过大。
+- 云端 `CloudLLMRefiner.detect_pii_entities` + `BaseLLMRefiner.detect_pii_entities` + `build_pii_detect_prompt` 在 S3 阶段先绕过不调用，**已于 S4 删除（2026-06-15）**（连同 `LLMRefiner` Protocol 的该方法声明、`PII_DETECT_SYSTEM_PROMPT` 常量、`cloud.py` 的 `_extract_json_payload`/`_coerce_str_list`/`_CODE_FENCE_RE` 等 helper）。§9.2 已决「不保留云端检测路径」，S3 只绕过、物理删除与 prompt 清理归 S4，避免 S3 改动面过大。`CloudLLMRefiner` 类本身保留（现为 `BaseLLMRefiner` 薄子类，作 `provider="cloud"` 选型标识）。
 
 ## 4. 配置项（`PIIConfig` 增量）
 
@@ -276,7 +276,7 @@ CI **不下载真实模型**（体量大），全部用注入式 fake 覆盖逻�
 | **S3.4** | NER 环境 API：`GET /ner/status`（探测）+ `POST /ner/setup`（装包子进程，§6.3）+ `GET /ner/setup/status`（进度）+ 模型名白名单校验（§6.4）+ 子进程生命周期挂 shutdown 链 + API 测试 | status/setup 单测绿（mock 子进程）；校验拒非法模型名取证；子进程 drain/cancel 不泄漏 |
 | **S3.5** | 前端 TaskForm：开人名/机构名脱敏时拉 `/ner/status`，未就绪内联告警 + 一键配置按钮 + 进度轮询 + 三态 UX（§6.5）；i18n；400 兜底入口 | vitest 绿；`screenshot.js` 截图核对告警/进度/就绪三屏 |
 | **S3.6** | `scripts/setup_ner.sh` + `benchmark_ner.py` + `ner_eval.jsonl`，跑真实证据 | `ner-benchmark.md` 有召回/速度对照表 + 达标结论 |
-| **S3.7** | 文档：本文转「已落地」、`privacy.md`/`pipeline.md` 同步、`pii-unification.md` §5/§6 状态更新；云端 `detect_pii_entities` 标记死路待 S4 | 文档同步；全门禁绿 |
+| **S3.7** | 文档：本文转「已落地」、`privacy.md`/`pipeline.md` 同步、`pii-unification.md` §5/§6 状态更新；云端 `detect_pii_entities` 链路在 S3.7 时仅绕过未删（该链路已于 S4 删除，2026-06-15） | 文档同步；全门禁绿 |
 
 每步一个 commit（`feat(core)`/`feat(api)`/`feat(tui)`/`test(core)`/`docs`），整体一个 `feature/pii-unify-s3` 分支 → PR base dev → rebase-merge。`Fixes` 关联随同批安全 release 进 main。
 
@@ -290,7 +290,7 @@ CI **不下载真实模型**（体量大），全部用注入式 fake 覆盖逻�
 
 1. **选型 spaCy 主进程**（偏离 §9 原定 LAC+GLiNER）：因 GLiNER `transformers≥4.51.3` 撞 OCR venv 的 `4.46.3`、LAC 2021 停更 + paddle 耦合；spaCy CNN 零 torch/transformers，唯一能干净进主进程的。
 2. **默认中英双模** `zh_core_web_md` + `en_core_web_md`（CNN，禁 `trf`）；≥1 加载即可用，部分缺失 warn + best-effort。
-3. **接缝**：实体检测从 LLM 层（`refiner.detect_pii_entities`）挪进隐私层（`PIIGuard.detect_entities` → `LocalEntityDetector`）；云端检测路径 S3 绕过、S4 清理。
+3. **接缝**：实体检测从 LLM 层（原 `refiner.detect_pii_entities`）挪进隐私层（`PIIGuard.detect_entities` → `LocalEntityDetector`）；云端检测路径 S3 绕过、**已于 S4 删除（2026-06-15）**。
 4. **失败策略**：请求级 fail-fast（不可用即 400 `NER_BACKEND_UNAVAILABLE`）+ 运行期 fail-closed 兜底；`ner_backend="none"` 为知情放弃（不阻断）。
 5. **GLiNER 弃用**：装上即破坏 OCR 环境（`transformers≥4.51.3` 撞 `4.46.3`），**不接、不留 `ner_backend` 取值**；若 spaCy 不达标再评估与环境隔离的方案（§1.3），不预埋 GLiNER。
 6. **环境一键配置**（用户要求）：实体脱敏环境未就绪 → **报错 + 提示 + 提供一键配置功能**（`POST /ner/setup` 装包子进程，§6.3），用户点确认即自动装 spaCy + 模型（装进当前 venv、惰性 import 免重启），而非只甩报错。模型名严格白名单校验、命令固定、走鉴权（§6.4）。

@@ -94,7 +94,7 @@ Detailed description (doc mode):
 - (4) Incremental merge: `IncrementalMerger.add_page()` rolling merge/dedup page by page, inserting `<!-- page: ... -->` boundary markers
 - (5) Streaming segmentation: `StreamSegmentExtractor` cuts segments from the growing text by the runtime-adaptive segment length L* driven by `RateController`
 - (6) LLM Refinement: Per-segment markdown structure repair, Gap marker parsing, model truncation detection (`finish_reason == "length"` or heuristic line-count ratio); on `LLMCache` hit it is skipped; on failure it falls back to the original text
-- (7) PII entity detection (optional): After 5 pages accumulate, asynchronously call `detect_pii_entities()` to obtain an `EntityLexicon` for reuse on gap-filling re-OCR fragments
+- (7) PII entity detection (optional): After 5 pages accumulate, asynchronously run local NER detection (`PIIGuard.detect_entities`, spaCy) to obtain an `EntityLexicon` for reuse on gap-filling re-OCR fragments
 - (8) Reassembly: `_reassemble()` concatenates segment results
 - (9) Gap Filling (optional): `OCREngine.reocr_page()` re-OCR + `LLMRefiner.fill_gap()`, with GPU lock and per-gap exception fallback
 - (10) Full-text Refinement (optional): Final full-text refinement pass, re-running `parse_gaps()`

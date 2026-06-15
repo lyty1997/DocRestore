@@ -89,9 +89,6 @@ def _build_pipeline() -> Pipeline:
             markdown=md, gaps=[], truncated=False,
         ),
     )
-    mock_refiner.detect_pii_entities = AsyncMock(
-        return_value=([], []),
-    )
     mock_refiner.fill_gap = AsyncMock(return_value="")
     pipeline.set_refiner(mock_refiner)
 

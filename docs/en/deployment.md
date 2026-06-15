@@ -164,7 +164,7 @@ GLM_API_KEY=sk-xxx
 OPENAI_API_BASE=https://your-proxy.com/v1
 ```
 
-Cloud mode also issues an extra LLM call for PII entity detection (person/org names) on top of regex redaction.
+Person/org name entity detection runs on a local NER model (spaCy, `privacy/ner.py`) so names never leave the machine, layered on top of regex redaction; it no longer depends on the LLM provider (the former cloud LLM entity detection was removed in S4 (2026-06-15)).
 
 #### Local mode (data never leaves the machine)
 
@@ -176,7 +176,7 @@ Hook up any OpenAI-compatible local server; no API key required:
 | vLLM | `vllm serve Qwen/Qwen2.5-14B-Instruct --port 8001` | `http://localhost:8001/v1` |
 | llama.cpp | `llama-server -m model.gguf --port 8080` | `http://localhost:8080/v1` |
 
-In local mode `LocalLLMRefiner.detect_pii_entities` returns empty by default → the LLM-based entity detection is skipped, only regex redaction runs, and **no data is sent to any external service**. The `.env` API key may be left empty.
+In local mode entity detection likewise runs on the local NER model (spaCy; names never leave the machine, independent of the provider), with regex redaction layered on top; refinement also happens on the local machine, so **no data is sent to any external service**. The `.env` API key may be left empty.
 
 ## 4. OCR Engine Configuration
 
