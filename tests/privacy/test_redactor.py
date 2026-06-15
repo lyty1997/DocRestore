@@ -16,8 +16,6 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
-
 import pytest
 
 from docrestore.pipeline.config import CustomWord, PIIConfig
@@ -29,87 +27,20 @@ from docrestore.privacy.redactor import (
 )
 
 
-class TestRedactForCloudRegexOnly:
-    """纯 regex 脱敏（无 LLM）"""
+class TestEntityLengthOrderViaLexicon:
+    """实体按长度降序替换（防短实体先匹配吞掉长实体前缀）。
 
-    @pytest.mark.asyncio
-    async def test_regex_only_no_refiner(self) -> None:
-        """无 refiner 时只做 regex 替换"""
+    词表由外部本地 NER 提供，redact_snippet 直接吃 lexicon——不再经云端检测。
+    """
+
+    def test_longer_entity_replaced_before_shorter_prefix(self) -> None:
         cfg = PIIConfig(enable=True)
         redactor = PIIRedactor(cfg)
-        text = "电话 13812345678 邮箱 a@b.com"
-        result, records, lexicon = (
-            await redactor.redact_for_cloud(text, None)
+        lexicon = EntityLexicon(
+            person_names=("张三", "张三丰"), org_names=(),
         )
-        assert "13812345678" not in result
-        assert "a@b.com" not in result
-        assert cfg.phone_placeholder in result
-        assert cfg.email_placeholder in result
-        assert lexicon is None
-        assert len(records) == 2
-
-
-class TestRedactForCloudWithLLM:
-    """regex + LLM mock 脱敏"""
-
-    @pytest.mark.asyncio
-    async def test_regex_plus_llm_entities(self) -> None:
-        """人名/机构名也被替换"""
-        cfg = PIIConfig(enable=True)
-        redactor = PIIRedactor(cfg)
-
-        mock_refiner = AsyncMock()
-        mock_refiner.detect_pii_entities = AsyncMock(
-            return_value=(["张三"], ["腾讯公司"]),
-        )
-
-        text = "张三在腾讯公司工作，电话 13812345678"
-        result, records, lexicon = (
-            await redactor.redact_for_cloud(text, mock_refiner)
-        )
-        assert "张三" not in result
-        assert "腾讯公司" not in result
-        assert "13812345678" not in result
-        assert cfg.person_name_placeholder in result
-        assert cfg.org_name_placeholder in result
-        assert lexicon is not None
-        assert "张三" in lexicon.person_names
-
-    @pytest.mark.asyncio
-    async def test_llm_detect_failure_returns_none_lexicon(
-        self,
-    ) -> None:
-        """LLM 检测失败时 lexicon 为 None"""
-        cfg = PIIConfig(enable=True)
-        redactor = PIIRedactor(cfg)
-
-        mock_refiner = AsyncMock()
-        mock_refiner.detect_pii_entities = AsyncMock(
-            side_effect=RuntimeError("API error"),
-        )
-
-        text = "张三在腾讯公司工作"
-        result, records, lexicon = (
-            await redactor.redact_for_cloud(text, mock_refiner)
-        )
-        # regex 无匹配，LLM 失败 → 原文不变
-        assert lexicon is None
-
-    @pytest.mark.asyncio
-    async def test_entity_length_order(self) -> None:
-        """实体按长度降序替换，防止短实体先匹配"""
-        cfg = PIIConfig(enable=True)
-        redactor = PIIRedactor(cfg)
-
-        mock_refiner = AsyncMock()
-        mock_refiner.detect_pii_entities = AsyncMock(
-            return_value=(["张三", "张三丰"], []),
-        )
-
         text = "张三丰和张三都在场"
-        result, records, lexicon = (
-            await redactor.redact_for_cloud(text, mock_refiner)
-        )
+        result, _ = redactor.redact_snippet(text, lexicon)
         assert "张三丰" not in result
         assert "张三" not in result
         assert cfg.person_name_placeholder in result

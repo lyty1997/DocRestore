@@ -28,7 +28,7 @@ Pipeline 是端到端编排层，负责把各处理模块按确定顺序串起�
 - **进度上报**：通过 `on_progress` 回调（API/WS 层转发）持续推送 `TaskProgress`。
 - **并发与资源**：
   - GPU 串行：OCR 及 re-OCR 使用 `asyncio.Lock` 串行化（跨任务共享锁由 Scheduler 提供）。
-  - LLM 限流：所有 LLM API 调用（refine / fill_gap / final_refine / detect_*）通过
+  - LLM 限流：所有 LLM API 调用（refine / fill_gap / final_refine）通过
     `scheduler.llm_semaphore`（由 `LLMConfig.max_concurrent_requests` 构造）限流，
     上限对**所有同时运行的 pipeline** 生效。详见 §9.2。
 
@@ -168,12 +168,12 @@ Pipeline 是“全知”层，直接依赖所有处理模块：
 | `processing/segmenter.py` | `StreamSegmentExtractor`（流式增量切段） |
 | `pipeline/rate_controller.py` | `RateController`（运行时自适应段长 L*，OCR/LLM 速率配速） |
 | `llm/base.py` | `LLMRefiner` Protocol |
-| `llm/cloud.py` | `CloudLLMRefiner`（云端实现：refine/fill_gap/final_refine；`detect_pii_entities` S3 起死路，本地 NER 取代） |
+| `llm/cloud.py` | `CloudLLMRefiner`（云端实现：refine/fill_gap/final_refine；`detect_pii_entities` 已于 S4 删除（2026-06-15），本地 NER 取代） |
 | `llm/local.py` | `LocalLLMRefiner`（本地实现：refine/fill_gap/final_refine） |
 | `privacy/patterns.py` | 结构化 PII 正则（手机/邮箱/证件/银行卡等） |
 | `privacy/guard.py` | `PIIGuard`（统一脱敏闸口：`redact_structured`/`redact_for_cloud`/`detect_entities`） |
 | `privacy/ner.py` | `SpacyEntityDetector`（本地 NER 人名/机构名检测，S3 起取代云端 detect） |
-| `privacy/redactor.py` | `PIIRedactor`（regex 脱敏 + 替换记录；`redact_for_cloud(refiner)` 死路待 S4） |
+| `privacy/redactor.py` | `PIIRedactor`（regex 脱敏 + 替换记录；现行公共方法 `redact_snippet`/`redact_regex_only`/`redact_tokens_only`；`redact_for_cloud(refiner)` 已于 S4 删除（2026-06-15）） |
 | `output/renderer.py` | `Renderer`（渲染并写入最终 `document.md`） |
 
 ## 5. 编排流程图（流式：OCR 生产者 ∥ 流式消费者）
@@ -312,7 +312,8 @@ LLM 负责在精修时处理段间重叠的去重，`_reassemble()` 只做简单
 - `PipelineScheduler.llm_semaphore` 由 `LLMConfig.max_concurrent_requests`（默认 3）
   构造，跨所有 pipeline 实例共享。
 - `BaseLLMRefiner._call_llm()` 是所有 LLM 调用的统一出口：`refine` / `fill_gap` /
-  `final_refine` / `detect_pii_entities` 全部经此限流。
+  `final_refine` 全部经此限流（云端实体检测 `detect_pii_entities` 已于 S4 删除（2026-06-15），
+  人名/机构名实体检测改由本地 NER `PIIGuard.detect_entities` 承担，不出本机）。
 - 注入路径：`api/app.py` lifespan 创建 Scheduler 后，
   `pipeline.set_llm_semaphore(scheduler.llm_semaphore)` → `Pipeline._create_refiner()`
   构造 `CloudLLMRefiner(cfg, semaphore=self._llm_semaphore)`。
@@ -404,7 +405,7 @@ Pipeline.process_many(code.enable=True) → PipelineResult（markdown=""）
 - **整图无 text_lines**：跳过该页并记入 `missing_line_pages`，列表用于上报；其他页继续。
 - **所有页都无 column**：`raise RuntimeError("代码模式：OCR producer 未产出任何页")`，由上层任务捕获写错误结果。
 - **单 SourceFile 的 LLM 精修/repair/audit 失败**：`catch Exception` 回退原文，写日志和 quality flag，不中断同任务其他文件。
-- **PII 失败**（云端实体检测异常）：与普通模式一致，单 SourceFile 降级跳过。
+- **PII 失败**（本地 NER 实体检测异常，原云端 `detect_pii_entities` 已于 S4 删除）：与普通模式一致，单 SourceFile 降级跳过。
 - **诊断器外部工具缺失**：`CodeDiagnosticRunner` 降级为 `tool_unavailable`，不让任务失败（见 [processing.md §3.5](processing.md)）。
 
 ### 10.4 并发与资源

@@ -12,14 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""PIIRedactor 核心逻辑：regex + LLM 实体检测 → 不可逆替换"""
+"""PIIRedactor 核心逻辑：结构化 regex + 自定义敏感词 + 实体词表替换 → 不可逆替换。
+
+实体词表由外部本地 NER（``PIIGuard.detect_entities``）提供，
+本模块只按词表替换，不再调用云端 LLM 检测。
+"""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 
-from docrestore.llm.base import LLMRefiner
 from docrestore.models import RedactionRecord
 from docrestore.pipeline.config import PIIConfig
 from docrestore.privacy.patterns import (
@@ -97,59 +100,6 @@ class PIIRedactor:
     def __init__(self, config: PIIConfig) -> None:
         """初始化脱敏器。"""
         self._config = config
-
-    async def redact_for_cloud(
-        self,
-        text: str,
-        refiner: LLMRefiner | None,
-    ) -> tuple[str, list[RedactionRecord], EntityLexicon | None]:
-        """完整脱敏：regex → LLM 实体检测 → 实体替换。
-
-        返回 (脱敏文本, 脱敏记录, 实体词典)。
-        实体词典可传给 redact_snippet() 复用。
-
-        .. deprecated:: S3
-            **死路，待 S4 删除。** S3 起实体检测改本地 NER
-            （``PIIGuard.detect_entities``，见 privacy/ner.py），生产路径已不再
-            经此 ``refiner.detect_pii_entities`` 分支。当前仅保留供历史调用兼容。
-        """
-        # 1. regex 替换结构化 PII
-        text, records = redact_structured_pii(
-            text, self._config,
-        )
-
-        # 2. LLM 实体检测（输入已去结构化 PII 的文本）
-        lexicon: EntityLexicon | None = None
-        needs_person = self._config.redact_person_name
-        needs_org = self._config.redact_org_name
-
-        if (needs_person or needs_org) and refiner is not None:
-            try:
-                person_names, org_names = (
-                    await refiner.detect_pii_entities(text)
-                )
-                lexicon = EntityLexicon(
-                    person_names=tuple(person_names),
-                    org_names=tuple(org_names),
-                )
-            except Exception:
-                logger.warning(
-                    "PII 实体检测失败",
-                    exc_info=True,
-                )
-
-        # 3. 用 lexicon 做实体替换
-        if lexicon is not None:
-            text, entity_records = self._apply_lexicon(
-                text, lexicon,
-            )
-            records.extend(entity_records)
-
-        # 4. 自定义敏感词替换
-        text, custom_records = self._replace_custom_words(text)
-        records.extend(custom_records)
-
-        return text, records, lexicon
 
     def redact_regex_only(
         self,

@@ -19,8 +19,6 @@ S3 切换本地 NER 前的留证脚本（详见 docs/zh/backend/pii-local-ner.md
   ① 自建金标 tests/privacy/fixtures/ner_eval.jsonl（中英文短句，**非用户数据集**，
      覆盖中文名/英文名/公司/机构/干扰项）→ 算 PER/ORG 严格 P/R/F1 + 宽松召回。
   ② 真实样本测速：test_images 下 OCR 输出（result.mmd）文本，仅测吞吐不做内容断言。
-  ③ 可选 --cloud：有 GLM_API_KEY 时跑云端 detect_pii_entities，算「本地∩云端 / 云端」
-     一致率（银标参考），失败则跳过、不阻断主流程。
 
 用法：
     conda activate docrestore   # 需先装 spaCy + 模型：bash scripts/setup_ner.sh
@@ -33,9 +31,7 @@ S3 切换本地 NER 前的留证脚本（详见 docs/zh/backend/pii-local-ner.md
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
-import os
 import statistics
 import sys
 import time
@@ -199,40 +195,6 @@ def speed_test(detector: SpacyEntityDetector, texts: list[str]) -> SpeedStat:
     )
 
 
-def cloud_agreement(
-    gold: list[GoldItem], model: str, api_base: str,
-) -> tuple[Tally, Tally] | None:
-    """可选银标：跑云端 detect_pii_entities，对同一金标打分便于同表对比。
-
-    无 GLM_API_KEY / 无 model / 任何异常 → 返回 None（跳过，不阻断主流程）。
-    """
-    api_key = os.environ.get("GLM_API_KEY", "").strip()
-    if not api_key or not model:
-        print("[cloud] 跳过：缺 GLM_API_KEY 或 model", file=sys.stderr)
-        return None
-    try:
-        from docrestore.llm.cloud import CloudLLMRefiner
-        from docrestore.pipeline.config import LLMConfig
-
-        cfg = LLMConfig(
-            provider="cloud", model=model, api_base=api_base, api_key=api_key,
-        )
-
-        async def _run() -> tuple[Tally, Tally]:
-            refiner = CloudLLMRefiner(cfg, semaphore=asyncio.Semaphore(4))
-            per, org = Tally(), Tally()
-            for item in gold:
-                persons, orgs = await refiner.detect_pii_entities(item.text)
-                _score(item.persons, persons, per)
-                _score(item.orgs, orgs, org)
-            return per, org
-
-        return asyncio.run(_run())
-    except Exception as exc:
-        print(f"[cloud] 跳过云端对照：{exc}", file=sys.stderr)
-        return None
-
-
 def _fmt_tally(name: str, t: Tally) -> str:
     """一行 markdown 表格行。"""
     return (
@@ -249,9 +211,8 @@ def build_report(
     local: tuple[Tally, Tally],
     speed: SpeedStat,
     speed_source: str,
-    cloud: tuple[Tally, Tally] | None,
 ) -> str:
-    """拼装 markdown 报告（表格 + 测速 + 可选云端对照）。"""
+    """拼装 markdown 报告（表格 + 测速）。"""
     per, org = local
     header = "| 类别 | 金标 | TP | FP | FN | 精确 | 召回 | F1 | 宽松召回 |"
     sep = "|---|---|---|---|---|---|---|---|---|"
@@ -279,19 +240,6 @@ def build_report(
         ),
         "",
     ]
-    if cloud is not None:
-        c_per, c_org = cloud
-        lines += [
-            "### 云端 LLM 对照（银标参考，同一金标）",
-            "",
-            header,
-            sep,
-            _fmt_tally("人名 PER", c_per),
-            _fmt_tally("机构 ORG", c_org),
-            "",
-        ]
-    else:
-        lines += ["> 云端对照未跑（无 GLM_API_KEY 或未加 --cloud）。", ""]
     return "\n".join(lines)
 
 
@@ -304,11 +252,6 @@ def main() -> int:
         "--samples-dir", type=Path, default=PROJECT_ROOT / "test_images",
     )
     parser.add_argument("--out", type=Path, default=None)
-    parser.add_argument("--cloud", action="store_true")
-    parser.add_argument("--cloud-model", default=os.environ.get("LLM_MODEL", ""))
-    parser.add_argument(
-        "--cloud-api-base", default=os.environ.get("LLM_API_BASE", ""),
-    )
     args = parser.parse_args()
 
     models: tuple[str, ...] = tuple(args.models)
@@ -334,13 +277,8 @@ def main() -> int:
         args.samples_dir, gold, OCR_RESULT_FILENAME,
     )
     speed = speed_test(detector, texts)
-    cloud = (
-        cloud_agreement(gold, args.cloud_model, args.cloud_api_base)
-        if args.cloud
-        else None
-    )
 
-    report = build_report(models, gold_path, len(gold), local, speed, source, cloud)
+    report = build_report(models, gold_path, len(gold), local, speed, source)
     print(report)
     out: Path | None = args.out
     if out is not None:

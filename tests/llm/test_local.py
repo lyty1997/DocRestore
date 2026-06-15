@@ -54,14 +54,6 @@ class TestLocalLLMRefinerInstantiation:
         refiner = LocalLLMRefiner(_make_config())
         assert isinstance(refiner, BaseLLMRefiner)
 
-    @pytest.mark.asyncio
-    async def test_detect_pii_entities_returns_empty(self) -> None:
-        """LocalLLMRefiner.detect_pii_entities 返回空列表（不检测）"""
-        refiner = LocalLLMRefiner(_make_config())
-        person, org = await refiner.detect_pii_entities("张三来自 ACME")
-        assert person == []
-        assert org == []
-
     def test_not_cloud_instance(self) -> None:
         """LocalLLMRefiner 不是 CloudLLMRefiner 实例"""
         refiner = LocalLLMRefiner(_make_config())

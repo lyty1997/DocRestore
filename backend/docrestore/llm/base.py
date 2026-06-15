@@ -151,22 +151,9 @@ class LLMRefiner(Protocol):
         """
         ...
 
-    async def detect_pii_entities(
-        self, text: str,
-    ) -> tuple[list[str], list[str]]:
-        """检测文本中的人名和机构名，返回 (person_names, org_names)。
-
-        本地实现可返回 ([], [])，云端实现应调用 LLM 做实体识别。
-        检测失败抛异常，由调用方决定是否阻断云端调用。
-        """
-        ...
-
 
 class BaseLLMRefiner:
     """LLM 精修器公共实现（litellm 调用）。
-
-    detect_pii_entities 默认返回空列表（本地 LLM 场景无需检测）；
-    云端实现 CloudLLMRefiner 覆盖此方法做真实实体识别。
 
     semaphore 用于限制跨 pipeline 的 LLM API 全局并发。None 表示不限流，
     便于单元测试直接构造。生产路径由 Pipeline 从 Scheduler 注入。
@@ -416,14 +403,3 @@ class BaseLLMRefiner:
 
         cleaned_md, gaps = parse_gaps(content)
         return RefinedResult(markdown=cleaned_md, gaps=gaps, truncated=truncated)
-
-    async def detect_pii_entities(
-        self, text: str,
-    ) -> tuple[list[str], list[str]]:
-        """默认实现：不做实体检测，返回空列表。
-
-        本地 LLM 实现继承此默认行为（数据不出本地，无需识别）。
-        云端实现应覆盖此方法调用 LLM 做真实识别。
-        """
-        _ = text
-        return [], []

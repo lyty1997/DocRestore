@@ -28,7 +28,7 @@ Core responsibilities:
 - **Progress reporting**: Continuously pushes `TaskProgress` via the `on_progress` callback (forwarded by the API/WS layer).
 - **Concurrency & resources**:
   - GPU serialization: OCR and re-OCR use `asyncio.Lock` for serialization (cross-task shared lock provided by Scheduler).
-  - LLM rate limiting: All LLM API calls (refine / fill_gap / final_refine / detect_*) are gated by `scheduler.llm_semaphore`
+  - LLM rate limiting: All LLM API calls (refine / fill_gap / final_refine) are gated by `scheduler.llm_semaphore`
     (constructed from `LLMConfig.max_concurrent_requests`). The cap applies across **all concurrently running pipelines**. See Section 9.2.
 
 > Historical note: Earlier coordinate- / text-feature-based clustering, and the later LLM document boundary detection (`DOC_BOUNDARY`), have both been removed (see the §9.4 historical note). Now "one leaf directory = one document": `process_many()` returns a single `PipelineResult`, and `process_tree()` returns one per leaf directory aggregated into a `list[PipelineResult]`.
@@ -167,12 +167,12 @@ Pipeline is the "omniscient" layer, directly depending on all processing modules
 | `processing/segmenter.py` | `StreamSegmentExtractor` (streaming incremental segmentation) |
 | `pipeline/rate_controller.py` | `RateController` (runtime-adaptive segment length L*, OCR/LLM rate pacing) |
 | `llm/base.py` | `LLMRefiner` Protocol |
-| `llm/cloud.py` | `CloudLLMRefiner` (cloud implementation: refine/fill_gap/final_refine; `detect_pii_entities` is a dead path as of S3, replaced by local NER) |
+| `llm/cloud.py` | `CloudLLMRefiner` (cloud implementation: refine/fill_gap/final_refine; the cloud `detect_pii_entities` method chain was removed in S4 (2026-06-15), replaced by local NER) |
 | `llm/local.py` | `LocalLLMRefiner` (local implementation: refine/fill_gap/final_refine) |
 | `privacy/patterns.py` | Structured PII regexes (phone/email/ID/bank card, etc.) |
 | `privacy/guard.py` | `PIIGuard` (unified redaction gateway: `redact_structured`/`redact_for_cloud`/`detect_entities`) |
 | `privacy/ner.py` | `SpacyEntityDetector` (local NER person/org detection, replaces cloud detect as of S3) |
-| `privacy/redactor.py` | `PIIRedactor` (regex redaction + redaction records; `redact_for_cloud(refiner)` is a dead path pending S4) |
+| `privacy/redactor.py` | `PIIRedactor` (regex redaction + redaction records: `redact_snippet`/`redact_regex_only`/`redact_tokens_only`; the old `redact_for_cloud(refiner)` was removed in S4 (2026-06-15)) |
 | `output/renderer.py` | `Renderer` (renders and writes the final `document.md`) |
 
 ## 5. Orchestration Flow Diagram (Streaming: OCR Producer ∥ Streaming Consumer)
@@ -279,7 +279,7 @@ If any photo's OCR fails (GPU OOM, corrupted image, etc.), the entire task is im
 
 ### 8.3 PII Redaction Failure Strategy (Local NER Entity Detection)
 
-When PII redaction is enabled and local NER entity detection is required (S3+, formerly cloud `detect_pii_entities`):
+When PII redaction is enabled and local NER entity detection is required (this replaced the former cloud `detect_pii_entities`, removed in S4 (2026-06-15)):
 
 - If entity detection fails:
   - `PIIConfig.block_cloud_on_detect_failure=True`: Sets `cloud_blocked=True`, **skips all cloud LLM stages** (segment refinement/gap fill/final refinement), outputs only regex-redacted results, and logs a warning.
@@ -312,7 +312,7 @@ During development, full tracebacks are returned for debugging convenience. The 
 - `PipelineScheduler.llm_semaphore` is constructed from `LLMConfig.max_concurrent_requests`
   (default 3) and shared across every pipeline instance.
 - `BaseLLMRefiner._call_llm()` is the single entry point for every LLM call
-  (`refine` / `fill_gap` / `final_refine` / `detect_pii_entities`);
+  (`refine` / `fill_gap` / `final_refine`);
   all of them are rate-limited through this gate.
 - Injection path: `api/app.py` lifespan creates the Scheduler, then
   `pipeline.set_llm_semaphore(scheduler.llm_semaphore)` → `Pipeline._create_refiner()`
@@ -410,7 +410,7 @@ Pipeline.process_many(code.enable=True) → PipelineResult (markdown="")
 - **Image with no `text_lines`**: the page is skipped and added to `missing_line_pages` (reported upstream); other pages continue.
 - **No columns produced at all**: `raise RuntimeError("代码模式：OCR producer 未产出任何页")`, caught at the task layer and written as an error result.
 - **Per-`SourceFile` LLM refine / repair / audit failure**: `catch Exception`, fall back to the original text, log + write a quality flag, do not interrupt other files in the same task.
-- **PII failure** (cloud entity detection error): same policy as plain mode — degrade per `SourceFile`.
+- **PII failure** (local NER entity detection error): same policy as plain mode — degrade per `SourceFile`.
 - **Missing external diagnostic tool**: `CodeDiagnosticRunner` degrades to `tool_unavailable` rather than failing the task (see [processing.md §3.5](processing.md)).
 
 ### 10.4 Concurrency and Resources

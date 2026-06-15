@@ -22,9 +22,8 @@ The LLM refinement layer performs "format repair + structure restoration + gap d
 
 - **Automatic gap filling (Gap fill)**: When refinement detects a content jump, it extracts the missing fragment from re-OCR results and inserts it back.
 - **Whole-document refinement (Final refine)**: Performs a second pass of cross-segment deduplication and global format cleanup on the reassembled markdown.
-- **(Deprecated, removed in S4) PII entity detection**: Previously provided person/organization name dictionaries for the privacy redaction stage.
 
-> **⚠️ `detect_pii_entities` is a dead path (S3, 2026-06-14)**: person/organization detection moved to **local NER** (`privacy/ner.py::PIIGuard.detect_entities`, spaCy -- names never leave the machine). The Pipeline no longer calls this layer's `detect_pii_entities`; the descriptions in §3/§5 below are historical (code marked `deprecated`, pending removal in S4). See [privacy.md](privacy.md).
+> **Cloud LLM PII entity detection removed in S4 (2026-06-15)**: the cloud `detect_pii_entities` method chain (`CloudLLMRefiner.detect_pii_entities` / `BaseLLMRefiner.detect_pii_entities` / the `LLMRefiner` Protocol declaration) and the `build_pii_detect_prompt` / `PII_DETECT_SYSTEM_PROMPT` prompts have all been deleted. Person/organization detection now runs on **local NER** (`privacy/ner.py::SpacyEntityDetector`, surfaced via `PIIGuard.detect_entities` -- names never leave the machine). See [privacy.md](privacy.md).
 
 Two **providers** are supported -- cloud and local:
 
@@ -37,9 +36,9 @@ Two **providers** are supported -- cloud and local:
 
 | File | Responsibility |
 |---|---|
-| `llm/base.py` | `LLMRefiner` Protocol + `BaseLLMRefiner` shared implementation (litellm calls, refine/fill_gap/final_refine/detect_pii_entities) |
-| `llm/cloud.py` | `CloudLLMRefiner(BaseLLMRefiner)` (cloud implementation, overrides `detect_pii_entities` for real entity detection) |
-| `llm/local.py` | `LocalLLMRefiner(BaseLLMRefiner)` (local implementation, `detect_pii_entities` inherits the default empty implementation) |
+| `llm/base.py` | `LLMRefiner` Protocol + `BaseLLMRefiner` shared implementation (litellm calls, refine/fill_gap/final_refine; cloud `detect_pii_entities` removed in S4, replaced by local NER) |
+| `llm/cloud.py` | `CloudLLMRefiner(BaseLLMRefiner)` (cloud implementation; now a thin subclass kept as the `provider="cloud"` selection marker after `detect_pii_entities` was removed in S4) |
+| `llm/local.py` | `LocalLLMRefiner(BaseLLMRefiner)` (local implementation, inherits `refine/fill_gap/final_refine`) |
 | `llm/prompts.py` | Prompt templates + GAP parsing (`parse_gaps()`, etc.) |
 | `llm/code_refine.py` | `CodeLLMRefiner` (code-mode character-level refine / rewrite mode) |
 | `llm/code_repair.py` | `DiagnosticCodeRepairer` (diagnostic-driven scoped patches) + `CodeConsistencyAuditor` (re-diagnosis + acceptance gate) |
@@ -67,18 +66,15 @@ class LLMRefiner(Protocol):
     ) -> str: ...
 
     async def final_refine(self, markdown: str) -> RefinedResult: ...
-
-    async def detect_pii_entities(
-        self, text: str,
-    ) -> tuple[list[str], list[str]]: ...
 ```
+
+> The cloud `detect_pii_entities` Protocol method was removed in S4 (2026-06-15); person/organization detection now runs on local NER (`privacy/ner.py::SpacyEntityDetector` via `PIIGuard.detect_entities`).
 
 **Calling conventions**:
 - Input: a single markdown segment (`raw_markdown`) with `RefineContext` (segment index and other context)
 - Output: `RefinedResult(markdown, gaps, truncated)`
   - `gaps`: a list of `Gap` objects parsed from the LLM output (the LLM expresses gap locations via comment markers)
   - `truncated`: whether the model output was suspected to be truncated (see Section 6)
-- `detect_pii_entities()`: Default empty implementation (data stays local in the local scenario); `CloudLLMRefiner` overrides it with real LLM-based entity recognition
 
 ## 4. Dependencies
 
@@ -99,8 +95,9 @@ The LLM layer does not depend on the implementation details of OCR/processing/ou
 - Per-segment refinement `refine()`
 - Gap filling `fill_gap()`
 - Whole-document refinement `final_refine()`
-- PII entity detection `detect_pii_entities()` (returns empty lists by default; overridden by cloud)
 - Output truncation marking (`finish_reason == "length"` -> `truncated=True`)
+
+> The cloud `detect_pii_entities()` method was removed in S4 (2026-06-15); entity detection now runs on local NER (see [privacy.md](privacy.md)).
 
 Interface structure:
 
@@ -125,11 +122,6 @@ class BaseLLMRefiner:
     ) -> str: ...
 
     async def final_refine(self, markdown: str) -> RefinedResult: ...
-
-    async def detect_pii_entities(
-        self, text: str,
-    ) -> tuple[list[str], list[str]]:
-        """默认返回 ([], [])，CloudLLMRefiner 覆盖为真实检测"""
 ```
 
 Key points:
@@ -145,18 +137,15 @@ Key points:
 
 ### 5.2 `CloudLLMRefiner` (llm/cloud.py)
 
-`CloudLLMRefiner(BaseLLMRefiner)` overrides `detect_pii_entities` to perform LLM-based entity recognition:
+`CloudLLMRefiner(BaseLLMRefiner)` is now a thin subclass that serves purely as the `provider="cloud"` selection marker; it inherits the base class's `refine()/fill_gap()/final_refine()` unchanged.
 
-- The prompt is constructed by `build_pii_detect_prompt()`
-- The model is expected to return JSON: `{"person_names": [...], "org_names": [...]}`
-- JSON parsing failures raise `RuntimeError` (upstream decides whether to block cloud calls)
+> Previously this class overrode `detect_pii_entities` to perform LLM-based entity recognition (cloud JSON detection via `build_pii_detect_prompt()`). That override -- together with its JSON-parsing helpers -- was removed in S4 (2026-06-15); person/organization detection migrated to local NER so names never leave the machine.
 
 ### 5.3 `LocalLLMRefiner` (llm/local.py)
 
 `LocalLLMRefiner(BaseLLMRefiner)` is the implementation for the local provider:
 
 - Purely inherits the base class's `refine()/fill_gap()/final_refine()`
-- `detect_pii_entities()` inherits the base class's empty implementation (data stays local in the local scenario; PII redaction relies solely on regex and custom sensitive words)
 
 ### 5.4 Prompt Templates and GAP Parsing (llm/prompts.py)
 
@@ -175,9 +164,6 @@ Key points:
   - `GAP_FILL_USER_TEMPLATE`
   - `GAP_FILL_EMPTY_MARKER = "无法补充"`
   - `build_gap_fill_prompt(gap, current_page_text, next_page_text?, next_page_name?)`
-- PII entity detection:
-  - `PII_DETECT_SYSTEM_PROMPT`
-  - `build_pii_detect_prompt(text)`
 - Heading extraction:
   - `extract_first_heading(markdown) -> str` (takes the first heading as `PipelineResult.doc_title`)
 
@@ -199,8 +185,8 @@ Provider selection is done by Pipeline:
 
 PII compatibility strategy:
 
-- During the redaction stage, LLM entity detection goes through `BaseLLMRefiner.detect_pii_entities()`: the base class returns `([], [])` by default
-- `CloudLLMRefiner` overrides this method with real LLM detection; `LocalLLMRefiner` inherits the default empty implementation -> only regex-based redaction is performed
+- The LLM layer no longer participates in PII entity detection. The cloud `detect_pii_entities()` path was removed in S4 (2026-06-15).
+- Person/organization detection now runs on local NER (`privacy/ner.py::SpacyEntityDetector`, surfaced via `PIIGuard.detect_entities`); regex + custom sensitive words still apply on top. Names never leave the machine regardless of cloud/local provider. See [privacy.md](privacy.md).
 
 ### 5.6 CodeLLMRefiner (llm/code_refine.py, Code-Mode Character-Level Refine)
 
@@ -266,7 +252,7 @@ A typical call path of the LLM layer within the full processing flow (non-LLM mo
 ```
 MergedDocument.markdown
     │
-    ├─ (optional) PII redaction: CloudLLMRefiner.detect_pii_entities()
+    ├─ (optional) PII redaction: local NER PIIGuard.detect_entities()  # cloud detect_pii_entities removed in S4 (2026-06-15)
     │
     ▼
 processing.segmenter.DocumentSegmenter.segment()

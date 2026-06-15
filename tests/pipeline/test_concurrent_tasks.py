@@ -264,7 +264,6 @@ class TestGapFillLockSequence:
         refiner.final_refine = AsyncMock(return_value=MagicMock(
             markdown="正文内容", gaps=[], truncated=False,
         ))
-        refiner.detect_pii_entities = AsyncMock(return_value=([], []))
 
         # fill_gap 必须走 semaphore 以验证"先释放再重新获取"：
         # 这里真实地用 sem 包一层，模拟真实 refiner 的行为

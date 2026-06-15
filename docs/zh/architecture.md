@@ -101,7 +101,7 @@ PPT 模式分支（_ppt_pipeline，见 ppt-mode.md）：
 - ④ 增量合并：`IncrementalMerger.add_page()` 逐页滚动合并去重，插入 `<!-- page: ... -->` 边界标记
 - ⑤ 流式切段：`StreamSegmentExtractor` 按 `RateController` 运行时自适应段长 L* 从增长中的文本切段
 - ⑥ LLM 精修：逐段修复 markdown 结构，解析 Gap 标记，检测模型截断（`finish_reason == "length"` 或启发式行数比），命中 `LLMCache` 跳过；失败回退原文
-- ⑦ PII 实体检测（可选）：满 5 页后异步 `detect_pii_entities()` 取 `EntityLexicon`，供缺口补充 re-OCR 片段复用
+- ⑦ PII 实体检测（可选）：满 5 页后异步本地 NER 检测（`PIIGuard.detect_entities`，spaCy）取 `EntityLexicon`，供缺口补充 re-OCR 片段复用
 - ⑧ 重组：`_reassemble()` 拼接各段结果
 - ⑨ 缺口补充（可选）：`OCREngine.reocr_page()` re-OCR + `LLMRefiner.fill_gap()`，带 GPU 锁与单 gap 异常降级
 - ⑩ 整篇精修（可选）：全文最终精修，再次 `parse_gaps()`

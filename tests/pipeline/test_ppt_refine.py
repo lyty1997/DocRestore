@@ -69,13 +69,6 @@ class _PerPageRefiner:
         del markdown, chunk_index, total_chunks, retry_hint
         return RefinedResult(markdown="")
 
-    async def detect_pii_entities(
-        self, text: str,
-    ) -> tuple[list[str], list[str]]:
-        """stub：不检测实体。"""
-        del text
-        return [], []
-
 
 def _as_refiner(fake: _PerPageRefiner) -> LLMRefiner:
     """显式 cast stub 为 LLMRefiner（满足 mypy strict，结构性匹配不足）。"""

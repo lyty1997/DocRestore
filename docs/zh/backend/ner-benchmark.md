@@ -21,7 +21,7 @@ Licensed under the Apache License, Version 2.0 (the "License").
   「包含或被包含」即算命中（容忍边界差，如 `Dr. Emily Brown` vs `Emily Brown`）。
 - **测速**：优先 `test_images/**/result.mmd`（真实 OCR 文本，仅测吞吐不做内容断言）；本机无 OCR
   样本时回退金标语料。
-- **云端银标**（可选 `--cloud`）：跑现状云端 `detect_pii_entities` 对同一金标打分作参考。
+- **云端银标对照已随 S4 移除（2026-06-15）**：原可选 `--cloud` 路径（跑云端 `detect_pii_entities` 对同一金标打分作银标参考）连同云端实体检测链路一并删除，脚本不再支持 `--cloud`。下方判定以**金标绝对召回**为准（云端银标本就非真值，仅作参考）。
 
 脚本 `scripts/benchmark_ner.py`；模型 `zh_core_web_md` + `en_core_web_md`（CNN，禁 `*_trf`）。
 
@@ -39,18 +39,15 @@ Licensed under the Apache License, Version 2.0 (the "License").
 - 结论：相对 OCR（秒级/页）与云端 LLM 精修（秒级/段）可忽略；且检测走
   `asyncio.to_thread` 卸载，不阻塞事件循环（S3.3）。
 
-## 3. 云端银标对照
+## 3. 云端银标对照（已随 S4 移除）
 
-本次未取得有效数字：`.env` 当前 `LLM_MODEL` 为网关 gemini 模型，其密钥与 `GLM_API_KEY` 不匹配，
-云端调用返回 `AuthenticationError: Invalid token`，脚本按设计**优雅跳过**（不阻断本地证据）。
-需要时用对应网关密钥复跑：
+本节为历史记录。S3.6 当次未取得有效数字：`.env` 当时 `LLM_MODEL` 为网关 gemini 模型，其密钥与
+`GLM_API_KEY` 不匹配，云端调用返回 `AuthenticationError: Invalid token`，脚本按设计**优雅跳过**
+（不阻断本地证据）。
 
-```bash
-source .env  # 或 export 正确的网关 key
-python scripts/benchmark_ner.py --cloud --cloud-model "<gateway/model>"
-```
-
-注：云端 LLM 本身非真值（有自身误差），仅作银标参考；下方判定以**金标绝对召回**为准。
+云端 LLM 本身非真值（有自身误差），仅作银标参考；判定一直以**金标绝对召回**为准（见 §4）。因此
+**云端银标对照已于 S4 删除（2026-06-15）**——`benchmark_ner.py` 的 `--cloud`/`--cloud-model`/
+`--cloud-api-base` 参数连同云端 `detect_pii_entities` 链路一并移除，脚本不再支持云端对照。
 
 ## 4. 判定（是否切本地 NER）
 
@@ -64,5 +61,6 @@ python scripts/benchmark_ner.py --cloud --cloud-model "<gateway/model>"
 4. **零环境冲突 + 速度可忽略** —— spaCy CNN 不碰 OCR venv 的 torch/transformers（§1.1），
    CPU 单段 ~9ms 不阻塞主链路。
 
-**遗留 / 后续**：① 机构召回若实测不够，换 `*_core_web_lg` 或补领域词典；② 取得网关有效 key 后
-补云端银标一致率；③ 真实 OCR 文本测速（生成 test_images OCR 后复跑 `--samples-dir`）。
+**遗留 / 后续**：① 机构召回若实测不够，换 `*_core_web_lg` 或补领域词典；② 真实 OCR 文本测速
+（生成 test_images OCR 后复跑 `--samples-dir`）。（原「补云端银标一致率」一项已随 S4 删除云端
+对照路径而取消。）

@@ -136,11 +136,15 @@ pipeline_semaphore（粗粒度）和 llm_semaphore（细粒度）二选一：
 - `CloudLLMRefiner.refine()` — 分段精修
 - `CloudLLMRefiner.fill_gap()` — 缺口补充
 - `CloudLLMRefiner.final_refine()` — 整篇精修
-- `CloudLLMRefiner.detect_pii_entities()` — 实体检测
 - `LocalLLMRefiner.*` — 本地 LLM 相同粒度
 
 统一在 `_BaseLLMRefiner` 基类的 `_build_kwargs` / 实际 API 调用前 acquire
 semaphore，避免每个调用点分别加一遍。
+
+> 注：原云端实体检测 `CloudLLMRefiner.detect_pii_entities()` 已于 S4 删除
+> （2026-06-15），实体检测迁到本地 NER（`PIIGuard.detect_entities` →
+> `privacy/ner.py`，主进程 CPU，不占 llm_semaphore）；故 llm_semaphore 现仅约束
+> refine / fill_gap / final_refine。
 
 **决策 8：Semaphore 注入方式**
 
@@ -149,14 +153,19 @@ semaphore，避免每个调用点分别加一遍。
 - ContextVar 适合"深层调用栈自动拿到"，但 Refiner 创建点已经能看到 scheduler
 - 构造器注入便于测试（mock 不需要设 ContextVar）
 
-**决策 9：PII Regex 阶段不限流**
+**决策 9：PII 脱敏阶段不限流**
 
 PII 脱敏分两段：
 - Regex（`patterns.py`）— 纯 CPU，无网络，无需限流
-- 实体检测（`detect_pii_entities`）— LLM 调用，走 llm_semaphore
+- 实体检测（本地 NER `PIIGuard.detect_entities` → `privacy/ner.py`）— 主进程
+  CPU，不走网络，无需限流
 
-→ 只有 `detect_pii_entities` 需要限流，`_replace_custom_words` / regex
-  匹配保持直通。
+→ 两段均直通（`_replace_custom_words` / regex 匹配 / 本地 NER 实体检测），
+  llm_semaphore 不约束 PII 脱敏。
+
+> 注：S4（2026-06-15）之前实体检测走云端 `detect_pii_entities()`（LLM 调用、
+> 需占 llm_semaphore），该云端调用已删除，实体检测迁本地 NER（名字不出本机），
+> 因此 PII 脱敏整段不再触及 llm_semaphore。
 
 **决策 10：profile.json 命名**
 

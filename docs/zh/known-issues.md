@@ -394,7 +394,7 @@ limitations under the License.
 | 手机/邮箱/身份证/银行卡 | regex | ✅ producer 逐页 `redact_regex_only`（`pipeline.py:1587`）入队前 |
 | **密码/用户名/账号/token** | **regex（本次新增）** | ✅ 同上，走 `redact_structured_pii` step-0 凭据检测器 |
 | 自定义敏感词 | 精确匹配 | ✅ 同上，连本地 debug/cache 都不留明文 |
-| 人名/机构名 | LLM `detect_pii_entities` | ⚠️ 部分：**早窗口已修**（词表就绪前不送云端）；仅剩检测调用本身把文本发云端（LLM 检测固有） |
+| 人名/机构名 | 本地 NER `PIIGuard.detect_entities`（spaCy，S4 起；原云端 LLM `detect_pii_entities` 已于 S4 删除 2026-06-15） | ⚠️ 部分：**早窗口已修**（词表就绪前不送云端）；S4 起检测改本地 NER（`privacy/ner.py`），名字不出本机，不再有云端检测调用曝光 |
 
 **已修 1（2026-06-06，commit 1e4a68a）**：新增凭据/token regex 检测器（label 锚定 KV +
 URL 内联 `user:pass@` + sk-/ghp_/AKIA/JWT 已知格式），补上密码/用户名/账号/token 的空缺。
@@ -416,9 +416,10 @@ refine/repair/audit 前脱掉，`Zhang_counter` 等 name-like 标识符不动。
 可能误伤 `password=<expr>` 右侧（`redact_credential` 可关）。回归：`test_code_pii_header.py`。
 
 **未修遗留（已知，另排期）**：
-1. **人名/机构名检测调用曝光**：实体检测必须把文本给 LLM 才能认（用云端 provider 时即外发一次）。
-   早窗口段精修曝光已修；彻底规避检测曝光需本地 NER / 本地检测 provider。用户已认可"上云前完全
-   脱敏不现实，能拦多少拦多少"。
+1. **人名/机构名检测调用曝光（已于 S4 闭环 2026-06-15）**：原云端实体检测（`detect_pii_entities`）
+   要把文本给 LLM 才能认（用云端 provider 时即外发一次）；早窗口段精修曝光已修，但检测调用本身仍上云。
+   S4 起检测迁到本地 NER（`PIIGuard.detect_entities` → `privacy/ner.py` spaCy），名字不出本机，云端检测
+   调用曝光已彻底消除——本条「彻底规避检测曝光需本地 NER」的补法已落地。
 2. **代码模式正文里的人名/机构名**：正文只做 regex/凭据/自定义词脱敏，**不做实体脱敏**（实体检测
    会把变量名/namespace 当人名误替换，AGE-50）。故正文注释里的人名/机构名仍可能上云。header 的
    人名/机构名已脱。

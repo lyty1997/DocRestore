@@ -22,13 +22,12 @@ LLM 精修层负责对 OCR 合并去重后的 markdown 进行“格式修复 + �
 
 - **缺口自动补充（Gap fill）**：当精修检测到内容跳跃时，结合 re-OCR 结果从原始文本中提取缺失片段并插回。
 - **整篇文档级精修（Final refine）**：对分段精修重组后的整篇 markdown 再做一遍跨段去重与全局格式清理。
-- **（已废弃，待 S4 删）PII 实体检测**：原为隐私脱敏阶段提供人名/机构名实体词典来源。
 
-> **⚠️ `detect_pii_entities` 已是死路（S3，2026-06-14）**：人名/机构名检测改**本地 NER**
-> （`privacy/ner.py::PIIGuard.detect_entities`，spaCy，名字不出本机）。Pipeline 已不再调用本层的
-> `detect_pii_entities`；本文 §3/§5 中所有相关描述均为历史，代码侧已标 `deprecated`，待 S4 连同
-> `CloudLLMRefiner.detect_pii_entities` 与基类默认实现一并删除。详见
-> [privacy.md](privacy.md) §10.5 / [pii-local-ner.md](pii-local-ner.md)。
+> **ℹ️ 云端 `detect_pii_entities` 已于 S4 删除（2026-06-15）**：人名/机构名检测改**本地 NER**
+> （`privacy/ner.py::PIIGuard.detect_entities`，spaCy，名字不出本机）。Pipeline 不再调用任何
+> 云端 PII 实体检测方法；`CloudLLMRefiner.detect_pii_entities`、基类
+> `BaseLLMRefiner.detect_pii_entities` 默认实现与 `LLMRefiner` Protocol 中的该方法声明已整链删除。
+> 详见 [privacy.md](privacy.md) §10.5 / [pii-local-ner.md](pii-local-ner.md)。
 
 同时支持 **云端与本地两种 provider**：
 
@@ -41,9 +40,9 @@ LLM 精修层负责对 OCR 合并去重后的 markdown 进行“格式修复 + �
 
 | 文件 | 职责 |
 |---|---|
-| `llm/base.py` | `LLMRefiner` Protocol + `BaseLLMRefiner` 公共实现（litellm 调用、refine/fill_gap/final_refine/detect_pii_entities） |
-| `llm/cloud.py` | `CloudLLMRefiner(BaseLLMRefiner)`（云端实现，覆盖 `detect_pii_entities` 做真实实体检测） |
-| `llm/local.py` | `LocalLLMRefiner(BaseLLMRefiner)`（本地实现，`detect_pii_entities` 继承默认空实现） |
+| `llm/base.py` | `LLMRefiner` Protocol + `BaseLLMRefiner` 公共实现（litellm 调用、refine/fill_gap/final_refine） |
+| `llm/cloud.py` | `CloudLLMRefiner(BaseLLMRefiner)`（云端 provider 选型标识的薄子类；云端实体检测已 S4 删除，人名/机构名改本地 NER） |
+| `llm/local.py` | `LocalLLMRefiner(BaseLLMRefiner)`（本地实现，纯继承基类 refine/fill_gap/final_refine） |
 | `llm/prompts.py` | prompt 模板 + GAP 解析（`parse_gaps()` 等） |
 | `llm/code_refine.py` | `CodeLLMRefiner`（代码模式字符级精修 / rewrite 模式） |
 | `llm/code_repair.py` | `DiagnosticCodeRepairer`（诊断驱动 scoped patch）+ `CodeConsistencyAuditor`（重诊断 + 接受门） |
@@ -71,18 +70,15 @@ class LLMRefiner(Protocol):
     ) -> str: ...
 
     async def final_refine(self, markdown: str) -> RefinedResult: ...
-
-    async def detect_pii_entities(
-        self, text: str,
-    ) -> tuple[list[str], list[str]]: ...
 ```
+
+> Protocol 不含任何 PII 实体检测方法：原 `detect_pii_entities` 已于 S4 删除（2026-06-15），人名/机构名检测迁至本地 NER（`privacy/ner.py::PIIGuard.detect_entities`，名字不出本机）。
 
 **调用约定**：
 - 输入：单段 markdown 文本（`raw_markdown`）与 `RefineContext`（段序号等上下文）
 - 输出：`RefinedResult(markdown, gaps, truncated)`
   - `gaps`：从 LLM 输出中解析出的 `Gap` 列表（LLM 通过注释标记表达缺口位置）
   - `truncated`：是否疑似发生了模型输出截断（详见第 6 节）
-- `detect_pii_entities()`：默认空实现（本地场景数据不出本地）；`CloudLLMRefiner` 覆盖为真实 LLM 实体识别
 
 ## 4. 依赖的接口
 
@@ -103,7 +99,6 @@ LLM 层不依赖 OCR/processing/output 的实现细节，只消费文本并产�
 - 单段精修 `refine()`
 - Gap 补充 `fill_gap()`
 - 整篇精修 `final_refine()`
-- PII 实体检测 `detect_pii_entities()`（默认返回空列表，云端覆盖）
 - 输出截断标记（`finish_reason == "length"` → `truncated=True`）
 
 接口结构：
@@ -129,12 +124,9 @@ class BaseLLMRefiner:
     ) -> str: ...
 
     async def final_refine(self, markdown: str) -> RefinedResult: ...
-
-    async def detect_pii_entities(
-        self, text: str,
-    ) -> tuple[list[str], list[str]]:
-        """默认返回 ([], [])，CloudLLMRefiner 覆盖为真实检测"""
 ```
+
+> 基类不再含 PII 实体检测：原 `detect_pii_entities()` 默认实现已于 S4 删除（2026-06-15），人名/机构名检测迁至本地 NER。
 
 关键点：
 - `refine()`：
@@ -149,18 +141,17 @@ class BaseLLMRefiner:
 
 ### 5.2 `CloudLLMRefiner`（llm/cloud.py）
 
-`CloudLLMRefiner(BaseLLMRefiner)` 覆盖 `detect_pii_entities`，调用 LLM 做实体识别：
+`CloudLLMRefiner(BaseLLMRefiner)` 现为基类的薄子类，仅作 `provider == "cloud"` 的选型标识，纯继承基类的 `refine()/fill_gap()/final_refine()`。
 
-- prompt 由 `build_pii_detect_prompt()` 构造
-- 期望模型返回 JSON：`{"person_names": [...], "org_names": [...]}`
-- JSON 解析失败会抛出 `RuntimeError`（由上游决定是否阻断云端调用）
+- 原覆盖的 `detect_pii_entities` 及配套私有 helper（`_extract_json_payload` / `_coerce_str_list` / `_CODE_FENCE_RE`）已于 S4 删除（2026-06-15）。
+- 人名/机构名检测迁至本地 NER（`privacy/ner.py::PIIGuard.detect_entities`，名字不出本机），不再有云端 LLM 实体识别路径。
 
 ### 5.3 `LocalLLMRefiner`（llm/local.py）
 
 `LocalLLMRefiner(BaseLLMRefiner)` 为本地 provider 的实现：
 
 - 纯继承基类的 `refine()/fill_gap()/final_refine()`
-- `detect_pii_entities()` 继承基类空实现（本地场景数据不出本地，PII 脱敏仅依赖正则与自定义敏感词即可）
+- 不再有任何 PII 实体检测方法（原 `detect_pii_entities` 已整链 S4 删除）；PII 脱敏由本地 NER + 正则 + 自定义敏感词承担，数据不出本地
 
 ### 5.4 prompt 模板与 GAP 解析（llm/prompts.py）
 
@@ -179,9 +170,6 @@ class BaseLLMRefiner:
   - `GAP_FILL_USER_TEMPLATE`
   - `GAP_FILL_EMPTY_MARKER = "无法补充"`
   - `build_gap_fill_prompt(gap, current_page_text, next_page_text?, next_page_name?)`
-- PII 实体检测：
-  - `PII_DETECT_SYSTEM_PROMPT`
-  - `build_pii_detect_prompt(text)`
 - 标题提取：
   - `extract_first_heading(markdown) -> str`（取首个标题作 `PipelineResult.doc_title`）
 
@@ -194,17 +182,17 @@ GAP 标记解析：
 
 > 重要：精修 prompt 只依赖页边界标记 `<!-- page: <原图文件名> -->` 与 GAP 标记，不再依赖任何“段间衔接标记”。
 
-### 5.5 Provider 选择与 PII 兼容性
+### 5.5 Provider 选择与 PII 接缝
 
 Provider 选择由 Pipeline 完成：
 
 - `LLMConfig.provider == "cloud"` → `CloudLLMRefiner`
 - `LLMConfig.provider == "local"` → `LocalLLMRefiner`
 
-PII 兼容性策略：
+PII 接缝策略：
 
-- 脱敏阶段 LLM 实体检测走 `BaseLLMRefiner.detect_pii_entities()`：基类默认返回 `([], [])`
-- `CloudLLMRefiner` 重写该方法走真实 LLM；`LocalLLMRefiner` 继承默认空实现 → 只执行正则脱敏
+- 两个 refiner 都不再承担 PII 实体检测（原云端 `detect_pii_entities` 已于 S4 删除）。
+- 人名/机构名检测统一走本地 NER（`privacy/ner.py::PIIGuard.detect_entities`），与 provider 无关，名字不出本机；脱敏正则与自定义敏感词照常生效。
 
 ### 5.6 CodeLLMRefiner（llm/code_refine.py，代码模式字符级精修）
 
@@ -270,7 +258,7 @@ LLM 层在完整处理流程中的典型调用路径如下（省略非 LLM 模�
 ```
 MergedDocument.markdown
     │
-    ├─（可选）PII 脱敏：CloudLLMRefiner.detect_pii_entities()
+    ├─（可选）PII 脱敏：本地 NER PIIGuard.detect_entities()（名字不出本机；原云端 detect_pii_entities 已 S4 删除）
     │
     ▼
 processing.segmenter.DocumentSegmenter.segment()
