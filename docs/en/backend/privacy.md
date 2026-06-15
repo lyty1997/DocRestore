@@ -91,9 +91,13 @@ Default replacement placeholders (all overridable via `PIIConfig`):
 - ID card: `[id_card]` (`id_card_placeholder`)
 - Bank card: `[bank_card]` (`bank_card_placeholder`)
 
-### 4.2 Entity Detection (LLM)
+### 4.2 Entity Detection (local NER; formerly cloud LLM)
 
-Optionally enabled in cloud mode only:
+> **As of S3 (2026-06-14), this uses local NER**: `PIIGuard.detect_entities` (spaCy) replaces the
+> cloud `detect_pii_entities` below (now marked `deprecated`, removed in S4). Names never leave the
+> machine. The cloud path below is historical. See the design doc `pii-local-ner.md` (Chinese).
+
+Former cloud-only path (deprecated):
 - Calls `CloudLLMRefiner.detect_pii_entities()` to detect person / organization names
 - Returns JSON: `{"person_names": [...], "org_names": [...]}`
 - Builds an EntityLexicon and replaces entities
