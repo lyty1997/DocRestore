@@ -46,11 +46,10 @@ _NAME = "张三"  # 仅出现在 producer 之后、需 LLM 检测的人名（正
 
 
 class _RecordingRefiner:
-    """stub：refine 记录收到的文本；detect 返回固定人名词表。"""
+    """stub：refine 记录收到的文本（实体检测走注入的 _FakeDetector，不在此 stub）。"""
 
-    def __init__(self, persons: list[str]) -> None:
+    def __init__(self) -> None:
         self.refine_inputs: list[str] = []
-        self._persons = persons
 
     async def refine(
         self, text: str, context: RefineContext,
@@ -59,13 +58,6 @@ class _RecordingRefiner:
         del context
         self.refine_inputs.append(text)
         return RefinedResult(markdown=text)
-
-    async def detect_pii_entities(
-        self, text: str,
-    ) -> tuple[list[str], list[str]]:
-        """返回固定人名词表（模拟云端实体检测）。"""
-        del text
-        return list(self._persons), []
 
     async def final_refine(
         self, markdown: str, *,
@@ -176,7 +168,7 @@ async def test_ppt_early_window_redacts_name_before_cloud(
         pii=_pii(),
     )
     pipeline = Pipeline(cfg)
-    fake = _RecordingRefiner([_NAME])
+    fake = _RecordingRefiner()
     pipeline.set_refiner(_as_refiner(fake))
 
     queue = await _queue_of(pages)
@@ -208,7 +200,7 @@ async def test_doc_early_window_redacts_name_before_cloud(
         pii=_pii(),
     )
     pipeline = Pipeline(cfg)
-    fake = _RecordingRefiner([_NAME])
+    fake = _RecordingRefiner()
     pipeline.set_refiner(_as_refiner(fake))
     controller = RateController(cfg.llm)
 

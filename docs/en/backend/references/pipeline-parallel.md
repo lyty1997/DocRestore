@@ -149,11 +149,16 @@ All cloud / local LLM calls:
 - `CloudLLMRefiner.refine()` — segment refine
 - `CloudLLMRefiner.fill_gap()` — gap filling
 - `CloudLLMRefiner.final_refine()` — full-document refine
-- `CloudLLMRefiner.detect_pii_entities()` — entity detection
 - `LocalLLMRefiner.*` — same granularity for local LLM
 
 All unified at `_BaseLLMRefiner._build_kwargs` / right before the actual API
 call to acquire the semaphore, instead of adding it at every call site.
+
+> Note: the former cloud entity detection `CloudLLMRefiner.detect_pii_entities()`
+> was removed in S4 (2026-06-15). Entity detection moved to local NER
+> (`PIIGuard.detect_entities` → `privacy/ner.py`, main-process CPU, does not hold
+> the llm_semaphore), so the llm_semaphore now only constrains
+> refine / fill_gap / final_refine.
 
 **Decision 8: How Semaphores Are Injected**
 
@@ -164,14 +169,21 @@ Inject into the Refiner via constructor parameters; **do not use ContextVar**:
   Refiner construction site already has visibility into the scheduler.
 - Constructor injection is easier to test (mocks don't need to set a ContextVar).
 
-**Decision 9: PII Regex Stage Is Not Throttled**
+**Decision 9: PII Redaction Stage Is Not Throttled**
 
 PII redaction has two phases:
 - Regex (`patterns.py`) — pure CPU, no network, no throttling needed.
-- Entity detection (`detect_pii_entities`) — LLM call, goes through llm_semaphore.
+- Entity detection (local NER `PIIGuard.detect_entities` → `privacy/ner.py`) —
+  main-process CPU, no network, no throttling needed.
 
-→ Only `detect_pii_entities` needs throttling; `_replace_custom_words` /
-  regex matching remain pass-through.
+→ Both phases are pass-through (`_replace_custom_words` / regex matching / local
+  NER entity detection); the llm_semaphore does not constrain PII redaction.
+
+> Note: before S4 (2026-06-15), entity detection went through the cloud
+> `detect_pii_entities()` (an LLM call that held the llm_semaphore). That cloud
+> call has been removed and entity detection moved to local NER (names never
+> leave the machine), so the entire PII redaction stage no longer touches the
+> llm_semaphore.
 
 **Decision 10: profile.json Naming**
 

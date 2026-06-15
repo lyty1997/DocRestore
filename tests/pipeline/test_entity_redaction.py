@@ -51,8 +51,8 @@ _ORG = "某科技公司"
 class _RecordingRefiner:
     """stub：记录 refine 收到的文本，原样回显（未脱敏则人名会出现在收到文本里）。
 
-    S3：实体检测已改本地 NER，不再走 refiner.detect_pii_entities；该方法保留空实现
-    仅为满足 LLMRefiner 协议（实际检测由注入的 _CountingDetector 拦截）。
+    实体检测走本地 NER（由注入的 _CountingDetector 拦截 guard.get_detector），
+    本 stub 不实现 detect。
     """
 
     def __init__(self) -> None:
@@ -84,13 +84,6 @@ class _RecordingRefiner:
         """最终精修 stub（空）。"""
         del markdown, chunk_index, total_chunks, retry_hint
         return RefinedResult(markdown="")
-
-    async def detect_pii_entities(
-        self, text: str,
-    ) -> tuple[list[str], list[str]]:
-        """已废弃（S3 检测改本地 NER）；保留空实现满足 LLMRefiner 协议。"""
-        del text
-        return [], []
 
 
 class _CountingDetector:

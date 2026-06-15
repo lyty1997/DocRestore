@@ -41,7 +41,7 @@ backend/docrestore/
 │   └── segmenter.py       # Document segmenter
 ├── llm/
 │   ├── base.py            # LLMRefiner Protocol + BaseLLMRefiner
-│   ├── cloud.py           # CloudLLMRefiner (litellm + PII entity detection)
+│   ├── cloud.py           # CloudLLMRefiner (litellm; cloud PII entity detection removed in S4, now local NER)
 │   ├── local.py           # LocalLLMRefiner (OpenAI-compatible local service)
 │   └── prompts.py         # Prompt templates
 ├── privacy/
@@ -69,7 +69,7 @@ backend/docrestore/
 | OCR Layer | [ocr.md](ocr.md) | `OCREngine.ocr()`, `OCREngine.ocr_batch()`, `EngineManager` |
 | Processing Layer | [processing.md](processing.md) | `OCRCleaner.clean()`, `PageDeduplicator.merge_all_pages()` |
 | LLM Refinement Layer | [llm.md](llm.md) | `LLMRefiner.refine()`, `fill_gap()`, `final_refine()` |
-| PII Redaction | [privacy.md](privacy.md) | `PIIRedactor.redact_for_cloud()` |
+| PII Redaction | [privacy.md](privacy.md) | `PIIGuard.redact_for_cloud()`, `PIIGuard.detect_entities()` |
 | Pipeline Orchestration | [pipeline.md](pipeline.md) | `Pipeline.process_many()`, `TaskManager` |
 | API Layer | [api.md](api.md) | REST + WebSocket + Upload + Authentication |
 

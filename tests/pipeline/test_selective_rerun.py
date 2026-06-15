@@ -79,12 +79,6 @@ class _FakeRefiner:
         del markdown, chunk_index, total_chunks, retry_hint
         return RefinedResult(markdown="")
 
-    async def detect_pii_entities(
-        self, text: str,
-    ) -> tuple[list[str], list[str]]:
-        del text
-        return [], []
-
 
 def _as_refiner(fake: _FakeRefiner) -> LLMRefiner:
     """显式 cast _FakeRefiner 为 LLMRefiner（满足 mypy strict）。"""

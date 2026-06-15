@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License").
 
 # PII 脱敏统一设计（PIIGuard + 本地 NER）
 
-> 状态：**S1–S3 已落地**（2026-06-14，分支 `feature/pii-unify-s3`）；S4（删云端 detect 死路）待办（§6）。
+> 状态：**S1–S4 已落地**（S4 于 2026-06-15 删除云端 detect 死路代码，全门禁绿，§6）。
 > 触发：#36 修复后用户提出「文档/代码/PPT 三模式统一 PII 路径，不要分模式管理」。
 > 决策已拍板：① 统一到一个 `PIIGuard`；② 结构化 PII **一次前置**（含代码 `text_lines`，即 option 2）；③ 加**本地 NER**，人名/机构名也不出本机。
 
@@ -144,7 +144,7 @@ LocalEntityDetector(Protocol):
 | **S1** | 抽 `PIIGuard`，把现有所有脱敏调用**原样收口**到它（`redact_structured`/`redact_for_cloud` 先包住现逻辑，`detect_entities` 暂仍委托云端）。**行为零变化**。 | 全量测试与现状逐字节一致；mypy/ruff/typos 绿 |
 | **S2** | 代码正文 body 降 `tokens_only`（`_redact_code_pii` body 行改档），header 仍 `full`；新增 `tokens_only` 正则原语（仅 `sk-`/`gh?_`/`AKIA`/JWT + 自定义词）。**prompt 字段（file_path/片段/诊断）保持 `full`，`_make_regex_redactor` 保留**（§9.5）。文档/PPT producer 已在 S1b 走 `guard.redact_structured`（`full`）。 | 正文不再被全量正则改坏（`password=expr` 取证）；硬编码 `sk-` 仍被拦；#36 回归（含 prompt 字段 full）仍绿 |
 | **S3** ✅已落地 | 本地 NER：`privacy/ner.py::SpacyEntityDetector`（spaCy，**非** LAC/GLiNER，见 [pii-local-ner.md](pii-local-ner.md) §1.1）；`PIIGuard.detect_entities` 切本地 + 一键环境配置（`GET/POST /ner/*` + 前端 TaskForm）；§5.4 benchmark 留证。 | ✅ [ner-benchmark.md](ner-benchmark.md)（人名召回 0.92）；名字不再出现在云端调用入参（mock 取证）；前端三态 Playwright 验证 |
-| **S4** | 清理：删旧云端 `detect_pii_entities` 调用路径 + `PIIRedactor.redact_for_cloud(refiner)`（S3.7 已**标 deprecated 死路**）；文档 `privacy.md`/`pipeline.md`/`llm.md` 已在 S3.7 同步。 | 删死路代码 + 全门禁绿（文档 S3.7 已同步） |
+| **S4** ✅已落地 | 清理：已于 S4 删除（2026-06-15）旧云端 `detect_pii_entities` 调用路径（`CloudLLMRefiner`/`BaseLLMRefiner.detect_pii_entities` + `LLMRefiner` Protocol 声明）+ `PIIRedactor.redact_for_cloud(refiner)` + `build_pii_detect_prompt`/`PII_DETECT_SYSTEM_PROMPT`；文档 `privacy.md`/`pipeline.md`/`llm.md` 已同步。 | ✅ 死路代码已删（2026-06-15）+ 全门禁绿（文档已同步） |
 
 每步一个 `feature/pii-unify-sN` 分支，独立 PR，逐个闭环（禁止多个半成品并行）。
 

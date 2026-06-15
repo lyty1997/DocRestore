@@ -48,7 +48,7 @@ backend/docrestore/
 │   └── code_diagnostics.py # 多语言轻量诊断
 ├── llm/
 │   ├── base.py            # LLMRefiner Protocol + BaseLLMRefiner
-│   ├── cloud.py           # CloudLLMRefiner（litellm + PII 实体检测）
+│   ├── cloud.py           # CloudLLMRefiner（litellm 云端精修；PII 实体检测已于 S4 迁出至本地 NER）
 │   ├── local.py           # LocalLLMRefiner（OpenAI 兼容本地服务）
 │   ├── code_refine.py     # 代码字符级精修/rewrite
 │   ├── code_repair.py     # 诊断驱动 scoped repair
@@ -79,7 +79,7 @@ backend/docrestore/
 | OCR 层 | [ocr.md](ocr.md) | `OCREngine.ocr()`, `OCREngine.ocr_batch()`, `EngineManager` |
 | 处理层 | [processing.md](processing.md) | `OCRCleaner.clean()`, `PageDeduplicator.merge_all_pages()`, `group_into_files()`, `CodeDiagnosticRunner` |
 | LLM 精修层 | [llm.md](llm.md) | `LLMRefiner.refine()`, `fill_gap()`, `final_refine()` |
-| PII 脱敏 | [privacy.md](privacy.md) | `PIIRedactor.redact_for_cloud()` |
+| PII 脱敏 | [privacy.md](privacy.md) | `PIIGuard.redact_for_cloud()`, `PIIGuard.detect_entities()`, `PIIRedactor.redact_snippet()` |
 | Pipeline 编排 | [pipeline.md](pipeline.md) | `Pipeline.process_many()`, `TaskManager` |
 | API 层 | [api.md](api.md) | REST + WebSocket + 上传 + 鉴权 |
 

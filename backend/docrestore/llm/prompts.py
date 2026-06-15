@@ -559,31 +559,6 @@ def build_gap_fill_prompt(
     ]
 
 
-# --- PII 实体检测 prompt ---
-
-PII_DETECT_SYSTEM_PROMPT = (
-    "你是隐私信息识别助手。分析文本中的人名和机构/公司名称。\n"
-    "规则：\n"
-    "1. 只识别人名（中文或英文）和机构/公司名称\n"
-    "2. 忽略方括号占位符内容（如 [手机号]、[邮箱] 等）\n"
-    "3. 实体必须是文本中原样出现的子串\n"
-    '4. 只输出 JSON，格式：'
-    '{"person_names": [...], "org_names": [...]}\n'
-    "5. 没有找到则输出空数组\n"
-    "6. 不要输出任何解释文字"
-)
-
-
-def build_pii_detect_prompt(
-    text: str,
-) -> list[dict[str, str]]:
-    """构造 PII 实体检测的 [system, user] messages。"""
-    return [
-        {"role": "system", "content": PII_DETECT_SYSTEM_PROMPT},
-        {"role": "user", "content": text},
-    ]
-
-
 # 提取首个一级标题
 _HEADING_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 

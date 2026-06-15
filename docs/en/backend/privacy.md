@@ -38,31 +38,36 @@ privacy/
 class PIIRedactor:
     def __init__(self, config: PIIConfig) -> None: ...
 
-    async def redact_for_cloud(
-        self,
-        text: str,
-        refiner: LLMRefiner | None,
-    ) -> tuple[str, list[RedactionRecord], EntityLexicon | None]:
-        """Redact PII from the merged document for cloud LLM consumption.
+    def redact_regex_only(
+        self, text: str,
+    ) -> tuple[str, list[RedactionRecord]]:
+        """Structured regex (phone/email/ID card/bank card) + custom
+        sensitive words only. No LLM, no EntityLexicon dependency. Used by
+        the streaming Pipeline OCR Producer per page (entity detection has
+        not happened yet, so no lexicon is available)."""
 
-        Flow:
-        1. Structured regex redaction (phone/email/ID card/bank card)
-        2. Custom sensitive words replaced in descending order by word length
-           (each word uses its own code; falls back if code is empty)
-        3. If refiner is provided, call refiner.detect_pii_entities()
-           to detect person names / organization names
-        4. Build EntityLexicon and replace entities
-
-        Returns:
-            (redacted text, redaction records list, entity lexicon | None)
-        """
+    def redact_tokens_only(
+        self, text: str,
+    ) -> tuple[str, list[RedactionRecord]]:
+        """Code-body profile: only high-confidence credential tokens +
+        custom sensitive words, with zero damage to normal code. Skips the
+        full KV / phone / email / card / host / url regexes (which would
+        corrupt ``password = get_secret()``) and does no entity replacement
+        (protects import paths / identifiers). Idempotent."""
 
     def redact_snippet(
         self, text: str, lexicon: EntityLexicon | None,
     ) -> tuple[str, list[RedactionRecord]]:
-        """Redact a short snippet (e.g. re-OCR text) reusing an existing
-        entity lexicon, without calling the LLM again."""
+        """Light redaction (regex + reuse of an existing lexicon), used for
+        re-OCR text. Does not call the LLM."""
 ```
+
+> The unified cloud gateway is `PIIGuard.redact_for_cloud(text, lexicon, *, profile)`
+> (sync), which dispatches to the `PIIRedactor` methods above by profile. It is **not**
+> the same as the deleted `PIIRedactor.redact_for_cloud(text, refiner)` (async, refiner
+> argument), which was removed in S4 (2026-06-15). All cloud call sites route through
+> the `PIIGuard` gateway. Entity detection now happens locally via
+> `PIIGuard.detect_entities(text)` (local NER), so names never leave the machine.
 
 ### 3.2 EntityLexicon
 
@@ -74,7 +79,7 @@ class EntityLexicon:
     org_names: tuple[str, ...]
 ```
 
-> When entity detection fails or under a local provider, `redact_for_cloud` returns `None` as the lexicon (callers must handle the None case).
+> When entity detection is not requested, local NER is disabled, or detection fails, `PIIGuard.detect_entities` returns `None` instead of a lexicon (callers must handle the None case and fail-closed per `block_cloud_on_detect_failure`).
 
 ## 4. Redaction Strategy
 
@@ -91,16 +96,18 @@ Default replacement placeholders (all overridable via `PIIConfig`):
 - ID card: `[id_card]` (`id_card_placeholder`)
 - Bank card: `[bank_card]` (`bank_card_placeholder`)
 
-### 4.2 Entity Detection (local NER; formerly cloud LLM)
+### 4.2 Entity Detection (local NER)
 
-> **As of S3 (2026-06-14), this uses local NER**: `PIIGuard.detect_entities` (spaCy) replaces the
-> cloud `detect_pii_entities` below (now marked `deprecated`, removed in S4). Names never leave the
-> machine. The cloud path below is historical. See the design doc `pii-local-ner.md` (Chinese).
+> **Entity detection runs entirely on local NER** (`PIIGuard.detect_entities`, spaCy). The former
+> cloud path `CloudLLMRefiner.detect_pii_entities` was removed in S4 (2026-06-15); names never leave
+> the machine. See the design doc `pii-local-ner.md` (Chinese).
 
-Former cloud-only path (deprecated):
-- Calls `CloudLLMRefiner.detect_pii_entities()` to detect person / organization names
-- Returns JSON: `{"person_names": [...], "org_names": [...]}`
+Current local path:
+- Calls `PIIGuard.detect_entities(text)` to detect person / organization names via local NER
+  (`privacy/ner.py::SpacyEntityDetector`)
 - Builds an EntityLexicon and replaces entities
+- Returns `None` (no lexicon) when entity redaction is not requested, NER is disabled, or detection
+  fails -- callers fail-closed per `block_cloud_on_detect_failure`
 
 Default replacement placeholders:
 - Person name: `[person_name]` (`person_name_placeholder`)
@@ -148,9 +155,9 @@ To alleviate the readability issues caused by the same placeholder appearing rep
 ```
 MergedDocument (after merge)
     |
-    v PIIRedactor.redact_for_cloud()
+    v PIIGuard.redact_for_cloud(text, lexicon, *, profile)
     |-- Regex redaction (phone/email/ID card/bank card)
-    |-- LLM entity detection (optional: person/organization names)
+    |-- Local NER entity detection (optional: person/organization names)
     +-- Entity replacement
     |
     v (redacted text, RedactionRecord[], EntityLexicon)
@@ -162,11 +169,11 @@ MergedDocument (after merge)
 
 - Filename: `patterns.py`, not `regex.py` (to avoid mypy module name conflicts)
 - Bank card validation: uses the Luhn algorithm to reduce false positives
-- Entity detection: only available in cloud mode (LocalLLMRefiner lacks this capability)
+- Entity detection: runs on local NER (`PIIGuard.detect_entities`), independent of the LLM provider; names never leave the machine
 - Re-OCR redaction: text from re-OCR during gap filling also requires redaction
 
 ## 9. Related Documents
 
 - [Data Models](data-models.md) - `RedactionRecord`, `PIIConfig`
-- [LLM Layer](llm.md) - `CloudLLMRefiner.detect_pii_entities()`
+- [LLM Layer](llm.md) - cloud `CloudLLMRefiner.detect_pii_entities()` was removed in S4 (2026-06-15); entity detection now uses local NER (`PIIGuard.detect_entities`)
 - [Pipeline](pipeline.md) - Position of PII redaction in the data flow

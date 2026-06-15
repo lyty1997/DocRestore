@@ -38,40 +38,41 @@ privacy/
 class PIIRedactor:
     def __init__(self, config: PIIConfig) -> None: ...
 
-    async def redact_for_cloud(
-        self,
-        text: str,
-        refiner: LLMRefiner | None,
-    ) -> tuple[str, list[RedactionRecord], EntityLexicon | None]:
-        """对合并文档进行 PII 脱敏（供云端 LLM 使用）。
-
-        流程：
-        1. 结构化正则脱敏（手机/邮箱/身份证/银行卡）
-        2. 自定义敏感词按 word 长度全局降序替换（每词用自己的 code，空则回落）
-        3. 若 refiner 非空，调用 refiner.detect_pii_entities() 检测人名/机构名
-        4. 构建 EntityLexicon 并替换实体
-
-        Returns:
-            (脱敏后文本, 脱敏记录列表, 实体词典 | None)
-        """
-
     def redact_snippet(
         self, text: str, lexicon: EntityLexicon | None,
     ) -> tuple[str, list[RedactionRecord]]:
-        """对短片段（如 re-OCR 文本）复用已有实体词典做脱敏，不再调用 LLM。"""
+        """对短片段（如 re-OCR 文本）做脱敏：结构化正则 + 自定义词，
+        再复用已有 `EntityLexicon` 替换人名/机构名（词表为 None 则退化为仅正则）。"""
+
+    def redact_regex_only(
+        self, text: str,
+    ) -> tuple[str, list[RedactionRecord]]:
+        """仅结构化正则 + 凭据 + 自定义词脱敏，不做实体替换（供流式 producer 逐页先行）。"""
+
+    def redact_tokens_only(
+        self, text: str,
+    ) -> tuple[str, list[RedactionRecord]]:
+        """仅高置信密钥（sk-/gh?_/AKIA/JWT）+ 自定义词脱敏，供代码正文 body 用，
+        不跑 KV/手机/邮箱全量正则以免吞坏代码。"""
 ```
+
+> 送云端的统一闸口是 `PIIGuard.redact_for_cloud(text, lexicon, *, profile)`（sync，第二参数
+> 是 lexicon），实体词典由本地 NER `PIIGuard.detect_entities(text)` 产出，见 §10.5。
+> 原 `PIIRedactor.redact_for_cloud(text, refiner)`（async、依赖云端 refiner 检测实体）已于
+> S4 删除（2026-06-15）。
 
 ### 3.2 EntityLexicon
 
 ```python
 @dataclass(frozen=True)
 class EntityLexicon:
-    """LLM 检测到的实体词典（不可变，便于跨页复用）。"""
+    """本地 NER 检测到的实体词典（不可变，便于跨页复用）。"""
     person_names: tuple[str, ...]
     org_names: tuple[str, ...]
 ```
 
-> 实体检测失败或本地 provider 下，`redact_for_cloud` 返回 `None` 作为 lexicon（调用方需判空）。
+> 实体检测失败或未开人名/机构名开关时，`PIIGuard.detect_entities` 返回 `None` 作为 lexicon
+> （调用方需判空，`redact_snippet(text, None)` 退化为仅正则）。
 
 ## 4. 脱敏策略
 
@@ -88,15 +89,14 @@ class EntityLexicon:
 - 身份证：`[身份证号]`（`id_card_placeholder`）
 - 银行卡：`[银行卡号]`（`bank_card_placeholder`）
 
-### 4.2 实体检测（本地 NER，原云端 LLM）
+### 4.2 实体检测（本地 NER）
 
-> **S3（2026-06-14）起改本地 NER**：`PIIGuard.detect_entities`（spaCy）取代下述云端
-> `detect_pii_entities`（已标 deprecated 死路，待 S4 删），名字不出本机。详见 §10.5。
-> 以下云端路径仅存历史。
+> **S3（2026-06-14）起本地 NER**：`PIIGuard.detect_entities`（spaCy）检测人名/机构名，名字不出
+> 本机；其取代的原云端 `detect_pii_entities` 方法链已于 S4 删除（2026-06-15）。详见 §10.5。
 
-原云端可选路径（已废弃）：
-- 调用 `CloudLLMRefiner.detect_pii_entities()` 检测人名/组织名
-- 返回 JSON：`{"person_names": [...], "org_names": [...]}`
+现行本地 NER 路径：
+- 调用 `PIIGuard.detect_entities(text)`（`privacy/ner.py::SpacyEntityDetector`）检测人名/机构名
+- 返回 `EntityLexicon`（`person_names` / `org_names`），检测失败或未开开关时返回 `None`
 - 构建 EntityLexicon 并替换实体
 
 默认替换占位符：
@@ -136,18 +136,18 @@ API 层 `CustomSensitiveWord`（`api/schemas.py`）是 pydantic 请求模型，�
 ## 6. 失败策略
 
 - 正则脱敏失败：记录 warning，继续流程
-- 实体检测失败 + `block_cloud_on_detect_failure=True`：跳过所有云端 LLM 调用
-- 实体检测失败 + `block_cloud_on_detect_failure=False`：仅使用正则脱敏结果
+- 本地 NER 实体检测失败 + `block_cloud_on_detect_failure=True`：跳过所有云端 LLM 调用
+- 本地 NER 实体检测失败 + `block_cloud_on_detect_failure=False`：仅使用正则脱敏结果
 
 ## 7. 数据流
 
 ```
 MergedDocument（合并后）
     │
-    ▼ PIIRedactor.redact_for_cloud()
+    ▼ 结构化脱敏 + 实体替换（早期批量版整篇路径，流式版见 §9）
     ├─ 正则脱敏（手机/邮箱/身份证/银行卡）
-    ├─ LLM 实体检测（可选，人名/组织名）
-    └─ 实体替换
+    ├─ 本地 NER 实体检测（可选，人名/机构名，PIIGuard.detect_entities）
+    └─ 实体替换（PIIGuard.redact_for_cloud(text, lexicon)）
     │
     ▼ (脱敏后文本, RedactionRecord[], EntityLexicon)
     │
@@ -158,7 +158,7 @@ MergedDocument（合并后）
 
 - 文件名：`patterns.py` 不是 `regex.py`（避免 mypy 模块名冲突）
 - 银行卡校验：使用 Luhn 算法降低误报
-- 实体检测：仅在云端模式下可用（LocalLLMRefiner 无此能力）
+- 实体检测：走本地 NER（`PIIGuard.detect_entities`，spaCy），与 LLM provider 无关，名字不出本机
 - re-OCR 脱敏：缺口补充时的 re-OCR 文本也需要脱敏
 
 ## 9. 全链路实体脱敏前置（流式版 · 已落地 2026-06-04）
@@ -168,7 +168,7 @@ MergedDocument（合并后）
 ### 9.1 流式版现状
 
 - **结构化 PII（正则）**：`_ocr_producer` 对每页 `page.cleaned_text` 调 `redact_regex_only`（手机 / 邮箱 / 身份证 / 银行卡 + 自定义词），**入队前**完成 → 下游全部（分段 / 精修 / 输出 / 全模式含 PPT）都见不到结构化 PII。✅
-- **实体 PII（人名 / 机构名）**：文档模式 `_stream_process` 在积累到 `_PII_DETECT_THRESHOLD` 页后调一次 `_delayed_pii_detect` → `detect_pii_entities` 构建 `EntityLexicon`。
+- **实体 PII（人名 / 机构名）**：文档模式 `_stream_process` 在积累到 `_PII_DETECT_THRESHOLD` 页后调一次 `_delayed_pii_detect` → 本地 NER `PIIGuard.detect_entities` 构建 `EntityLexicon`（S3 前为云端 `detect_pii_entities`，已于 S4 删除）。
 
 ### 9.2 缺口
 
@@ -184,8 +184,8 @@ MergedDocument（合并后）
 
 关键约束 / 决策：
 
-- 检测沿用所配置 refiner（不强制本地）；保持文档流式（不收齐全文），早窗口靠输出兜底覆盖。
-- **`detect_pii_entities(text)` 本身要把文本送给 refiner**——若 refiner 是云端，则检测调用本身上云一次。"人名完全不出本机"须配 `provider="local"`（本设计不强制，仅记边界）。
+- 保持文档流式（不收齐全文），早窗口靠输出兜底覆盖。
+- 实体检测走本地 NER（`PIIGuard.detect_entities`，S4 已取代原「沿用所配置 refiner」的云端检测，2026-06-15），名字不出本机；详见 §10.5。
 - `lexicon=None`（未开 name 开关 / 检测失败）→ `redact_snippet(text, None)` 退化为仅正则，零改动、不阻断精修。
 
 ### 9.4 验收
@@ -259,9 +259,10 @@ CNN，零 torch/transformers，不撞 OCR venv），兑现「名字不出本机�
 - **fail-fast**：开人名/机构名脱敏但 spaCy/模型未装 → 建任务 400 `NER_BACKEND_UNAVAILABLE`
   （`remediable=true`）；`GET /ner/status` 探测 + `POST /ner/setup` 一键装环境（前端 TaskForm 三态 UX）。
 - **fail-closed**：运行期检测异常 → `lexicon=None`，`block_cloud_on_detect_failure` 阻断云端精修。
-- **死路（待 S4 删）**：§3.1 `PIIRedactor.redact_for_cloud(refiner)`、§4.2/§8 的云端
-  `detect_pii_entities`、§9.3「检测沿用所配置 refiner」约束 —— 均已被本地 NER 取代，
-  代码侧已标 `deprecated`（`llm/cloud.py`/`base.py`/`privacy/redactor.py`）。
+- **已于 S4 删除（2026-06-15）**：原 `PIIRedactor.redact_for_cloud(refiner)`（async）、
+  云端 `detect_pii_entities`（`CloudLLMRefiner` / `BaseLLMRefiner` / `LLMRefiner` Protocol）、
+  `build_pii_detect_prompt` + `PII_DETECT_SYSTEM_PROMPT`、§9.3 原「检测沿用所配置 refiner」约束
+  —— 均已被本地 NER 取代，对应代码（`llm/cloud.py`/`base.py`/`prompts.py`/`privacy/redactor.py`）已清除。
 - 选型（spaCy 而非 LAC/GLiNER，含环境冲突原委）与 benchmark 留证：见
   [pii-local-ner.md](pii-local-ner.md) §1 / [ner-benchmark.md](ner-benchmark.md)（人名召回 0.92 达标）。
 
@@ -271,5 +272,5 @@ CNN，零 torch/transformers，不撞 OCR venv），兑现「名字不出本机�
 - [PII 本地 NER 详细设计](pii-local-ner.md) - S3 spaCy 选型 + 接缝 + 一键环境配置
 - [NER benchmark 留证](ner-benchmark.md) - S3.6 spaCy 召回/速度实测
 - [数据模型](data-models.md) - `RedactionRecord`, `PIIConfig`
-- [LLM 层](llm.md) - `CloudLLMRefiner.detect_pii_entities()`（S3 起死路，本地 NER 取代）
+- [LLM 层](llm.md) - 云端 `detect_pii_entities` 已于 S4 删除（2026-06-15），本地 NER 取代
 - [Pipeline](pipeline.md) - PII 脱敏在数据流中的位置

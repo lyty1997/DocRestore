@@ -12,108 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""云端 LLM 精修器：在 BaseLLMRefiner 基础上增加 PII 实体检测。"""
+"""云端 LLM 精修器（基于 BaseLLMRefiner，走 litellm）。"""
 
 from __future__ import annotations
 
-import json
-import re
-
 from docrestore.llm.base import BaseLLMRefiner
-from docrestore.llm.prompts import build_pii_detect_prompt
-
-# 匹配 ```json\n...\n``` / ```\n...\n``` 两种 markdown code fence
-_CODE_FENCE_RE = re.compile(
-    r"^```(?:json)?\s*\n(.*?)\n```\s*$",
-    re.DOTALL,
-)
-
-
-def _extract_json_payload(raw: str) -> str:
-    """从 LLM 输出中剥出 JSON 文本。
-
-    兼容两种常见响应形态：
-    - 纯 JSON：原样返回
-    - markdown code fence（```json ... ``` 或 ``` ... ```）：剥掉围栏
-    - 无围栏但含前后说明：返回首个 `{` 到末个 `}` 之间的内容
-    """
-    text = raw.strip()
-    m = _CODE_FENCE_RE.match(text)
-    if m:
-        return m.group(1).strip()
-
-    # 退化匹配：取第一个 { 到最后一个 }（应对模型在 JSON 前后啰嗦说明的情况）
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end > start:
-        return text[start:end + 1]
-    return text
-
-
-def _coerce_str_list(value: object) -> list[str]:
-    """把 LLM 输出的实体字段强制收窄为 list[str]。
-
-    防 LLM 常见坏形状（issue #13）：
-    - 裸字符串 ``"Alice"`` —— 若直接 ``list(...)`` 会逐字符拆成
-      ``['A','l','i','c','e']``，下游全局替换会把正文每个字母打碎；
-    - 混入 ``None`` / 数字 / 嵌套对象等非字符串项。
-
-    非 list 一律返回空（视为该字段缺失）；list 内仅保留去空格后非空的
-    ``str`` 项。
-    """
-    if not isinstance(value, list):
-        return []
-    result: list[str] = []
-    for item in value:
-        if isinstance(item, str):
-            stripped = item.strip()
-            if stripped:
-                result.append(stripped)
-    return result
 
 
 class CloudLLMRefiner(BaseLLMRefiner):
-    """云端 LLM 精修器，额外支持 PII 实体检测。"""
+    """云端 LLM 精修器。
 
-    async def detect_pii_entities(
-        self, text: str,
-    ) -> tuple[list[str], list[str]]:
-        """检测文本中的人名和机构名。
+    与 BaseLLMRefiner 共享 refine/fill_gap/final_refine；作为 ``provider="cloud"``
+    的精修器类型标识（Pipeline._create_refiner 据 provider 选型）。
 
-        返回 (person_names, org_names)。
-        解析失败抛 RuntimeError。
-
-        .. deprecated:: S3
-            **死路，待 S4 删除。** S3 起人名/机构名检测改本地 NER（spaCy，
-            ``privacy/ner.py::PIIGuard.detect_entities``），名字不再出本机；Pipeline
-            已不再调用本云端方法。保留仅为接口兼容，S4 连同基类默认实现一并清理。
-        """
-        messages = build_pii_detect_prompt(text)
-        kwargs = self._build_kwargs(messages)
-
-        response = await self._call_llm(kwargs)
-        if not response.choices:
-            msg = (
-                "LLM 返回空 choices"
-                f"（model={self._config.model}）"
-            )
-            raise RuntimeError(msg)
-
-        raw: str = response.choices[0].message.content or ""
-        payload = _extract_json_payload(raw)
-
-        try:
-            data = json.loads(payload)
-        except json.JSONDecodeError as exc:
-            msg = f"PII 实体检测返回非 JSON: {raw[:200]}"
-            raise RuntimeError(msg) from exc
-
-        # 顶层必须是对象；返回 list/裸值时按检测失败处理（fail-closed），
-        # 避免 data.get 触发 AttributeError 或漏过类型校验（issue #13）。
-        if not isinstance(data, dict):
-            msg = f"PII 实体检测返回非对象 JSON: {raw[:200]}"
-            raise RuntimeError(msg)
-
-        person_names = _coerce_str_list(data.get("person_names"))
-        org_names = _coerce_str_list(data.get("org_names"))
-        return person_names, org_names
+    历史上曾覆盖 ``detect_pii_entities`` 做云端 PII 实体识别，S3 起人名/机构名
+    检测改本地 NER（``privacy/ner.py::PIIGuard.detect_entities``，名字不出本机），
+    该云端检测路径已于 S4 删除。
+    """

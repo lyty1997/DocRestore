@@ -164,7 +164,7 @@ GLM_API_KEY=sk-xxx
 OPENAI_API_BASE=https://your-proxy.com/v1
 ```
 
-云端模式额外做一次 LLM PII 实体识别（人名/机构名），与 regex 脱敏叠加。
+人名/机构名实体识别走本地 NER（spaCy，`privacy/ner.py`），名字不出本机，与 regex 脱敏叠加；不再依赖 LLM provider（原云端 LLM 实体检测已于 S4 删除，2026-06-15）。
 
 #### 本地模式（数据不出本地）
 
@@ -176,7 +176,7 @@ OPENAI_API_BASE=https://your-proxy.com/v1
 | vLLM | `vllm serve Qwen/Qwen2.5-14B-Instruct --port 8001` | `http://localhost:8001/v1` |
 | llama.cpp | `llama-server -m model.gguf --port 8080` | `http://localhost:8080/v1` |
 
-本地模式下 `LocalLLMRefiner.detect_pii_entities` 默认返回空 → 跳过 LLM 实体识别，只跑 regex 脱敏；**数据不会发送到任何外部服务**。`.env` 里的 API Key 可留空。
+本地模式下实体识别同样走本地 NER（spaCy，名字不出本机，与 provider 无关），regex 脱敏叠加其上；精修也在本机完成，故 **数据不会发送到任何外部服务**。`.env` 里的 API Key 可留空。
 
 #### 凭据持久化策略（api_key 不落库，#37）
 

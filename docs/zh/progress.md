@@ -2105,3 +2105,20 @@ S3.7 文档收尾 + PR base dev。云端 `detect_pii_entities` 暂留待 S4 清�
 **整批 PR**：`feature/pii-unify-s3`（S3.1–S3.7，~14 commit）→ **PR #59 base dev**。门禁全绿：mypy 72 文件 0 错 / ruff / 前端 vitest 115 + tsc + eslint / pytest **1329 passed, 42 skipped**（除 3 个 pre-existing DeepSeek 环境缺失）。
 
 **遗留（S4）**：删云端 `detect_pii_entities`（base/cloud）+ `PIIRedactor.redact_for_cloud(refiner)` 死路代码。PR #59 合 dev 后，整批 S1–S3 随 dev→main 时关 #36 相关。
+
+## 2026-06-15 — PII 统一 S4 删除云端检测死路代码
+
+**落地**（纯删除，无行为变化——删的是 S3 起已不被生产调用的死路；PR #59 已合 dev）：
+- 云端实体检测方法链整链删除：`CloudLLMRefiner.detect_pii_entities` + `BaseLLMRefiner.detect_pii_entities` 默认实现 + `LLMRefiner` Protocol 声明；`CloudLLMRefiner` 收缩为 `BaseLLMRefiner` 薄子类（仅作 `provider="cloud"` 选型标识）。
+- `llm/prompts.py`：删 `build_pii_detect_prompt` + `PII_DETECT_SYSTEM_PROMPT`。
+- `llm/cloud.py`：删私有 helper `_extract_json_payload` / `_coerce_str_list` / `_CODE_FENCE_RE`（`_extract_json_payload` 在 `code_refine.py` 另有独立副本，不受影响）。
+- `privacy/redactor.py`：删 `PIIRedactor.redact_for_cloud(text, refiner)`（async）+ 不再依赖的 `LLMRefiner` import；模块 docstring 改「实体词表由外部本地 NER 提供，本模块只按词表替换」。`redact_snippet`/`redact_regex_only`/`redact_tokens_only` 活路保留。
+- `scripts/benchmark_ner.py`：删 `--cloud` 云端银标对照（`cloud_agreement` + 3 个 cloud 参数 + `asyncio`/`os` import）。
+- 测试：删 `tests/llm/test_pii_detect_prompt.py`（整文件）；`test_cloud_truncation.py` 删 helper/PII 解析用例（保留截断检测）；`test_redactor.py` 删 redact_for_cloud 用例（长度降序覆盖改 `redact_snippet(lexicon)` 版保留）；`test_local.py`/`test_base_semaphore.py` 去 detect_pii_entities；6 个 pipeline fake refiner 的 detect_pii_entities 残桩清零。
+- **区分保留**：`PIIGuard.redact_for_cloud(text, lexicon, *, profile)`（sync 活路闸口，与被删 async 同名不同类）全程未动。
+
+**文档**（13 处 zh/en）：死路 banner 翻「已删除（2026-06-15）」+ 删把已删符号当现行 API 的描述——`privacy.md` §3.1 改展示 PIIRedactor 现行方法、§4.2/§7 改本地 NER；`llm.md` Protocol/CloudLLMRefiner 段；`pipeline.md`/`README.md`/`pii-unification.md`/`pii-local-ner.md`/`ner-benchmark.md`/`pipeline-parallel.md`/`architecture.md`/`deployment.md`/`known-issues.md`；保留「本地 NER 取代云端」迁移说明性引用。
+
+**验证**：净删除 16 文件 +34/−548 行（1 文件删）；`mypy --strict` 74 文件 0 错 / ruff / typos（含 docs）/ **pytest 1307 passed, 45 skipped, 0 failed**；grep 确认 `detect_pii_entities` / `build_pii_detect_prompt` / `PIIRedactor.redact_for_cloud(refiner)` 代码零残留（仅余说明性注释）。
+
+**遗留**：PR base dev 待提/合；dev→main 整批 release 时关 #36 相关。

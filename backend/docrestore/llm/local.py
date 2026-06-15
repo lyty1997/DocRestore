@@ -22,6 +22,5 @@ from docrestore.llm.base import BaseLLMRefiner
 class LocalLLMRefiner(BaseLLMRefiner):
     """本地 LLM 精修器（ollama/vllm/llama.cpp 等 OpenAI 兼容服务）。
 
-    与 CloudLLMRefiner 共享 refine/fill_gap/final_refine，
-    detect_pii_entities 继承 BaseLLMRefiner 的空实现（本地场景数据不出本地）。
+    与 CloudLLMRefiner 共享 refine/fill_gap/final_refine（本地场景数据不出本地）。
     """
