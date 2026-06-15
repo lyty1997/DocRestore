@@ -34,6 +34,7 @@ from docrestore.llm.circuit_breaker import (
     LLMCircuitOpenError,
     get_breaker,
 )
+from docrestore.llm.egress_gate import enforce_egress
 from docrestore.llm.prompts import (
     GAP_FILL_EMPTY_MARKER,
     build_final_refine_prompt,
@@ -244,7 +245,13 @@ class BaseLLMRefiner:
 
         熔断器处于 open 时直接抛 LLMCircuitOpenError（不占用 semaphore，
         不记 timing log），由上层 fallback 捕获退到原文/reassembled。
+
+        出云闸口（#67）：在熔断/限流之前强制 fail-closed 拒发 + 实体兜底脱敏
+        （本地 provider / 无任务策略时放行）；拒发抛 CloudEgressBlockedError，
+        与熔断同样被上层 fallback 接住，不占 semaphore、不计熔断。
         """
+        enforce_egress(kwargs, self._config.provider)
+
         prof = current_profiler()
         model = str(kwargs.get("model", ""))
         api_base = str(kwargs.get("base_url", ""))

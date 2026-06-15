@@ -42,6 +42,11 @@ import aiofiles
 from docrestore.llm.base import BaseLLMRefiner, LLMRefiner
 from docrestore.llm.cache import LLMCache
 from docrestore.llm.cloud import CloudLLMRefiner
+from docrestore.llm.egress_gate import (
+    CloudEgressPolicy,
+    egress_scope,
+    update_egress_policy,
+)
 from docrestore.pipeline.quality_report import (
     UI_NOISE_RESIDUAL_RE,
     QualityIssue,
@@ -382,19 +387,26 @@ def _stitch_final_chunks(chunks: list[str]) -> str:
 
 def _make_regex_redactor(
     pii_cfg: PIIConfig,
+    lexicon: EntityLexicon | None = None,
 ) -> Callable[[str], str] | None:
-    """构造 ``redact_regex_only`` 的文本投影函数（#36），未开 PII 返回 None。
+    """构造代码模式 prompt 字段（file_path / 源码片段 / 诊断）送云脱敏投影函数
+    （#36 + #67 字段级加固），未开 PII 返回 None。
 
-    代码模式把 ``file_path`` / 源码片段 / 诊断拼进云端 prompt 前用它脱敏：结构化
-    PII + 凭据/token + 自定义词，**不做实体（人名/机构名）替换**——避免误伤
-    import 路径 / namespace / 标识符（与 _redact_code_pii 的正文处理同口径）。
+    结构化 PII（手机/邮箱/证件/卡/凭据/host/内链）+ 自定义词走 ``full``（§9.5：
+    prompt 字段不随正文降 ``tokens_only``）；``lexicon`` 非空时**额外施实体替换**
+    （人名/机构名）——实体是精确串替换，不误伤 import 路径/namespace/标识符（误伤
+    风险只来自结构化正则，与实体无关）。lexicon 由 ``_redact_code_pii`` 检测后回传。
+
+    与出云闸口（#67）的关系：闸口在 ``_call_llm`` 已对全部出云内容兜底实体替换；
+    此处字段级**额外**补结构化脱敏（闸口不跑结构化）——尤其覆盖闸口够不到的
+    ``unresolved_items`` 自由文本，属纵深防御。
     """
     if not pii_cfg.enable:
         return None
     guard = PIIGuard(pii_cfg)
 
     def _redact(text: str) -> str:
-        return guard.redact_structured(text)
+        return guard.redact_for_cloud(text, lexicon)
 
     return _redact
 
@@ -915,11 +927,19 @@ class Pipeline:
                 mode="many",
             ) if is_root else contextlib.nullcontext()
             with root_stage:
-                return await self._stream_pipeline(
-                    image_dir, output_dir, on_progress,
-                    llm, gpu_lock, pii, ocr, code, ppt, controller,
-                    overrides,
+                # 出云闸口（#67）：每个 leaf 在此安装任务级出云策略（ContextVar
+                # task-local，process_tree 并发子目录互不串味）；guard 据请求级
+                # pii_cfg 建一次，block_cloud/lexicon 由三模式就绪后 update。
+                pii_cfg = pii or self._config.pii
+                egress_guard = (
+                    PIIGuard(pii_cfg) if pii_cfg.enable else None
                 )
+                with egress_scope(CloudEgressPolicy(guard=egress_guard)):
+                    return await self._stream_pipeline(
+                        image_dir, output_dir, on_progress,
+                        llm, gpu_lock, pii, ocr, code, ppt, controller,
+                        overrides,
+                    )
 
     async def _scan_task_images(
         self,
@@ -1200,7 +1220,14 @@ class Pipeline:
                     "\n".join(raw_accum), pii,
                 )
                 pii_done = True
-                if self._should_block_cloud(entity_lexicon, pii):
+                ppt_block_cloud = self._should_block_cloud(
+                    entity_lexicon, pii,
+                )
+                # 出云闸口同步（#67）：按页精修发云端前写入 block_cloud + lexicon。
+                update_egress_policy(
+                    block_cloud=ppt_block_cloud, lexicon=entity_lexicon,
+                )
+                if ppt_block_cloud:
                     # fail-closed：检测失败 → 停用按页云端精修，后续页退原文
                     refiner = None
                     refining = False
@@ -1229,7 +1256,12 @@ class Pipeline:
                 "\n".join(raw_accum), pii,
             )
             pii_done = True
-            if self._should_block_cloud(entity_lexicon, pii):
+            ppt_block_cloud = self._should_block_cloud(entity_lexicon, pii)
+            # 出云闸口同步（#67）：短 PPT 推迟页精修发云端前写入策略。
+            update_egress_policy(
+                block_cloud=ppt_block_cloud, lexicon=entity_lexicon,
+            )
+            if ppt_block_cloud:
                 refiner = None
                 refining = False
                 logger.warning(
@@ -1486,10 +1518,15 @@ class Pipeline:
         # 正文 regex（结构化 PII + 凭据/token）+ 自定义词但不做实体脱敏（避免误伤
         # import 路径 / namespace / 标识符）。送云端 refine/repair/audit 前完成。
         pii_block_cloud = False
+        code_lexicon: EntityLexicon | None = None
         if pii_cfg.enable and sources:
-            pii_block_cloud = await self._redact_code_pii(
+            pii_block_cloud, code_lexicon = await self._redact_code_pii(
                 sources, pii_cfg,
             )
+        # 出云闸口同步（#67）：code refine/repair/audit 即将发云端，写入 block_cloud
+        # 与 code lexicon——闸口据此对诊断自由文本（g++/clang 回显源码行）与
+        # file_path 施实体替换，堵 N2（实体 lexicon 此前从未线程化到 code 诊断）。
+        update_egress_policy(block_cloud=pii_block_cloud, lexicon=code_lexicon)
 
         # 4. 可选 LLM 字符级精修（每个 SourceFile 独立调用，失败回退原文）；
         # 受统一精修开关约束，关精修时跳过（但上面的 PII 头脱敏仍照常执行）。
@@ -1509,7 +1546,7 @@ class Pipeline:
             # #36：file_path / 源码片段 / 诊断拼进云端 prompt 前的脱敏函数（请求级
             # pii_cfg；未开 PII 则 None，不脱）。三类 refiner（refine/repair/audit）
             # 共用，确保任何送云端的 prompt 字段都先 redact_regex_only。
-            prompt_redact = _make_regex_redactor(pii_cfg)
+            prompt_redact = _make_regex_redactor(pii_cfg, code_lexicon)
             code_refiner = CodeLLMRefiner(
                 base_refiner_obj, mode=refine_mode, redact=prompt_redact,
             )
@@ -1623,7 +1660,7 @@ class Pipeline:
         self,
         sources: list[SourceFile],
         pii_cfg: PIIConfig,
-    ) -> bool:
+    ) -> tuple[bool, EntityLexicon | None]:
         """对每个 SourceFile 脱敏（in-place），送云端 refine/repair/audit 前执行。
 
         分 header / body 两段差异化处理（``_split_leading_comment`` 切分）：
@@ -1645,7 +1682,7 @@ class Pipeline:
         （fail-closed，避免 header 里未脱敏的人名/机构名外发）。其余返回 False。
         """
         if not sources:
-            return False
+            return False, None
 
         guard = PIIGuard(pii_cfg)
         # 每个文件切出 (header, body)，header + body == merged_text
@@ -1676,8 +1713,9 @@ class Pipeline:
             sources[i].merged_text = new_header + new_body
 
         # 检测已尝试且失败 + fail-closed → 通知调用方跳过后续云端精修
-        # （_should_block_cloud 已含 block_cloud_on_detect_failure 与 none 排除）
-        return detect_failed
+        # （_should_block_cloud 已含 block_cloud_on_detect_failure 与 none 排除）；
+        # 同时回传 lexicon，供出云闸口对 code 诊断/路径施实体兜底（堵 N2）。
+        return detect_failed, lexicon
 
     async def _resolve_ocr_engine(
         self,
@@ -1965,6 +2003,12 @@ class Pipeline:
             json.dumps(controller.snapshot(), indent=2),
         )
 
+        # 出云闸口同步（#67）：gap-fill / final_refine / dup-H2 重试此刻才发云端，
+        # 此处一次性把 block_cloud（堵 N1）与实体 lexicon 写入任务策略——
+        # final_refine 送云内容的实体保护此刻**仅靠闸口**（输出兜底 2212 在其后）。
+        update_egress_policy(
+            block_cloud=pii_block_cloud, lexicon=entity_lexicon,
+        )
         return await self._finalize_single_doc(
             merger, pages_ref, refined_results, all_gaps,
             output_dir, llm, gpu_lock, report_fn, entity_lexicon,
@@ -2112,7 +2156,10 @@ class Pipeline:
                 )
 
         # A-2 信号 4：final_refine 输出仍有重复 H2 → 带提示重做一次
-        if not truncated:
+        # 出云闸口 N1 源头双保险（#67）：fail-closed（block_cloud）时不发起 dup-H2
+        # 重试——此处从源头消除「重试在 block_cloud 守卫外」的物理缺陷；闸口层
+        # 另在 _call_llm 兜底拒发，两层缺一仍安全。
+        if not truncated and not block_cloud:
             doc, truncated = await self._maybe_retry_final_refine_on_dup_h2(
                 doc, output_dir, llm, report_fn, cache, llm_cfg,
                 quality, initial_truncated=truncated,

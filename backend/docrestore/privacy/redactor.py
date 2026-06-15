@@ -153,6 +153,19 @@ class PIIRedactor:
 
         return text, records
 
+    def apply_lexicon(
+        self,
+        text: str,
+        lexicon: EntityLexicon,
+    ) -> tuple[str, list[RedactionRecord]]:
+        """仅按实体词典替换人名/机构名，**不跑结构化 regex**，返回 (文本, 记录)。
+
+        供出云闸口（#67）统一兜底用：实体替换是精确串替换，对代码标识符 / import
+        路径 / 结构化文本一律安全（只替 lexicon 里的人名/机构串）。遵循
+        ``redact_person_name`` / ``redact_org_name`` 开关，幂等（占位符不被二次匹配）。
+        """
+        return self._apply_lexicon(text, lexicon)
+
     def _replace_custom_words(
         self,
         text: str,

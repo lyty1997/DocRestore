@@ -22,10 +22,12 @@ import pytest
 from docrestore.pipeline.config import PIIConfig
 from docrestore.pipeline.pipeline import (
     Pipeline,
+    _make_regex_redactor,
     _split_leading_comment,
 )
 from docrestore.privacy import guard as guard_mod
 from docrestore.privacy.ner import NERUnavailableError
+from docrestore.privacy.redactor import EntityLexicon
 from docrestore.processing.code_assembly import CodeColumn
 from docrestore.processing.code_file_grouping import PageColumn, SourceFile
 from docrestore.processing.ide_meta_extract import IDEMeta
@@ -322,7 +324,7 @@ class TestRedactCodePiiFailClosed:
             _FakeDetector(raises=NERUnavailableError("spacy unavailable")),
         )
         pipe = Pipeline.__new__(Pipeline)
-        block = await pipe._redact_code_pii([src], pii_cfg)
+        block, _lexicon = await pipe._redact_code_pii([src], pii_cfg)
         assert block is True
 
     @pytest.mark.asyncio
@@ -340,7 +342,7 @@ class TestRedactCodePiiFailClosed:
             _FakeDetector(raises=NERUnavailableError("spacy unavailable")),
         )
         pipe = Pipeline.__new__(Pipeline)
-        block = await pipe._redact_code_pii([src], pii_cfg)
+        block, _lexicon = await pipe._redact_code_pii([src], pii_cfg)
         assert block is False
 
     @pytest.mark.asyncio
@@ -355,8 +357,11 @@ class TestRedactCodePiiFailClosed:
         )
         _patch_detector(monkeypatch, _FakeDetector(orgs=("someone",)))
         pipe = Pipeline.__new__(Pipeline)
-        block = await pipe._redact_code_pii([src], pii_cfg)
+        block, lexicon = await pipe._redact_code_pii([src], pii_cfg)
         assert block is False
+        # #67：检测出的 lexicon 须回传，供出云闸口对 code 诊断施实体兜底（堵 N2）
+        assert lexicon is not None
+        assert "someone" in lexicon.org_names
 
     @pytest.mark.asyncio
     async def test_backend_none_returns_false(
@@ -374,5 +379,33 @@ class TestRedactCodePiiFailClosed:
             _FakeDetector(raises=NERUnavailableError("不应被调用")),
         )
         pipe = Pipeline.__new__(Pipeline)
-        block = await pipe._redact_code_pii([src], pii_cfg)
+        block, _lexicon = await pipe._redact_code_pii([src], pii_cfg)
         assert block is False
+
+
+class TestMakeRegexRedactor:
+    """#67 字段级加固：prompt_redact 闭包接 lexicon 后兼做结构化 + 实体。"""
+
+    def test_lexicon_applies_structured_and_entity(self) -> None:
+        """lexicon 非空 → 结构化 PII（手机/邮箱）+ 实体（人名/机构）都脱。"""
+        cfg = PIIConfig(enable=True, redact_person_name=True)
+        lexicon = EntityLexicon(person_names=("张三",), org_names=())
+        redact = _make_regex_redactor(cfg, lexicon)
+        assert redact is not None
+        out = redact("作者 张三 邮箱 a@corp.example 手机 13800138000")
+        assert "张三" not in out  # 实体替换（#67）
+        assert "a@corp.example" not in out  # 结构化
+        assert "13800138000" not in out
+
+    def test_no_lexicon_structured_only_no_entity(self) -> None:
+        """lexicon=None（默认）→ 仅结构化，实体不替（向后兼容 #36 行为）。"""
+        cfg = PIIConfig(enable=True, redact_person_name=True)
+        redact = _make_regex_redactor(cfg)
+        assert redact is not None
+        out = redact("作者 张三 邮箱 a@corp.example")
+        assert "张三" in out  # 无 lexicon 不替实体
+        assert "a@corp.example" not in out  # 结构化照脱
+
+    def test_disabled_returns_none(self) -> None:
+        """未开 PII → 返回 None（调用方不脱）。"""
+        assert _make_regex_redactor(PIIConfig(enable=False)) is None
