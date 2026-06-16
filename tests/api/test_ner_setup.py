@@ -22,11 +22,14 @@ spacy download**。覆盖：模型白名单校验、成功/失败状态机、单
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 from collections.abc import Callable, Iterable
 
 import pytest
 from httpx import AsyncClient
 
+from docrestore.privacy import ner_install
 from docrestore.privacy.ner_install import NERSetupManager
 
 
@@ -83,6 +86,133 @@ def _patch_exec(
         return proc_factory()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake)
+
+
+class _SignalRecordingProc:
+    """fake 子进程：记录收到的信号。SIGTERM 是否生效由 obey_sigterm 决定，
+    SIGKILL 一律致死——用于验证 _kill_proc 的 SIGTERM→SIGKILL 升级与回收（#63）。"""
+
+    def __init__(self, *, obey_sigterm: bool) -> None:
+        """记录是否听从 SIGTERM；初始未退出。"""
+        self.returncode: int | None = None
+        self.pid = 525252
+        self.stdout = _FakeStdout([])
+        self._obey_sigterm = obey_sigterm
+        self._dead = asyncio.Event()
+        self.signals: list[int] = []
+
+    async def wait(self) -> int:
+        """挂起直到收到致命信号，返回退出码（SIGKILL → -9）。"""
+        await self._dead.wait()
+        self.returncode = -9 if signal.SIGKILL in self.signals else 0
+        return self.returncode
+
+    def deliver(self, sig: int) -> None:
+        """记录信号；致命信号置位 _dead 让 wait() 返回。"""
+        self.signals.append(sig)
+        if sig == signal.SIGKILL or (
+            self._obey_sigterm and sig == signal.SIGTERM
+        ):
+            self._dead.set()
+
+
+def _patch_killpg(
+    monkeypatch: pytest.MonkeyPatch, proc: _SignalRecordingProc, *, pgid: int,
+) -> None:
+    """把 os.getpgid/os.killpg 接到 fake 进程的信号记录（不碰真实进程）。"""
+    monkeypatch.setattr(os, "getpgid", lambda _pid: pgid)
+    monkeypatch.setattr(
+        os, "killpg",
+        lambda gid, sig: proc.deliver(sig) if gid == pgid else None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_kill_proc_sigkill_fallback_when_sigterm_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """忽略 SIGTERM 的 stuck 子进程 → grace 后 SIGKILL 兜底 + wait() 回收（#63）。"""
+    proc = _SignalRecordingProc(obey_sigterm=False)
+    mgr = NERSetupManager()
+    mgr._proc = proc  # type: ignore[assignment]
+    _patch_killpg(monkeypatch, proc, pgid=777)
+
+    await mgr._kill_proc(grace=0.05)
+
+    assert signal.SIGTERM in proc.signals  # 先优雅
+    assert signal.SIGKILL in proc.signals  # 再强杀兜底
+    assert proc.returncode is not None  # 已回收（无僵尸）
+
+
+@pytest.mark.asyncio
+async def test_run_reaps_proc_on_generic_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_exec 泛异常 → _run 的 finally 仍杀+回收子进程（#63：原 except 路径漏杀）。"""
+    proc = _SignalRecordingProc(obey_sigterm=True)
+    mgr = NERSetupManager()
+    _patch_killpg(monkeypatch, proc, pgid=888)
+
+    async def _boom(_cmd: list[str]) -> bool:
+        # 模拟 spawn 后、命令处理中异常
+        mgr._proc = proc  # type: ignore[assignment]
+        raise RuntimeError("drain 崩了")
+
+    monkeypatch.setattr(mgr, "_exec", _boom)
+
+    await mgr._run(("zh_core_web_md",))
+
+    assert mgr.status()["state"] == "failed"
+    assert signal.SIGTERM in proc.signals  # finally 清理了子进程
+    assert proc.returncode is not None  # 已回收
+    assert mgr._proc is None  # finally 置空
+
+
+@pytest.mark.asyncio
+async def test_shutdown_kills_running_proc_on_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """运行中 shutdown：cancel + finally 杀+回收子进程，无异常逃逸（#63）。"""
+    proc = _SignalRecordingProc(obey_sigterm=True)
+    started = asyncio.Event()
+    mgr = NERSetupManager()
+    _patch_killpg(monkeypatch, proc, pgid=999)
+
+    async def _hang(_cmd: list[str]) -> bool:
+        mgr._proc = proc  # type: ignore[assignment]
+        started.set()
+        await asyncio.Event().wait()  # 永久挂起，直到被 cancel
+        return True
+
+    monkeypatch.setattr(mgr, "_exec", _hang)
+
+    assert await mgr.start(["zh_core_web_md"]) is True
+    await started.wait()
+    await mgr.shutdown()  # cancel + await + kill
+
+    assert signal.SIGTERM in proc.signals
+    assert proc.returncode is not None
+    assert mgr.status()["state"] == "failed"  # 取消置 failed
+
+
+@pytest.mark.asyncio
+async def test_install_success_resets_detector_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """安装成功后调用 reset_detector_cache（装后免重启生效，#61）。"""
+    called = {"n": 0}
+    monkeypatch.setattr(
+        ner_install, "reset_detector_cache",
+        lambda: called.__setitem__("n", called["n"] + 1),
+    )
+    _patch_exec(monkeypatch, lambda: _FakeProc(0, [b"ok\n"]))
+    mgr = NERSetupManager()
+    assert await mgr.start(["zh_core_web_md"]) is True
+    assert mgr._task is not None
+    await mgr._task
+
+    assert mgr.status()["state"] == "done"
+    assert called["n"] == 1
 
 
 def test_validate_models_whitelist() -> None:

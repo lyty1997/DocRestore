@@ -18,6 +18,10 @@
 因此从 DB 还原（resume / 重启水合）出来的 ``LLMConfig`` 其 ``api_key`` 为空。
 本模块提供单点回填：仅当配置内 ``api_key`` 为空、且环境变量存在时从环境补回，
 绝不覆盖请求里显式带入的 key。环境变量名集中在此，避免多处硬编码漂移。
+
+已知限制（#64）：若原 key 仅来自请求体（非环境变量），重启后无处回填，resume 时
+云端精修会 401 静默回退原文。详见 known-issues.md「请求级 api_key 任务重启后不可
+resume」——需 resume 的任务应把 key 配进 ``DOCRESTORE_LLM_API_KEY`` 环境变量。
 """
 
 from __future__ import annotations

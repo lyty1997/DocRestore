@@ -64,6 +64,8 @@ interface CreateTaskBody {
   image_dir: string;
   output_dir?: string | undefined;
   llm?: {
+    /** 云端 / 本地 provider（#49 显式契约，与后端 LLMConfig.provider 对齐） */
+    provider?: "cloud" | "local" | undefined;
     model?: string | undefined;
     api_base?: string | undefined;
     api_key?: string | undefined;
@@ -76,6 +78,10 @@ interface CreateTaskBody {
     custom_sensitive_words?:
       | readonly { word: string; code?: string | undefined }[]
       | undefined;
+    /** NER opt-out（#64）：无 spaCy 环境只做结构化正则脱敏；省略=后端默认 */
+    ner_backend?: "spacy" | "none" | undefined;
+    redact_person_name?: boolean | undefined;
+    redact_org_name?: boolean | undefined;
   } | undefined;
   ocr?: {
     model?: string | undefined;
@@ -485,6 +491,11 @@ export function getSourceImageUrl(taskId: string, filename: string): string {
   return appendTokenToUrl(
     `${API_BASE}/tasks/${taskId}/source-images/${encodeURIComponent(filename)}`,
   );
+}
+
+/** 构建上传预览图 URL（附加 token 供 <img src> 在 token 模式下显示，#47） */
+export function getUploadFileUrl(sessionId: string, fileId: string): string {
+  return appendTokenToUrl(`${API_BASE}/uploads/${sessionId}/files/${fileId}`);
 }
 
 /** 构建 WS 进度推送 URL（附加 token 供 WebSocket 握手使用） */

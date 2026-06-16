@@ -357,8 +357,12 @@ class EngineManager:
 
         target_pipeline = config.paddle_pipeline
 
-        # 快速路径：引擎已匹配
-        if self._is_matched(target_model, target_gpu, target_pipeline):
+        # 快速路径：引擎已匹配且当前无切换进行中。加 is_switching 守卫堵 TOCTOU
+        # （#40）：切换中 _current_* 仍指旧值，异配并发请求若走快速路径会拿到正被
+        # _shutdown_current 拆除的旧引擎；切换中一律落 _switch_lock 双检兜底。
+        if not self.is_switching and self._is_matched(
+            target_model, target_gpu, target_pipeline,
+        ):
             return self._engine  # type: ignore[return-value]
 
         async with self._switch_lock:
@@ -532,6 +536,22 @@ class EngineManager:
         # start_new_session=True 保证 pid == pgid，登记到进程级兜底清理。
         _track_pgid(self._ppocr_server_proc.pid)
 
+        # stdout drain 必须在 _wait_server_ready 之前挂起（#38）：启动期 vLLM /
+        # 模型加载向 stdout 狂打日志，无人消费则 64KB pipe buffer 写满 → server
+        # 内 logging 阻塞在 pipe_write → 永不就绪、worker OCR 300s 超时循环。
+        # stderr 留到 ready 之后挂——_wait_server_ready 期间由
+        # _collect_stderr_progress 独占读 stderr 提取启动进度，不能并发再起 reader。
+        if self._ppocr_server_proc.stdout is not None:
+            self._ppocr_drain_tasks.append(
+                asyncio.create_task(
+                    _drain_stream_to_logger(
+                        self._ppocr_server_proc.stdout,
+                        "[ppocr-server stdout]",
+                    ),
+                    name="ppocr-server-stdout-drain",
+                ),
+            )
+
         # 等待 server 就绪，超时/异常/取消时清理进程
         timeout = config.paddle_server_startup_timeout
         try:
@@ -563,20 +583,10 @@ class EngineManager:
 
         logger.info("ppocr-server 已就绪 (port=%d)", port)
 
-        # server ready 之后挂起 stdout/stderr drain：否则日志累积把 64KB pipe
-        # buffer 写满，server 内任何 logging 阻塞在 pipe_write → HTTP 响应
-        # 全部卡死 → worker OCR 300s 超时循环。_wait_server_ready 期间由
-        # _collect_stderr_progress 读 stderr 提取启动进度，此时已结束，不冲突。
+        # stderr drain 在 ready 之后挂起：_wait_server_ready 期间由
+        # _collect_stderr_progress 独占读 stderr 提取启动进度，此时已结束、不冲突。
+        # stdout drain 已在 _wait_server_ready 之前挂起（见上，#38）。
         proc = self._ppocr_server_proc
-        if proc.stdout is not None:
-            self._ppocr_drain_tasks.append(
-                asyncio.create_task(
-                    _drain_stream_to_logger(
-                        proc.stdout, "[ppocr-server stdout]",
-                    ),
-                    name="ppocr-server-stdout-drain",
-                ),
-            )
         if proc.stderr is not None:
             self._ppocr_drain_tasks.append(
                 asyncio.create_task(

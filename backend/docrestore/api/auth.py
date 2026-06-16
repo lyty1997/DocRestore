@@ -28,7 +28,6 @@ WebSocket 仅支持 ``?token=<token>``（浏览器原生 WS API 不支持自定�
 
 from __future__ import annotations
 
-import contextlib
 import hmac
 import logging
 import os
@@ -87,6 +86,14 @@ def _config_dir() -> Path:
     return base / "docrestore"
 
 
+def _read_device_token(token_path: Path) -> str:
+    """读取持久化 device token，读不到 / 为空一律返回空串。"""
+    try:
+        return token_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def _load_or_create_device_token() -> str:
     """读取持久化 device token；不存在/为空则生成强随机 token 落地（POSIX 0600）。
 
@@ -94,28 +101,38 @@ def _load_or_create_device_token() -> str:
     fail-closed（始终有 token 强制校验）。
     """
     token_path = _config_dir() / _DEVICE_TOKEN_FILENAME
-    try:
-        existing = token_path.read_text(encoding="utf-8").strip()
-    except OSError:
-        existing = ""
+    existing = _read_device_token(token_path)
     if existing:
         return existing
 
     token = secrets.token_urlsafe(_DEVICE_TOKEN_NBYTES)
     try:
         token_path.parent.mkdir(parents=True, exist_ok=True)
-        token_path.write_text(token, encoding="utf-8")
-        # 仅 owner 可读写（POSIX；Windows 上 chmod 语义有限，best-effort）
-        with contextlib.suppress(OSError):
-            token_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        # 原子创建：权限在 open 时即固定为 0600，消除 write_text→chmod 之间
+        # token 文件按 umask 默认（常 0644）世界可读的窗口期（TOCTOU，#62）。
+        # O_EXCL 同时防并发进程互相覆盖：竞争失败方读回对方写入的同一 token。
+        fd = os.open(
+            token_path,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            stat.S_IRUSR | stat.S_IWUSR,
+        )
+        try:
+            os.write(fd, token.encode("utf-8"))
+        finally:
+            os.close(fd)
         logger.info("已生成并落地 device token: %s", token_path)
+        return token
+    except FileExistsError:
+        # 与并发进程竞争创建：对方已抢先写入，读回复用以保证同一 token
+        existing = _read_device_token(token_path)
+        return existing or token
     except OSError:
         logger.warning(
             "device token 落地失败（%s），本次使用内存临时 token，重启后需重新配对",
             token_path,
             exc_info=True,
         )
-    return token
+        return token
 
 
 def configure_auth(token: str) -> None:
@@ -178,13 +195,14 @@ def enforce_bind_safety(bind_host: str | None = None) -> None:
 
     host = bind_host if bind_host is not None else os.environ.get(_ENV_BIND_HOST)
     if not host:
-        logger.warning(
-            "无鉴权模式但无法判定绑定地址（未设 %s）：请仅在 loopback 使用；"
-            "要对外暴露请配置 %s",
-            _ENV_BIND_HOST,
-            _ENV_API_TOKEN,
+        # fail-closed：无鉴权模式下无法确认绑定地址（绕过 start.sh 直接 uvicorn
+        # 且未设 _ENV_BIND_HOST）时，不能证明仅绑定环回 → 拒启而非放行（#62）。
+        raise RuntimeError(
+            f"拒绝启动：{_ENV_ALLOW_INSECURE} 无鉴权模式但无法确认绑定地址"
+            f"（未设 {_ENV_BIND_HOST}）。无法证明仅绑定环回，fail-closed 拒绝。"
+            f"请设 {_ENV_BIND_HOST}=127.0.0.1（仅本机），或配置 "
+            f"{_ENV_API_TOKEN} 启用鉴权后再对外暴露。",
         )
-        return
 
     if _is_loopback_host(host):
         logger.warning("无鉴权模式：仅绑定环回地址 %s（本机可达）", host)

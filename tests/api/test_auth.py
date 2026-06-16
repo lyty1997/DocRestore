@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
@@ -67,6 +67,21 @@ def _make_app(*, with_auth: bool = True) -> FastAPI:
         configure_auth("")
 
     return app
+
+
+@pytest.fixture(autouse=True)
+def _restore_auth_globals() -> Iterator[None]:
+    """快照并还原 auth 模块级 _API_TOKEN / _INSECURE_MODE（#66）。
+
+    configure_auth* 直接改这两个模块级全局，而 _isolate_env 只还原 env、不还原
+    全局 → 测试顺序相关 flaky（前一个测试设的 token 漏给后一个）。本 autouse
+    fixture 模块级生效，保证每个测试前后全局状态一致。
+    """
+    saved_token = auth_module._API_TOKEN
+    saved_insecure = auth_module._INSECURE_MODE
+    yield
+    auth_module._API_TOKEN = saved_token
+    auth_module._INSECURE_MODE = saved_insecure
 
 
 @pytest.fixture
@@ -257,13 +272,14 @@ class TestBindSafety:
         configure_auth("")
         enforce_bind_safety(host)  # 不抛异常即通过
 
-    def test_insecure_unknown_host_allowed_with_warning(
+    def test_insecure_unknown_host_refuses_start(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """无鉴权模式 + 无法判定绑定地址 → 放行（仅告警）。"""
+        """无鉴权模式 + 无法判定绑定地址 → fail-closed 拒绝启动（#62）。"""
         configure_auth("")
         monkeypatch.delenv("DOCRESTORE_BIND_HOST", raising=False)
-        enforce_bind_safety(None)  # 不抛异常
+        with pytest.raises(RuntimeError, match="无法确认绑定地址"):
+            enforce_bind_safety(None)
 
     def test_token_present_allows_any_host(self) -> None:
         """有 token → 绑任意地址都安全，不拦截。"""

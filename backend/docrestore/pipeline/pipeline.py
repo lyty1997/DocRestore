@@ -752,15 +752,19 @@ class Pipeline:
                     ),
                     name=f"warmup-leaf-{warmup_leaf.name}",
                 )
-                try:
-                    await controller.wait_cold_start()
-                except BaseException:
-                    warmup_task.cancel()
-                    with contextlib.suppress(
-                        asyncio.CancelledError, Exception,
-                    ):
-                        await warmup_task
-                    raise
+                # 仅云端流式文档精修才需冷启动校准段长 L*；code/PPT/关精修/未配 model
+                # 的多目录任务不走该路径，跳过 wait_cold_start 直接并发，免白等最长
+                # 60s（#44）——首个 leaf 改为与其余 leaf 并发跑，不再串行 warmup。
+                if self._will_stream_refine(llm, code, ppt):
+                    try:
+                        await controller.wait_cold_start()
+                    except BaseException:
+                        warmup_task.cancel()
+                        with contextlib.suppress(
+                            asyncio.CancelledError, Exception,
+                        ):
+                            await warmup_task
+                        raise
 
                 rest_tasks = [
                     asyncio.create_task(
@@ -2375,9 +2379,10 @@ class Pipeline:
     ) -> tuple[RefinedResult, bool]:
         """段级精修带磁盘缓存。返回 `(result, used_refiner)`。
 
-        `used_refiner=False` 表示走了缓存命中或 refiner=None 的 fallback，
-        调用方据此决定是否把本次 elapsed 喂给 RateController（缓存命中的
-        "伪时延"会严重低估 LLM 成本，污染 L* 估算）。
+        `used_refiner=False` 表示**未拿到真实模型输出**：缓存命中、refiner=None，
+        或精修调用失败/熔断 fail-fast 回退原文（#45）。调用方据此决定是否把本次
+        elapsed 喂给 RateController——缓存命中的"伪时延"会低估 LLM 成本，熔断
+        fail-fast 的"极短耗时"会误判 LLM 极快，二者都污染 L* 估算，一律不计入。
 
         异常 fallback 不写缓存（put 只在 refine 成功分支后调用），下次
         resume 仍会重试该段。truncated=True 由 LLMCache.put 内部过滤。
@@ -2434,7 +2439,9 @@ class Pipeline:
                     fallback_to_raw=True,
                     output_markdown=text,
                 )
-            return RefinedResult(markdown=text), True
+            # used_refiner=False：精修失败/熔断回退原文，未拿到真实模型输出，
+            # 不能以"失败的极短耗时"喂 RateController 污染吞吐桶（#45）。
+            return RefinedResult(markdown=text), False
 
         # A-2 信号 2：截断 → 递归二分重试，仍截断回退到原文。
         # 关键防护：流式 pipeline 历史 bug，截断后 LLM 输出会直接吞掉
@@ -3041,6 +3048,9 @@ class Pipeline:
         markdown = doc.markdown
         filled_count = 0
         profiler = current_profiler()
+        # PIIGuard 建一次复用（#66）：原 _fill_one_gap 每 gap 重建（含 NER 模型
+        # 初始化），这里建一次下传；关 PII 时为 None。
+        pii_guard = PIIGuard(pii_cfg) if pii_cfg.enable else None
 
         for gi, gap in enumerate(gaps):
             report_fn(
@@ -3072,7 +3082,7 @@ class Pipeline:
                         gap, page_map, page_order,
                         reocr_cache, gpu_lock, refiner,
                         entity_lexicon,
-                        pii_cfg=pii_cfg,
+                        pii_guard=pii_guard,
                     )
             except Exception:
                 logger.warning(
@@ -3109,17 +3119,16 @@ class Pipeline:
         refiner: object,
         entity_lexicon: EntityLexicon | None = None,
         *,
-        pii_cfg: PIIConfig,
+        pii_guard: PIIGuard | None,
     ) -> str:
         """对单个 gap 做 re-OCR + LLM 提取。
 
         返回填充内容（空字符串表示无法填充）。
         若启用 PII 脱敏，re-OCR 文本在送入 LLM 前先脱敏。
 
-        ``pii_cfg`` 为**请求级** PII 配置（#36）：gap 补全的 re-OCR 产生**全新
-        文本**，绕过了 producer 的逐页 regex 脱敏，必须在此送 fill_gap 云端前用
-        请求级配置补脱；回落 self._config.pii（默认 enable=False）会让结构化 PII
-        裸送云端。
+        ``pii_guard`` 由 ``_fill_gaps`` 用**请求级** pii_cfg 建一次下传（#66 复用 +
+        #36 请求级）：gap 补全的 re-OCR 产生**全新文本**，绕过 producer 的逐页 regex
+        脱敏，必须在送 fill_gap 云端前补脱；None 表示未开 PII。
         """
         # re-OCR 当前页
         current_text = await self._reocr_cached(
@@ -3136,14 +3145,14 @@ class Pipeline:
                 next_page_name, page_map, reocr_cache, gpu_lock,
             )
 
-        # PII 脱敏 re-OCR 文本（轻量模式，不调用 LLM）；用请求级 pii_cfg（#36）
-        if pii_cfg.enable:
-            guard = PIIGuard(pii_cfg)
-            current_text = guard.redact_for_cloud(
+        # PII 脱敏 re-OCR 文本（轻量模式，不调用 LLM）；guard 由 _fill_gaps 用请求级
+        # pii_cfg 建一次下传（#66 复用 + #36 请求级），None 表示未开 PII。
+        if pii_guard is not None:
+            current_text = pii_guard.redact_for_cloud(
                 current_text, entity_lexicon,
             )
             if next_page_text is not None:
-                next_page_text = guard.redact_for_cloud(
+                next_page_text = pii_guard.redact_for_cloud(
                     next_page_text, entity_lexicon,
                 )
 
@@ -3257,6 +3266,26 @@ class Pipeline:
         if not llm.model:
             return None
         return self._create_refiner(llm)
+
+    def _will_stream_refine(
+        self,
+        llm: LLMConfig | None,
+        code: CodeRestoreConfig | None,
+        ppt: PowerPointRestoreConfig | None,
+    ) -> bool:
+        """多子目录是否会走云端流式文档精修（决定是否需 warmup 冷启动校准 L*）。
+
+        代码 / PPT 模式有各自的精修路径、不经 RateController 段长冷启动；关精修
+        （enable_refine=False）或未配 model 则根本不精修。任一成立 → 无需冷启动，
+        直接并发所有子目录免白等最长 60s（#44）。
+        """
+        effective_code = code if code is not None else self._config.code
+        if effective_code is not None and effective_code.enable:
+            return False
+        effective_ppt = ppt if ppt is not None else self._config.ppt
+        if effective_ppt is not None and effective_ppt.enable:
+            return False
+        return self._get_refiner(llm, for_refine=True) is not None
 
     async def _maybe_retry_final_refine_on_dup_h2(
         self,

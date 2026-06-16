@@ -141,6 +141,30 @@ def test_get_detector_caches_by_model_set(monkeypatch: pytest.MonkeyPatch) -> No
     assert a is not c
 
 
+def test_reset_detector_cache_enables_after_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """模拟「装后免重启生效」（#61）：缺模型时 detector 钉死不可用；
+    reset_detector_cache 后同进程重新构造的 detector 加载新装模型即可用。"""
+    monkeypatch.setattr(ner, "_DETECTOR_CACHE", {})
+    # 阶段一：模型缺失 → detector 加载空、不可用，且被缓存钉死
+    monkeypatch.setattr(ner, "_load_models", lambda names: [])
+    stale = ner.get_detector(["zh_core_web_md"])
+    assert stale.available is False
+    assert ner.get_detector(["zh_core_web_md"]) is stale  # 命中同一钉死实例
+
+    # 阶段二：模型「装好」+ reset → 缓存失效，重建 detector 可用并能检出实体
+    monkeypatch.setattr(
+        ner, "_load_models", lambda names: [_nlp(("张三", "PERSON"))],
+    )
+    ner.reset_detector_cache()
+    fresh = ner.get_detector(["zh_core_web_md"])
+    assert fresh is not stale
+    assert fresh.available is True
+    persons, _orgs = fresh.detect("任意文本")
+    assert "张三" in persons
+
+
 def test_probe_spacy_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     """spaCy 未装 → spacy_installed False，全部模型计 missing，detector 不可用。"""
     monkeypatch.setattr(ner, "_spec_exists", lambda name: False)

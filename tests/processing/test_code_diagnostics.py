@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -15,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from docrestore.processing import code_diagnostics as cd
 from docrestore.processing.code_diagnostics import (
     CodeDiagnosticRunner,
     CodeDiagnosticTarget,
@@ -899,3 +901,191 @@ class TestUnsafeIncludeNeutralization:
         )
         # sentinel 与磁盘原文件零改写。
         assert sentinel.read_text(encoding="utf-8") == marker + "\n"
+
+
+class _FakeTimeoutProc:
+    """伪 Popen 上下文管理器：communicate 前几次超时，验证 #42 二次 drain 有界。"""
+
+    def __init__(self, *, drain_hangs: bool) -> None:
+        """drain_hangs=True 模拟 killpg 后子进程不退、二次 communicate 仍超时。"""
+        self.pid = 0
+        self.returncode: int | None = None
+        self.killed = False
+        self.communicate_calls = 0
+        self._drain_hangs = drain_hangs
+
+    def __enter__(self) -> _FakeTimeoutProc:
+        """进入 with。"""
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        """退出 with，不吞异常。"""
+        return
+
+    def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+        """第 1 次（正常等待）必超时；第 2 次（drain）按 drain_hangs 决定。"""
+        self.communicate_calls += 1
+        if self.communicate_calls == 1:
+            raise subprocess.TimeoutExpired(cmd="diag", timeout=timeout or 0)
+        if self.communicate_calls == 2 and self._drain_hangs:
+            raise subprocess.TimeoutExpired(cmd="diag", timeout=timeout or 0)
+        self.returncode = -9
+        return "", ""
+
+    def kill(self) -> None:
+        """强杀本体。"""
+        self.killed = True
+        self.returncode = -9
+
+    def poll(self) -> int | None:
+        """返回退出码（None=仍在跑）。"""
+        return self.returncode
+
+
+class TestRunCommandBoundedDrain:
+    """#42：killpg 后二次 communicate 带 timeout，不永挂。"""
+
+    def test_drain_hang_falls_back_to_kill(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        """二次 drain 仍超时 → proc.kill() 兜底再短超时回收，整体不阻塞。"""
+        fake = _FakeTimeoutProc(drain_hangs=True)
+        monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_k: fake)
+        # killpg 真发会误杀测试进程组（pid=0），桩成 no-op
+        monkeypatch.setattr(cd, "_kill_process_group", lambda _proc: None)
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            _run_command(["x"], tmp_path, 1)
+
+        assert fake.killed  # 二次 drain 超时 → 强杀本体兜底（防永挂）
+        assert fake.communicate_calls == 3  # 正常 + 二次 drain + kill 后回收
+
+    def test_drain_success_no_kill(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        """二次 drain 成功回收 → 无需强杀本体。"""
+        fake = _FakeTimeoutProc(drain_hangs=False)
+        monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_k: fake)
+        monkeypatch.setattr(cd, "_kill_process_group", lambda _proc: None)
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            _run_command(["x"], tmp_path, 1)
+
+        assert not fake.killed
+        assert fake.communicate_calls == 2  # 正常 + 二次 drain 即回收
+
+
+class TestDiagPreexecMemoryLimit:
+    """#42：诊断子进程 preexec 设 RLIMIT_DATA 堆内存上限。"""
+
+    def test_preexec_sets_data_limit(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """_diag_preexec 对 RLIMIT_DATA 调 setrlimit 为配置的堆上限。"""
+        calls: list[tuple[int, tuple[int, int]]] = []
+
+        class _FakeResource:
+            RLIMIT_CPU = 0
+            RLIMIT_FSIZE = 1
+            RLIMIT_DATA = 2
+
+            @staticmethod
+            def setrlimit(res: int, limits: tuple[int, int]) -> None:
+                calls.append((res, limits))
+
+        monkeypatch.setattr(cd, "_resource", _FakeResource)
+        cd._diag_preexec()
+
+        data = [lim for res, lim in calls if res == _FakeResource.RLIMIT_DATA]
+        assert data == [
+            (cd._DIAG_RLIMIT_DATA_BYTES, cd._DIAG_RLIMIT_DATA_BYTES),
+        ]
+
+
+class TestNeutralizeIntoSizeCap:
+    """#65：兜底中和路径同样施加 5MB 大小上限。"""
+
+    def test_oversize_returns_none_fail_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """超大文件 → _neutralize_into 返回 None（fail-closed），不写影子文件。"""
+        big = tmp_path / "big.c"
+        big.write_text("int main(){}", encoding="utf-8")
+        # 把上限调到 0 模拟"超大"，避免真造 5MB 文件
+        monkeypatch.setattr(cd, "_DIAG_MIRROR_MAX_FILE_BYTES", 0)
+        shadow = tmp_path / "shadow"
+        shadow.mkdir()
+
+        assert cd._neutralize_into(big, shadow, "c") is None
+        assert list(shadow.iterdir()) == []  # 未写出任何影子文件
+
+
+class TestSanitizeGateRegistry:
+    """#65：中和门改为显式登记表，go 等显式登记不需中和。"""
+
+    def test_registry_consistent_and_excludes_go(self) -> None:
+        """c/cpp/rust 需中和；go/js/ts 显式登记为不需；派生集与登记表一致。"""
+        assert cd._LANG_NEEDS_INCLUDE_SANITIZE["c"] is True
+        assert cd._LANG_NEEDS_INCLUDE_SANITIZE["cpp"] is True
+        assert cd._LANG_NEEDS_INCLUDE_SANITIZE["rust"] is True
+        assert cd._LANG_NEEDS_INCLUDE_SANITIZE["go"] is False
+        derived = {
+            lang for lang, needs in cd._LANG_NEEDS_INCLUDE_SANITIZE.items()
+            if needs
+        }
+        assert derived == cd._SANITIZED_LANGUAGES
+
+    def test_go_target_not_shadowed(self, tmp_path: Path) -> None:
+        """go 不在中和门 → _sanitize_target 原样返回（不进影子树）。"""
+        runner = CodeDiagnosticRunner()
+        target = _target(tmp_path / "main.go", "go")
+        with contextlib.ExitStack() as stack:
+            result = runner._sanitize_target(target, "go", stack)
+        assert result is target
+
+
+class TestIsTraversalOrAbsolute:
+    """#66：分段越级/空判定 helper（三处统一复用，安全关键路径）。"""
+
+    @pytest.mark.parametrize(
+        ("parts", "expected"),
+        [
+            ([], True),  # 空分段 → 不安全（fail-closed）
+            (["a"], False),
+            (["a", "b"], False),
+            ([".."], True),
+            (["a", "..", "b"], True),
+            (["..", "etc", "passwd"], True),
+        ],
+    )
+    def test_cases(self, parts: list[str], expected: bool) -> None:
+        assert cd._is_traversal_or_absolute(parts) is expected
+
+
+class TestMirrorCache:
+    """#66：run 级 -I 根镜像缓存——同 (root, language) 只镜像一次，跨语言分开。"""
+
+    def test_dedups_same_root_language(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[tuple[Path, str]] = []
+
+        def _spy(src: Path, _dest: Path, lang: str) -> int:
+            calls.append((src, lang))
+            return 0
+
+        monkeypatch.setattr(cd, "_mirror_sanitized_tree", _spy)
+        run_shadow = tmp_path / "run"
+        run_shadow.mkdir()
+        cache = cd._MirrorCache(run_shadow)
+        root = (tmp_path / "inc").resolve()
+
+        d1, _ = cache.mirror(root, "c")
+        d2, _ = cache.mirror(root, "c")  # 命中缓存
+        assert d1 == d2
+        assert len(calls) == 1  # 只镜像一次
+
+        # 不同语言（中和规则不同）→ 单独镜像、独立影子
+        d3, _ = cache.mirror(root, "rust")
+        assert d3 != d1
+        assert len(calls) == 2

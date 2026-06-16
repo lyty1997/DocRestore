@@ -45,7 +45,7 @@ from docrestore.api.upload import (
     start_cleanup_task,
     upload_router,
 )
-from docrestore.llm.credentials import ENV_LLM_API_KEY
+from docrestore.llm.credentials import refill_api_key_from_env
 from docrestore.ocr.engine_manager import (
     EngineManager,
     cleanup_stale_ppocr_servers,
@@ -155,10 +155,13 @@ def _auto_configure_llm(config: PipelineConfig) -> None:
         config.llm.api_base = api_base
         logger.info("从环境变量配置 LLM api_base: %s", api_base)
 
-    api_key = os.environ.get(ENV_LLM_API_KEY, "")
-    if api_key and not config.llm.api_key:
-        config.llm.api_key = api_key
-        logger.info("已从环境变量读取 LLM api_key")
+    # api_key 走单点回填（#66）：与 resume 水合共用
+    # credentials.refill_api_key_from_env，避免回填逻辑两处维护漂移
+    # （refill 仅在 api_key 为空且 env 非空时返回新配置）。
+    if not config.llm.api_key:
+        config.llm = refill_api_key_from_env(config.llm)
+        if config.llm.api_key:
+            logger.info("已从环境变量读取 LLM api_key")
 
     if not config.llm.model:
         logger.warning(

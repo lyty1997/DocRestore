@@ -110,9 +110,10 @@ _HOST_TARGET_RE = re.compile(
 _URL_LIKE_RE = re.compile(
     r"(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*://)?"
     r"(?P<host>"
-    r"\d{1,3}(?:\.\d{1,3}){3}"
+    r"\[[0-9A-Fa-f:.]+\]"                       # [IPv6] 含 :: 压缩 / IPv4-mapped
+    r"|\d{1,3}(?:\.\d{1,3}){3}"                 # IPv4
     r"|[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
-    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+"  # FQDN（≥1 点）
     r")"
     r"(?::\d{1,5})?"
     r"(?:[/?#][^\s\"'<>)）】\]]*)?"
@@ -132,9 +133,13 @@ def _host_matches_domains(host: str, domains: list[str]) -> bool:
 
 
 def _is_internal_ip(host: str) -> bool:
-    """host 是私有 / 回环 IPv4 地址。非 IP 形态返回 False。"""
+    """host 是私有 / 回环 IP（IPv4 或 ``[IPv6]``）。非 IP 形态返回 False。"""
+    candidate = host
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]  # 去 URL 里的 IPv6 方括号
+    candidate = candidate.split("%", 1)[0]  # 去 IPv6 scope id（fe80::1%eth0）
     try:
-        ip = ipaddress.ip_address(host)
+        ip = ipaddress.ip_address(candidate)
     except ValueError:
         return False
     return ip.is_private or ip.is_loopback

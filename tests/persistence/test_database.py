@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -386,3 +387,77 @@ async def test_scrub_skips_clean_and_corrupt_rows(tmp_path: Path) -> None:
         assert clean.llm.model == "gpt-4"
     finally:
         await db2.close()
+
+
+async def test_write_lock_serializes_transactions(db: TaskDatabase) -> None:
+    """#41：一个写事务持锁期间，另一写操作被挡在锁外，无法插进其 commit 边界。
+
+    占住 _write_lock 模拟事务进行中，并发的 update_status 必须等锁释放才执行；
+    若忘了给 update_status 加锁，"other-done" 会在 "slow-exit" 之前出现。
+    """
+    await db.insert_task(
+        task_id="tA", status="pending", image_dir="/in", output_dir="/out",
+    )
+    order: list[str] = []
+    gate = asyncio.Event()
+
+    async def _slow_write() -> None:
+        async with db._write_lock:
+            order.append("slow-enter")
+            await gate.wait()
+            order.append("slow-exit")
+
+    async def _other_write() -> None:
+        order.append("other-wait")
+        await db.update_status("tA", "failed")
+        order.append("other-done")
+
+    slow = asyncio.create_task(_slow_write())
+    await asyncio.sleep(0.01)  # 确保 slow 先拿到锁
+    other = asyncio.create_task(_other_write())
+    await asyncio.sleep(0.01)  # other 此刻应卡在 _write_lock，update 尚未执行
+    assert order == ["slow-enter", "other-wait"]
+
+    gate.set()  # 放行 slow → 释放锁 → other 才能写
+    await asyncio.gather(slow, other)
+    assert order == ["slow-enter", "other-wait", "slow-exit", "other-done"]
+
+    row = await db.get_task("tA")
+    assert row is not None
+    assert row.status == "failed"  # update 锁释放后确实生效
+
+
+async def test_concurrent_writes_remain_consistent(db: TaskDatabase) -> None:
+    """#41：大量并发写后一致——completed 必有结果、failed 必无结果，无半截事务。"""
+    n = 20
+    for i in range(n):
+        await db.insert_task(
+            task_id=f"t{i}", status="pending",
+            image_dir="/in", output_dir=f"/out/{i}",
+        )
+
+    async def _complete(idx: int) -> None:
+        await db.complete_task_with_results(
+            f"t{idx}", "completed",
+            [(f"/out/{idx}/doc.md", f"doc{idx}", f"d{idx}")],
+        )
+
+    async def _fail(idx: int) -> None:
+        await db.update_status(f"t{idx}", "failed", error="boom")
+
+    # 交错并发：偶数走原子终态（UPDATE+INSERT），奇数走单 UPDATE
+    await asyncio.gather(*[
+        _complete(i) if i % 2 == 0 else _fail(i) for i in range(n)
+    ])
+
+    # 一致性断言从输入派生：completed↔有结果、failed↔无结果，无"完成但零结果"
+    for i in range(n):
+        row = await db.get_task(f"t{i}")
+        assert row is not None
+        results = await db.get_results(f"t{i}")
+        if i % 2 == 0:
+            assert row.status == "completed"
+            assert len(results) == 1
+        else:
+            assert row.status == "failed"
+            assert results == []

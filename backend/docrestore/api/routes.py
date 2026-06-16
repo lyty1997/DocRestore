@@ -55,6 +55,7 @@ from docrestore.api.schemas import (
     NERSetupStatusResponse,
     NERStatusResponse,
     OCRStatusResponse,
+    PIIConfigRequest,
     OCRWarmupRequest,
     ProgressResponse,
     SourceImagesResponse,
@@ -400,10 +401,18 @@ async def detect_crop_boxes(req: CropDetectRequest) -> CropDetectResponse:
 
 
 def _resolve_crop_image(image_dir: str, name: str) -> Path | None:
-    """解析 image_dir + 相对名为安全路径；越界 / 非文件返回 None。"""
+    """解析 image_dir + 相对名为安全路径；越界 / 非文件 / 非图片后缀返回 None。
+
+    后缀白名单校验与姊妹端点 ``_crop_figure_sync`` 对齐（#50）：仅有路径穿越防护
+    不够——攻击者可借本端点读 image_dir 内任意类型文件（误放的 .env/.key/源码）。
+    """
     root = Path(image_dir).resolve()
     target = (root / name).resolve()
-    if root not in target.parents or not target.is_file():
+    if (
+        root not in target.parents
+        or not target.is_file()
+        or target.suffix.lower() not in _IMAGE_EXTS
+    ):
         return None
     return target
 
@@ -618,6 +627,44 @@ def _resolve_output_dir(req: CreateTaskRequest) -> str | None:
     return output_dir
 
 
+async def _revalidate_reused_api_base(llm: LLMConfig | None) -> None:
+    """resume/retry 复用持久化 ``llm.api_base`` 时重过 SSRF 守卫（#62，关联 #33）。
+
+    ``api_base`` 会持久化（不像 api_key 被排除）；历史失败任务可能存了建于守卫
+    之前 / 白名单收紧之前的内网 / 云元数据地址，续跑/重试若不重校验等于绕过 #33。
+    DNS 解析阻塞，包进 ``to_thread`` 避免卡事件循环。
+    """
+    if llm is not None and llm.api_base:
+        await asyncio.to_thread(validate_outbound_api_base, llm.api_base)
+
+
+def _resolve_pii_config(
+    pii_req: PIIConfigRequest | None, default_pii: PIIConfig,
+) -> PIIConfig | None:
+    """合成请求级 PII 覆盖到完整 ``PIIConfig``（None=不覆盖，下游用默认）。
+
+    除 enable / 自定义词外，暴露 ner_backend / 人名 / 机构名脱敏开关（#64）：
+    无 spaCy 环境可只做结构化（手机/邮箱/卡号）正则脱敏，把 ner_backend 设
+    "none" 或关人名/机构名脱敏即可，避免 _guard_ner_backend 硬 400。
+    """
+    if pii_req is None:
+        return None
+    update: dict[str, object] = {}
+    if pii_req.enable is not None:
+        update["enable"] = pii_req.enable
+    if pii_req.custom_sensitive_words is not None:
+        update["custom_sensitive_words"] = _to_custom_words(
+            pii_req.custom_sensitive_words,
+        )
+    if pii_req.ner_backend is not None:
+        update["ner_backend"] = pii_req.ner_backend
+    if pii_req.redact_person_name is not None:
+        update["redact_person_name"] = pii_req.redact_person_name
+    if pii_req.redact_org_name is not None:
+        update["redact_org_name"] = pii_req.redact_org_name
+    return default_pii.model_copy(update=update)
+
+
 def _guard_ner_backend(pii_cfg: PIIConfig) -> None:
     """请求级 fail-fast：开实体脱敏但本地 NER 不可用 → 400（名字不裸送云端）。
 
@@ -678,16 +725,7 @@ async def create_task(
     # OCR 覆盖 + 手动裁剪框（任务级，见 _requested_crop_boxes 注释）
     ocr_cfg = _resolve_ocr_config(req, defaults.ocr)
 
-    pii_cfg: PIIConfig | None = None
-    if req.pii is not None:
-        pii_update: dict[str, object] = {}
-        if req.pii.enable is not None:
-            pii_update["enable"] = req.pii.enable
-        if req.pii.custom_sensitive_words is not None:
-            pii_update["custom_sensitive_words"] = (
-                _to_custom_words(req.pii.custom_sensitive_words)
-            )
-        pii_cfg = defaults.pii.model_copy(update=pii_update)
+    pii_cfg = _resolve_pii_config(req.pii, defaults.pii)
 
     # 本地 NER fail-fast（S3）：开人名/机构名脱敏但 spaCy/模型未就绪 → 400 不建任务，
     # 避免名字裸送云端或白跑 OCR。校验"有效"配置（请求级覆盖后；ner_* 仍走 defaults）。
@@ -1438,6 +1476,13 @@ async def cleanup_tasks(req: TaskCleanupRequest) -> TaskCleanupResponse:
 async def retry_task(task_id: str) -> ActionResponse:
     """重试失败的任务（从头跑，不复用 output_dir）"""
     manager = _get_manager()
+    task = await manager.get_task_async(task_id)
+    if task is None:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
+    # 复用持久化 llm.api_base 前重过 SSRF 守卫（#62，关联 #33）
+    await _revalidate_reused_api_base(task.llm)
     result = await manager.retry_task(task_id)
 
     if result is None:
@@ -1475,6 +1520,13 @@ async def resume_task(task_id: str) -> ActionResponse:
     仅 FAILED 状态（含用户取消）可继续。返回新建 task 的 task_id。
     """
     manager = _get_manager()
+    task = await manager.get_task_async(task_id)
+    if task is None:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
+    # 复用持久化 llm.api_base 前重过 SSRF 守卫（#62，关联 #33）
+    await _revalidate_reused_api_base(task.llm)
     result = await manager.resume_task(task_id)
 
     if result is None:

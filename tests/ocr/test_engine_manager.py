@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -148,6 +149,32 @@ class TestEnsureSwitching:
         bad_engine.shutdown.assert_awaited()
         assert manager.engine is None
         assert manager.current_model == ""
+
+    @pytest.mark.asyncio
+    async def test_ensure_skips_fast_path_while_switching(self) -> None:
+        """切换进行中（switch_lock 持有）即便配置匹配也不走快速路径（#40）。
+
+        否则异配并发会拿到正被 _shutdown_current 拆除的旧引擎（use-after-shutdown）。
+        持锁后对匹配配置调 ensure，应落锁阻塞（被 wait_for 超时打断）而非秒回旧引擎。
+        """
+        manager, _ = _make_manager(model="deepseek/ocr-2")
+        mock_engine = _make_mock_engine()
+        with patch(
+            "docrestore.ocr.engine_manager.create_engine",
+            return_value=mock_engine,
+        ):
+            await manager.ensure()  # 稳态：引擎匹配、_current_* 落地
+        assert manager.engine is mock_engine
+
+        # 模拟切换进行中：手动持有 switch_lock
+        await manager._switch_lock.acquire()
+        try:
+            assert manager.is_switching is True
+            # 配置仍匹配，但 is_switching=True → 不走快速路径 → 落锁阻塞（锁被占）
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(manager.ensure(), timeout=0.1)
+        finally:
+            manager._switch_lock.release()
 
 
 class TestShutdown:
@@ -295,6 +322,52 @@ class TestStartPpocrServer:
         await manager._start_ppocr_server(config, on_progress=None)
 
         assert manager._ppocr_server_proc is None
+
+    @pytest.mark.asyncio
+    async def test_stdout_drain_starts_before_wait_ready(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#38：stdout drain 必须在 _wait_server_ready 之前挂起，防启动期 vLLM 狂打
+        日志写满 64KB pipe → server logging 阻塞 → 永不就绪死锁。"""
+        manager, config = _make_manager(model="paddle-ocr/ppocr-vl")
+        config = config.model_copy(
+            update={"paddle_server_python": sys.executable},
+        )
+
+        fake_proc = MagicMock()
+        fake_proc.pid = 0
+        fake_proc.stdout = object()
+        fake_proc.stderr = object()
+
+        async def _fake_spawn(*_a: object, **_k: object) -> MagicMock:
+            return fake_proc
+
+        async def _fake_drain(*_a: object, **_k: object) -> None:
+            return None
+
+        names_at_wait: dict[str, set[str]] = {}
+
+        async def _fake_wait_ready(*_a: object, **_k: object) -> None:
+            # 记录 _wait_server_ready 被调用「那一刻」已挂起的 drain 任务名
+            names_at_wait["names"] = {
+                t.get_name() for t in manager._ppocr_drain_tasks
+            }
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_spawn)
+        monkeypatch.setattr(em_mod, "_track_pgid", lambda _pid: None)
+        monkeypatch.setattr(em_mod, "_drain_stream_to_logger", _fake_drain)
+        monkeypatch.setattr(
+            EngineManager, "_wait_server_ready", _fake_wait_ready,
+        )
+
+        await manager._start_ppocr_server(config, on_progress=None)
+
+        # 关键：_wait_server_ready 调用时 stdout drain 已在场（防死锁前提）
+        assert "ppocr-server-stdout-drain" in names_at_wait.get("names", set())
+        # 收尾：drain 任务已 done（_fake_drain 立即返回），gather 清理无副作用
+        await asyncio.gather(
+            *manager._ppocr_drain_tasks, return_exceptions=True,
+        )
 
 
 # ─────────────────────────────────────────────────────────────

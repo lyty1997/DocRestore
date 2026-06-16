@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 
 import {
@@ -22,6 +23,7 @@ import {
 } from "../api/client";
 import type { TaskResultResponse } from "../api/schemas";
 import { preprocessMarkdown } from "../features/task/markdown";
+import { PREVIEW_SANITIZE_SCHEMA } from "../features/task/markdownSanitize";
 import { filterImagesForDoc } from "../features/task/sourceImages";
 import { usePreviewScrollSync } from "../hooks/usePreviewScrollSync";
 import {
@@ -396,7 +398,8 @@ export function DocCodePreview({
           >
             <Markdown
               remarkPlugins={[remarkGfm]}
-              rehypePlugins={[rehypeRaw]}
+              // rehypeRaw 解析不可信内联 HTML 后，rehypeSanitize 显式白名单过滤（#46）
+              rehypePlugins={[rehypeRaw, [rehypeSanitize, PREVIEW_SANITIZE_SCHEMA]]}
             >
               {preprocessMarkdown(
                 selectedDoc.markdown,

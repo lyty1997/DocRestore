@@ -17,7 +17,7 @@
 覆盖 (result, used_refiner) 契约：
 - miss → 调 refiner，成功则写缓存，used_refiner=True
 - hit → 跳过 refiner 调用，used_refiner=False
-- refiner 抛异常 → 回退原文，不写缓存，used_refiner=True（时延由 controller 采样）
+- refiner 抛异常/熔断 → 回退原文，不写缓存，used_refiner=False（不喂 controller，#45）
 - truncated=True 的 refiner 结果 → 不写缓存（与 LLMCache 协作）
 """
 
@@ -77,8 +77,9 @@ async def test_refiner_exception_does_not_persist(
     result, used = await Pipeline._refine_segment_with_cache(
         refiner, "raw seg", 0, 1, cache, _llm(),
     )
-    # 异常时回退原文，used_refiner 仍 True（调用方据此把时延喂给 controller）
-    assert used is True
+    # 异常/熔断回退原文 → used_refiner=False（#45）：未拿到真实模型输出，
+    # 调用方据此**不**把"失败的极短耗时"喂 RateController，避免污染吞吐桶。
+    assert used is False
     assert result.markdown == "raw seg"
 
     # 下次 resume 必须再次尝试（未写缓存）

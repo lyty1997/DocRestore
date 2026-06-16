@@ -34,6 +34,8 @@ import signal
 import sys
 from typing import TYPE_CHECKING, Literal
 
+from docrestore.privacy.ner import reset_detector_cache
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -105,16 +107,21 @@ class NERSetupManager:
                     [sys.executable, "-m", "spacy", "download", name],
                 )
             self._state = "done" if ok else "failed"
+            if ok:
+                # 装好后失效 detector / import 探测缓存，同进程免重启即生效（#61）
+                reset_detector_cache()
         except asyncio.CancelledError:
             self._append("安装被取消")
             self._state = "failed"
-            await self._kill_proc()
             raise
         except Exception as exc:  # 安装异常 → failed，错误透出（不外抛崩 loop）
             logger.warning("NER 环境安装异常", exc_info=True)
             self._error = str(exc)
             self._state = "failed"
         finally:
+            # 子进程清理移到 finally，覆盖正常/取消/泛异常所有退出路径（#63）：
+            # spawn 后任意异常都不再漏杀子进程；正常退出时 proc 已逝 _kill_proc no-op。
+            await self._kill_proc()
             self._proc = None
 
     async def _exec(self, cmd: list[str]) -> bool:
@@ -141,13 +148,42 @@ class NERSetupManager:
             self._error = f"命令失败（退出码 {rc}）：{' '.join(cmd)}"
         return rc == 0
 
-    async def _kill_proc(self) -> None:
-        """SIGTERM 整个进程组（start_new_session 保证 pgid=pid），容忍已退出。"""
+    @staticmethod
+    def _process_group(proc: asyncio.subprocess.Process) -> int | None:
+        """取子进程 pgid（start_new_session → pgid==pid）；进程已逝返回 None。"""
+        with contextlib.suppress(ProcessLookupError):
+            return os.getpgid(proc.pid)
+        return None
+
+    @staticmethod
+    def _signal_group(pgid: int | None, sig: signal.Signals) -> None:
+        """向进程组发信号，容忍进程已退出 / 无权限。"""
+        if pgid is None:
+            return
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pgid, sig)
+
+    async def _kill_proc(self, *, grace: float = 2.0) -> None:
+        """关停子进程组：SIGTERM → grace 内未退 → SIGKILL 兜底 → wait() 回收。
+
+        start_new_session 保证 pgid==pid，killpg 整组清理（pip/spacy 可能再起子
+        进程）。遵守 concurrency-resource-safety：SIGTERM 必有 SIGKILL fallback +
+        必 await 回收——否则忽略 SIGTERM 的慢网络 pip 子进程会成僵尸/孤儿累积。
+        """
         proc = self._proc
         if proc is None or proc.returncode is not None:
             return
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        pgid = self._process_group(proc)
+        self._signal_group(pgid, signal.SIGTERM)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=grace)
+            return
+        except TimeoutError:
+            # 优雅期内未退（忽略 SIGTERM 的 stuck pip）→ 强杀整组兜底
+            self._signal_group(pgid, signal.SIGKILL)
+        # SIGKILL 后回收，避免僵尸；wait 可重复 await（已逝则容忍）
+        with contextlib.suppress(ProcessLookupError, ChildProcessError):
+            await proc.wait()
 
     async def shutdown(self) -> None:
         """关停：cancel 安装任务 + await（吞 CancelledError）+ killpg 兜底。"""

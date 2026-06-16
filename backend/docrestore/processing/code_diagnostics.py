@@ -1,6 +1,16 @@
 # Copyright 2026 @lyty1997
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """代码模式多语言轻量诊断。
 
@@ -38,9 +48,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: 单个诊断子进程的 CPU 秒上限，宏展开炸弹在 wall-clock 超时前先被 CPU 限额掐断。
-#: 不设 RLIMIT_AS：rustc/jemalloc 会保留大量虚拟地址空间，地址空间限额易误伤正常诊断。
+#: 单个诊断子进程的 CPU 秒上限。注意（#65 修正原误导注释）：单线程编译下 CPU 秒
+#: ≈ 墙钟秒，墙钟 timeout（默认 10s）先于本 15s 限额触发；本限额仅作多核/并行编译
+#: 的 CPU 兜底，原注释"宏炸弹在 wall-clock 超时前先被 CPU 掐断"与单线程事实相反。
 _DIAG_RLIMIT_CPU_SECONDS = 15
+#: 诊断子进程堆内存（data 段）上限（#42）：挡 brk 增长型内存炸弹。不设 RLIMIT_AS——
+#: rustc/jemalloc 保留大量虚拟地址空间，地址空间限额易误伤正常诊断。注意 Linux 下
+#: RLIMIT_DATA 不计 mmap 分配，故仅作辅助，超大内存仍主要靠墙钟 timeout + killpg 兜住。
+_DIAG_RLIMIT_DATA_BYTES = 2 * 1024 * 1024 * 1024
 #: 诊断子进程可写文件总字节上限（语法诊断不应产出大文件）。
 _DIAG_RLIMIT_FSIZE_BYTES = 64 * 1024 * 1024
 #: 诊断影子树单文件大小上限（超限源文件不参与诊断，记日志）。
@@ -218,16 +233,33 @@ class CodeDiagnosticRunner:
     def run_targets(
         self, targets: list[CodeDiagnosticTarget],
     ) -> list[CodeDiagnostic]:
-        """批量诊断文件，单文件失败不影响其他文件。"""
-        return [self.run_target(target) for target in targets]
+        """批量诊断文件，单文件失败不影响其他文件。
 
-    def run_target(self, target: CodeDiagnosticTarget) -> CodeDiagnostic:
-        """诊断单个文件。"""
+        全批共享一个 run 级 -I 根镜像缓存（#66）：同语言 target 共用的 -I 根只镜像
+        一次，免 O(N×M) 重复树拷贝。run-shadow 生命周期由本 ExitStack 接管。
+        """
+        with contextlib.ExitStack() as run_stack:
+            run_shadow = Path(run_stack.enter_context(
+                tempfile.TemporaryDirectory(prefix="docrestore-code-run-"),
+            ))
+            cache = _MirrorCache(run_shadow)
+            return [
+                self.run_target(target, mirror_cache=cache)
+                for target in targets
+            ]
+
+    def run_target(
+        self,
+        target: CodeDiagnosticTarget,
+        *,
+        mirror_cache: _MirrorCache | None = None,
+    ) -> CodeDiagnostic:
+        """诊断单个文件。``mirror_cache`` 仅批量（run_targets）传入以共享 -I 镜像。"""
         language = _resolve_language(target)
         if language in {"python", "json", "toml", "xml", "yaml"}:
             return self._run_parser(target, language)
         if language in {"javascript", "typescript", "c", "cpp", "go", "rust"}:
-            return self._run_tool(target, language)
+            return self._run_tool(target, language, mirror_cache)
         return CodeDiagnostic(
             path=target.path,
             language=language,
@@ -359,11 +391,16 @@ class CodeDiagnosticRunner:
         return _syntax_clean(target, "yaml", start)
 
     def _run_tool(
-        self, target: CodeDiagnosticTarget, language: str,
+        self,
+        target: CodeDiagnosticTarget,
+        language: str,
+        mirror_cache: _MirrorCache | None = None,
     ) -> CodeDiagnostic:
         """编译型语言诊断入口：先中和不安全 #include，再走真正的编译诊断。"""
         with contextlib.ExitStack() as stack:
-            safe_target = self._sanitize_target(target, language, stack)
+            safe_target = self._sanitize_target(
+                target, language, stack, mirror_cache,
+            )
             return self._run_tool_compiled(safe_target, language)
 
     def _sanitize_target(
@@ -371,6 +408,7 @@ class CodeDiagnosticRunner:
         target: CodeDiagnosticTarget,
         language: str,
         stack: contextlib.ExitStack,
+        mirror_cache: _MirrorCache | None = None,
     ) -> CodeDiagnosticTarget:
         """把目标文件与其所有 -I 根镜像成一份中和影子树后再编译。
 
@@ -388,7 +426,9 @@ class CodeDiagnosticRunner:
         shadow = Path(stack.enter_context(
             tempfile.TemporaryDirectory(prefix="docrestore-code-safe-"),
         ))
-        builder = _ShadowBuilder(shadow, language)
+        # 本 target 自有 shadow 仍管"目标本体"放置（兜底/fail-closed，per-target 防
+        # basename 碰撞）；-I 根镜像走 run 级共享缓存（#66，批量时跨 target 复用）。
+        builder = _ShadowBuilder(shadow, language, cache=mirror_cache)
         new_include_root = builder.mirror(target.include_root)
         new_extra: list[Path] = []
         for root in target.extra_include_roots or []:
@@ -590,8 +630,38 @@ _RUST_INCLUDE_RE = re.compile(
 # Rust #[path = "..."] 模块属性，可指向任意文件。
 _RUST_PATH_ATTR_RE = re.compile(r'#\s*\[\s*path\s*=\s*"([^"\n]+)"')
 
-#: 需要影子树中和的语言（编译器预处理会按路径真实读取外部文件 → LFI 面）。
-_SANITIZED_LANGUAGES: frozenset[str] = frozenset({"c", "cpp", "rust"})
+#: 各语言"工具链是否会按源码内路径真实读取外部文件"登记表（#65）：决定是否需经影子
+#: 树 #include 中和门。中和门按本表判定而非散落硬编码——新增语言必须在此显式登记其
+#: 读文件能力，避免"漏加中和"。值=是否需要影子树中和（True 才进 _sanitize_target）：
+#:   - c/cpp：预处理器 #include/#include_next/#import 按路径真实读盘 → 需中和
+#:   - rust：include!()/#[path] 宏按路径读盘 → 需中和
+#:   - go：import 仅解析模块缓存、不读相对路径；//go:embed 编译器层即拒 ../与绝对/
+#:     前导斜杠路径 → 无相对 include LFI 面，无需中和（显式登记，勿误加）
+#:   - javascript/typescript：node --check / tsc --noEmit 纯语法检查，不按源码指令
+#:     读外部文件 → 无需中和
+_LANG_NEEDS_INCLUDE_SANITIZE: dict[str, bool] = {
+    "c": True,
+    "cpp": True,
+    "rust": True,
+    "go": False,
+    "javascript": False,
+    "typescript": False,
+}
+
+#: 需要影子树中和的语言（由上表派生：登记为 True 者）。
+_SANITIZED_LANGUAGES: frozenset[str] = frozenset(
+    lang for lang, needs in _LANG_NEEDS_INCLUDE_SANITIZE.items() if needs
+)
+
+
+def _is_traversal_or_absolute(parts: list[str]) -> bool:
+    """路径分段是否越级（``..``）或为空 → 不安全（#66 统一三处的分段判定）。
+
+    仅判分段层面的 ``..`` 与空。绝对路径 / Windows 盘符 / 前导点的检测各调用点
+    口径不同（``Path.is_absolute`` vs ``startswith('/')`` vs 含前导点），仍由各方
+    在切分前自行判定——本 helper 不收敛那部分，以免削弱任一处的安全检查。
+    """
+    return not parts or any(part == ".." for part in parts)
 
 
 def _is_unsafe_include_path(raw: str) -> bool:
@@ -604,7 +674,7 @@ def _is_unsafe_include_path(raw: str) -> bool:
     if re.match(r"^[A-Za-z]:/", candidate):  # Windows 盘符 C:/...
         return True
     segments = [seg for seg in candidate.split("/") if seg]
-    return ".." in segments
+    return _is_traversal_or_absolute(segments)
 
 
 def _c_include_is_unsafe(line: str) -> bool:
@@ -728,12 +798,46 @@ def _mirror_one_file(src: Path, dest: Path, language: str) -> int:
     return blocked
 
 
-class _ShadowBuilder:
-    """构建中和影子树：把 -I 根逐个镜像进隔离 tmp，记真实根→影子根映射并去重。"""
+class _MirrorCache:
+    """run 级 -I 根镜像缓存（#66）：``(resolved_root, language)`` → 已中和影子目录。
 
-    def __init__(self, shadow: Path, language: str) -> None:
+    一次批量诊断（``run_targets``）内，多个同语言 target 共享同一 -I 根时只镜像一次，
+    避免 O(N×M) 重复树拷贝。镜像树在 run 级 shadow 下、中和后**只读**（编译器 -I 仅
+    读取），多 target 指向同一份安全。**必须按 language 键**——C/Rust 的 ``#include``
+    中和规则不同，跨语言复用同一镜像会用错规则、漏掉危险 include（削弱 LFI 防护）。
+    """
+
+    def __init__(self, shadow: Path) -> None:
+        """``shadow`` 为 run 级隔离根，生命周期由 ``run_targets`` 的 ExitStack 接管。"""
+        self._shadow = shadow
+        self._cache: dict[tuple[Path, str], tuple[Path, int]] = {}
+
+    def mirror(self, resolved: Path, language: str) -> tuple[Path, int]:
+        """返回 ``(影子目录, 中和数)``：(root, language) 命中即复用，否则镜像一次。"""
+        key = (resolved, language)
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit
+        dest = self._shadow / f"r{len(self._cache)}"
+        blocked = _mirror_sanitized_tree(resolved, dest, language)
+        result = (dest, blocked)
+        self._cache[key] = result
+        return result
+
+
+class _ShadowBuilder:
+    """构建中和影子树：把 -I 根逐个镜像进隔离 tmp，记真实根→影子根映射并去重。
+
+    ``cache`` 非空时（``run_targets`` 批量）-I 根镜像走 run 级共享缓存，跨 target 只
+    镜像一次（#66）；为空时（``run_target`` 单跑）退化为本 builder 自有镜像。
+    """
+
+    def __init__(
+        self, shadow: Path, language: str, *, cache: _MirrorCache | None = None,
+    ) -> None:
         self._shadow = shadow
         self._language = language
+        self._cache = cache
         self._mirrors: dict[Path, Path] = {}
         self.order: list[tuple[Path, Path]] = []
         self.blocked = 0
@@ -751,8 +855,13 @@ class _ShadowBuilder:
         cached = self._mirrors.get(resolved)
         if cached is not None:
             return cached
-        dest = self._shadow / f"r{len(self._mirrors)}"
-        self.blocked += _mirror_sanitized_tree(resolved, dest, self._language)
+        if self._cache is not None:
+            # run 级共享：同 (root, language) 跨 target 只镜像一次（只读复用）
+            dest, blocked = self._cache.mirror(resolved, self._language)
+        else:
+            dest = self._shadow / f"r{len(self._mirrors)}"
+            blocked = _mirror_sanitized_tree(resolved, dest, self._language)
+        self.blocked += blocked
         self._mirrors[resolved] = dest
         self.order.append((resolved, dest))
         return dest
@@ -781,6 +890,18 @@ def _neutralize_into(
     real_file: Path, shadow: Path, language: str,
 ) -> Path | None:
     """兜底：父目录不可镜像时，单独中和目标本体写入影子根。"""
+    try:
+        size = real_file.stat().st_size
+    except OSError:
+        return None
+    if size > _DIAG_MIRROR_MAX_FILE_BYTES:
+        # 与 _mirror_one_file 一致施加 5MB 上限（#65）：兜底路径不能绕过镜像循环的
+        # 大小上限。超大文件返回 None → 上层 fail-closed（指向未写出的占位影子文件，
+        # 编译器报"打不开"），绝不 read_text+write_text 整个超大文件再喂编译器。
+        logger.warning(
+            "诊断兜底中和跳过超大文件(%d B): %s", size, real_file.name,
+        )
+        return None
     try:
         text = real_file.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -823,6 +944,7 @@ def _diag_preexec() -> None:  # pragma: no cover - 仅在子进程 fork 后执�
         return
     for res, limit in (
         (_resource.RLIMIT_CPU, _DIAG_RLIMIT_CPU_SECONDS),
+        (_resource.RLIMIT_DATA, _DIAG_RLIMIT_DATA_BYTES),
         (_resource.RLIMIT_FSIZE, _DIAG_RLIMIT_FSIZE_BYTES),
     ):
         with contextlib.suppress(ValueError, OSError):
@@ -851,8 +973,15 @@ def _run_command(
             stdout, stderr = proc.communicate(timeout=timeout_s)
         except subprocess.TimeoutExpired:
             _kill_process_group(proc)
-            # 二次 communicate 排空管道并回收子进程，避免 pipe 残留/僵尸。
-            proc.communicate()
+            # 二次 communicate 排空管道并回收子进程，避免 pipe 残留/僵尸。带 timeout
+            # 防 killpg 未能让子进程立即退出时永久阻塞诊断线程（#42，原无 timeout 可
+            # 永挂）；仍不退则强杀本体兜底再短超时回收。
+            try:
+                proc.communicate(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.communicate(timeout=5)
             raise
         return CommandRunResult(
             returncode=proc.returncode,
@@ -890,7 +1019,7 @@ def _safe_diagnostic_rel_path(raw_path: str, index: int) -> str:
     if path.is_absolute():
         return path.name or fallback
     parts = [part for part in path.parts if part not in {"", "."}]
-    if not parts or any(part == ".." for part in parts):
+    if _is_traversal_or_absolute(parts):
         return path.name or fallback
     return "/".join(parts)
 
@@ -1191,7 +1320,7 @@ def _missing_include_path(message: str) -> str | None:
     if not raw or raw.startswith("/") or raw.startswith("."):
         return None
     parts = [part for part in raw.replace("\\", "/").split("/") if part]
-    if not parts or any(part == ".." for part in parts):
+    if _is_traversal_or_absolute(parts):
         return None
     return "/".join(parts)
 
