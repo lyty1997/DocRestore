@@ -752,15 +752,19 @@ class Pipeline:
                     ),
                     name=f"warmup-leaf-{warmup_leaf.name}",
                 )
-                try:
-                    await controller.wait_cold_start()
-                except BaseException:
-                    warmup_task.cancel()
-                    with contextlib.suppress(
-                        asyncio.CancelledError, Exception,
-                    ):
-                        await warmup_task
-                    raise
+                # 仅云端流式文档精修才需冷启动校准段长 L*；code/PPT/关精修/未配 model
+                # 的多目录任务不走该路径，跳过 wait_cold_start 直接并发，免白等最长
+                # 60s（#44）——首个 leaf 改为与其余 leaf 并发跑，不再串行 warmup。
+                if self._will_stream_refine(llm, code, ppt):
+                    try:
+                        await controller.wait_cold_start()
+                    except BaseException:
+                        warmup_task.cancel()
+                        with contextlib.suppress(
+                            asyncio.CancelledError, Exception,
+                        ):
+                            await warmup_task
+                        raise
 
                 rest_tasks = [
                     asyncio.create_task(
@@ -2375,9 +2379,10 @@ class Pipeline:
     ) -> tuple[RefinedResult, bool]:
         """段级精修带磁盘缓存。返回 `(result, used_refiner)`。
 
-        `used_refiner=False` 表示走了缓存命中或 refiner=None 的 fallback，
-        调用方据此决定是否把本次 elapsed 喂给 RateController（缓存命中的
-        "伪时延"会严重低估 LLM 成本，污染 L* 估算）。
+        `used_refiner=False` 表示**未拿到真实模型输出**：缓存命中、refiner=None，
+        或精修调用失败/熔断 fail-fast 回退原文（#45）。调用方据此决定是否把本次
+        elapsed 喂给 RateController——缓存命中的"伪时延"会低估 LLM 成本，熔断
+        fail-fast 的"极短耗时"会误判 LLM 极快，二者都污染 L* 估算，一律不计入。
 
         异常 fallback 不写缓存（put 只在 refine 成功分支后调用），下次
         resume 仍会重试该段。truncated=True 由 LLMCache.put 内部过滤。
@@ -2434,7 +2439,9 @@ class Pipeline:
                     fallback_to_raw=True,
                     output_markdown=text,
                 )
-            return RefinedResult(markdown=text), True
+            # used_refiner=False：精修失败/熔断回退原文，未拿到真实模型输出，
+            # 不能以"失败的极短耗时"喂 RateController 污染吞吐桶（#45）。
+            return RefinedResult(markdown=text), False
 
         # A-2 信号 2：截断 → 递归二分重试，仍截断回退到原文。
         # 关键防护：流式 pipeline 历史 bug，截断后 LLM 输出会直接吞掉
@@ -3257,6 +3264,26 @@ class Pipeline:
         if not llm.model:
             return None
         return self._create_refiner(llm)
+
+    def _will_stream_refine(
+        self,
+        llm: LLMConfig | None,
+        code: CodeRestoreConfig | None,
+        ppt: PowerPointRestoreConfig | None,
+    ) -> bool:
+        """多子目录是否会走云端流式文档精修（决定是否需 warmup 冷启动校准 L*）。
+
+        代码 / PPT 模式有各自的精修路径、不经 RateController 段长冷启动；关精修
+        （enable_refine=False）或未配 model 则根本不精修。任一成立 → 无需冷启动，
+        直接并发所有子目录免白等最长 60s（#44）。
+        """
+        effective_code = code if code is not None else self._config.code
+        if effective_code is not None and effective_code.enable:
+            return False
+        effective_ppt = ppt if ppt is not None else self._config.ppt
+        if effective_ppt is not None and effective_ppt.enable:
+            return False
+        return self._get_refiner(llm, for_refine=True) is not None
 
     async def _maybe_retry_final_refine_on_dup_h2(
         self,

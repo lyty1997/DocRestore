@@ -842,6 +842,20 @@ class TaskManager:
             task_id, TaskStatus.FAILED, error="用户取消",
         ):
             await self._persist_status(task_id, "failed", error="用户取消")
+            # 必须显式发终结帧（#43）：cancel 抢赢 _finalize 后，run_task 的
+            # CancelledError 分支拿到 finalized=False 会跳过其终结帧；此处不补发，
+            # 已订阅的 WS 客户端永收不到终态 → 永久挂起。与 run_task 取消帧一致。
+            self.publish_progress(
+                task_id,
+                TaskProgress(
+                    stage="failed",
+                    current=0,
+                    total=0,
+                    percent=0.0,
+                    message="用户取消",
+                    message_key="progress.cancelled",
+                ),
+            )
             return ""
         # 已是终态：COMPLETED 说明 run_task 抢先完成、取消失败；FAILED 说明
         # run_task 的取消/异常 handler 已先置失败，取消实际已生效

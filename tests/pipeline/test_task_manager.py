@@ -307,6 +307,23 @@ class TestCancelTask:
         assert task.error == "用户取消"
 
     @pytest.mark.asyncio
+    async def test_cancel_publishes_terminal_frame(self) -> None:
+        """#43：cancel 成功后向订阅者发终结帧，已订阅的 WS 不再永久挂起。"""
+        mgr = _make_manager()
+        task = mgr.create_task(image_dir="/x")  # PENDING，progress 为 None
+        q = await mgr.subscribe_progress(task.task_id)
+        assert q is not None
+        assert q.empty()  # 无初始帧 seed（progress 为 None）
+
+        err = await mgr.cancel_task(task.task_id)
+        assert err == ""
+
+        # _broadcast_progress 为后台任务投递，等其把终结帧放进订阅队列
+        frame = await asyncio.wait_for(q.get(), timeout=1.0)
+        assert frame.stage == "failed"
+        assert frame.message_key == "progress.cancelled"
+
+    @pytest.mark.asyncio
     async def test_cancels_running_task_and_triggers_bg_cancel(
         self,
     ) -> None:
