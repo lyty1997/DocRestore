@@ -2161,3 +2161,18 @@ S3.7 文档收尾 + PR base dev。云端 `detect_pii_entities` 暂留待 S4 清�
 **门禁**：`bash scripts/check_quality.sh` EXIT=0（mypy --strict 75 文件 ✓ / ruff ✓ / typos ✓ / 前端 typecheck+eslint ✓ / pytest 1364 passed 45 skipped；前端 vitest 121 passed）。
 
 **遗留**：本批为 medium + HIGH #62，**不含** cleanup #66（用户确认暂缓）+ 评审0615 #62 之外未列项。待开 `feature/s-medium-issues → dev` PR（合并后这些 issue 随下一次 dev→main release `Closes` 关闭）。
+
+## 2026-06-16 #66 cleanup 合集（评审0615 纯清理项）
+
+PR #69 合入 dev 后，应用户「先做 #66」收尾最后一个评审0615 项。分支 `feature/s-cleanup-66`，9 个子项一个 commit（`refactor(core)`）：
+
+1. `_extract_json` 两份（code_refine/code_repair）合并为 `llm/json_extract.extract_json` + 删悬空 docstring。
+2. `app.py _auto_configure_llm` api_key 改走 `credentials.refill_api_key_from_env` 单点回填。
+3. `code_diagnostics` 抽 `_is_traversal_or_absolute` 统一三处分段越级/空判定（绝对路径检测各站点口径不同——`Path.is_absolute`/`startswith('/')`/前导点——**故意不收敛**，避免削弱任一处 LFI 检查）。
+4. `ner.py spacy.load(enable=["ner"])` 跳过 tagger/parser 提速。
+5. `code_diagnostics` 加 run 级 `_MirrorCache`：批量诊断同语言共享 -I 根镜像只镜一次（O(N×M)→O(M)），**按 language 键**防跨语言中和规则错用；per-target body 放置不变（防 basename 碰撞）。
+6. `pipeline._fill_one_gap` 改由 `_fill_gaps` 建一次 `PIIGuard` 下传（原每 gap 重建含 NER 初始化）。
+7. 三文件 license header 补全为 13 行模板。
+8. `test_auth` 加模块级 autouse fixture 还原 `_API_TOKEN`/`_INSECURE_MODE` 防顺序 flaky。
+
+**门禁**：`bash scripts/check_quality.sh` EXIT=0（mypy 76 文件 / ruff / typos / 前端 / pytest 1371 passed 45 skipped）。待开 `feature/s-cleanup-66 → dev` PR。至此评审0615（#61–#66）代码层全部落 dev，仅余 dev→main release 收口关闭 issue。
