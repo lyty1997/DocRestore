@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
@@ -67,6 +67,21 @@ def _make_app(*, with_auth: bool = True) -> FastAPI:
         configure_auth("")
 
     return app
+
+
+@pytest.fixture(autouse=True)
+def _restore_auth_globals() -> Iterator[None]:
+    """快照并还原 auth 模块级 _API_TOKEN / _INSECURE_MODE（#66）。
+
+    configure_auth* 直接改这两个模块级全局，而 _isolate_env 只还原 env、不还原
+    全局 → 测试顺序相关 flaky（前一个测试设的 token 漏给后一个）。本 autouse
+    fixture 模块级生效，保证每个测试前后全局状态一致。
+    """
+    saved_token = auth_module._API_TOKEN
+    saved_insecure = auth_module._INSECURE_MODE
+    yield
+    auth_module._API_TOKEN = saved_token
+    auth_module._INSECURE_MODE = saved_insecure
 
 
 @pytest.fixture

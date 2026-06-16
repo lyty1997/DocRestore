@@ -5,6 +5,12 @@
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """IDE 代码字符级 LLM 修正（AGE-8 Phase 3.1）
 
@@ -31,6 +37,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from docrestore.llm.base import BaseLLMRefiner
+from docrestore.llm.json_extract import extract_json
 from docrestore.llm.prompts import (
     build_code_refine_prompt,
     build_code_rewrite_prompt,
@@ -246,7 +253,7 @@ class CodeLLMRefiner:
                 raw_response=raw,
             )
 
-        payload = _extract_json_payload(raw)
+        payload = extract_json(raw)
         try:
             data = json.loads(payload)
         except json.JSONDecodeError as exc:
@@ -455,24 +462,3 @@ def _dedupe_flags(flags: list[str]) -> list[str]:
         seen.add(flag)
         out.append(flag)
     return out
-
-
-def _extract_json_payload(raw: str) -> str:
-    r"""从 LLM 输出中剥出 JSON 文本
-
-    与 ``cloud._extract_json_payload`` 同款：兼容 ``\`\`\`json`` 围栏 / 纯
-    JSON / 前后带说明三种形态。
-    """
-    text = raw.strip()
-    if text.startswith("```"):
-        # 剥围栏
-        first_newline = text.find("\n")
-        if first_newline >= 0:
-            text = text[first_newline + 1:]
-        if text.endswith("```"):
-            text = text[: -3].rstrip()
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end > start:
-        return text[start:end + 1]
-    return text

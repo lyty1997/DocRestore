@@ -1042,3 +1042,50 @@ class TestSanitizeGateRegistry:
         with contextlib.ExitStack() as stack:
             result = runner._sanitize_target(target, "go", stack)
         assert result is target
+
+
+class TestIsTraversalOrAbsolute:
+    """#66：分段越级/空判定 helper（三处统一复用，安全关键路径）。"""
+
+    @pytest.mark.parametrize(
+        ("parts", "expected"),
+        [
+            ([], True),  # 空分段 → 不安全（fail-closed）
+            (["a"], False),
+            (["a", "b"], False),
+            ([".."], True),
+            (["a", "..", "b"], True),
+            (["..", "etc", "passwd"], True),
+        ],
+    )
+    def test_cases(self, parts: list[str], expected: bool) -> None:
+        assert cd._is_traversal_or_absolute(parts) is expected
+
+
+class TestMirrorCache:
+    """#66：run 级 -I 根镜像缓存——同 (root, language) 只镜像一次，跨语言分开。"""
+
+    def test_dedups_same_root_language(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[tuple[Path, str]] = []
+
+        def _spy(src: Path, _dest: Path, lang: str) -> int:
+            calls.append((src, lang))
+            return 0
+
+        monkeypatch.setattr(cd, "_mirror_sanitized_tree", _spy)
+        run_shadow = tmp_path / "run"
+        run_shadow.mkdir()
+        cache = cd._MirrorCache(run_shadow)
+        root = (tmp_path / "inc").resolve()
+
+        d1, _ = cache.mirror(root, "c")
+        d2, _ = cache.mirror(root, "c")  # 命中缓存
+        assert d1 == d2
+        assert len(calls) == 1  # 只镜像一次
+
+        # 不同语言（中和规则不同）→ 单独镜像、独立影子
+        d3, _ = cache.mirror(root, "rust")
+        assert d3 != d1
+        assert len(calls) == 2

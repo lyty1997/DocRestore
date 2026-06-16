@@ -3048,6 +3048,9 @@ class Pipeline:
         markdown = doc.markdown
         filled_count = 0
         profiler = current_profiler()
+        # PIIGuard 建一次复用（#66）：原 _fill_one_gap 每 gap 重建（含 NER 模型
+        # 初始化），这里建一次下传；关 PII 时为 None。
+        pii_guard = PIIGuard(pii_cfg) if pii_cfg.enable else None
 
         for gi, gap in enumerate(gaps):
             report_fn(
@@ -3079,7 +3082,7 @@ class Pipeline:
                         gap, page_map, page_order,
                         reocr_cache, gpu_lock, refiner,
                         entity_lexicon,
-                        pii_cfg=pii_cfg,
+                        pii_guard=pii_guard,
                     )
             except Exception:
                 logger.warning(
@@ -3116,17 +3119,16 @@ class Pipeline:
         refiner: object,
         entity_lexicon: EntityLexicon | None = None,
         *,
-        pii_cfg: PIIConfig,
+        pii_guard: PIIGuard | None,
     ) -> str:
         """对单个 gap 做 re-OCR + LLM 提取。
 
         返回填充内容（空字符串表示无法填充）。
         若启用 PII 脱敏，re-OCR 文本在送入 LLM 前先脱敏。
 
-        ``pii_cfg`` 为**请求级** PII 配置（#36）：gap 补全的 re-OCR 产生**全新
-        文本**，绕过了 producer 的逐页 regex 脱敏，必须在此送 fill_gap 云端前用
-        请求级配置补脱；回落 self._config.pii（默认 enable=False）会让结构化 PII
-        裸送云端。
+        ``pii_guard`` 由 ``_fill_gaps`` 用**请求级** pii_cfg 建一次下传（#66 复用 +
+        #36 请求级）：gap 补全的 re-OCR 产生**全新文本**，绕过 producer 的逐页 regex
+        脱敏，必须在送 fill_gap 云端前补脱；None 表示未开 PII。
         """
         # re-OCR 当前页
         current_text = await self._reocr_cached(
@@ -3143,14 +3145,14 @@ class Pipeline:
                 next_page_name, page_map, reocr_cache, gpu_lock,
             )
 
-        # PII 脱敏 re-OCR 文本（轻量模式，不调用 LLM）；用请求级 pii_cfg（#36）
-        if pii_cfg.enable:
-            guard = PIIGuard(pii_cfg)
-            current_text = guard.redact_for_cloud(
+        # PII 脱敏 re-OCR 文本（轻量模式，不调用 LLM）；guard 由 _fill_gaps 用请求级
+        # pii_cfg 建一次下传（#66 复用 + #36 请求级），None 表示未开 PII。
+        if pii_guard is not None:
+            current_text = pii_guard.redact_for_cloud(
                 current_text, entity_lexicon,
             )
             if next_page_text is not None:
-                next_page_text = guard.redact_for_cloud(
+                next_page_text = pii_guard.redact_for_cloud(
                     next_page_text, entity_lexicon,
                 )
 

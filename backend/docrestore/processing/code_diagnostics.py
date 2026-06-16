@@ -1,6 +1,16 @@
 # Copyright 2026 @lyty1997
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """代码模式多语言轻量诊断。
 
@@ -223,16 +233,33 @@ class CodeDiagnosticRunner:
     def run_targets(
         self, targets: list[CodeDiagnosticTarget],
     ) -> list[CodeDiagnostic]:
-        """批量诊断文件，单文件失败不影响其他文件。"""
-        return [self.run_target(target) for target in targets]
+        """批量诊断文件，单文件失败不影响其他文件。
 
-    def run_target(self, target: CodeDiagnosticTarget) -> CodeDiagnostic:
-        """诊断单个文件。"""
+        全批共享一个 run 级 -I 根镜像缓存（#66）：同语言 target 共用的 -I 根只镜像
+        一次，免 O(N×M) 重复树拷贝。run-shadow 生命周期由本 ExitStack 接管。
+        """
+        with contextlib.ExitStack() as run_stack:
+            run_shadow = Path(run_stack.enter_context(
+                tempfile.TemporaryDirectory(prefix="docrestore-code-run-"),
+            ))
+            cache = _MirrorCache(run_shadow)
+            return [
+                self.run_target(target, mirror_cache=cache)
+                for target in targets
+            ]
+
+    def run_target(
+        self,
+        target: CodeDiagnosticTarget,
+        *,
+        mirror_cache: _MirrorCache | None = None,
+    ) -> CodeDiagnostic:
+        """诊断单个文件。``mirror_cache`` 仅批量（run_targets）传入以共享 -I 镜像。"""
         language = _resolve_language(target)
         if language in {"python", "json", "toml", "xml", "yaml"}:
             return self._run_parser(target, language)
         if language in {"javascript", "typescript", "c", "cpp", "go", "rust"}:
-            return self._run_tool(target, language)
+            return self._run_tool(target, language, mirror_cache)
         return CodeDiagnostic(
             path=target.path,
             language=language,
@@ -364,11 +391,16 @@ class CodeDiagnosticRunner:
         return _syntax_clean(target, "yaml", start)
 
     def _run_tool(
-        self, target: CodeDiagnosticTarget, language: str,
+        self,
+        target: CodeDiagnosticTarget,
+        language: str,
+        mirror_cache: _MirrorCache | None = None,
     ) -> CodeDiagnostic:
         """编译型语言诊断入口：先中和不安全 #include，再走真正的编译诊断。"""
         with contextlib.ExitStack() as stack:
-            safe_target = self._sanitize_target(target, language, stack)
+            safe_target = self._sanitize_target(
+                target, language, stack, mirror_cache,
+            )
             return self._run_tool_compiled(safe_target, language)
 
     def _sanitize_target(
@@ -376,6 +408,7 @@ class CodeDiagnosticRunner:
         target: CodeDiagnosticTarget,
         language: str,
         stack: contextlib.ExitStack,
+        mirror_cache: _MirrorCache | None = None,
     ) -> CodeDiagnosticTarget:
         """把目标文件与其所有 -I 根镜像成一份中和影子树后再编译。
 
@@ -393,7 +426,9 @@ class CodeDiagnosticRunner:
         shadow = Path(stack.enter_context(
             tempfile.TemporaryDirectory(prefix="docrestore-code-safe-"),
         ))
-        builder = _ShadowBuilder(shadow, language)
+        # 本 target 自有 shadow 仍管"目标本体"放置（兜底/fail-closed，per-target 防
+        # basename 碰撞）；-I 根镜像走 run 级共享缓存（#66，批量时跨 target 复用）。
+        builder = _ShadowBuilder(shadow, language, cache=mirror_cache)
         new_include_root = builder.mirror(target.include_root)
         new_extra: list[Path] = []
         for root in target.extra_include_roots or []:
@@ -619,6 +654,16 @@ _SANITIZED_LANGUAGES: frozenset[str] = frozenset(
 )
 
 
+def _is_traversal_or_absolute(parts: list[str]) -> bool:
+    """路径分段是否越级（``..``）或为空 → 不安全（#66 统一三处的分段判定）。
+
+    仅判分段层面的 ``..`` 与空。绝对路径 / Windows 盘符 / 前导点的检测各调用点
+    口径不同（``Path.is_absolute`` vs ``startswith('/')`` vs 含前导点），仍由各方
+    在切分前自行判定——本 helper 不收敛那部分，以免削弱任一处的安全检查。
+    """
+    return not parts or any(part == ".." for part in parts)
+
+
 def _is_unsafe_include_path(raw: str) -> bool:
     """判断 #include 目标是否为绝对路径或越级路径（潜在任意文件读取）。"""
     candidate = raw.strip().replace("\\", "/")
@@ -629,7 +674,7 @@ def _is_unsafe_include_path(raw: str) -> bool:
     if re.match(r"^[A-Za-z]:/", candidate):  # Windows 盘符 C:/...
         return True
     segments = [seg for seg in candidate.split("/") if seg]
-    return ".." in segments
+    return _is_traversal_or_absolute(segments)
 
 
 def _c_include_is_unsafe(line: str) -> bool:
@@ -753,12 +798,46 @@ def _mirror_one_file(src: Path, dest: Path, language: str) -> int:
     return blocked
 
 
-class _ShadowBuilder:
-    """构建中和影子树：把 -I 根逐个镜像进隔离 tmp，记真实根→影子根映射并去重。"""
+class _MirrorCache:
+    """run 级 -I 根镜像缓存（#66）：``(resolved_root, language)`` → 已中和影子目录。
 
-    def __init__(self, shadow: Path, language: str) -> None:
+    一次批量诊断（``run_targets``）内，多个同语言 target 共享同一 -I 根时只镜像一次，
+    避免 O(N×M) 重复树拷贝。镜像树在 run 级 shadow 下、中和后**只读**（编译器 -I 仅
+    读取），多 target 指向同一份安全。**必须按 language 键**——C/Rust 的 ``#include``
+    中和规则不同，跨语言复用同一镜像会用错规则、漏掉危险 include（削弱 LFI 防护）。
+    """
+
+    def __init__(self, shadow: Path) -> None:
+        """``shadow`` 为 run 级隔离根，生命周期由 ``run_targets`` 的 ExitStack 接管。"""
+        self._shadow = shadow
+        self._cache: dict[tuple[Path, str], tuple[Path, int]] = {}
+
+    def mirror(self, resolved: Path, language: str) -> tuple[Path, int]:
+        """返回 ``(影子目录, 中和数)``：(root, language) 命中即复用，否则镜像一次。"""
+        key = (resolved, language)
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit
+        dest = self._shadow / f"r{len(self._cache)}"
+        blocked = _mirror_sanitized_tree(resolved, dest, language)
+        result = (dest, blocked)
+        self._cache[key] = result
+        return result
+
+
+class _ShadowBuilder:
+    """构建中和影子树：把 -I 根逐个镜像进隔离 tmp，记真实根→影子根映射并去重。
+
+    ``cache`` 非空时（``run_targets`` 批量）-I 根镜像走 run 级共享缓存，跨 target 只
+    镜像一次（#66）；为空时（``run_target`` 单跑）退化为本 builder 自有镜像。
+    """
+
+    def __init__(
+        self, shadow: Path, language: str, *, cache: _MirrorCache | None = None,
+    ) -> None:
         self._shadow = shadow
         self._language = language
+        self._cache = cache
         self._mirrors: dict[Path, Path] = {}
         self.order: list[tuple[Path, Path]] = []
         self.blocked = 0
@@ -776,8 +855,13 @@ class _ShadowBuilder:
         cached = self._mirrors.get(resolved)
         if cached is not None:
             return cached
-        dest = self._shadow / f"r{len(self._mirrors)}"
-        self.blocked += _mirror_sanitized_tree(resolved, dest, self._language)
+        if self._cache is not None:
+            # run 级共享：同 (root, language) 跨 target 只镜像一次（只读复用）
+            dest, blocked = self._cache.mirror(resolved, self._language)
+        else:
+            dest = self._shadow / f"r{len(self._mirrors)}"
+            blocked = _mirror_sanitized_tree(resolved, dest, self._language)
+        self.blocked += blocked
         self._mirrors[resolved] = dest
         self.order.append((resolved, dest))
         return dest
@@ -935,7 +1019,7 @@ def _safe_diagnostic_rel_path(raw_path: str, index: int) -> str:
     if path.is_absolute():
         return path.name or fallback
     parts = [part for part in path.parts if part not in {"", "."}]
-    if not parts or any(part == ".." for part in parts):
+    if _is_traversal_or_absolute(parts):
         return path.name or fallback
     return "/".join(parts)
 
@@ -1236,7 +1320,7 @@ def _missing_include_path(message: str) -> str | None:
     if not raw or raw.startswith("/") or raw.startswith("."):
         return None
     parts = [part for part in raw.replace("\\", "/").split("/") if part]
-    if not parts or any(part == ".." for part in parts):
+    if _is_traversal_or_absolute(parts):
         return None
     return "/".join(parts)
 
