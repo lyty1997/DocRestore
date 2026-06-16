@@ -1,6 +1,16 @@
 # Copyright 2026 @lyty1997
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """诊断驱动的代码 scoped repair。
 
@@ -19,6 +29,7 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from docrestore.llm.base import BaseLLMRefiner
+from docrestore.llm.json_extract import extract_json
 from docrestore.llm.code_refine import (
     CodeRefineResult,
     CodeUnresolved,
@@ -604,7 +615,7 @@ def parse_repair_response(
             context=context, flags=["code.repair.truncated"],
         )
     try:
-        data = json.loads(_extract_json(raw))
+        data = json.loads(extract_json(raw))
     except json.JSONDecodeError:
         return CodeRepairAttempt(
             context=context, flags=["code.repair.json_decode_error"],
@@ -646,7 +657,7 @@ def parse_consistency_audit_response(
             context=context, flags=["code.audit.truncated"],
         )
     try:
-        data = json.loads(_extract_json(raw))
+        data = json.loads(extract_json(raw))
     except json.JSONDecodeError:
         return CodeConsistencyAuditAttempt(
             context=context, flags=["code.audit.json_decode_error"],
@@ -1007,21 +1018,6 @@ def _range_authorizing_patch(
         ):
             return edit_range
     return None
-
-
-def _extract_json(raw: str) -> str:
-    text = raw.strip()
-    if text.startswith("```"):
-        first_newline = text.find("\n")
-        if first_newline >= 0:
-            text = text[first_newline + 1:]
-        if text.endswith("```"):
-            text = text[:-3].rstrip()
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        return text[start:end + 1]
-    return text
 
 
 def _sibling_files(

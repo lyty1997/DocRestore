@@ -145,7 +145,9 @@ def _load_models(model_names: Sequence[str]) -> list[_SpacyNLP]:
     nlps: list[_SpacyNLP] = []
     for name in model_names:
         try:
-            nlp: _SpacyNLP = spacy.load(name)
+            # 只用 .ents（NER），enable=["ner"] 跳过 tagger/parser 等组件，
+            # 加载与每次 nlp(text) 推理都更快（#66）；输出实体集合不受影响。
+            nlp: _SpacyNLP = spacy.load(name, enable=["ner"])
         except Exception as exc:  # 模型缺失/损坏/版本不兼容 → 跳过该模型
             logger.warning("spaCy 模型加载失败，跳过：%s（%s）", name, exc)
             continue

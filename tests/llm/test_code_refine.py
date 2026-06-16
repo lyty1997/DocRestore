@@ -20,8 +20,8 @@ from docrestore.llm.base import BaseLLMRefiner
 from docrestore.llm.code_refine import (
     CodeLLMRefiner,
     CodeRefineResult,
-    _extract_json_payload,
 )
+from docrestore.llm.json_extract import extract_json
 from docrestore.pipeline.config import LLMConfig, PIIConfig
 from docrestore.privacy.redactor import PIIRedactor
 from docrestore.processing.code_assembly import CodeColumn, CodeLine
@@ -80,15 +80,15 @@ def _make_refiner(
 
 class TestExtractJsonPayload:
     def test_plain_json(self) -> None:
-        assert _extract_json_payload('{"a": 1}') == '{"a": 1}'
+        assert extract_json('{"a": 1}') == '{"a": 1}'
 
     def test_code_fence_json(self) -> None:
         raw = '```json\n{"a": 1}\n```'
-        assert _extract_json_payload(raw) == '{"a": 1}'
+        assert extract_json(raw) == '{"a": 1}'
 
     def test_with_prefix_text(self) -> None:
         raw = 'Here is JSON: {"a": 1} thanks'
-        assert _extract_json_payload(raw) == '{"a": 1}'
+        assert extract_json(raw) == '{"a": 1}'
 
 
 class TestRefineHappyPath:
