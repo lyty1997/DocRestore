@@ -225,6 +225,57 @@ class TestUpdateResultMarkdown:
         # 内存同步
         assert task.results[0].markdown == "新内容"
 
+    @pytest.mark.asyncio
+    async def test_rejects_out_of_root_output_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """output_dir 越界（不在受信工作根下）→ 拒绝写入、不落盘（#62 写 sink）。"""
+        root = tmp_path / "root"
+        root.mkdir()
+        monkeypatch.setenv("DOCRESTORE_WORK_ROOT", str(root))
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        out = outside / "doc.md"
+        out.write_text("旧内容", encoding="utf-8")
+        result = PipelineResult(output_path=out, markdown="旧内容")
+        task = _make_completed_task("t-oob", outside, [result])
+        mgr = _make_manager()
+        mgr._tasks[task.task_id] = task
+
+        err = await mgr.update_result_markdown(task.task_id, 0, "新内容")
+        assert err is not None
+        assert "越界" in err
+        # 未落盘：原文件内容保持不变
+        assert out.read_text(encoding="utf-8") == "旧内容"
+
+
+class TestResumeBoundary:
+    """resume_task 复用持久化 output_dir 的边界守卫（#62，关联 #34）。"""
+
+    @pytest.mark.asyncio
+    async def test_resume_rejects_out_of_root_output_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """resume 复用越界 output_dir → 返回错误串拒绝续跑，不建新任务。"""
+        root = tmp_path / "root"
+        root.mkdir()
+        monkeypatch.setenv("DOCRESTORE_WORK_ROOT", str(root))
+        outside = tmp_path / "outside"
+        task = Task(
+            task_id="t-resume-oob",
+            status=TaskStatus.FAILED,
+            image_dir=str(outside / "imgs"),
+            output_dir=str(outside),
+        )
+        mgr = _make_manager()
+        mgr._tasks[task.task_id] = task
+
+        result = await mgr.resume_task(task.task_id)
+        assert isinstance(result, str)
+        assert "越界" in result
+        # 未创建新任务（内存仅原任务一条）
+        assert len(mgr._tasks) == 1
+
 
 class TestCancelTask:
     """cancel_task 三分支"""
@@ -565,13 +616,14 @@ class TestResumeTask:
     """resume_task 保留 output_dir，并延续代码模式配置"""
 
     @pytest.mark.asyncio
-    async def test_resume_preserves_code_config(self) -> None:
+    async def test_resume_preserves_code_config(self, tmp_path: Path) -> None:
         mgr = _make_manager()
+        # output_dir 须落在受信工作根（默认系统 tempdir）下，否则被 #62 边界守卫拒
         failed = Task(
             task_id="failed-code",
             status=TaskStatus.FAILED,
             image_dir="/orig/imgs",
-            output_dir="/orig/out",
+            output_dir=str(tmp_path / "out"),
             code=CodeRestoreConfig(enable=True, output_files_dir="src"),
         )
         mgr._tasks[failed.task_id] = failed
@@ -606,14 +658,15 @@ class TestResumeTask:
         assert new.code.enable is True
 
     @pytest.mark.asyncio
-    async def test_resume_preserves_ppt_config(self) -> None:
+    async def test_resume_preserves_ppt_config(self, tmp_path: Path) -> None:
         """resume 直接沿用已持久化的 task.ppt（正常路径，无需产物推断）。"""
         mgr = _make_manager()
+        # output_dir 须落在受信工作根（默认系统 tempdir）下，否则被 #62 边界守卫拒
         failed = Task(
             task_id="failed-ppt",
             status=TaskStatus.FAILED,
             image_dir="/orig/imgs",
-            output_dir="/orig/out",
+            output_dir=str(tmp_path / "out"),
             ppt=PowerPointRestoreConfig(enable=True),
         )
         mgr._tasks[failed.task_id] = failed

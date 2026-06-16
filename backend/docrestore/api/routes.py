@@ -618,6 +618,17 @@ def _resolve_output_dir(req: CreateTaskRequest) -> str | None:
     return output_dir
 
 
+async def _revalidate_reused_api_base(llm: LLMConfig | None) -> None:
+    """resume/retry 复用持久化 ``llm.api_base`` 时重过 SSRF 守卫（#62，关联 #33）。
+
+    ``api_base`` 会持久化（不像 api_key 被排除）；历史失败任务可能存了建于守卫
+    之前 / 白名单收紧之前的内网 / 云元数据地址，续跑/重试若不重校验等于绕过 #33。
+    DNS 解析阻塞，包进 ``to_thread`` 避免卡事件循环。
+    """
+    if llm is not None and llm.api_base:
+        await asyncio.to_thread(validate_outbound_api_base, llm.api_base)
+
+
 def _guard_ner_backend(pii_cfg: PIIConfig) -> None:
     """请求级 fail-fast：开实体脱敏但本地 NER 不可用 → 400（名字不裸送云端）。
 
@@ -1438,6 +1449,13 @@ async def cleanup_tasks(req: TaskCleanupRequest) -> TaskCleanupResponse:
 async def retry_task(task_id: str) -> ActionResponse:
     """重试失败的任务（从头跑，不复用 output_dir）"""
     manager = _get_manager()
+    task = await manager.get_task_async(task_id)
+    if task is None:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
+    # 复用持久化 llm.api_base 前重过 SSRF 守卫（#62，关联 #33）
+    await _revalidate_reused_api_base(task.llm)
     result = await manager.retry_task(task_id)
 
     if result is None:
@@ -1475,6 +1493,13 @@ async def resume_task(task_id: str) -> ActionResponse:
     仅 FAILED 状态（含用户取消）可继续。返回新建 task 的 task_id。
     """
     manager = _get_manager()
+    task = await manager.get_task_async(task_id)
+    if task is None:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
+    # 复用持久化 llm.api_base 前重过 SSRF 守卫（#62，关联 #33）
+    await _revalidate_reused_api_base(task.llm)
     result = await manager.resume_task(task_id)
 
     if result is None:

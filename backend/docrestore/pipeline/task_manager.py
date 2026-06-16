@@ -740,6 +740,11 @@ class TaskManager:
         if result_index < 0 or result_index >= len(task.results):
             return "文档索引越界"
 
+        # 写 sink 边界守卫（#62，关联 #34）：编辑保存会向 output_dir 写文件，
+        # 越界（历史/篡改任务）拒写，避免在受信工作根外落产物。
+        if not output_dir_within_root(task.output_dir):
+            return "输出目录越界（不在受信工作根下），拒绝写入"
+
         result = task.results[result_index]
 
         # 写回磁盘：document.md 保持前端原样（既有行为，不改归一化）；同时
@@ -1045,6 +1050,11 @@ class TaskManager:
 
         if task.status != TaskStatus.FAILED:
             return f"任务状态为 {task.status.value}，仅失败任务可继续"
+
+        # 复用持久化 output_dir 前重过边界守卫（#62，关联 #34）：历史/篡改的越界
+        # output_dir 续跑时仍会 mkdir+写产物，删除时被 rmtree。retry 不复用故无需。
+        if not output_dir_within_root(task.output_dir):
+            return "输出目录越界（不在受信工作根下），拒绝续跑"
 
         # 同 retry_task：code 命中优先，互斥时不再推断 ppt。
         code = self._retry_code_config(task)
