@@ -38,9 +38,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: 单个诊断子进程的 CPU 秒上限，宏展开炸弹在 wall-clock 超时前先被 CPU 限额掐断。
-#: 不设 RLIMIT_AS：rustc/jemalloc 会保留大量虚拟地址空间，地址空间限额易误伤正常诊断。
+#: 单个诊断子进程的 CPU 秒上限。注意（#65 修正原误导注释）：单线程编译下 CPU 秒
+#: ≈ 墙钟秒，墙钟 timeout（默认 10s）先于本 15s 限额触发；本限额仅作多核/并行编译
+#: 的 CPU 兜底，原注释"宏炸弹在 wall-clock 超时前先被 CPU 掐断"与单线程事实相反。
 _DIAG_RLIMIT_CPU_SECONDS = 15
+#: 诊断子进程堆内存（data 段）上限（#42）：挡 brk 增长型内存炸弹。不设 RLIMIT_AS——
+#: rustc/jemalloc 保留大量虚拟地址空间，地址空间限额易误伤正常诊断。注意 Linux 下
+#: RLIMIT_DATA 不计 mmap 分配，故仅作辅助，超大内存仍主要靠墙钟 timeout + killpg 兜住。
+_DIAG_RLIMIT_DATA_BYTES = 2 * 1024 * 1024 * 1024
 #: 诊断子进程可写文件总字节上限（语法诊断不应产出大文件）。
 _DIAG_RLIMIT_FSIZE_BYTES = 64 * 1024 * 1024
 #: 诊断影子树单文件大小上限（超限源文件不参与诊断，记日志）。
@@ -590,8 +595,28 @@ _RUST_INCLUDE_RE = re.compile(
 # Rust #[path = "..."] 模块属性，可指向任意文件。
 _RUST_PATH_ATTR_RE = re.compile(r'#\s*\[\s*path\s*=\s*"([^"\n]+)"')
 
-#: 需要影子树中和的语言（编译器预处理会按路径真实读取外部文件 → LFI 面）。
-_SANITIZED_LANGUAGES: frozenset[str] = frozenset({"c", "cpp", "rust"})
+#: 各语言"工具链是否会按源码内路径真实读取外部文件"登记表（#65）：决定是否需经影子
+#: 树 #include 中和门。中和门按本表判定而非散落硬编码——新增语言必须在此显式登记其
+#: 读文件能力，避免"漏加中和"。值=是否需要影子树中和（True 才进 _sanitize_target）：
+#:   - c/cpp：预处理器 #include/#include_next/#import 按路径真实读盘 → 需中和
+#:   - rust：include!()/#[path] 宏按路径读盘 → 需中和
+#:   - go：import 仅解析模块缓存、不读相对路径；//go:embed 编译器层即拒 ../与绝对/
+#:     前导斜杠路径 → 无相对 include LFI 面，无需中和（显式登记，勿误加）
+#:   - javascript/typescript：node --check / tsc --noEmit 纯语法检查，不按源码指令
+#:     读外部文件 → 无需中和
+_LANG_NEEDS_INCLUDE_SANITIZE: dict[str, bool] = {
+    "c": True,
+    "cpp": True,
+    "rust": True,
+    "go": False,
+    "javascript": False,
+    "typescript": False,
+}
+
+#: 需要影子树中和的语言（由上表派生：登记为 True 者）。
+_SANITIZED_LANGUAGES: frozenset[str] = frozenset(
+    lang for lang, needs in _LANG_NEEDS_INCLUDE_SANITIZE.items() if needs
+)
 
 
 def _is_unsafe_include_path(raw: str) -> bool:
@@ -782,6 +807,18 @@ def _neutralize_into(
 ) -> Path | None:
     """兜底：父目录不可镜像时，单独中和目标本体写入影子根。"""
     try:
+        size = real_file.stat().st_size
+    except OSError:
+        return None
+    if size > _DIAG_MIRROR_MAX_FILE_BYTES:
+        # 与 _mirror_one_file 一致施加 5MB 上限（#65）：兜底路径不能绕过镜像循环的
+        # 大小上限。超大文件返回 None → 上层 fail-closed（指向未写出的占位影子文件，
+        # 编译器报"打不开"），绝不 read_text+write_text 整个超大文件再喂编译器。
+        logger.warning(
+            "诊断兜底中和跳过超大文件(%d B): %s", size, real_file.name,
+        )
+        return None
+    try:
         text = real_file.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
@@ -823,6 +860,7 @@ def _diag_preexec() -> None:  # pragma: no cover - 仅在子进程 fork 后执�
         return
     for res, limit in (
         (_resource.RLIMIT_CPU, _DIAG_RLIMIT_CPU_SECONDS),
+        (_resource.RLIMIT_DATA, _DIAG_RLIMIT_DATA_BYTES),
         (_resource.RLIMIT_FSIZE, _DIAG_RLIMIT_FSIZE_BYTES),
     ):
         with contextlib.suppress(ValueError, OSError):
@@ -851,8 +889,15 @@ def _run_command(
             stdout, stderr = proc.communicate(timeout=timeout_s)
         except subprocess.TimeoutExpired:
             _kill_process_group(proc)
-            # 二次 communicate 排空管道并回收子进程，避免 pipe 残留/僵尸。
-            proc.communicate()
+            # 二次 communicate 排空管道并回收子进程，避免 pipe 残留/僵尸。带 timeout
+            # 防 killpg 未能让子进程立即退出时永久阻塞诊断线程（#42，原无 timeout 可
+            # 永挂）；仍不退则强杀本体兜底再短超时回收。
+            try:
+                proc.communicate(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.communicate(timeout=5)
             raise
         return CommandRunResult(
             returncode=proc.returncode,
