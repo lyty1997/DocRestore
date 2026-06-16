@@ -350,3 +350,40 @@ class TestStageServerSource:
         image_dir = Path(resp.json()["image_dir"])
         names = sorted(p.name for p in image_dir.iterdir())  # noqa: ASYNC240
         assert names == ["x.jpg", "x_1.jpg"]
+
+
+class TestResolveCropImage:
+    """#50：/crop/image 解析加后缀白名单，挡 image_dir 内非图片文件读取。"""
+
+    def test_valid_image_returned(self, tmp_path: Path) -> None:
+        """合法图片正常返回解析后路径。"""
+        from docrestore.api.routes import _resolve_crop_image
+
+        img = tmp_path / "p.jpg"
+        img.write_bytes(b"x")
+        assert _resolve_crop_image(str(tmp_path), "p.jpg") == img.resolve()
+
+    def test_case_insensitive_suffix(self, tmp_path: Path) -> None:
+        """大写后缀 .JPG 同样放行（大小写不敏感）。"""
+        from docrestore.api.routes import _resolve_crop_image
+
+        img = tmp_path / "P.JPG"
+        img.write_bytes(b"x")
+        assert _resolve_crop_image(str(tmp_path), "P.JPG") == img.resolve()
+
+    def test_non_image_rejected(self, tmp_path: Path) -> None:
+        """目录内非图片文件（误放的 .env）被后缀白名单挡掉 → None。"""
+        from docrestore.api.routes import _resolve_crop_image
+
+        secret = tmp_path / "secret.env"
+        secret.write_text("KEY=v", encoding="utf-8")
+        assert _resolve_crop_image(str(tmp_path), "secret.env") is None
+
+    def test_traversal_rejected(self, tmp_path: Path) -> None:
+        """路径穿越（../）即便指向 .jpg 也越界拒绝 → None。"""
+        from docrestore.api.routes import _resolve_crop_image
+
+        (tmp_path / "outside.jpg").write_bytes(b"x")
+        sub = tmp_path / "imgs"
+        sub.mkdir()
+        assert _resolve_crop_image(str(sub), "../outside.jpg") is None

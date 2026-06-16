@@ -400,10 +400,18 @@ async def detect_crop_boxes(req: CropDetectRequest) -> CropDetectResponse:
 
 
 def _resolve_crop_image(image_dir: str, name: str) -> Path | None:
-    """解析 image_dir + 相对名为安全路径；越界 / 非文件返回 None。"""
+    """解析 image_dir + 相对名为安全路径；越界 / 非文件 / 非图片后缀返回 None。
+
+    后缀白名单校验与姊妹端点 ``_crop_figure_sync`` 对齐（#50）：仅有路径穿越防护
+    不够——攻击者可借本端点读 image_dir 内任意类型文件（误放的 .env/.key/源码）。
+    """
     root = Path(image_dir).resolve()
     target = (root / name).resolve()
-    if root not in target.parents or not target.is_file():
+    if (
+        root not in target.parents
+        or not target.is_file()
+        or target.suffix.lower() not in _IMAGE_EXTS
+    ):
         return None
     return target
 
