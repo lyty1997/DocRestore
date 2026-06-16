@@ -2143,3 +2143,21 @@ S3.7 文档收尾 + PR base dev。云端 `detect_pii_entities` 暂留待 S4 清�
 **字段级加固（2026-06-16 追加，纵深防御）**：`_make_regex_redactor(pii_cfg, lexicon)` 非空时走 `redact_for_cloud`（结构化+实体）；`_code_pipeline` 传 `code_lexicon`；`build_consistency_audit_context` 经新 `_redact_unresolved_item` 对 `unresolved_items.context/note` 脱敏（**闸口够不到结构化 PII 的唯一缝**——闸口只兜底实体）。+5 测试（unresolved 脱敏 with/without redact、`_make_regex_redactor` lexicon/无 lexicon/未开）。设计文档 §5 标已落地 + 加 PlantUML 出云闸口时序图（`extract_and_compile.sh` 编译 exit 0）。
 
 **遗留**：commit/PR 待用户授权后合 dev；dev→main release 时 `Fixes #67`。
+
+## 2026-06-16 medium 严重度 issue 批量收口（#62 + #38–#50 + #61/#63/#64/#65）
+
+分支 `feature/s-medium-issues`（从 dev 切），按 area 串行逐个有证据闭环，9 个 commit：
+
+- **A #62 安全边界四连（HIGH，同根 #33/#34）**：resume/retry 复用持久化 `api_base` 重过 SSRF 守卫（`routes._revalidate_reused_api_base`）；`output_dir` 边界守卫下沉到写 sink（`update_result_markdown`）与 `resume_task`（`path_guard`）；无鉴权模式无法确认 bind host 时 fail-closed 拒启；device token 改 `os.open(O_EXCL\|0600)` 原子建消除 write→chmod 窗口期。
+- **B #63+#61 privacy**：`ner_install._kill_proc` SIGTERM→grace→SIGKILL+`wait()` 回收、清理移入 `finally`（覆盖取消/泛异常）；NER `reset_detector_cache`（装后免重启生效，修 fail-closed 永久停用）；自定义词替换幂等（占位符当保护区）；内链 URL 覆盖 `[IPv6]`。
+- **C #38/#39/#40 OCR worker**：ppocr-server stdout drain 提前到 `_wait_server_ready` 前（防 64KB pipe 死锁）；`_read_response` `errors=replace` + 超 buffer 单行捕获 → `_restart_worker`；`ensure()` 快速路径加 `is_switching` 守卫堵 TOCTOU。
+- **D #41 persistence**：写事务加 `asyncio.Lock` 串行化（5 个写方法），读不加锁（WAL）。
+- **E #42/#65 code_diagnostics**：preexec 增 `RLIMIT_DATA`、二次 `communicate` 带 timeout+kill 兜底；`_neutralize_into` 补 5MB 上限；修正 RLIMIT_CPU 误导注释；中和门改显式登记表 `_LANG_NEEDS_INCLUDE_SANITIZE`（go 显式登记不需中和）。
+- **F #43/#44/#45 pipeline**：`cancel_task` 抢赢 `_finalize` 后补发终结帧（WS 不再永挂）；多子目录仅云端流式精修才等冷启动（`_will_stream_refine`，免白等 60s）；精修异常/熔断回退返回 `used_refiner=False`（不污染 RateController 吞吐桶）。
+- **G #50 api**：`_resolve_crop_image` 补后缀白名单（与 `crop_figure` 对齐）。
+- **H #64 契约**：`PIIConfigRequest` 暴露 `ner_backend`/`redact_person_name`/`redact_org_name`（无 spaCy 可结构化-only 脱敏，抽 `_resolve_pii_config`）；请求级 api_key resume 限制按 issue 验收「或文档化」分支落 known-issues + credentials docstring。
+- **I #46/#47/#48/#49 前端**：rehypeRaw 后接 rehype-sanitize 白名单（`markdownSanitize.ts`，保 `data-page` 锚点、去 XSS）；上传预览图 `getUploadFileUrl` 带 token；`fetchResult` 退避重试不静默吞、失败翻 failed；`CreateTaskBody.llm.provider` 显式契约 + pii NER opt-out 字段。
+
+**门禁**：`bash scripts/check_quality.sh` EXIT=0（mypy --strict 75 文件 ✓ / ruff ✓ / typos ✓ / 前端 typecheck+eslint ✓ / pytest 1364 passed 45 skipped；前端 vitest 121 passed）。
+
+**遗留**：本批为 medium + HIGH #62，**不含** cleanup #66（用户确认暂缓）+ 评审0615 #62 之外未列项。待开 `feature/s-medium-issues → dev` PR（合并后这些 issue 随下一次 dev→main release `Closes` 关闭）。
