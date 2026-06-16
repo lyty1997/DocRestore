@@ -55,6 +55,7 @@ from docrestore.api.schemas import (
     NERSetupStatusResponse,
     NERStatusResponse,
     OCRStatusResponse,
+    PIIConfigRequest,
     OCRWarmupRequest,
     ProgressResponse,
     SourceImagesResponse,
@@ -637,6 +638,33 @@ async def _revalidate_reused_api_base(llm: LLMConfig | None) -> None:
         await asyncio.to_thread(validate_outbound_api_base, llm.api_base)
 
 
+def _resolve_pii_config(
+    pii_req: PIIConfigRequest | None, default_pii: PIIConfig,
+) -> PIIConfig | None:
+    """合成请求级 PII 覆盖到完整 ``PIIConfig``（None=不覆盖，下游用默认）。
+
+    除 enable / 自定义词外，暴露 ner_backend / 人名 / 机构名脱敏开关（#64）：
+    无 spaCy 环境可只做结构化（手机/邮箱/卡号）正则脱敏，把 ner_backend 设
+    "none" 或关人名/机构名脱敏即可，避免 _guard_ner_backend 硬 400。
+    """
+    if pii_req is None:
+        return None
+    update: dict[str, object] = {}
+    if pii_req.enable is not None:
+        update["enable"] = pii_req.enable
+    if pii_req.custom_sensitive_words is not None:
+        update["custom_sensitive_words"] = _to_custom_words(
+            pii_req.custom_sensitive_words,
+        )
+    if pii_req.ner_backend is not None:
+        update["ner_backend"] = pii_req.ner_backend
+    if pii_req.redact_person_name is not None:
+        update["redact_person_name"] = pii_req.redact_person_name
+    if pii_req.redact_org_name is not None:
+        update["redact_org_name"] = pii_req.redact_org_name
+    return default_pii.model_copy(update=update)
+
+
 def _guard_ner_backend(pii_cfg: PIIConfig) -> None:
     """请求级 fail-fast：开实体脱敏但本地 NER 不可用 → 400（名字不裸送云端）。
 
@@ -697,16 +725,7 @@ async def create_task(
     # OCR 覆盖 + 手动裁剪框（任务级，见 _requested_crop_boxes 注释）
     ocr_cfg = _resolve_ocr_config(req, defaults.ocr)
 
-    pii_cfg: PIIConfig | None = None
-    if req.pii is not None:
-        pii_update: dict[str, object] = {}
-        if req.pii.enable is not None:
-            pii_update["enable"] = req.pii.enable
-        if req.pii.custom_sensitive_words is not None:
-            pii_update["custom_sensitive_words"] = (
-                _to_custom_words(req.pii.custom_sensitive_words)
-            )
-        pii_cfg = defaults.pii.model_copy(update=pii_update)
+    pii_cfg = _resolve_pii_config(req.pii, defaults.pii)
 
     # 本地 NER fail-fast（S3）：开人名/机构名脱敏但 spaCy/模型未就绪 → 400 不建任务，
     # 避免名字裸送云端或白跑 OCR。校验"有效"配置（请求级覆盖后；ner_* 仍走 defaults）。

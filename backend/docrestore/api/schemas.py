@@ -82,6 +82,12 @@ class PIIConfigRequest(BaseModel):
     custom_sensitive_words: (
         list[CustomSensitiveWord] | list[str] | None
     ) = None
+    # NER 后端 opt-out（#64）：无 spaCy 环境想只做结构化（手机/邮箱/卡号）正则脱敏时，
+    # 把 ner_backend 设 "none" 或关人名/机构名脱敏，避免 _guard_ner_backend 硬 400。
+    # 不传（None）则沿用服务端默认（spacy + 人名/机构名脱敏开）。
+    ner_backend: Literal["spacy", "none"] | None = None
+    redact_person_name: bool | None = None
+    redact_org_name: bool | None = None
 
 
 class CodeRestoreConfigRequest(BaseModel):
