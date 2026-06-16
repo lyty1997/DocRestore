@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 
+import { getUploadFileUrl } from "../api/client";
 import type { UploadFileItem } from "../api/schemas";
 import { useTranslation } from "../i18n";
 
@@ -106,11 +107,13 @@ export function UploadPreviewPanel({
                           type="button"
                           className="upload-preview-thumb-btn"
                           onClick={() => {
-                            setLightboxSrc(`/api/v1/uploads/${file.session_id}/files/${file.file_id}`);
+                            setLightboxSrc(
+                              getUploadFileUrl(file.session_id, file.file_id),
+                            );
                           }}
                         >
                           <img
-                            src={`/api/v1/uploads/${file.session_id}/files/${file.file_id}`}
+                            src={getUploadFileUrl(file.session_id, file.file_id)}
                             alt={file.filename}
                             className="upload-preview-thumb"
                           />

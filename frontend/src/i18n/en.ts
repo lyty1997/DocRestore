@@ -428,6 +428,7 @@ export const en: Record<TranslationKey, string> = {
   // ── Task / upload hook fallback ──
   "errors.task.runFailed": "Task failed",
   "errors.task.runFailedWithReason": "Task failed: {reason}",
+  "errors.task.resultFetchFailed": "Failed to fetch results, please retry",
   "errors.task.createFailed": "Failed to create task",
   "errors.upload.confirmFailed": "Failed to confirm upload",
   "errors.upload.deleteFailed": "Failed to delete image",

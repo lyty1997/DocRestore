@@ -414,6 +414,7 @@ export const zhTW: Record<TranslationKey, string> = {
   // ── 任務/上傳 hook 兜底文案 ──
   "errors.task.runFailed": "任務失敗",
   "errors.task.runFailedWithReason": "任務失敗：{reason}",
+  "errors.task.resultFetchFailed": "結果拉取失敗，請稍後重試",
   "errors.task.createFailed": "建立任務失敗",
   "errors.upload.confirmFailed": "確認上傳失敗",
   "errors.upload.deleteFailed": "刪除圖片失敗",

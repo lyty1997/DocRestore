@@ -140,21 +140,39 @@ export function useTaskRunner(): UseTaskRunnerReturn {
     };
   }, [cleanup]);
 
-  /** 拉取最终结果 */
-  const fetchResult = useCallback(async (tid: string) => {
-    try {
-      const resp = await getTaskResults(tid);
-      if (isMountedRef.current) {
-        setAllResults(resp.results);
-        const first = resp.results[0];
-        if (first !== undefined) {
-          setResultMarkdown(first.markdown);
-          setTaskResult(first);
+  /** 拉取最终结果。成功返回 true；失败（重试耗尽）setError + 返回 false，
+   *  调用方据此**不**翻 completed（#48：原空 catch 静默吞 → 完成态空白无重试）。 */
+  const fetchResult = useCallback(async (tid: string): Promise<boolean> => {
+    const maxAttempts = 3;
+    let delay = 500;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const resp = await getTaskResults(tid);
+        if (isMountedRef.current) {
+          setAllResults(resp.results);
+          const first = resp.results[0];
+          if (first !== undefined) {
+            setResultMarkdown(first.markdown);
+            setTaskResult(first);
+          }
+        }
+        return true;
+      } catch (error_: unknown) {
+        if (!isMountedRef.current) return false;
+        console.error("拉取结果失败", error_);
+        if (attempt < maxAttempts) {
+          await new Promise<void>((resolve) => setTimeout(resolve, delay));
+          delay *= 2; // 指数退避：0.5s → 1s
         }
       }
-    } catch {
-      console.error("拉取结果失败");
     }
+    if (isMountedRef.current) {
+      setError({
+        key: "errors.task.resultFetchFailed",
+        fallback: "结果拉取失败，请稍后重试",
+      });
+    }
+    return false;
   }, []);
 
   /** 处理轮询响应的终态判断 */
@@ -177,8 +195,8 @@ export function useTaskRunner(): UseTaskRunnerReturn {
           // 必须先拉到结果再翻 completed：TaskResult 以 useState 初值一次性
           // 吃 props（key=taskId 不变不会重挂载），若 status 先翻、allResults
           // 仍为空，组件会卡在"暂无可用结果"直到换页重挂载。
-          await fetchResult(tid);
-          setStatus("completed");
+          // 拉取失败（重试耗尽）→ 翻 failed 而非 completed，避免空白完成态（#48）。
+          setStatus((await fetchResult(tid)) ? "completed" : "failed");
           break;
         }
         case "failed": {
@@ -292,9 +310,9 @@ export function useTaskRunner(): UseTaskRunnerReturn {
               case "completed": {
                 cleanup();
                 // 同 handlePollResponse：先拉结果再翻 completed，避免
-                // TaskResult 以空 allResults 挂载后卡在"暂无可用结果"。
-                await fetchResult(tid);
-                setStatus("completed");
+                // TaskResult 以空 allResults 挂载后卡在"暂无可用结果"；
+                // 拉取失败则翻 failed 而非 completed（#48）。
+                setStatus((await fetchResult(tid)) ? "completed" : "failed");
                 break;
               }
               case "failed": {

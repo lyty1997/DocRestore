@@ -410,6 +410,7 @@ export const zhCN = {
   // ── 任务/上传 hook 兜底文案 ──
   "errors.task.runFailed": "任务失败",
   "errors.task.runFailedWithReason": "任务失败：{reason}",
+  "errors.task.resultFetchFailed": "结果拉取失败，请稍后重试",
   "errors.task.createFailed": "创建任务失败",
   "errors.upload.confirmFailed": "确认上传失败",
   "errors.upload.deleteFailed": "删除图片失败",
