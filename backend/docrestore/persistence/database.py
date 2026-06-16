@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Sequence
@@ -138,6 +139,11 @@ class TaskDatabase:
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
         self._db: aiosqlite.Connection | None = None
+        # 写事务串行化（#41）：所有协程共享单个 aiosqlite 连接，无锁时多语句事务
+        # 的 commit 边界会被另一协程的 commit() 提前打断（如 complete_task_with_
+        # results 的 UPDATE+INSERT 被 update_status 的 commit 截断）。读不加锁（WAL
+        # 下读不阻塞写）。启动期 initialize 内的写为单线程，不经此锁。
+        self._write_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
         """打开连接、建表、恢复中断任务。"""
@@ -206,36 +212,38 @@ class TaskDatabase:
         """插入新任务。llm/ocr/pii/code/ppt 为完整 Config 快照。"""
         db = self._get_db()
         now = created_at or datetime.now().isoformat()
-        await db.execute(
-            """\
-            INSERT INTO tasks
-                (task_id, status, image_dir, output_dir,
-                 llm, ocr, pii, code, ppt,
-                 created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        params = (
+            task_id,
+            status,
+            image_dir,
+            output_dir,
+            # api_key 绝不落库（#37）：明文持久化 = 长期凭据泄漏面（备份/
+            # 快照/误传 DB 均带 key）。resume/水合时由
+            # llm.credentials.refill_api_key_from_env 从环境补回。其余
+            # Config 当前无凭据字段（config.py 审计：唯一凭据即 llm.api_key）。
             (
-                task_id,
-                status,
-                image_dir,
-                output_dir,
-                # api_key 绝不落库（#37）：明文持久化 = 长期凭据泄漏面（备份/
-                # 快照/误传 DB 均带 key）。resume/水合时由
-                # llm.credentials.refill_api_key_from_env 从环境补回。其余
-                # Config 当前无凭据字段（config.py 审计：唯一凭据即 llm.api_key）。
-                (
-                    llm.model_dump_json(exclude={"api_key"})
-                    if llm is not None
-                    else None
-                ),
-                ocr.model_dump_json() if ocr is not None else None,
-                pii.model_dump_json() if pii is not None else None,
-                code.model_dump_json() if code is not None else None,
-                ppt.model_dump_json() if ppt is not None else None,
-                now,
-                now,
+                llm.model_dump_json(exclude={"api_key"})
+                if llm is not None
+                else None
             ),
+            ocr.model_dump_json() if ocr is not None else None,
+            pii.model_dump_json() if pii is not None else None,
+            code.model_dump_json() if code is not None else None,
+            ppt.model_dump_json() if ppt is not None else None,
+            now,
+            now,
         )
-        await db.commit()
+        async with self._write_lock:
+            await db.execute(
+                """\
+                INSERT INTO tasks
+                    (task_id, status, image_dir, output_dir,
+                     llm, ocr, pii, code, ppt,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                params,
+            )
+            await db.commit()
 
     async def update_status(
         self,
@@ -246,11 +254,13 @@ class TaskDatabase:
         """更新任务状态。"""
         db = self._get_db()
         now = datetime.now().isoformat()
-        await db.execute(
-            "UPDATE tasks SET status=?, error=?, updated_at=? WHERE task_id=?",
-            (status, error, now, task_id),
-        )
-        await db.commit()
+        async with self._write_lock:
+            await db.execute(
+                "UPDATE tasks SET status=?, error=?, updated_at=? "
+                "WHERE task_id=?",
+                (status, error, now, task_id),
+            )
+            await db.commit()
 
     async def insert_results(
         self,
@@ -267,14 +277,15 @@ class TaskDatabase:
         """
         db = self._get_db()
         normalized = self._normalize_results(results)
-        await db.executemany(
-            """\
-            INSERT INTO task_results
-                (task_id, output_path, doc_title, doc_dir, error)
-            VALUES (?, ?, ?, ?, ?)""",
-            [(task_id, *r) for r in normalized],
-        )
-        await db.commit()
+        async with self._write_lock:
+            await db.executemany(
+                """\
+                INSERT INTO task_results
+                    (task_id, output_path, doc_title, doc_dir, error)
+                VALUES (?, ?, ?, ?, ?)""",
+                [(task_id, *r) for r in normalized],
+            )
+            await db.commit()
 
     @staticmethod
     def _normalize_results(
@@ -311,28 +322,31 @@ class TaskDatabase:
         db = self._get_db()
         now = datetime.now().isoformat()
         normalized = self._normalize_results(results)
-        await db.execute(
-            "UPDATE tasks SET status=?, error=?, updated_at=? WHERE task_id=?",
-            (status, error, now, task_id),
-        )
-        if normalized:
-            await db.executemany(
-                """\
-                INSERT INTO task_results
-                    (task_id, output_path, doc_title, doc_dir, error)
-                VALUES (?, ?, ?, ?, ?)""",
-                [(task_id, *r) for r in normalized],
+        async with self._write_lock:
+            await db.execute(
+                "UPDATE tasks SET status=?, error=?, updated_at=? "
+                "WHERE task_id=?",
+                (status, error, now, task_id),
             )
-        await db.commit()
+            if normalized:
+                await db.executemany(
+                    """\
+                    INSERT INTO task_results
+                        (task_id, output_path, doc_title, doc_dir, error)
+                    VALUES (?, ?, ?, ?, ?)""",
+                    [(task_id, *r) for r in normalized],
+                )
+            await db.commit()
 
     async def delete_task(self, task_id: str) -> bool:
         """删除任务及其结果（CASCADE）。返回是否存在并删除。"""
         db = self._get_db()
-        cursor = await db.execute(
-            "DELETE FROM tasks WHERE task_id=?", (task_id,)
-        )
-        await db.commit()
-        return cursor.rowcount > 0
+        async with self._write_lock:
+            cursor = await db.execute(
+                "DELETE FROM tasks WHERE task_id=?", (task_id,)
+            )
+            await db.commit()
+            return cursor.rowcount > 0
 
     # ── 读操作 ──────────────────────────────────────────
 
