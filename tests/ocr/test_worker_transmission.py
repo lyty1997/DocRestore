@@ -93,3 +93,59 @@ async def test_batch_raises_on_missing_pages(
     chunk = [Path("a.jpg"), Path("b.jpg")]
     with pytest.raises(RuntimeError, match="页数不一致"):
         await eng._send_ocr_batch_all(chunk, Path("/out"))
+
+
+@pytest.mark.asyncio
+async def test_read_response_tolerates_invalid_utf8() -> None:
+    """#39：worker stdout 混入非法字节 → 不崩，按非 JSON 噪声跳过读到下一行有效 JSON。
+
+    旧实现严格 decode("utf-8") 遇非法字节 UnicodeDecodeError 直接崩整个 task。
+    """
+    eng = DeepSeekOCR2Engine.__new__(DeepSeekOCR2Engine)
+    eng._config = OCRConfig()
+    # 后续行是合法 JSON；首段（raw 参数）注入非法字节
+    reader = _FakeReader([b'{"ok": true, "seq": 7}\n'])
+    bad_first = b"\xff\xfe \x80garbage\n"
+
+    resp = await eng._read_response(
+        bad_first, cast("asyncio.StreamReader", reader), 5,
+    )
+
+    assert resp == {"ok": True, "seq": 7}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ValueError("Separator is not found, and chunk exceed the limit"),
+        asyncio.LimitOverrunError("chunk exceed the limit", 0),
+    ],
+)
+async def test_read_command_response_restarts_on_oversize_line(
+    monkeypatch: pytest.MonkeyPatch, exc: Exception,
+) -> None:
+    """#39：单行超 buffer（readline 抛 ValueError / readuntil 抛 LimitOverrunError）
+    → 重启 worker 丢残留 + 转 RuntimeError，后续页可继续（原逃逸到 task failed）。"""
+    eng = DeepSeekOCR2Engine.__new__(DeepSeekOCR2Engine)
+    eng._config = OCRConfig()
+    restarted = {"n": 0}
+
+    async def _fake_restart() -> None:
+        restarted["n"] += 1
+
+    async def _raise_oversize(
+        _stdout: asyncio.StreamReader, _timeout: float,
+    ) -> dict[str, object]:
+        raise exc
+
+    monkeypatch.setattr(eng, "_restart_worker", _fake_restart)
+    monkeypatch.setattr(eng, "_read_next_response", _raise_oversize)
+
+    reader = _FakeReader([])
+    with pytest.raises(RuntimeError, match="超 buffer 限额"):
+        await eng._read_command_response(
+            cast("asyncio.StreamReader", reader), 5.0, 1,
+        )
+
+    assert restarted["n"] == 1  # 确实重启了 worker

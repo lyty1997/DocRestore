@@ -226,7 +226,10 @@ class WorkerBackedOCREngine(ABC):
         """
         buffered = raw
         while True:
-            text = buffered.decode("utf-8").strip()
+            # 与 _drain_stream_to_logger 对齐用 errors="replace"（#39）：worker
+            # stdout 偶混非法字节，严格解码会 UnicodeDecodeError 崩整个 task；
+            # 替换为 U+FFFD 后解析失败的行按非 JSON 噪声跳过即可。
+            text = buffered.decode("utf-8", errors="replace").strip()
             if text:
                 try:
                     result: dict[str, object] = json.loads(text)
@@ -587,16 +590,7 @@ class WorkerBackedOCREngine(ABC):
 
         read_timeout = self._get_timeout()
         while True:
-            try:
-                resp = await self._read_next_response(stdout, read_timeout)
-            except asyncio.CancelledError:
-                # worker 仍在处理，响应会残留在 stdout 缓冲区
-                self._pending_resync = True
-                self._pending_seq = seq
-                raise
-            except TimeoutError:
-                msg = f"{self.engine_name} worker 响应超时({read_timeout}s)"
-                raise RuntimeError(msg) from None
+            resp = await self._read_command_response(stdout, read_timeout, seq)
 
             resp_seq = resp.get("seq")
             if isinstance(resp_seq, int):
@@ -618,6 +612,40 @@ class WorkerBackedOCREngine(ABC):
                 "响应未携带 seq（期望 %d），按当前响应返回", seq,
             )
             return resp
+
+    async def _read_command_response(
+        self,
+        stdout: asyncio.StreamReader,
+        read_timeout: float,
+        seq: int,
+    ) -> dict[str, object]:
+        """读一条 worker 响应，统一处理取消残留 / 超时 / 超长行重启。
+
+        分三类失败：
+        - CancelledError：worker 仍在处理，记 pending 让 _resync 后续 drain，不重启
+        - TimeoutError：转 RuntimeError（上层回退原文）
+        - LimitOverrunError / ValueError（#39）：单行超 worker_stdio_buffer_bytes
+          （readline 内部把 LimitOverrunError 转 ValueError；readuntil 直抛
+          LimitOverrunError），协议已失同步且超长行无法重读，重启 worker 丢弃残留，
+          后续页可继续——原先此异常逃逸到 task failed 且不重启。
+        """
+        try:
+            return await self._read_next_response(stdout, read_timeout)
+        except asyncio.CancelledError:
+            self._pending_resync = True
+            self._pending_seq = seq
+            raise
+        except TimeoutError:
+            msg = f"{self.engine_name} worker 响应超时({read_timeout}s)"
+            raise RuntimeError(msg) from None
+        except (asyncio.LimitOverrunError, ValueError) as exc:
+            logger.warning(
+                "%s worker stdout 单行超 buffer 限额，重启 worker: %s",
+                self.engine_name, exc,
+            )
+            await self._restart_worker()
+            msg = f"{self.engine_name} worker 单行响应超 buffer 限额，已重启"
+            raise RuntimeError(msg) from exc
 
     async def _read_next_response(
         self,
