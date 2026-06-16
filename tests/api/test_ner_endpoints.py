@@ -29,6 +29,7 @@ from httpx import AsyncClient
 
 from docrestore.api import routes
 from docrestore.api.errors import APIErrorCode, ApiBusinessError
+from docrestore.api.schemas import PIIConfigRequest
 from docrestore.pipeline.config import PIIConfig
 
 
@@ -94,6 +95,53 @@ class TestGuardNerBackend:
         assert ei.value.code is APIErrorCode.NER_BACKEND_UNAVAILABLE
         assert ei.value.params["remediable"] is True
         assert ei.value.params["missing_models"]  # 非空（缺的模型透出供前端提示）
+
+
+class TestResolvePiiConfig:
+    """#64：PIIConfigRequest 暴露 NER opt-out 字段并正确合成进 PIIConfig。"""
+
+    def test_synthesizes_ner_opt_out_fields(self) -> None:
+        """ner_backend / 人名 / 机构名脱敏开关从请求合成到完整配置。"""
+        cfg = routes._resolve_pii_config(
+            PIIConfigRequest(
+                enable=True,
+                ner_backend="none",
+                redact_person_name=False,
+                redact_org_name=False,
+            ),
+            PIIConfig(),
+        )
+        assert cfg is not None
+        assert cfg.enable is True
+        assert cfg.ner_backend == "none"
+        assert cfg.redact_person_name is False
+        assert cfg.redact_org_name is False
+
+    def test_unset_fields_keep_server_default(self) -> None:
+        """未传的字段沿用服务端默认（不被请求覆盖）。"""
+        default = PIIConfig()
+        cfg = routes._resolve_pii_config(
+            PIIConfigRequest(enable=True), default,
+        )
+        assert cfg is not None
+        assert cfg.ner_backend == default.ner_backend
+        assert cfg.redact_person_name == default.redact_person_name
+
+    def test_none_request_returns_none(self) -> None:
+        """无 pii 覆盖 → None（下游用默认）。"""
+        assert routes._resolve_pii_config(None, PIIConfig()) is None
+
+    def test_ner_opt_out_passes_guard_without_spacy(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """端到端（#64）：请求 ner_backend=none 合成后过 _guard_ner_backend，
+        无 spaCy 也不 400 —— 结构化-only PII 在无 spaCy 环境可用。"""
+        monkeypatch.setattr(routes, "probe_availability", _probe_unavailable)
+        cfg = routes._resolve_pii_config(
+            PIIConfigRequest(enable=True, ner_backend="none"), PIIConfig(),
+        )
+        assert cfg is not None
+        routes._guard_ner_backend(cfg)  # 不抛即通过
 
 
 class TestNerStatusEndpoint:

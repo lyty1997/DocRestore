@@ -136,6 +136,23 @@ class TestCustomSensitiveWords:
             for r in records
         )
 
+    def test_custom_word_redaction_is_idempotent(self) -> None:
+        """敏感词是其占位符子串时，二次脱敏不破坏已插入占位符（#61 幂等）。
+
+        word="PII" 其 code="[PII_REDACTED]" 含子串 "PII"：旧实现二次 redact 会在
+        占位符内部再命中 → 破坏。新实现把已存在占位符当保护区，连续两次结果一致。
+        """
+        cfg = PIIConfig(
+            enable=True,
+            custom_sensitive_words=[CustomWord(word="PII", code="[PII_REDACTED]")],
+        )
+        redactor = PIIRedactor(cfg)
+        once, _ = redactor.redact_regex_only("本段含 PII 字样")
+        twice, _ = redactor.redact_regex_only(once)
+        assert "PII 字样" not in once  # 原词已脱
+        assert once == twice  # 幂等：二次脱敏结果不变
+        assert once.count("[PII_REDACTED]") == 1  # 占位符未被二次破坏/嵌套
+
     def test_custom_word_with_code_uses_code(self) -> None:
         """指定 code 时用 code 替换"""
         cfg = PIIConfig(

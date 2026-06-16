@@ -257,13 +257,14 @@ class TestBindSafety:
         configure_auth("")
         enforce_bind_safety(host)  # 不抛异常即通过
 
-    def test_insecure_unknown_host_allowed_with_warning(
+    def test_insecure_unknown_host_refuses_start(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """无鉴权模式 + 无法判定绑定地址 → 放行（仅告警）。"""
+        """无鉴权模式 + 无法判定绑定地址 → fail-closed 拒绝启动（#62）。"""
         configure_auth("")
         monkeypatch.delenv("DOCRESTORE_BIND_HOST", raising=False)
-        enforce_bind_safety(None)  # 不抛异常
+        with pytest.raises(RuntimeError, match="无法确认绑定地址"):
+            enforce_bind_safety(None)
 
     def test_token_present_allows_any_host(self) -> None:
         """有 token → 绑任意地址都安全，不拦截。"""

@@ -27,6 +27,7 @@ import pytest
 from httpx import AsyncClient
 
 from docrestore.api import routes
+from docrestore.pipeline.config import LLMConfig
 from docrestore.pipeline.task_manager import Task, TaskStatus
 
 
@@ -36,6 +37,7 @@ def _inject_task(
     tmp_path: Path,
     *,
     with_output_file: bool = False,
+    llm: LLMConfig | None = None,
 ) -> Task:
     """直接向 TaskManager 注入指定状态的 Task。
 
@@ -54,6 +56,7 @@ def _inject_task(
         status=status,
         image_dir=str(img_dir),
         output_dir=str(out_dir),
+        llm=llm,
     )
     routes._task_manager._tasks[task_id] = task
     return task
@@ -294,6 +297,24 @@ class TestRetryTask:
         # retry 分配新 output_dir（与 resume 的关键差异）
         assert new_task.output_dir != old.output_dir
 
+    @pytest.mark.asyncio
+    async def test_retry_rejects_persisted_private_api_base(
+        self, api_client: AsyncClient, tmp_path: Path,
+    ) -> None:
+        """retry 复用持久化的内网 api_base → 400（SSRF 守卫重校验，#62）。
+
+        api_base 用链路本地字面量（云元数据），无需 DNS；守卫拒后不建新任务。
+        """
+        _inject_task(
+            "t-retry-ssrf", TaskStatus.FAILED, tmp_path,
+            llm=LLMConfig(
+                model="m", api_base="http://169.254.169.254/v1", api_key="k",
+            ),
+        )
+        resp = await api_client.post("/api/v1/tasks/t-retry-ssrf/retry")
+        assert resp.status_code == 400
+        assert "api_base" in resp.json()["detail"]
+
 
 class TestResumeTask:
     """POST /tasks/{task_id}/resume — 复用 output_dir 让 OCR 缓存命中"""
@@ -355,6 +376,21 @@ class TestResumeTask:
         assert old.task_id in (
             routes._task_manager._tasks  # type: ignore[union-attr]
         )
+
+    @pytest.mark.asyncio
+    async def test_resume_rejects_persisted_private_api_base(
+        self, api_client: AsyncClient, tmp_path: Path,
+    ) -> None:
+        """resume 复用持久化的内网 api_base → 400（SSRF 守卫重校验，#62）。"""
+        _inject_task(
+            "t-resume-ssrf", TaskStatus.FAILED, tmp_path,
+            llm=LLMConfig(
+                model="m", api_base="http://169.254.169.254/v1", api_key="k",
+            ),
+        )
+        resp = await api_client.post("/api/v1/tasks/t-resume-ssrf/resume")
+        assert resp.status_code == 400
+        assert "api_base" in resp.json()["detail"]
 
 
 class TestCleanupTasks:

@@ -723,3 +723,19 @@ tests/api + tests/pipeline 全量 **425 passed 17 skipped** + mypy --strict + ru
 **教训**：「上云前脱敏」要把**请求级配置贯穿到每一个云端 sink**（深层 helper 不得回落启动默认）、**脱敏必须在
 拼 prompt / 送检之前**（顺序写反等于没脱）、并覆盖**所有**进 prompt 的字段（不止正文，路径 / 外部片段 / 诊断同样
 外发）。结构化字段脱敏放在 `json.dumps` 之前，序列化层天然兜住占位符转义。
+
+## 请求级 api_key 任务重启后不可 resume（#64，已知限制 2026-06-16）
+
+**现象**：用请求体 `llm.api_key` 建的任务，服务重启后 resume / retry 时云端精修缺 key，
+每段 401 被 `except` 回退原文，**静默产出未精修结果**且无错误暴露。
+
+**根因**：#37 把 `api_key` 排除出 DB（明文持久化是长期凭据泄漏面），DB 水合只能从环境变量
+`DOCRESTORE_LLM_API_KEY` 回填（`llm/credentials.refill_api_key_from_env`）。若原 key 来自请求体
+而非环境，重启后无处可回填 → 水合出的 `LLMConfig.api_key` 为空。
+
+**为何不在 resume 入口硬拦**：`provider="cloud"` + 空 key 并非总是错误——指向**无鉴权本地/中转
+代理**（环回 api_base）的合法用法同样空 key，一刀切 400 会误伤既有可用任务（回归）。无法在
+resume 时区分「请求级 key 丢失」与「本就无需 key」，故按 issue #64 验收的「**或文档化**」分支处理。
+
+**规避**：需 resume 的云端精修任务，把 key 配进环境变量 `DOCRESTORE_LLM_API_KEY`（重启后水合自动
+回填），而非仅放请求体；或重新建任务并在请求体重新提供 key。本地 LLM 用 `provider="local"`，不受影响。

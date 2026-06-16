@@ -30,9 +30,11 @@ import pytest
 
 from docrestore.models import PageOCR, TaskProgress
 from docrestore.pipeline.config import (
+    CodeRestoreConfig,
     LLMConfig,
     PIIConfig,
     PipelineConfig,
+    PowerPointRestoreConfig,
 )
 from docrestore.pipeline.pipeline import Pipeline
 from docrestore.pipeline.rate_controller import RateController
@@ -272,3 +274,50 @@ class TestProcessTreePartialFailure:
         assert by_dir["good1"].markdown != ""
         assert by_dir["good2"].error == ""
         assert by_dir["good2"].markdown != ""
+
+
+class TestWillStreamRefine:
+    """#44：多子目录是否需 warmup 冷启动的判定（决定能否跳过最长 60s 白等）。"""
+
+    @staticmethod
+    def _pipeline() -> Pipeline:
+        return Pipeline(
+            PipelineConfig(llm=LLMConfig(model="m", enable_refine=True)),
+        )
+
+    def test_cloud_refine_on_needs_cold_start(self) -> None:
+        """开精修 + 配了 model + 文档模式 → 需冷启动。"""
+        pipe = self._pipeline()
+        assert pipe._will_stream_refine(
+            LLMConfig(model="m", enable_refine=True), None, None,
+        ) is True
+
+    def test_refine_off_skips(self) -> None:
+        """关精修 → 不调云端 → 跳过冷启动。"""
+        pipe = self._pipeline()
+        assert pipe._will_stream_refine(
+            LLMConfig(model="m", enable_refine=False), None, None,
+        ) is False
+
+    def test_empty_model_skips(self) -> None:
+        """未配 model → 无 refiner → 跳过冷启动。"""
+        pipe = self._pipeline()
+        assert pipe._will_stream_refine(
+            LLMConfig(model="", enable_refine=True), None, None,
+        ) is False
+
+    def test_code_mode_skips(self) -> None:
+        """代码模式有独立精修路径，不经段长冷启动 → 跳过。"""
+        pipe = self._pipeline()
+        assert pipe._will_stream_refine(
+            LLMConfig(model="m", enable_refine=True),
+            CodeRestoreConfig(enable=True), None,
+        ) is False
+
+    def test_ppt_mode_skips(self) -> None:
+        """PPT 模式按页精修，不经段长冷启动 → 跳过。"""
+        pipe = self._pipeline()
+        assert pipe._will_stream_refine(
+            LLMConfig(model="m", enable_refine=True),
+            None, PowerPointRestoreConfig(enable=True),
+        ) is False

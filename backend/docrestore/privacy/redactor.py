@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 from docrestore.models import RedactionRecord
@@ -92,6 +93,18 @@ def _replace_entities(
         text = text.replace(name, placeholder)
         count += occurrences
     return text, count
+
+
+def _placeholder_split_re(placeholders: set[str]) -> re.Pattern[str] | None:
+    """构造按占位符切分文本的正则（捕获组保留占位符本身）。
+
+    长串优先（按长度降序拼 alternation），避免短占位符吞掉长占位符；无有效占位符
+    返回 None。供自定义词替换把已插入占位符当「保护区」、不二次命中（#61 幂等）。
+    """
+    valid = sorted({p for p in placeholders if p}, key=len, reverse=True)
+    if not valid:
+        return None
+    return re.compile("(" + "|".join(re.escape(p) for p in valid) + ")")
 
 
 class PIIRedactor:
@@ -176,6 +189,11 @@ class PIIRedactor:
         custom_words_placeholder。按 placeholder 聚合为 RedactionRecord，
         多代号场景下会产生多条记录。替换顺序按 word 长度全局降序，
         避免短词先吞掉长词的前缀（如"张伟"先于"张伟强"）。
+
+        幂等（#61）：把已存在的占位符视为「保护区」，只在占位符之外的自由文本里
+        替换——否则当敏感词是其占位符子串时（如 word="PII"、placeholder=
+        "[PII_REDACTED]"），对重叠文本反复脱敏（分段精修 + 输出兜底会多次 redact
+        同一段）会在已插入占位符内部二次命中并破坏它。
         """
         records: list[RedactionRecord] = []
         words = self._config.custom_sensitive_words
@@ -189,15 +207,31 @@ class PIIRedactor:
             key=lambda e: len(e.word),
             reverse=True,
         )
+        if not sorted_entries:
+            return text, records
+
         counts: dict[str, int] = {}
-        for entry in sorted_entries:
-            placeholder = entry.code or default_ph
-            occurrences = text.count(entry.word)
-            if occurrences > 0:
-                text = text.replace(entry.word, placeholder)
-                counts[placeholder] = (
-                    counts.get(placeholder, 0) + occurrences
-                )
+
+        def _redact_free(segment: str) -> str:
+            for entry in sorted_entries:
+                placeholder = entry.code or default_ph
+                occurrences = segment.count(entry.word)
+                if occurrences > 0:
+                    segment = segment.replace(entry.word, placeholder)
+                    counts[placeholder] = counts.get(placeholder, 0) + occurrences
+            return segment
+
+        split_re = _placeholder_split_re(
+            {e.code or default_ph for e in sorted_entries},
+        )
+        if split_re is None:
+            text = _redact_free(text)
+        else:
+            # split 后奇数段是占位符（原样保留），偶数段是自由文本（执行替换）
+            text = "".join(
+                part if i % 2 == 1 else _redact_free(part)
+                for i, part in enumerate(split_re.split(text))
+            )
 
         for placeholder, count in counts.items():
             records.append(
