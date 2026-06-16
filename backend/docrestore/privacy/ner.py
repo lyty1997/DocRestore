@@ -245,3 +245,17 @@ def get_detector(model_names: Sequence[str]) -> SpacyEntityDetector:
         detector = SpacyEntityDetector(model_names)
         _DETECTOR_CACHE[key] = detector
         return detector
+
+
+def reset_detector_cache() -> None:
+    """清空 detector 进程级缓存 + 失效 import 探测缓存（#61）。
+
+    供 ``POST /ner/setup`` 装好 spaCy / 模型后调用：丢弃此前在「模型缺失」状态下
+    加载并被钉死（``_loaded=True`` / ``_nlps=[]``）的 detector，使同进程后续
+    ``get_detector`` 重新构造并加载新装模型，兑现「装完免重启即生效」。
+    ``importlib.invalidate_caches()`` 让 ``find_spec`` 能探测到刚装进 venv 的新包
+    （否则 ``probe_availability`` 仍报「未装」）。
+    """
+    importlib.invalidate_caches()
+    with _CACHE_LOCK:
+        _DETECTOR_CACHE.clear()

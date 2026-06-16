@@ -362,6 +362,30 @@ class TestInternalUrlRedaction:
         assert "127.0.0.1" not in result
         assert cfg.internal_url_placeholder in result
 
+    def test_private_ipv6_url_redacted(self) -> None:
+        """[IPv6] 唯一本地地址（fd00::/8）的 URL 零配置即脱（#61）。"""
+        cfg = PIIConfig(enable=True)
+        text = "内网 http://[fd00::1]/path 服务"
+        result, records = redact_structured_pii(text, cfg)
+        assert "fd00::1" not in result
+        assert cfg.internal_url_placeholder in result
+        assert any(r.kind == "internal_url" for r in records)
+
+    def test_loopback_ipv6_url_redacted(self) -> None:
+        """[::1] 回环 IPv6 视为内部，带端口整体脱。"""
+        cfg = PIIConfig(enable=True)
+        text = "http://[::1]:8080/admin"
+        result, _ = redact_structured_pii(text, cfg)
+        assert result == cfg.internal_url_placeholder
+
+    def test_public_ipv6_url_preserved(self) -> None:
+        """公网 IPv6（Cloudflare DNS，全局单播）不误伤。"""
+        cfg = PIIConfig(enable=True)
+        text = "公网 DNS http://[2606:4700:4700::1111]/dns-query 查询"
+        result, records = redact_structured_pii(text, cfg)
+        assert result == text
+        assert not any(r.kind == "internal_url" for r in records)
+
     def test_configured_domain_redacted(self) -> None:
         """host 命中配置的敏感域名后缀 → 整条 URL（含路径）脱。"""
         cfg = PIIConfig(enable=True, sensitive_url_domains=["antfin.com"])
