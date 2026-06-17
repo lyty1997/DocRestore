@@ -422,6 +422,26 @@ class PowerPointRestoreConfig(BaseModel):
     rectify_top_extend_ratio: float = 0.2
 
 
+class PdfRenderConfig(BaseModel):
+    """PDF 输入逐页渲染配置（Epic A）。
+
+    上传 / 直传的 PDF 在 pipeline 摄取入口逐页渲染成 PNG 后，复用既有图片
+    OCR → 去重 → 精修链路；一个 PDF = 一篇文档。本阶段仅用服务端默认，不暴露
+    请求级覆盖、不进 DB。详见 ``docs/zh/pdf-mode.md``。
+    """
+
+    #: 是否渲染 PDF 输入（关闭则 .pdf 被 scan_images 忽略、不产文档）
+    enable: bool = True
+    #: 渲染分辨率（DPI 200 已验证与 PaddleOCR-VL 同像素契约）
+    dpi: int = 200
+    #: 单 PDF 页数硬上限，超出截断前 N 页 + warning（防内存 / 磁盘打爆）
+    max_pages: int = 500
+    #: 渲染 PNG 长边上限，超出按比例降采样（防超大幅面页撑爆 OCR）
+    max_long_side: int = 4096
+    #: 页号零填充位数，保证 scan_images 字典序 = 页序
+    zero_pad: int = 4
+
+
 class ContentCropConfig(BaseModel):
     """文档模式正文区裁剪配置（仅文档模式生效）。
 
@@ -447,6 +467,7 @@ class PipelineConfig(BaseModel):
     code: CodeRestoreConfig = Field(default_factory=CodeRestoreConfig)
     ppt: PowerPointRestoreConfig = Field(default_factory=PowerPointRestoreConfig)
     content_crop: ContentCropConfig = Field(default_factory=ContentCropConfig)
+    pdf: PdfRenderConfig = Field(default_factory=PdfRenderConfig)
     db_path: str = "data/docrestore.db"  # SQLite 持久化路径
     debug: bool = True  # 落盘各阶段中间结果到 output_dir/debug/
 
