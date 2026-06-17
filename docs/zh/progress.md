@@ -1,5 +1,28 @@
 # 开发进度
 
+## 2026-06-18 - Epic A A1（#75 后端 PDF 输入）落地
+
+按设计 `docs/zh/pdf-mode.md` 实现 A1 后端，分支 `feature/s-a1-pdf-render`，3 个有证据闭环：
+
+- **A1-①**（`ab41422`）：新建 `backend/docrestore/pipeline/render/pdf.py`
+  `render_pdf_to_dir`（pypdfium2 逐页渲染 RGB PNG）——幂等 sentinel `.render_done.json`
+  / 坏页跳过 / 损坏 PDF 上浮 / `max_pages` 截断 / `max_long_side` 降采样 / `safe_pdf_stem`
+  净化 / 零填充命名自动加宽；新增 `PdfRenderConfig`（`PipelineConfig.pdf`，仅服务端默认）；
+  `pyproject.toml` 加 pypdfium2 + mypy override。单测 10 例。
+- **A1-②**（`536759e`）：`process_tree` 摄取入口插 `_expand_pdfs`（单 PDF 落根命中
+  `process_many` 快路 / 多 PDF 分子目录）；坏 PDF 转占位失败合入复用部分失败聚合；
+  抽 `_process_subdirs` 化解 C901；content_crop 对 PDF 渲染页跳过（sentinel 判定 D8）；
+  pypdfium2 改懒加载。集成测 5 例。
+- **A1-③**（`332bb3d`）：上传 `.pdf` 放行 + PDF 200MB 按 ext 分流；全图片 xor 全 PDF
+  互斥双闸（upload_files 闸一 + create_task `_has_mixed_input` 闸二）。测试 6 例。
+
+**证据/门禁**：每步过 `check_quality` 等价检查；最终 mypy 78 文件 0 错 / ruff / typos /
+pytest 1392 passed, 0 failed。过程坑：Pillow JPEG 懒加载（已入 known-issues）；
+ruff hook 比项目 gate 严（ASYNC240/C901 项目 ignore 但 hook 拦，按本文件惯例 to_thread + 抽函数解决）。
+
+**遗留**：**A2（#76 前端）未开工**——FileUploader accept 加 `application/pdf` + 白名单、
+UploadPreviewPanel 对 .pdf 占位图、i18n、视觉验证（需起 dev server 截图）。
+
 ## 2026-06-17 - Epic A（PDF 输入）设计定稿
 
 **背景**：MinerU vs PaddleOCR-VL benchmark 结论「不引入 MinerU、维持 PaddleOCR-VL」
