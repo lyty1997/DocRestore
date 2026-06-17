@@ -72,14 +72,15 @@ class TestUpload:
         resp = await api_client.post("/api/v1/uploads")
         sid = resp.json()["session_id"]
 
+        # .pdf 已是合法输入（Epic A），用 .txt 验证无效扩展名仍被拒
         resp = await api_client.post(
             f"/api/v1/uploads/{sid}/files",
-            files=[("files", ("doc.pdf", b"fake-pdf", "application/pdf"))],
+            files=[("files", ("doc.txt", b"fake-text", "text/plain"))],
         )
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["uploaded"]) == 0
-        assert "doc.pdf" in data["failed"]
+        assert "doc.txt" in data["failed"]
 
     @pytest.mark.asyncio
     async def test_upload_mixed_files(
