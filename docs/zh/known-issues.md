@@ -739,3 +739,18 @@ resume 时区分「请求级 key 丢失」与「本就无需 key」，故按 iss
 
 **规避**：需 resume 的云端精修任务，把 key 配进环境变量 `DOCRESTORE_LLM_API_KEY`（重启后水合自动
 回填），而非仅放请求体；或重新建任务并在请求体重新提供 key。本地 LLM 用 `provider="local"`，不受影响。
+
+## Pillow 首次 RGB→PDF 保存 KeyError 'JPEG'（Epic A 渲染，2026-06-18）
+
+**现象**：在全新 Python 进程里第一步就 `Image.new("RGB", ...).save(path, save_all=True,
+append_images=[...])` 存多页 PDF，报 `KeyError: 'JPEG'`（`PdfImagePlugin._write_image`
+里 `Image.SAVE["JPEG"]` 不存在）；但 `features.check("jpg")` 明明为 True。
+
+**根因**：Pillow 插件**懒加载**。`Image.save()` 只触发 `preinit()`，而 PDF 保存对 RGB 页
+用 JPEG(DCTDecode) 编码，需要完整 `Image.init()` 注册的 `Image.SAVE["JPEG"]` 处理器。
+若进程内此前没有任何操作触发全量 init（如 `features.check`、open 一张 jpg），`Image.SAVE`
+里就没有 JPEG，保存即 KeyError。与 libjpeg 是否安装**无关**（本机 jpg 支持正常）。
+
+**规避**：造 PDF（fixture / 任何 RGB→PDF）前显式 `Image.init()`。已在
+`tests/pipeline/render/test_pdf.py::_make_pdf` 落地。生产渲染路径用 pypdfium2 读 PDF、
+不走 Pillow 存 PDF，不受影响。

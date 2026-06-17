@@ -1,5 +1,80 @@
 # 开发进度
 
+## 2026-06-18 - Epic A A2（#76 前端 PDF 输入）落地 → Epic A 收口
+
+按设计 `docs/zh/pdf-mode.md` 实现 A2 前端，分支 `feature/s-a1-pdf-render`，提交 `019f97d`：
+
+- **新建 `frontend/src/features/task/fileKind.ts`**：纯逻辑类别判定模块
+  （`fileKind` / `isPdfFilename` / `isAcceptedFilename` / `classifySelection`，导出
+  `IMAGE_EXTENSIONS` / `PDF_EXTENSION` / `ALLOWED_EXTENSIONS` / `ACCEPT_ATTR`），便于单测复用。
+- **`FileUploader.tsx`**：`accept` 加 `application/pdf`、白名单加 `.pdf`；选择时
+  **互斥预校验**（图片与 PDF 混选→红框提示且不发起上传，对应后端 D6 闸一/闸二的客户端前置）；
+  「选择图片文件」按钮文案改「选择文件」。
+- **`UploadPreviewPanel.tsx`**：`.pdf` 不能 `<img>`，改渲染占位卡——`<a target=_blank>`
+  PDF 角标，点击新标签页打开；图片仍走原 `<img>` + lightbox。
+- **i18n 三语**：`fileUploader.fileTypeHint`（含 PDF + 互斥说明）/ 新增
+  `fileUploader.mixedInputError` / `uploadPreview.pdfDocument` / `noImages` 文案泛化。
+- **`App.css`**：`.upload-preview-pdf` 占位卡（4:3 同图片缩略图）+ `.upload-mixed-warning` 红框。
+
+**证据/门禁**：新增 3 个测试文件共 14 例（`fileKind.test.ts` 10 + `FileUploader.test.tsx` 2
++ `UploadPreviewPanel.test.tsx` 2），frontend vitest 135 passed；
+`check_quality.sh` EXIT=0（mypy / ruff / typos / 前端 typecheck + lint / 后端 pytest 1392 passed）。
+**视觉验证**（Playwright + dev server + 真实后端 insecure 回环）：①空闲态按钮+PDF/互斥提示
+②混选红框告警 ③真实上传单 PDF→预览面板 PDF 占位卡渲染正确，三张截图均已核对（验证产物已清理未入库）。
+
+**Epic A（#72）收口**：A1 后端 + A2 前端全部落地，PDF 输入端到端打通
+（上传 PDF → 摄取入口逐页渲染 → 复用 OCR→去重→精修 → 一 PDF 一文档）。
+**遗留**：本分支累计 7 commit 待合 dev（届时 release PR 收口 `Fixes #72 #75 #76`）；
+后续 Epic 未开工——C1 `#77`（公式渲染）/ Epic D `#73` / Epic E `#74`。
+
+## 2026-06-18 - Epic A A1（#75 后端 PDF 输入）落地
+
+按设计 `docs/zh/pdf-mode.md` 实现 A1 后端，分支 `feature/s-a1-pdf-render`，3 个有证据闭环：
+
+- **A1-①**（`ab41422`）：新建 `backend/docrestore/pipeline/render/pdf.py`
+  `render_pdf_to_dir`（pypdfium2 逐页渲染 RGB PNG）——幂等 sentinel `.render_done.json`
+  / 坏页跳过 / 损坏 PDF 上浮 / `max_pages` 截断 / `max_long_side` 降采样 / `safe_pdf_stem`
+  净化 / 零填充命名自动加宽；新增 `PdfRenderConfig`（`PipelineConfig.pdf`，仅服务端默认）；
+  `pyproject.toml` 加 pypdfium2 + mypy override。单测 10 例。
+- **A1-②**（`536759e`）：`process_tree` 摄取入口插 `_expand_pdfs`（单 PDF 落根命中
+  `process_many` 快路 / 多 PDF 分子目录）；坏 PDF 转占位失败合入复用部分失败聚合；
+  抽 `_process_subdirs` 化解 C901；content_crop 对 PDF 渲染页跳过（sentinel 判定 D8）；
+  pypdfium2 改懒加载。集成测 5 例。
+- **A1-③**（`332bb3d`）：上传 `.pdf` 放行 + PDF 200MB 按 ext 分流；全图片 xor 全 PDF
+  互斥双闸（upload_files 闸一 + create_task `_has_mixed_input` 闸二）。测试 6 例。
+
+**证据/门禁**：每步过 `check_quality` 等价检查；最终 mypy 78 文件 0 错 / ruff / typos /
+pytest 1392 passed, 0 failed。过程坑：Pillow JPEG 懒加载（已入 known-issues）；
+ruff hook 比项目 gate 严（ASYNC240/C901 项目 ignore 但 hook 拦，按本文件惯例 to_thread + 抽函数解决）。
+
+**遗留**：~~A2（#76 前端）未开工~~ **已落地（见本文件顶部 2026-06-18 A2 条目）**。
+
+## 2026-06-17 - Epic A（PDF 输入）设计定稿
+
+**背景**：MinerU vs PaddleOCR-VL benchmark 结论「不引入 MinerU、维持 PaddleOCR-VL」
+（见 `output/bench/quality/report.md`）后，基于现状设计 6 个 feature 并建 GitHub issue 树
+（Epic A `#72` / C1 `#77` / Epic D `#73` / Epic E `#74`，14 个 issue）。本次完成 **Epic A
+（PDF 输入）设计**。
+
+**方法**：ultracode workflow 并行 7 子系统只读核查 → 综合设计 → 对抗式挑刺（9 agent）。
+挑刺揪出 6 处必补欠工程，全部吸收进设计。
+
+**设计定稿**（`docs/zh/pdf-mode.md`，用户确认 Q1–Q5）：
+- 架构：**摄取入口渲染**（非上传时）、**单 PDF 落 `image_dir` 根命中 `process_many` 快路、
+  多 PDF 分 `{stem}/` 子目录**；复用 `process_tree` 多文档 / `IncrementalMerger` 跨页 /
+  source-images 锚点三套机制，核心流式链路一行不动。引擎 `pypdfium2`（Apache，bench 已验证）。
+- 6 处必补：D2 渲染幂等（`.render_done.json` sentinel，防 resume 重渲染+缓存键漂移）/
+  D4 `{stem}_page_NNNN.png` 前缀强制（防多 PDF basename 串页）/ D5 `pdf_stem` 安全净化 /
+  D6 互斥双闸（`create_task` 兜底闸从零新增）/ D8 content_crop 对 PDF 默认关 / D9 长边上限。
+- 确认项：content_crop 默认关 / PDF 上限 200MB / max_pages 500 截断+警告 /
+  配置仅服务端默认 / zip 不打源 PDF。
+
+**产出**：`docs/zh/pdf-mode.md`（含 PlantUML 数据流图，已编译验证 exit 0）；
+`architecture.md` §6.3 + `README.md` 索引同步。
+
+**遗留**：A1（`#75` 后端）/ A2（`#76` 前端）实现待开工；建议先闭环 A1 自包含核心
+（`render/pdf.py` + `PdfRenderConfig` + 单测，Pillow 造多页 PDF fixture）再做 pipeline 接入与前端。
+
 ## 2026-06-03 - 统一 LLM 精修开关 + PPT 按页精修（替代失效的 llm_polish）+ code-review
 
 **背景**：对 PPT 还原模式（AGE-83，S0–S6 刚合并 dev）做了一轮 max-effort code-review，

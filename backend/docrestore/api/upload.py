@@ -48,13 +48,21 @@ logger = logging.getLogger(__name__)
 
 upload_router = APIRouter()
 
-# 允许的图片扩展名
-_ALLOWED_EXTENSIONS = frozenset({
+# 允许的扩展名：图片 + PDF（Epic A）。一批上传要么全图片要么全 PDF（互斥闸见
+# upload_files）；PDF 在 pipeline 摄取入口逐页渲染成图片后复用图片链路。
+_IMAGE_EXTENSIONS = frozenset({
     ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif",
 })
+_PDF_EXTENSION = ".pdf"
+_ALLOWED_EXTENSIONS = _IMAGE_EXTENSIONS | {_PDF_EXTENSION}
 
-# 默认配置
-_MAX_FILE_SIZE_MB = 50
+# 输入类型标识（会话内互斥）
+_IMAGE_KIND = "image"
+_PDF_KIND = "pdf"
+
+# 默认配置：PDF 多页/扫描件常超图片上限，单独放宽
+_MAX_FILE_SIZE_MB = 50  # 图片单文件上限
+_MAX_PDF_SIZE_MB = 200  # PDF 单文件上限
 _SESSION_TTL_SECONDS = 3600  # 1 小时
 _CLEANUP_INTERVAL_SECONDS = 1800  # 过期上传会话清理轮询间隔（半小时）
 
@@ -191,9 +199,9 @@ def _build_upload_file_item(
 
 
 async def _save_uploaded_file(
-    file: UploadFile, target: Path, filename: str,
+    file: UploadFile, target: Path, filename: str, *, max_bytes: int,
 ) -> int | None:
-    """流式写入上传文件。返回写入字节数，失败返回 None。"""
+    """流式写入上传文件（上限 max_bytes，按扩展名分流）。返回字节数，失败 None。"""
     try:
         size = 0
         too_large = False
@@ -203,7 +211,7 @@ async def _save_uploaded_file(
                 if not chunk:
                     break
                 size += len(chunk)
-                if size > _MAX_FILE_SIZE_MB * 1024 * 1024:
+                if size > max_bytes:
                     too_large = True
                     break
                 await f.write(chunk)
@@ -216,6 +224,17 @@ async def _save_uploaded_file(
         logger.exception("上传文件失败: %s", filename)
         target.unlink(missing_ok=True)  # noqa: ASYNC240
         return None
+
+
+def _session_input_kind(session: UploadSession) -> str | None:
+    """会话已确立的输入类型（首个已上传文件决定；空会话返回 None）。
+
+    会话内全图片 xor 全 PDF（互斥闸保证），故取任一已上传文件的扩展名即可判定。
+    """
+    for record in session.files.values():
+        ext = Path(record.filename).suffix.lower()
+        return _PDF_KIND if ext == _PDF_EXTENSION else _IMAGE_KIND
+    return None
 
 
 @upload_router.post(
@@ -246,6 +265,8 @@ async def upload_files(
 
     uploaded: list[str] = []
     failed: list[str] = []
+    # 全图片 xor 全 PDF 互斥（D6 闸一）：首个文件确立会话类型，后续异类进 failed
+    session_kind = _session_input_kind(session)
 
     for idx, file in enumerate(files):
         filename = file.filename or "unnamed"
@@ -256,12 +277,24 @@ async def upload_files(
             failed.append(filename)
             continue
 
+        kind = _PDF_KIND if ext == _PDF_EXTENSION else _IMAGE_KIND
+        if session_kind is None:
+            session_kind = kind
+        elif kind != session_kind:
+            failed.append(filename)  # 混合输入拒绝（全图片 xor 全 PDF）
+            continue
+
+        max_bytes = (
+            _MAX_PDF_SIZE_MB if kind == _PDF_KIND else _MAX_FILE_SIZE_MB
+        ) * 1024 * 1024
         target, relative_path = _resolve_upload_target(
             session, filename, paths, idx,
         )
         target.parent.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240
 
-        result = await _save_uploaded_file(file, target, filename)
+        result = await _save_uploaded_file(
+            file, target, filename, max_bytes=max_bytes,
+        )
         if result is None:
             failed.append(filename)
         else:
