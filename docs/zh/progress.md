@@ -1,5 +1,31 @@
 # 开发进度
 
+## 2026-06-17 - Epic A（PDF 输入）设计定稿
+
+**背景**：MinerU vs PaddleOCR-VL benchmark 结论「不引入 MinerU、维持 PaddleOCR-VL」
+（见 `output/bench/quality/report.md`）后，基于现状设计 6 个 feature 并建 GitHub issue 树
+（Epic A `#72` / C1 `#77` / Epic D `#73` / Epic E `#74`，14 个 issue）。本次完成 **Epic A
+（PDF 输入）设计**。
+
+**方法**：ultracode workflow 并行 7 子系统只读核查 → 综合设计 → 对抗式挑刺（9 agent）。
+挑刺揪出 6 处必补欠工程，全部吸收进设计。
+
+**设计定稿**（`docs/zh/pdf-mode.md`，用户确认 Q1–Q5）：
+- 架构：**摄取入口渲染**（非上传时）、**单 PDF 落 `image_dir` 根命中 `process_many` 快路、
+  多 PDF 分 `{stem}/` 子目录**；复用 `process_tree` 多文档 / `IncrementalMerger` 跨页 /
+  source-images 锚点三套机制，核心流式链路一行不动。引擎 `pypdfium2`（Apache，bench 已验证）。
+- 6 处必补：D2 渲染幂等（`.render_done.json` sentinel，防 resume 重渲染+缓存键漂移）/
+  D4 `{stem}_page_NNNN.png` 前缀强制（防多 PDF basename 串页）/ D5 `pdf_stem` 安全净化 /
+  D6 互斥双闸（`create_task` 兜底闸从零新增）/ D8 content_crop 对 PDF 默认关 / D9 长边上限。
+- 确认项：content_crop 默认关 / PDF 上限 200MB / max_pages 500 截断+警告 /
+  配置仅服务端默认 / zip 不打源 PDF。
+
+**产出**：`docs/zh/pdf-mode.md`（含 PlantUML 数据流图，已编译验证 exit 0）；
+`architecture.md` §6.3 + `README.md` 索引同步。
+
+**遗留**：A1（`#75` 后端）/ A2（`#76` 前端）实现待开工；建议先闭环 A1 自包含核心
+（`render/pdf.py` + `PdfRenderConfig` + 单测，Pillow 造多页 PDF fixture）再做 pipeline 接入与前端。
+
 ## 2026-06-03 - 统一 LLM 精修开关 + PPT 按页精修（替代失效的 llm_polish）+ code-review
 
 **背景**：对 PPT 还原模式（AGE-83，S0–S6 刚合并 dev）做了一轮 max-effort code-review，
