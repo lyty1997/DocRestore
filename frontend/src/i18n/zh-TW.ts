@@ -279,10 +279,12 @@ export const zhTW: Record<TranslationKey, string> = {
   "tokenSettings.ariaLabel": "API Token 設定",
 
   // ── 檔案上傳 ──
-  "fileUploader.selectFiles": "選擇圖片檔案",
+  "fileUploader.selectFiles": "選擇檔案",
   "fileUploader.selectDir": "選擇目錄",
   "fileUploader.fileTypeHint":
-    "支援 JPG、PNG、BMP、TIFF 格式。選擇目錄時自動遍歷子目錄。",
+    "支援 JPG、PNG、BMP、TIFF 圖片，或 PDF 文件。同一批要麼全是圖片、要麼全是 PDF，不可混合。選擇目錄時自動遍歷子目錄。",
+  "fileUploader.mixedInputError":
+    "同一批輸入要麼全是圖片、要麼全是 PDF，不可混合。請分兩次上傳。",
   "fileUploader.uploading": "正在上傳... {uploaded} / {total}",
   "fileUploader.cancelUpload": "取消上傳",
   "fileUploader.uploadComplete": "上傳完成：{count} 個檔案",
@@ -311,8 +313,9 @@ export const zhTW: Record<TranslationKey, string> = {
   "uploadPreview.photoCount": "{count} 張照片",
   "uploadPreview.groupCount": "{count} 張",
   "uploadPreview.ungrouped": "未分組",
-  "uploadPreview.noImages": "目前沒有可用圖片",
+  "uploadPreview.noImages": "目前沒有可用檔案",
   "uploadPreview.deleting": "刪除中...",
+  "uploadPreview.pdfDocument": "PDF 文件（點擊在新分頁開啟）",
 
   // ── 來源選擇（本地/伺服器） ──
   "sourcePicker.localTab": "本地",

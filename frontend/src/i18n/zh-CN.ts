@@ -290,10 +290,12 @@ export const zhCN = {
   "tokenSettings.ariaLabel": "API Token 设置",
 
   // ── 文件上传 ──
-  "fileUploader.selectFiles": "选择图片文件",
+  "fileUploader.selectFiles": "选择文件",
   "fileUploader.selectDir": "选择目录",
   "fileUploader.fileTypeHint":
-    "支持 JPG、PNG、BMP、TIFF 格式。选择目录时自动遍历子目录。",
+    "支持 JPG、PNG、BMP、TIFF 图片，或 PDF 文档。同一批要么全是图片、要么全是 PDF，不可混合。选择目录时自动遍历子目录。",
+  "fileUploader.mixedInputError":
+    "同一批输入要么全是图片、要么全是 PDF，不可混合。请分两次上传。",
   "fileUploader.uploading": "正在上传... {uploaded} / {total}",
   "fileUploader.cancelUpload": "取消上传",
   "fileUploader.uploadComplete": "上传完成：{count} 个文件",
@@ -322,8 +324,9 @@ export const zhCN = {
   "uploadPreview.photoCount": "{count} 张照片",
   "uploadPreview.groupCount": "{count} 张",
   "uploadPreview.ungrouped": "未分组",
-  "uploadPreview.noImages": "当前没有可用图片",
+  "uploadPreview.noImages": "当前没有可用文件",
   "uploadPreview.deleting": "删除中...",
+  "uploadPreview.pdfDocument": "PDF 文档（点击在新标签页打开）",
 
   // ── 来源选择（本地/服务器） ──
   "sourcePicker.localTab": "本地",

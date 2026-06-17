@@ -1538,6 +1538,17 @@ body {
   color: var(--color-text-secondary);
 }
 
+/* 互斥违例提示（图片与 PDF 混选） */
+.upload-mixed-warning {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.82rem;
+  color: var(--color-danger, #c0392b);
+  background: var(--color-danger-glow, rgba(192, 57, 43, 0.1));
+  border: 1px solid var(--color-danger, #c0392b);
+  border-radius: 8px;
+}
+
 .upload-progress {
   padding: 1rem 0;
 }
@@ -1775,6 +1786,27 @@ body {
   aspect-ratio: 4 / 3;
   object-fit: cover;
   display: block;
+}
+
+/* PDF 占位卡：PDF 无法直接渲染缩略图，用图标占位 */
+.upload-preview-pdf {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background: var(--color-primary-glow);
+  text-decoration: none;
+}
+
+.upload-preview-pdf-badge {
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--color-primary);
+  border: 2px solid var(--color-primary);
+  border-radius: 6px;
+  padding: 0.25rem 0.5rem;
 }
 
 .upload-preview-meta {

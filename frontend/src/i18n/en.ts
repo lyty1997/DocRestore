@@ -287,10 +287,12 @@ export const en: Record<TranslationKey, string> = {
   "tokenSettings.ariaLabel": "API Token Settings",
 
   // ── File uploader ──
-  "fileUploader.selectFiles": "Select Image Files",
+  "fileUploader.selectFiles": "Select Files",
   "fileUploader.selectDir": "Select Directory",
   "fileUploader.fileTypeHint":
-    "Supports JPG, PNG, BMP, TIFF formats. Selecting a directory traverses subdirectories automatically.",
+    "Supports JPG, PNG, BMP, TIFF images, or PDF documents. Each batch must be either all images or all PDFs, not mixed. Selecting a directory traverses subdirectories automatically.",
+  "fileUploader.mixedInputError":
+    "A batch must be either all images or all PDFs, not mixed. Please upload them separately.",
   "fileUploader.uploading": "Uploading... {uploaded} / {total}",
   "fileUploader.cancelUpload": "Cancel Upload",
   "fileUploader.uploadComplete": "Upload complete: {count} files",
@@ -320,8 +322,9 @@ export const en: Record<TranslationKey, string> = {
   "uploadPreview.photoCount": "{count} photos",
   "uploadPreview.groupCount": "{count} files",
   "uploadPreview.ungrouped": "Ungrouped",
-  "uploadPreview.noImages": "No images available",
+  "uploadPreview.noImages": "No files available",
   "uploadPreview.deleting": "Deleting...",
+  "uploadPreview.pdfDocument": "PDF document (click to open in a new tab)",
 
   // ── Source picker (local / server) ──
   "sourcePicker.localTab": "Local",
