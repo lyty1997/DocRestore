@@ -1,5 +1,32 @@
 # 开发进度
 
+## 2026-06-18 - Epic A A2（#76 前端 PDF 输入）落地 → Epic A 收口
+
+按设计 `docs/zh/pdf-mode.md` 实现 A2 前端，分支 `feature/s-a1-pdf-render`，提交 `019f97d`：
+
+- **新建 `frontend/src/features/task/fileKind.ts`**：纯逻辑类别判定模块
+  （`fileKind` / `isPdfFilename` / `isAcceptedFilename` / `classifySelection`，导出
+  `IMAGE_EXTENSIONS` / `PDF_EXTENSION` / `ALLOWED_EXTENSIONS` / `ACCEPT_ATTR`），便于单测复用。
+- **`FileUploader.tsx`**：`accept` 加 `application/pdf`、白名单加 `.pdf`；选择时
+  **互斥预校验**（图片与 PDF 混选→红框提示且不发起上传，对应后端 D6 闸一/闸二的客户端前置）；
+  「选择图片文件」按钮文案改「选择文件」。
+- **`UploadPreviewPanel.tsx`**：`.pdf` 不能 `<img>`，改渲染占位卡——`<a target=_blank>`
+  PDF 角标，点击新标签页打开；图片仍走原 `<img>` + lightbox。
+- **i18n 三语**：`fileUploader.fileTypeHint`（含 PDF + 互斥说明）/ 新增
+  `fileUploader.mixedInputError` / `uploadPreview.pdfDocument` / `noImages` 文案泛化。
+- **`App.css`**：`.upload-preview-pdf` 占位卡（4:3 同图片缩略图）+ `.upload-mixed-warning` 红框。
+
+**证据/门禁**：新增 3 个测试文件共 14 例（`fileKind.test.ts` 10 + `FileUploader.test.tsx` 2
++ `UploadPreviewPanel.test.tsx` 2），frontend vitest 135 passed；
+`check_quality.sh` EXIT=0（mypy / ruff / typos / 前端 typecheck + lint / 后端 pytest 1392 passed）。
+**视觉验证**（Playwright + dev server + 真实后端 insecure 回环）：①空闲态按钮+PDF/互斥提示
+②混选红框告警 ③真实上传单 PDF→预览面板 PDF 占位卡渲染正确，三张截图均已核对（验证产物已清理未入库）。
+
+**Epic A（#72）收口**：A1 后端 + A2 前端全部落地，PDF 输入端到端打通
+（上传 PDF → 摄取入口逐页渲染 → 复用 OCR→去重→精修 → 一 PDF 一文档）。
+**遗留**：本分支累计 7 commit 待合 dev（届时 release PR 收口 `Fixes #72 #75 #76`）；
+后续 Epic 未开工——C1 `#77`（公式渲染）/ Epic D `#73` / Epic E `#74`。
+
 ## 2026-06-18 - Epic A A1（#75 后端 PDF 输入）落地
 
 按设计 `docs/zh/pdf-mode.md` 实现 A1 后端，分支 `feature/s-a1-pdf-render`，3 个有证据闭环：
@@ -20,8 +47,7 @@
 pytest 1392 passed, 0 failed。过程坑：Pillow JPEG 懒加载（已入 known-issues）；
 ruff hook 比项目 gate 严（ASYNC240/C901 项目 ignore 但 hook 拦，按本文件惯例 to_thread + 抽函数解决）。
 
-**遗留**：**A2（#76 前端）未开工**——FileUploader accept 加 `application/pdf` + 白名单、
-UploadPreviewPanel 对 .pdf 占位图、i18n、视觉验证（需起 dev server 截图）。
+**遗留**：~~A2（#76 前端）未开工~~ **已落地（见本文件顶部 2026-06-18 A2 条目）**。
 
 ## 2026-06-17 - Epic A（PDF 输入）设计定稿
 
