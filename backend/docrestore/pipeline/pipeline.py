@@ -538,6 +538,15 @@ def find_image_dirs(root: Path) -> list[Path]:
     return _collect(root)
 
 
+def _scan_pdfs(image_dir: Path) -> list[Path]:
+    """扫描目录根层的 PDF 文件，排序返回（不递归，与 scan_images 同层语义）。"""
+    return sorted(
+        p
+        for p in image_dir.iterdir()
+        if p.is_file() and p.suffix.lower() == ".pdf"
+    )
+
+
 class Pipeline:
     """核心编排器"""
 
@@ -671,6 +680,59 @@ class Pipeline:
         if self._refiner is None and self._config.llm.model:
             self._refiner = self._create_refiner(self._config.llm)
 
+    async def _expand_pdfs(self, image_dir: Path) -> list[PipelineResult]:
+        """摄取入口 PDF 展开（Epic A）：image_dir 根层 *.pdf 逐页渲染成 PNG。
+
+        - 单 PDF → 渲染到 image_dir 根（命中 process_many 快路）；
+        - 多 PDF → 各渲染到 ``{safe_stem}/`` 子目录（多文档分支，一个 PDF 一个结果）。
+
+        统一 ``{safe_stem}_`` 命名前缀保 basename 全局唯一（净化后撞名加后缀去重）。
+        渲染纯 CPU/IO，用 ``asyncio.to_thread`` 包裹、不持 gpu_lock。坏 / 加密 PDF
+        转占位失败结果返回，交 process_tree 合入 results（复用部分失败聚合）。
+        """
+        if not self._config.pdf.enable:
+            return []
+
+        from docrestore.pipeline.render import render_pdf_to_dir, safe_pdf_stem
+
+        pdfs = await asyncio.to_thread(_scan_pdfs, image_dir)
+        if not pdfs:
+            return []
+
+        cfg = self._config.pdf
+        single = len(pdfs) == 1
+        used: set[str] = set()
+        failures: list[PipelineResult] = []
+        for pdf in pdfs:
+            base = safe_pdf_stem(pdf.name)
+            stem, suffix = base, 2
+            while stem in used:  # 净化后撞名去重（"a b.pdf" 与 "a_b.pdf" → a_b）
+                stem, suffix = f"{base}_{suffix}", suffix + 1
+            used.add(stem)
+            out_dir = image_dir if single else image_dir / stem
+            try:
+                await asyncio.to_thread(
+                    render_pdf_to_dir,
+                    pdf,
+                    out_dir,
+                    cfg=cfg,
+                    name_prefix=f"{stem}_",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "PDF 渲染失败（记为部分失败）: %s: %s",
+                    pdf.name, exc, exc_info=exc,
+                )
+                failures.append(
+                    PipelineResult(
+                        output_path=out_dir / "document.md",
+                        markdown="",
+                        doc_dir="" if single else stem,
+                        error=f"{type(exc).__name__}: {str(exc)[:200]}",
+                    ),
+                )
+        return failures
+
     async def process_tree(
         self,
         image_dir: Path,
@@ -697,10 +759,17 @@ class Pipeline:
                 image_dir=str(image_dir),
                 mode="tree",
             ):
+                # Epic A：PDF 输入 → 逐页 PNG 展开（摄取入口，未持 gpu_lock）。
+                # 单 PDF 落根命中 process_many 快路，多 PDF 分子目录走多文档分支；
+                # 坏 PDF 转占位失败结果，合入返回供 TaskManager 聚合。
+                pdf_failures = await self._expand_pdfs(image_dir)
+
                 leaf_dirs = await asyncio.to_thread(
                     find_image_dirs, image_dir,
                 )
                 if not leaf_dirs:
+                    if pdf_failures:
+                        return pdf_failures  # 全部 PDF 渲染失败 → task FAILED
                     msg = f"未找到图片文件: {image_dir}"
                     raise FileNotFoundError(msg)
 
@@ -719,104 +788,113 @@ class Pipeline:
                         raise FileNotFoundError(msg)
 
                 # 单目录：直接委托 process_many（无需 warmup）
-                if (
-                    len(leaf_dirs) == 1 and leaf_dirs[0] == image_dir
-                ):
+                if len(leaf_dirs) == 1 and leaf_dirs[0] == image_dir:
                     result = await self.process_many(
                         image_dir, output_dir, on_progress,
                         llm, gpu_lock, pii, ocr, code=code, ppt=ppt,
                         overrides=overrides,
                     )
-                    return [result]
+                    return [result, *pdf_failures]
 
-                # 多子目录：warmup cold start + 并发剩余
-                # - leaves 按页数降序（最长子目录作 warmup 样本源最稳）
-                # - RateController 全局共享：warmup 期间采集 3+ 个 LLM 样本，
-                #   剩余子目录读到的 target_segment_chars() 已是解析解 L*
-                # - 严格"先串行 warmup → 等 cold_start_done → 再 gather 剩余"
-                #   不再 LPT（LPT 在 gather 下 acquire 顺序被 async IO race 污染）
-                leaves_sorted = sorted(
-                    leaf_dirs,
-                    key=lambda p: (-_count_images(p), str(p)),
+                # 多子目录：warmup cold start + 并发剩余（详见 _process_subdirs）
+                results = await self._process_subdirs(
+                    leaf_dirs, image_dir, output_dir, on_progress,
+                    llm, gpu_lock, pii, ocr, code, ppt, overrides,
                 )
-                controller = RateController(self._config.llm)
-                warmup_leaf, *rest = leaves_sorted
+                return [*results, *pdf_failures]
 
-                warmup_task = asyncio.create_task(
-                    self._process_leaf(
-                        0, warmup_leaf, image_dir, output_dir,
-                        on_progress, llm, gpu_lock, pii, ocr, code, ppt,
-                        total=len(leaves_sorted),
-                        controller=controller,
-                        overrides=overrides,
-                    ),
-                    name=f"warmup-leaf-{warmup_leaf.name}",
-                )
-                # 仅云端流式文档精修才需冷启动校准段长 L*；code/PPT/关精修/未配 model
-                # 的多目录任务不走该路径，跳过 wait_cold_start 直接并发，免白等最长
-                # 60s（#44）——首个 leaf 改为与其余 leaf 并发跑，不再串行 warmup。
-                if self._will_stream_refine(llm, code, ppt):
-                    try:
-                        await controller.wait_cold_start()
-                    except BaseException:
-                        warmup_task.cancel()
-                        with contextlib.suppress(
-                            asyncio.CancelledError, Exception,
-                        ):
-                            await warmup_task
-                        raise
+    async def _process_subdirs(
+        self,
+        leaf_dirs: list[Path],
+        image_dir: Path,
+        output_dir: Path,
+        on_progress: Callable[[TaskProgress], None] | None,
+        llm: LLMConfig | None,
+        gpu_lock: asyncio.Lock | None,
+        pii: PIIConfig | None,
+        ocr: OCRConfig | None,
+        code: CodeRestoreConfig | None,
+        ppt: PowerPointRestoreConfig | None,
+        overrides: ImageOverrides,
+    ) -> list[PipelineResult]:
+        """多子目录分支：按页数降序 warmup cold start，再并发剩余子目录。
 
-                rest_tasks = [
-                    asyncio.create_task(
-                        self._process_leaf(
-                            i + 1, leaf, image_dir, output_dir,
-                            on_progress, llm, gpu_lock, pii, ocr, code, ppt,
-                            total=len(leaves_sorted),
-                            controller=controller,
-                            overrides=overrides,
-                        ),
-                        name=f"leaf-{leaf.name}",
-                    )
-                    for i, leaf in enumerate(rest)
-                ]
-                # 容错：某个子目录失败不拖垮其他，异常转占位 PipelineResult，
-                # 上层（TaskManager）据 result.error 决定 task 最终 COMPLETED /
-                # FAILED，并把已成功 doc 的 markdown 保留给前端预览。
-                # asyncio.CancelledError 不吞：外层 cancel（shutdown / 用户取消）
-                # 应该一路传播，不能被转成"doc 失败"。
-                raw = await asyncio.gather(
-                    warmup_task, *rest_tasks, return_exceptions=True,
-                )
-                leaves_in_order = [warmup_leaf, *rest]
-                results: list[PipelineResult] = []
-                for leaf, item in zip(
-                    leaves_in_order, raw, strict=True,
+        - leaves 按页数降序（最长子目录作 warmup 样本源最稳）
+        - RateController 全局共享：warmup 期间采集 3+ 个 LLM 样本，剩余子目录读到的
+          target_segment_chars() 已是解析解 L*
+        - 严格"先串行 warmup → 等 cold_start_done → 再 gather 剩余"，不再 LPT
+          （LPT 在 gather 下 acquire 顺序被 async IO race 污染）
+        - 容错：某子目录失败不拖垮其他，异常转占位 PipelineResult；CancelledError
+          不吞，外层 cancel（shutdown / 用户取消）应一路传播
+        """
+        leaves_sorted = sorted(
+            leaf_dirs,
+            key=lambda p: (-_count_images(p), str(p)),
+        )
+        controller = RateController(self._config.llm)
+        warmup_leaf, *rest = leaves_sorted
+
+        warmup_task = asyncio.create_task(
+            self._process_leaf(
+                0, warmup_leaf, image_dir, output_dir,
+                on_progress, llm, gpu_lock, pii, ocr, code, ppt,
+                total=len(leaves_sorted),
+                controller=controller,
+                overrides=overrides,
+            ),
+            name=f"warmup-leaf-{warmup_leaf.name}",
+        )
+        # 仅云端流式文档精修才需冷启动校准段长 L*；code/PPT/关精修/未配 model 的
+        # 多目录任务不走该路径，跳过 wait_cold_start 直接并发，免白等最长 60s（#44）。
+        if self._will_stream_refine(llm, code, ppt):
+            try:
+                await controller.wait_cold_start()
+            except BaseException:
+                warmup_task.cancel()
+                with contextlib.suppress(
+                    asyncio.CancelledError, Exception,
                 ):
-                    if isinstance(item, asyncio.CancelledError):
-                        raise item
-                    if isinstance(item, BaseException):
-                        rel = leaf.relative_to(image_dir)
-                        logger.warning(
-                            "子目录 %s 处理失败（记为部分失败）: %s",
-                            rel, item,
-                            exc_info=item,
-                        )
-                        results.append(
-                            PipelineResult(
-                                output_path=(
-                                    output_dir / rel / "document.md"
-                                ),
-                                markdown="",
-                                doc_dir=str(rel),
-                                error=(
-                                    f"{type(item).__name__}: "
-                                    f"{str(item)[:200]}"
-                                ),
-                            ),
-                        )
-                    else:
-                        results.append(item)
-                return results
+                    await warmup_task
+                raise
+
+        rest_tasks = [
+            asyncio.create_task(
+                self._process_leaf(
+                    i + 1, leaf, image_dir, output_dir,
+                    on_progress, llm, gpu_lock, pii, ocr, code, ppt,
+                    total=len(leaves_sorted),
+                    controller=controller,
+                    overrides=overrides,
+                ),
+                name=f"leaf-{leaf.name}",
+            )
+            for i, leaf in enumerate(rest)
+        ]
+        raw = await asyncio.gather(
+            warmup_task, *rest_tasks, return_exceptions=True,
+        )
+        leaves_in_order = [warmup_leaf, *rest]
+        results: list[PipelineResult] = []
+        for leaf, item in zip(leaves_in_order, raw, strict=True):
+            if isinstance(item, asyncio.CancelledError):
+                raise item
+            if isinstance(item, BaseException):
+                rel = leaf.relative_to(image_dir)
+                logger.warning(
+                    "子目录 %s 处理失败（记为部分失败）: %s",
+                    rel, item, exc_info=item,
+                )
+                results.append(
+                    PipelineResult(
+                        output_path=output_dir / rel / "document.md",
+                        markdown="",
+                        doc_dir=str(rel),
+                        error=f"{type(item).__name__}: {str(item)[:200]}",
+                    ),
+                )
+            else:
+                results.append(item)
+        return results
 
     async def _process_leaf(
         self,
@@ -1042,15 +1120,23 @@ class Pipeline:
             default_ocr=self._config.ocr,
         )
 
+        # content_crop 仅文档模式生效；PDF 渲染页无屏摄侧栏 UI（据 sentinel 判定），
+        # 自动裁剪无收益只有误裁风险，一并跳过（Epic A D8）。
+        from docrestore.pipeline.render import is_pdf_rendered_dir
+
+        skip_content_crop = (
+            code_cfg.enable
+            or ppt_cfg.enable
+            or is_pdf_rendered_dir(image_dir)
+        )
+
         ocr_task = asyncio.create_task(
             self._ocr_producer(
                 images, output_dir, gpu_lock, page_queue,
                 pages_ref, controller, _report, ocr_effective, pii_cfg,
                 quality=quality, ppt=ppt_cfg,
                 content_crop=(
-                    self._config.content_crop
-                    if not code_cfg.enable and not ppt_cfg.enable
-                    else None
+                    None if skip_content_crop else self._config.content_crop
                 ),
                 overrides=overrides,
             ),

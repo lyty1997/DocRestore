@@ -37,7 +37,6 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import pypdfium2 as pdfium
 from PIL import Image
 
 if TYPE_CHECKING:
@@ -45,10 +44,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: 渲染完成标记文件名（落目标目录，用于幂等短路）
+#: 渲染完成标记文件名（落目标目录）：既做渲染幂等短路，也标识"该目录来自 PDF 渲染"
 _SENTINEL_NAME = ".render_done.json"
-#: pypdfium2 包版本，写入 sentinel 供检测渲染器升级导致的产物漂移
-_PDFIUM_VERSION = str(getattr(pdfium, "PYPDFIUM_INFO", "unknown"))
+
+
+def _pdfium_version() -> str:
+    """pypdfium2 包版本（懒加载，写入 sentinel 供检测渲染器升级导致的产物漂移）。"""
+    import pypdfium2 as pdfium
+
+    return str(getattr(pdfium, "PYPDFIUM_INFO", "unknown"))
+
+
+def is_pdf_rendered_dir(image_dir: Path) -> bool:
+    """该目录的图片是否由 PDF 渲染而来（据 sentinel 判定）。
+
+    供 pipeline 判断：PDF 渲染页无屏摄侧栏 UI，应跳过 content_crop 正文区裁剪。
+    """
+    return (image_dir / _SENTINEL_NAME).is_file()
 
 
 def safe_pdf_stem(name: str) -> str:
@@ -112,7 +124,7 @@ def _write_sentinel(
         "width": width,
         "name_prefix": name_prefix,
         "naming": f"{name_prefix}page_{{N:0{width}d}}.png",
-        "pdfium": _PDFIUM_VERSION,
+        "pdfium": _pdfium_version(),
     }
     (out_dir / _SENTINEL_NAME).write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8",
@@ -143,6 +155,8 @@ def render_pdf_to_dir(
     加密 / 损坏 PDF 的 ``PdfDocument`` 构造异常**不在此捕获**，由调用方转
     ``PipelineResult.error``（单 PDF 失败不影响同任务其他 PDF）。
     """
+    import pypdfium2 as pdfium
+
     out_dir.mkdir(parents=True, exist_ok=True)
     digest = _file_sha256(pdf_path)
 

@@ -26,30 +26,11 @@ from pathlib import Path
 
 import pypdfium2 as pdfium
 import pytest
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from docrestore.pipeline.config import PdfRenderConfig
 from docrestore.pipeline.render.pdf import render_pdf_to_dir, safe_pdf_stem
-
-
-def _make_pdf(
-    path: Path,
-    page_labels: list[str],
-    size: tuple[int, int] = (300, 400),
-) -> None:
-    """用 Pillow 构造多页 PDF（每页画一个标签文字）。
-
-    显式 ``Image.init()`` 注册 JPEG SAVE 处理器——Pillow 懒加载下首次 RGB→PDF
-    保存会因 ``Image.SAVE['JPEG']`` 未注册而 KeyError，见 docs/zh/known-issues.md。
-    """
-    Image.init()
-    pages: list[Image.Image] = []
-    for label in page_labels:
-        im = Image.new("RGB", size, "white")
-        draw = ImageDraw.Draw(im)
-        draw.text((20, size[1] // 2), label, fill="black")
-        pages.append(im)
-    pages[0].save(path, save_all=True, append_images=pages[1:])
+from tests.support.pdf_fixtures import make_pdf
 
 
 def test_safe_pdf_stem_sanitizes() -> None:
@@ -70,7 +51,7 @@ def test_render_basic(tmp_path: Path) -> None:
     """3 页 PDF → 3 个零填充命名 PNG，字典序 = 页序，均为有效 RGB 图。"""
     labels = ["PG-ONE", "PG-TWO", "PG-THREE"]
     pdf = tmp_path / "doc.pdf"
-    _make_pdf(pdf, labels)
+    make_pdf(pdf, labels)
     out = tmp_path / "out"
 
     count = render_pdf_to_dir(pdf, out, cfg=PdfRenderConfig(), name_prefix="doc_")
@@ -89,7 +70,7 @@ def test_render_basic(tmp_path: Path) -> None:
 def test_sentinel_records_digest(tmp_path: Path) -> None:
     """渲染完成落 .render_done.json，记录哈希 + 页数。"""
     pdf = tmp_path / "doc.pdf"
-    _make_pdf(pdf, ["A", "B"])
+    make_pdf(pdf, ["A", "B"])
     out = tmp_path / "out"
 
     render_pdf_to_dir(pdf, out, cfg=PdfRenderConfig(), name_prefix="d_")
@@ -103,7 +84,7 @@ def test_sentinel_records_digest(tmp_path: Path) -> None:
 def test_idempotent_short_circuit(tmp_path: Path) -> None:
     """sentinel 命中则整本跳过：删掉一页 PNG 后二次调用不重渲染。"""
     pdf = tmp_path / "doc.pdf"
-    _make_pdf(pdf, ["A", "B"])
+    make_pdf(pdf, ["A", "B"])
     out = tmp_path / "out"
     cfg = PdfRenderConfig()
 
@@ -121,10 +102,10 @@ def test_sentinel_busts_on_content_change(tmp_path: Path) -> None:
     pdf = tmp_path / "doc.pdf"
     out = tmp_path / "out"
     cfg = PdfRenderConfig()
-    _make_pdf(pdf, ["A", "B"])
+    make_pdf(pdf, ["A", "B"])
     render_pdf_to_dir(pdf, out, cfg=cfg, name_prefix="d_")
 
-    _make_pdf(pdf, ["A", "B", "C"])  # 覆盖同名 PDF，内容变 3 页
+    make_pdf(pdf, ["A", "B", "C"])  # 覆盖同名 PDF，内容变 3 页
     count = render_pdf_to_dir(pdf, out, cfg=cfg, name_prefix="d_")
 
     assert count == 3
@@ -134,7 +115,7 @@ def test_sentinel_busts_on_content_change(tmp_path: Path) -> None:
 def test_max_pages_truncates(tmp_path: Path) -> None:
     """页数超 max_pages 截断前 N 页。"""
     pdf = tmp_path / "doc.pdf"
-    _make_pdf(pdf, ["A", "B", "C", "D", "E"])
+    make_pdf(pdf, ["A", "B", "C", "D", "E"])
     out = tmp_path / "out"
 
     count = render_pdf_to_dir(
@@ -150,7 +131,7 @@ def test_zero_pad_auto_widen(tmp_path: Path) -> None:
     """零填充位数不足时按总页数自动加宽，保证字典序 = 页序。"""
     labels = [str(i) for i in range(12)]
     pdf = tmp_path / "doc.pdf"
-    _make_pdf(pdf, labels)
+    make_pdf(pdf, labels)
     out = tmp_path / "out"
 
     count = render_pdf_to_dir(
@@ -166,7 +147,7 @@ def test_zero_pad_auto_widen(tmp_path: Path) -> None:
 def test_long_side_downscale(tmp_path: Path) -> None:
     """超大幅面页按比例降采样到 max_long_side。"""
     pdf = tmp_path / "doc.pdf"
-    _make_pdf(pdf, ["A"], size=(300, 400))  # 200dpi 渲染长边约 1112
+    make_pdf(pdf, ["A"], size=(300, 400))  # 200dpi 渲染长边约 1112
     out = tmp_path / "out"
 
     render_pdf_to_dir(

@@ -14,6 +14,10 @@
 
 """输入源渲染层：把非图片输入（PDF 等）逐页渲染成 PNG，供既有图片链路消费。"""
 
-from docrestore.pipeline.render.pdf import render_pdf_to_dir, safe_pdf_stem
+from docrestore.pipeline.render.pdf import (
+    is_pdf_rendered_dir,
+    render_pdf_to_dir,
+    safe_pdf_stem,
+)
 
-__all__ = ["render_pdf_to_dir", "safe_pdf_stem"]
+__all__ = ["is_pdf_rendered_dir", "render_pdf_to_dir", "safe_pdf_stem"]
