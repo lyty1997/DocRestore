@@ -1,8 +1,14 @@
 # 文档模式编辑器数学公式渲染 — 设计
 
-> 状态：**设计稿（待确认后实现）** · 2026-06-18
+> 状态：**已确认（分两期）· 方案 B（自定义节点）· 阶段 1 已实现 / 阶段 2 待实现** · 2026-06-18
 > 关联：预览侧公式渲染已落地（`tech-stack.md` / `markdownSanitize.ts`），本文只覆盖
 > **编辑模式**（Tiptap WYSIWYG），PPT 模式无编辑器、不在范围内。
+>
+> 用户拍板：① 接受"阶段 1 先保真、阶段 2 再渲染"分期；② 渲染采用**方案 B**（自定义 Math
+> 节点 + KaTeX，与预览侧同栈），不用官方扩展。
+> **阶段 1 已落地**：`mathNodes.ts`（`MathInline`/`MathBlock` atom 节点）+ `markdownRoundtrip.ts`
+> 公式抽取与 turndown 还原 + 编辑器注册 + `mathRoundtrip.test.ts`（含 Tiptap 全链路幂等）。
+> 当前编辑器内公式以源码态 `$...$` 显示、不渲染，但 round-trip 逐字保真。
 
 ## 1. 背景与目标
 
@@ -89,6 +95,18 @@ A 做 md↔html 映射所需的同一处接缝，不浪费。
 - 单 `$` 行内公式与正文里字面 `$`（价格）的歧义：与预览侧同源问题，沿用同一判定，不在本设计单独解。
 - 是否需要"源码/预览"切换让用户直接编辑整段 LaTeX？暂不做，双击编辑单条已够。
 
-## 8. 待确认
-1. 是否接受"阶段 1 先保真、阶段 2 再渲染"的分期，还是要一次做到所见即所得？
-2. 渲染优先用官方 `@tiptap/extension-mathematics`（方案 A），还是坚持与预览侧完全同栈的自定义节点（方案 B）？
+## 8. 已确认决策（2026-06-18 用户拍板）
+1. ✅ **分两期**：阶段 1 先保真、阶段 2 再渲染（不一次到所见即所得）。
+2. ✅ **方案 B**：自定义 Math 节点 + KaTeX（与预览侧同栈），不用官方 `@tiptap/extension-mathematics`。
+
+## 9. 实施进度
+- **阶段 1（保真）✅ 已实现**：
+  - `mathNodes.ts`：`MathInline`（inline atom）/ `MathBlock`（block atom），latex 存 `data-latex`。
+  - `markdownRoundtrip.ts`：`mathToPlaceholders` 把 `$..$`/`$$..$$` 抽成 `data-math-*` 占位
+    （先块后行内、占位非空避开 turndown blank 丢弃）；turndown 加 `mathInline`/`mathBlock` 规则
+    只读 `data-latex` 还原。
+  - `MarkdownWysiwygEditor.tsx` 注册两节点；`App.css` 加源码态样式。
+  - `mathRoundtrip.test.ts`：string 两端 + **Tiptap 全链路**幂等（含 `\\`、下标、`\` 命令）。
+- **阶段 2（渲染 + 交互）⬜ 待实现**：给 `MathInline`/`MathBlock` 加 KaTeX `NodeView`
+  （复用预览侧 katex 配置，`throwOnError:false`）+ 双击编辑 `data-latex` + 输入规则
+  （`$$` 起块级、`$x$` 成行内）；视觉验证编辑器内公式渲染。

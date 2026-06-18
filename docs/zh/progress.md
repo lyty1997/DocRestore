@@ -2309,3 +2309,23 @@ PR #69 合入 dev 后，应用户「先做 #66」收尾最后一个评审0615 �
 可能被 `_`/`\` 转义破坏。设计分两期：①保真（round-trip 把公式当原子保护 + turndown 规则，
 **先做、最痛**）②渲染+交互（接 Tiptap 官方 `@tiptap/extension-mathematics` 或自定义 Math 节点，
 `data-latex` 为唯一真相，KaTeX NodeView + 双击编辑）。**待用户确认分期与方案 A/B 后实现**。
+
+## 2026-06-18 编辑器公式渲染 阶段1（round-trip 保真，方案 B）
+
+用户确认：分两期、方案 B（自定义 Math 节点 + KaTeX，与预览同栈）。先做阶段 1 保真。
+
+- 现状/动机：文档模式 Tiptap 编辑器走 `markdownRoundtrip.ts`（marked/turndown）另一条链路，
+  公式不渲染且 round-trip 会被 `_`/`\` 转义破坏（marked 当强调、turndown 转义）。
+- 实现：
+  · `mathNodes.ts`（新）：`MathInline`(inline atom)/`MathBlock`(block atom)，原始 LaTeX 存
+    `data-latex`（唯一真相），atom 节点以源码态 `$...$` 显示——本期不渲染但不被改坏。
+  · `markdownRoundtrip.ts`：`mathToPlaceholders` 在 marked 前把 `$$..$$`/`$..$` 抽成
+    `data-math-display`/`data-math-inline` 占位（先块后行内避免 `$$` 被拆；占位非空避开
+    turndown blank 丢弃；latex 进 data-latex 属性，marked/turndown 都不解析）；turndown 加
+    `mathInline`/`mathBlock` 规则只读 data-latex 还原 `$..$`/`$$..$$`。
+  · `MarkdownWysiwygEditor.tsx` 注册两节点；`App.css` 加源码态样式。
+- 验证：`tests/features/task/mathRoundtrip.test.ts` 10 用例（string 两端 + **经 Tiptap 全链路**
+  幂等，覆盖矩阵 `\\`、下标 `_`、`\alpha` 命令）全过；前端全量 vitest 155 passed；tsc -b ✓；
+  项目 eslint ✓；`npm run build` ✓。
+- 阶段 2（待实现）：MathInline/MathBlock 加 KaTeX NodeView + 双击编辑 + 输入规则。设计见
+  `docs/zh/frontend/editor-math-design.md` §9。

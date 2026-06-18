@@ -46,6 +46,7 @@ import {
   editorImagesToAssetUrls,
 } from "../features/task/markdown";
 import { htmlToMarkdown, markdownToHtml } from "../features/task/markdownRoundtrip";
+import { MathBlock, MathInline } from "../features/task/mathNodes";
 import {
   getCenterPagePosition,
   scrollToPagePosition,
@@ -321,6 +322,8 @@ export const MarkdownWysiwygEditor = forwardRef<
     TableCell,
     Placeholder.configure({ placeholder: t("editor.placeholder") }),
     PageAnchor,
+    MathInline,
+    MathBlock,
   ];
 
   const editor = useEditor({

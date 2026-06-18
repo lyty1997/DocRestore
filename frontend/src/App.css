@@ -2535,6 +2535,23 @@ body {
 .wysiwyg-page-anchor-icon { font-size: 0.85em; }
 .wysiwyg-page-anchor-label { font-family: ui-monospace, monospace; }
 
+/* 数学公式节点（阶段 1：源码态显示，待阶段 2 换 KaTeX NodeView） */
+.wysiwyg-prose .wysiwyg-math {
+  font-family: ui-monospace, monospace;
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  color: var(--color-text);
+}
+.wysiwyg-prose .wysiwyg-math-inline { padding: 0 0.25em; }
+.wysiwyg-prose .wysiwyg-math-block {
+  display: block;
+  padding: 0.4em 0.6em;
+  margin: 0.4em 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 /* placeholder（Tiptap Placeholder ext 注入的伪元素） */
 .wysiwyg-prose p.is-editor-empty:first-child::before {
   content: attr(data-placeholder);
