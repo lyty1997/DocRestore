@@ -10,11 +10,10 @@
  * 文档 tab、edit/save 状态机、源图同步滚动等公共行为。
  */
 
+import "katex/dist/katex.min.css";
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
-import rehypeRaw from "rehype-raw";
-import rehypeSanitize from "rehype-sanitize";
-import remarkGfm from "remark-gfm";
 
 import {
   getFilesIndex,
@@ -23,7 +22,10 @@ import {
 } from "../api/client";
 import type { TaskResultResponse } from "../api/schemas";
 import { preprocessMarkdown } from "../features/task/markdown";
-import { PREVIEW_SANITIZE_SCHEMA } from "../features/task/markdownSanitize";
+import {
+  PREVIEW_REHYPE_PLUGINS,
+  PREVIEW_REMARK_PLUGINS,
+} from "../features/task/markdownSanitize";
 import { filterImagesForDoc } from "../features/task/sourceImages";
 import { usePreviewScrollSync } from "../hooks/usePreviewScrollSync";
 import {
@@ -397,9 +399,10 @@ export function DocCodePreview({
             className="markdown-preview"
           >
             <Markdown
-              remarkPlugins={[remarkGfm]}
-              // rehypeRaw 解析不可信内联 HTML 后，rehypeSanitize 显式白名单过滤（#46）
-              rehypePlugins={[rehypeRaw, [rehypeSanitize, PREVIEW_SANITIZE_SCHEMA]]}
+              remarkPlugins={PREVIEW_REMARK_PLUGINS}
+              // 顺序：rehypeRaw 解析 HTML → rehypeSanitize 白名单过滤 →
+              // rehypeKatex 渲染数学公式（详见 markdownSanitize.ts）
+              rehypePlugins={PREVIEW_REHYPE_PLUGINS}
             >
               {preprocessMarkdown(
                 selectedDoc.markdown,
