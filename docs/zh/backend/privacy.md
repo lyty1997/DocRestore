@@ -270,6 +270,7 @@ CNN，零 torch/transformers，不撞 OCR venv），兑现「名字不出本机�
 
 - [PII 统一设计](pii-unification.md) - PIIGuard 收口 + 代码正文 tokens_only + 本地 NER 规划
 - [PII 本地 NER 详细设计](pii-local-ner.md) - S3 spaCy 选型 + 接缝 + 一键环境配置
+- [PII 实体脱敏误伤修复](pii-entity-overredaction-fix.md) - 结构损坏 + 误检根因与修复设计（替换层结构保护 + 词边界 + 词表净化）
 - [NER benchmark 留证](ner-benchmark.md) - S3.6 spaCy 召回/速度实测
 - [数据模型](data-models.md) - `RedactionRecord`, `PIIConfig`
 - [LLM 层](llm.md) - 云端 `detect_pii_entities` 已于 S4 删除（2026-06-15），本地 NER 取代

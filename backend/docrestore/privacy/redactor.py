@@ -26,6 +26,7 @@ from dataclasses import dataclass
 
 from docrestore.models import RedactionRecord
 from docrestore.pipeline.config import PIIConfig
+from docrestore.privacy.markup import split_protected
 from docrestore.privacy.patterns import (
     redact_structured_pii,
     redact_tokens_only_pii,
@@ -33,16 +34,25 @@ from docrestore.privacy.patterns import (
 
 logger = logging.getLogger(__name__)
 
-# 实体替换安全阈值（issue #13）：LLM 偶发幻觉/格式错误会吐出单字、纯标点或
-# 整句作为"实体名"，一旦全局 str.replace 会把正文打碎，且不可逆。
+# 实体替换安全阈值（issue #13）：NER 偶发会吐出单字、纯标点、文件名碎片或
+# 整句作为"实体名"，一旦无差别全局替换会把正文/结构打碎，且不可逆。
 _MIN_ENTITY_LEN = 2  # 短于此（单字"的"/"人"、单符号）一律跳过
 _HIGH_FREQ_WARN = 50  # 单实体替换次数超此 → 疑似误检，告警（仍执行）
-_LONG_ENTITY_WARN = 64  # 实体长度超此 → 疑似把整句当实体，告警（仍执行）
+_MAX_ENTITY_LEN = 64  # 实体长度超此 → 疑似把整句当实体，**丢弃**（误检净化）
+
+#: markup/结构字符：实体名含任一即非"名字"（如 `;'>kcat` / `U<` / `L)-aspartate`），
+#: 用于词表净化把结构碎片挡在替换之外（详见 pii-entity-overredaction-fix.md §3-B2）。
+_MARKUP_CHARS = frozenset("/\\<>${};'\"()[]|=`")
+
+#: 以常见文件扩展名收尾的候选（如 `xxx.jpg`）一律丢弃——图片标识符不是人名/机构名。
+_FILE_EXT_RE = re.compile(
+    r"\.(?:jpe?g|png|gif|svg|bmp|tiff?|webp|pdf|md|txt)$", re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
 class EntityLexicon:
-    """LLM 检测到的实体词典，用于复用（如 re-OCR 文本脱敏）"""
+    """本地 NER 检测到的实体词典，用于复用（如 re-OCR 文本脱敏）"""
 
     person_names: tuple[str, ...]
     org_names: tuple[str, ...]
@@ -51,7 +61,7 @@ class EntityLexicon:
 def _is_safe_entity(name: str) -> bool:
     """实体名是否可安全用于全局替换。
 
-    过滤会把正文打碎的 LLM 坏输出（issue #13）：空 / 过短（单字单符号）/
+    过滤会把正文打碎的坏输出（issue #13）：空 / 过短（单字单符号）/
     纯标点。``str.isalnum()`` 对中文/日文等返回 True，故可借它排除纯标点。
     """
     if len(name) < _MIN_ENTITY_LEN:
@@ -59,40 +69,91 @@ def _is_safe_entity(name: str) -> bool:
     return any(ch.isalnum() for ch in name)
 
 
+def _looks_like_name(name: str) -> bool:
+    """词表净化：候选是否"像"人名/机构名，挡掉 NER 在结构/科技文本上的误检。
+
+    在 :func:`_is_safe_entity` 基础上额外要求：长度不过整句、不含 markup/结构字符、
+    不以文件扩展名收尾、字母（含 CJK，``str.isalpha`` 对中日韩返回 True）占非空白
+    字符比例 ≥ 0.5。取舍为「召回换精度」：带数字/符号的真实机构名（极少见）会被放过，
+    换取零结构误伤（详见 pii-entity-overredaction-fix.md §3-B2、§7-R2）。
+    """
+    if not _is_safe_entity(name):
+        return False
+    if len(name) > _MAX_ENTITY_LEN:
+        return False
+    if any(ch in _MARKUP_CHARS for ch in name):
+        return False
+    if _FILE_EXT_RE.search(name):
+        return False
+    non_space = [ch for ch in name if not ch.isspace()]
+    if not non_space:
+        return False
+    letterish = sum(1 for ch in non_space if ch.isalpha())
+    return letterish / len(non_space) >= 0.5
+
+
+def _is_ascii_token(name: str) -> bool:
+    """实体是否为纯 ASCII 词形（决定是否启用词边界匹配，CJK 无词边界故走精确串）。"""
+    return name.isascii() and any(ch.isalnum() for ch in name)
+
+
+def _sub_in_free(segment: str, name: str, placeholder: str) -> tuple[str, int]:
+    """在单个自由文本段内替换实体，返回 (替换后, 次数)。
+
+    纯 ASCII 实体加词边界 ``(?<![0-9A-Za-z])…(?![0-9A-Za-z])``，避免命中更长单词的
+    子串（如 `FGR` 不再吃进 `FGRFP`）；含 CJK 的实体走精确串替换（CJK 无词边界）。
+    """
+    if _is_ascii_token(name):
+        pattern = re.compile(
+            r"(?<![0-9A-Za-z])" + re.escape(name) + r"(?![0-9A-Za-z])",
+        )
+        return pattern.subn(placeholder, segment)
+    occurrences = segment.count(name)
+    if occurrences == 0:
+        return segment, 0
+    return segment.replace(name, placeholder), occurrences
+
+
 def _replace_entities(
     text: str,
     names: list[str],
     placeholder: str,
 ) -> tuple[str, int]:
-    """按长度降序替换实体名称，返回 (替换后文本, 替换次数)。
+    """结构感知 + 词边界的实体替换，返回 (替换后文本, 替换次数)。
 
-    按长度降序排列防止"张三"先于"张三丰"匹配。跳过空/过短/纯标点实体，
-    对异常高频/超长实体告警，避免 LLM 坏输出全篇误替（issue #13）。
+    三重防护（pii-entity-overredaction-fix.md §3-A）：
+    1. 词表净化 :func:`_looks_like_name` 丢弃结构碎片/文件名/整句等误检；
+    2. :func:`split_protected` 只在自由文本段替换，保护图片 src / HTML 标签 /
+       行内·围栏代码 / LaTeX / URL；
+    3. 自由段内 ASCII 实体走词边界，防词内子串误命中。
+
+    按长度降序处理，防"张三"先于"张三丰"匹配。异常高频实体告警（仍执行）。
     """
-    count = 0
-    # 先 strip 再按长度降序，避免短实体先匹配
-    sorted_names = sorted(
-        (n.strip() for n in names), key=len, reverse=True,
-    )
-    for name in sorted_names:
-        if not _is_safe_entity(name):
-            continue
-        occurrences = text.count(name)
-        if occurrences == 0:
-            continue
-        if occurrences > _HIGH_FREQ_WARN:
+    candidates = [
+        name
+        for name in sorted(
+            (n.strip() for n in names), key=len, reverse=True,
+        )
+        if _looks_like_name(name)
+    ]
+    if not candidates:
+        return text, 0
+
+    # 偶数下标=自由文本（可替），奇数下标=结构保护段（原样保留）。
+    parts = split_protected(text)
+    total = 0
+    for name in candidates:
+        name_count = 0
+        for i in range(0, len(parts), 2):
+            parts[i], replaced = _sub_in_free(parts[i], name, placeholder)
+            name_count += replaced
+        if name_count > _HIGH_FREQ_WARN:
             logger.warning(
-                "实体替换次数异常高（%d 次 > %d），疑似 LLM 误检，仍执行：%r",
-                occurrences, _HIGH_FREQ_WARN, name[:40],
+                "实体替换次数异常高（%d 次 > %d），疑似 NER 误检，仍执行：%r",
+                name_count, _HIGH_FREQ_WARN, name[:40],
             )
-        if len(name) > _LONG_ENTITY_WARN:
-            logger.warning(
-                "实体长度异常（%d > %d），疑似把整句当实体，仍执行：%r",
-                len(name), _LONG_ENTITY_WARN, name[:80],
-            )
-        text = text.replace(name, placeholder)
-        count += occurrences
-    return text, count
+        total += name_count
+    return "".join(parts), total
 
 
 def _placeholder_split_re(placeholders: set[str]) -> re.Pattern[str] | None:
@@ -173,9 +234,11 @@ class PIIRedactor:
     ) -> tuple[str, list[RedactionRecord]]:
         """仅按实体词典替换人名/机构名，**不跑结构化 regex**，返回 (文本, 记录)。
 
-        供出云闸口（#67）统一兜底用：实体替换是精确串替换，对代码标识符 / import
-        路径 / 结构化文本一律安全（只替 lexicon 里的人名/机构串）。遵循
-        ``redact_person_name`` / ``redact_org_name`` 开关，幂等（占位符不被二次匹配）。
+        供出云闸口（#67）统一兜底用。实体替换经词表净化 + 结构保护区切分 + ASCII
+        词边界（:func:`_replace_entities`），对代码标识符 / import 路径 / 图片 src /
+        HTML 标签 / LaTeX 等结构化文本安全（不会改坏结构，只在自由正文段替 lexicon 里的
+        人名/机构串）。遵循 ``redact_person_name`` / ``redact_org_name`` 开关，
+        幂等（占位符不被二次匹配）。
         """
         return self._apply_lexicon(text, lexicon)
 
