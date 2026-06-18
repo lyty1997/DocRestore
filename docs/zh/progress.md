@@ -2251,3 +2251,19 @@ PR #69 合入 dev 后，应用户「先做 #66」收尾最后一个评审0615 �
 8. `test_auth` 加模块级 autouse fixture 还原 `_API_TOKEN`/`_INSECURE_MODE` 防顺序 flaky。
 
 **门禁**：`bash scripts/check_quality.sh` EXIT=0（mypy 76 文件 / ruff / typos / 前端 / pytest 1371 passed 45 skipped）。待开 `feature/s-cleanup-66 → dev` PR。至此评审0615（#61–#66）代码层全部落 dev，仅余 dev→main release 收口关闭 issue。
+
+## 2026-06-18 服务器源选择器对 PDF 放行（小修复）
+
+**问题**：选择服务器路径时只能选目录、不能选单个文件——根因是服务器浏览（`/filesystem/dirs`）与暂存（`/sources/server`）沿用 `routes.py` 的 `_IMAGE_EXTS`（仅 6 种图片，不含 `.pdf`），导致浏览目录时 PDF 文件被 `_build_dir_entry` 过滤掉、直传 PDF 路径被 `_resolve_stage_path` 400 拒。本地上传走 `fileKind.ts`/`upload.py` 的 PDF 口径，故"本地能选单 PDF、服务器不能"。
+
+**改动**（设计见 `docs/zh/pdf-mode.md` §11）：
+- `routes.py` 新增 `_BROWSE_FILE_EXTS = _IMAGE_EXTS | {".pdf"}`（与上传 `_ALLOWED_EXTENSIONS` 同口径，源图预览/裁剪仍用窄口径 `_IMAGE_EXTS`）；`_build_dir_entry` 列出 + `_resolve_stage_path` 校验改用之。
+- `_stage_files` 加"全图片 xor 全 PDF"互斥（复用 `MODE_CONFLICT`），与闸一（上传）/闸二（建任务）对称，混合早拒。
+- 前端 `SourcePicker.tsx`：文件项图标按类型 📄/🖼；PDF 不走 `<img>` 缩略图，用 📄 占位（+`App.css .server-picker-preview-pdf`）。
+- i18n `sourcePicker.emptyDir` 三语补"PDF"。
+
+**下游零改动**（已核验）：单 PDF symlink → 临时目录 → 闸二 `_has_mixed_input` 对仅 PDF 放行 → `_expand_pdfs` 用 `iterdir()`+`is_file()`（跟随 symlink、文件名后缀即 `.pdf`）正确识别 → 复用既有 `render_pdf_to_dir`。
+
+**门禁**：后端 `pytest tests/api/test_routes.py -k "Browse or Stage"` 11 passed（含新增 browse 列 PDF / stage 受单 PDF / stage 拒混合 3 例）；前端项目 eslint 干净（hook 内 npx ESLint 10.5.0 与 eslint-plugin-react 版本不兼容报 `getFilename`，非本次代码）、`tsc -b` 通过、vitest 组件 35 passed。
+
+**遗留**：UI 视觉验证（📄 图标 + PDF 占位预览）需后端+前端栈起来 + 目录内有 PDF 才能截图实景，未跑；逻辑由 typecheck/单测覆盖。

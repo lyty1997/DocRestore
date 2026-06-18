@@ -312,3 +312,26 @@ def render_pdf_to_dir(
 - **必补防欠工程**（吸收对抗式评审）：D2 渲染幂等、D4 basename 前缀强制、D5 stem 净化、
   D6 互斥双闸算法、D8 content_crop 关闭、D9 长边上限——这六处若漏，会在 resume 重渲染 /
   前端多 PDF 串页 / 规整 PDF 误裁 / 大页 OOM 处连环炸。
+
+## 11. 增量：服务器源选择器对 PDF 放行（2026-06-18）
+
+**背景**：Epic A 落地时 PDF 仅从「本地上传」入口进；「服务器浏览」选择器（`SourcePicker`
+服务器 Tab → `/filesystem/dirs` 浏览 + `/sources/server` stage）沿用 `_IMAGE_EXTS`（仅 6 种
+图片，不含 `.pdf`），导致浏览服务器目录时 **PDF 文件不显示**（`_build_dir_entry` 过滤）、
+即便绕过浏览直传 PDF 路径也被 `_resolve_stage_path` 400 拒。表现为「服务器路径只能选目录、
+不能选单个文件」。本增量把服务器源选择器的输入口径对齐本地上传（图片 + PDF）。
+
+| 文件 | 改动 |
+|---|---|
+| `api/routes.py`（浏览/stage 段） | 新增 `_BROWSE_FILE_EXTS = _IMAGE_EXTS \| {".pdf"}`（与 upload `_ALLOWED_EXTENSIONS` 同口径）；`_build_dir_entry` 文件列出 + `_resolve_stage_path` 校验改用之 |
+| `api/routes.py:_stage_files` | 解析后加「全图片 xor 全 PDF」互斥（复用 `MODE_CONFLICT`），与闸一（上传）/闸二（建任务）对称——混合早拒，不再先 stage 出临时目录再被闸二打回 |
+| `components/SourcePicker.tsx` | 文件项图标按类型用 📄/🖼；PDF 不走 `getCropImageUrl` 的 `<img>` 缩略图（PDF 不能 `<img>`），改 📄 占位 + 文件名 |
+| i18n `sourcePicker.emptyDir` | 文案「无图片和子目录」→「无图片/PDF 和子目录」三语 |
+
+**下游零改动**（已核验）：单 PDF symlink 进临时目录 → `create_task` 闸二 `_has_mixed_input`
+对「仅 PDF」放行 → `_expand_pdfs` 用 `iterdir()`+`is_file()`（跟随 symlink，文件名后缀即
+`.pdf`）正确识别 → 复用既有 `render_pdf_to_dir` 渲染链路。`_scan_pdfs`/`_has_mixed_input` 走
+`iterdir()`（词法、不 resolve），symlink 不影响判定。
+
+**测试**：browse 列出 `.pdf`、stage 接受单 PDF（产出 symlink 指向源 PDF）、stage 拒图片+PDF
+混合 400 `MODE_CONFLICT`。

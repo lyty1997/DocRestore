@@ -1590,6 +1590,10 @@ _IMAGE_COUNT_CAP = 9999
 _PAGE_SIZE_MAX = 100  # 任务列表分页上限（防止单次拉取过大结果）
 _STAGE_FILES_MAX = 5000  # 单次服务器侧文件暂存最大数量（防止滥用/超时）
 
+# 服务器浏览 / stage 可选输入文件扩展名：图片 + PDF，与本地上传
+# upload._ALLOWED_EXTENSIONS 同口径（源图预览/裁剪仍用窄口径 _IMAGE_EXTS）。
+_BROWSE_FILE_EXTS = _IMAGE_EXTS | {".pdf"}
+
 
 def _count_top_images(dir_path: Path) -> int | None:
     """浅扫描目录，统计顶层图片文件数；不可读返回 None。
@@ -1620,7 +1624,8 @@ def _count_top_images(dir_path: Path) -> int | None:
 def _build_dir_entry(child: Path, with_files: bool) -> DirEntry | None:
     """将目录项转换为 DirEntry；跳过返回 None。
 
-    with_files=True 时目录条目额外携带 image_count（顶层图片数预览）。
+    with_files=True 时目录条目额外携带 image_count（顶层图片数预览），
+    并列出图片 / PDF 文件（_BROWSE_FILE_EXTS，与本地上传同口径）。
     """
     try:
         if child.is_dir():
@@ -1629,7 +1634,7 @@ def _build_dir_entry(child: Path, with_files: bool) -> DirEntry | None:
                 name=child.name, is_dir=True, image_count=image_count,
             )
         if with_files and child.is_file():
-            if child.suffix.lower() not in _IMAGE_EXTS:
+            if child.suffix.lower() not in _BROWSE_FILE_EXTS:
                 return None
             try:
                 size: int | None = child.stat().st_size
@@ -1681,7 +1686,8 @@ async def browse_dirs(
     """列出指定路径下的子目录和（可选）文件，供前端来源选择器使用。
 
     - path 为 "~" 时展开为用户主目录
-    - 默认仅列出目录；include_files=True 时额外返回 _IMAGE_EXTS 范围内的文件
+    - 默认仅列出目录；include_files=True 时额外返回图片 / PDF 文件
+      （_BROWSE_FILE_EXTS，与本地上传同口径）
     - 不可读的目录/文件跳过（不报错）
     """
     return await asyncio.to_thread(_scan_dir, path, include_files)
@@ -1696,7 +1702,7 @@ async def browse_dirs(
 
 
 def _resolve_stage_path(raw: str) -> Path:
-    """校验单个 stage 路径：绝对、可解析、普通文件、图片扩展名。"""
+    """校验单个 stage 路径：绝对、可解析、普通文件、图片或 PDF 扩展名。"""
     p = Path(raw).expanduser()
     if not p.is_absolute():
         raise ApiBusinessError(
@@ -1718,7 +1724,7 @@ def _resolve_stage_path(raw: str) -> Path:
             f"不是普通文件: {real}",
             params={"path": str(real)},
         )
-    if real.suffix.lower() not in _IMAGE_EXTS:
+    if real.suffix.lower() not in _BROWSE_FILE_EXTS:
         raise ApiBusinessError(
             APIErrorCode.STAGE_PATH_BAD_EXT, 400,
             f"不支持的文件类型: {real}",
@@ -1746,6 +1752,16 @@ def _stage_files(raw_paths: list[str]) -> StageServerSourceResponse:
     import tempfile
 
     resolved = [_resolve_stage_path(raw) for raw in raw_paths]
+
+    # 全图片 xor 全 PDF 互斥：与上传层闸一、建任务闸二对称，混合在此早拒，
+    # 避免先 stage 出临时目录、再被 create_task 闸二（_has_mixed_input）打回。
+    has_pdf = any(p.suffix.lower() == ".pdf" for p in resolved)
+    has_image = any(p.suffix.lower() in _IMAGE_EXTS for p in resolved)
+    if has_pdf and has_image:
+        raise ApiBusinessError(
+            APIErrorCode.MODE_CONFLICT, 400,
+            "一批输入要么全是图片要么全是 PDF，不可混合",
+        )
 
     stage_dir = Path(tempfile.mkdtemp(prefix="docrestore_src_"))
     used_names: set[str] = set()

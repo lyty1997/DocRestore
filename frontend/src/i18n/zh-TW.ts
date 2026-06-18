@@ -322,7 +322,7 @@ export const zhTW: Record<TranslationKey, string> = {
   "sourcePicker.serverTab": "伺服器",
   "sourcePicker.currentPath": "目前路徑：",
   "sourcePicker.parentDir": ".. (上級目錄)",
-  "sourcePicker.emptyDir": "（目前目錄下無圖片和子目錄）",
+  "sourcePicker.emptyDir": "（目前目錄下無圖片/PDF 和子目錄）",
   "sourcePicker.useThisDir": "使用目前目錄",
   "sourcePicker.useSelectedFiles": "使用選取的 {count} 個檔案",
   "sourcePicker.confirmed": "已選取：{path}",

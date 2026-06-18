@@ -11,6 +11,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { browseDirs, getCropImageUrl, stageServerSources } from "../api/client";
 import type { DirEntry } from "../api/schemas";
+import { isPdfFilename } from "../features/task/fileKind";
 import { useTranslation } from "../i18n";
 import { FileUploader } from "./FileUploader";
 
@@ -308,7 +309,7 @@ export function SourcePicker({
                         })}
                       />
                       <span className="server-entry-name">
-                        {`🖼 ${entry.name}`}
+                        {`${isPdfFilename(entry.name) ? "📄" : "🖼"} ${entry.name}`}
                       </span>
                       {entry.size_bytes !== null && entry.size_bytes !== undefined && (
                         <span className="server-entry-size">
@@ -324,13 +325,19 @@ export function SourcePicker({
             )}
           </div>
 
-          {/* 点选文件的实时预览：知道选的是哪张照片 */}
+          {/* 点选文件的实时预览：图片渲缩略图；PDF 不能 <img>，用图标占位 */}
           {previewFile !== undefined && (
             <div className="server-picker-preview">
-              <img
-                src={getCropImageUrl(currentPath, previewFile)}
-                alt={previewFile}
-              />
+              {isPdfFilename(previewFile) ? (
+                <span className="server-picker-preview-pdf" aria-hidden="true">
+                  📄
+                </span>
+              ) : (
+                <img
+                  src={getCropImageUrl(currentPath, previewFile)}
+                  alt={previewFile}
+                />
+              )}
               <span className="server-picker-preview-name">{previewFile}</span>
             </div>
           )}

@@ -333,7 +333,7 @@ export const zhCN = {
   "sourcePicker.serverTab": "服务器",
   "sourcePicker.currentPath": "当前路径：",
   "sourcePicker.parentDir": ".. (上级目录)",
-  "sourcePicker.emptyDir": "（当前目录下无图片和子目录）",
+  "sourcePicker.emptyDir": "（当前目录下无图片/PDF 和子目录）",
   "sourcePicker.useThisDir": "使用当前目录",
   "sourcePicker.useSelectedFiles": "使用选中的 {count} 个文件",
   "sourcePicker.confirmed": "已选择：{path}",

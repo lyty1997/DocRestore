@@ -331,7 +331,7 @@ export const en: Record<TranslationKey, string> = {
   "sourcePicker.serverTab": "Server",
   "sourcePicker.currentPath": "Current path: ",
   "sourcePicker.parentDir": ".. (Parent directory)",
-  "sourcePicker.emptyDir": "(No images or subdirectories here)",
+  "sourcePicker.emptyDir": "(No images, PDFs, or subdirectories here)",
   "sourcePicker.useThisDir": "Use this directory",
   "sourcePicker.useSelectedFiles": "Use {count} selected file(s)",
   "sourcePicker.confirmed": "Selected: {path}",

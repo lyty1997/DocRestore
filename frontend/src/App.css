@@ -1339,6 +1339,17 @@ body {
   border-radius: 3px;
 }
 
+/* PDF 无缩略图：用大号文件图标占位，撑满与图片预览一致的高度 */
+.server-picker-preview-pdf {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  font-size: 64px;
+  line-height: 1;
+}
+
 .server-picker-preview-name {
   font-size: 11px;
   color: var(--color-text-secondary);
