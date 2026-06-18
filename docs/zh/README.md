@@ -47,6 +47,8 @@ docs/zh/
 ├── deployment.md                # 部署与环境配置
 ├── known-issues.md              # 已知问题与可复用处理策略
 ├── progress.md                  # 开发进度记录
+├── ppt-mode.md                  # PPT 还原模式设计
+├── pdf-mode.md                  # PDF 输入支持设计（Epic A）
 ├── backend/                     # 后端文档
 │   ├── README.md                # 后端架构总览
 │   ├── data-models.md           # 数据模型与配置

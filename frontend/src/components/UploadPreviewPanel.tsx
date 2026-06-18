@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 
 import { getUploadFileUrl } from "../api/client";
 import type { UploadFileItem } from "../api/schemas";
+import { isPdfFilename } from "../features/task/fileKind";
 import { useTranslation } from "../i18n";
 
 interface UploadPreviewPanelProps {
@@ -101,23 +102,44 @@ export function UploadPreviewPanel({
                 <div className="upload-preview-grid">
                   {group.files.map((file) => {
                     const deleting = deletingFileIds.includes(file.file_id);
+                    const fileUrl = getUploadFileUrl(
+                      file.session_id,
+                      file.file_id,
+                    );
+                    const isPdf = isPdfFilename(file.filename);
                     return (
                       <div key={file.file_id} className="upload-preview-card">
-                        <button
-                          type="button"
-                          className="upload-preview-thumb-btn"
-                          onClick={() => {
-                            setLightboxSrc(
-                              getUploadFileUrl(file.session_id, file.file_id),
-                            );
-                          }}
-                        >
-                          <img
-                            src={getUploadFileUrl(file.session_id, file.file_id)}
-                            alt={file.filename}
-                            className="upload-preview-thumb"
-                          />
-                        </button>
+                        {isPdf ? (
+                          // PDF 不能直接 <img>：用占位卡片，点击在新标签页打开
+                          <a
+                            href={fileUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="upload-preview-thumb-btn upload-preview-pdf"
+                            title={t("uploadPreview.pdfDocument")}
+                          >
+                            <span
+                              className="upload-preview-pdf-badge"
+                              aria-hidden="true"
+                            >
+                              PDF
+                            </span>
+                          </a>
+                        ) : (
+                          <button
+                            type="button"
+                            className="upload-preview-thumb-btn"
+                            onClick={() => {
+                              setLightboxSrc(fileUrl);
+                            }}
+                          >
+                            <img
+                              src={fileUrl}
+                              alt={file.filename}
+                              className="upload-preview-thumb"
+                            />
+                          </button>
+                        )}
                         <div className="upload-preview-meta">
                           <span title={file.relative_path} className="upload-preview-name">
                             {file.filename}

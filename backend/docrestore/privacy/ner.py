@@ -27,6 +27,8 @@ import logging
 import threading
 from typing import TYPE_CHECKING, Protocol
 
+from docrestore.privacy.markup import mask_structure
+
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
@@ -163,12 +165,15 @@ def _collect_entities(
     """对每个 nlp 跑 ``text``，并集 PERSON→persons / ORG→orgs，按出现顺序去重。
 
     ``detect`` 的纯逻辑（无加载副作用），便于单测直接喂 fake nlp。用 dict
-    保插入序去重。
+    保插入序去重。检测前先 :func:`mask_structure` 抹掉图片 src / HTML 标签 /
+    LaTeX / 代码 / URL，避免把结构碎片（``x.jpg`` / ``;'>`` / ``\\mu``）误检为
+    人名/机构名（详见 pii-entity-overredaction-fix.md §3-B1）；正文偏移不变、召回不损。
     """
+    masked = mask_structure(text)
     persons: dict[str, None] = {}
     orgs: dict[str, None] = {}
     for nlp in nlps:
-        for ent in nlp(text).ents:
+        for ent in nlp(masked).ents:
             name = ent.text.strip()
             if not name:
                 continue

@@ -695,6 +695,24 @@ def _guard_ner_backend(pii_cfg: PIIConfig) -> None:
     )
 
 
+def _has_mixed_input(image_dir_str: str) -> bool:
+    """image_dir 是否同时含 PDF 与图片（全图片 xor 全 PDF 兜底闸，Epic A D6 闸二）。
+
+    PDF 只看根层（上传 / 直传约定），图片递归看（复用 find_image_dirs，覆盖
+    "根层 PDF + 子目录图片" 的混合形态）。不存在的目录返回 False，交 pipeline 报错。
+    """
+    from docrestore.pipeline.pipeline import find_image_dirs
+
+    image_dir = Path(image_dir_str)
+    if not image_dir.is_dir():
+        return False
+    has_pdf = any(
+        p.is_file() and p.suffix.lower() == ".pdf"
+        for p in image_dir.iterdir()
+    )
+    return has_pdf and bool(find_image_dirs(image_dir))
+
+
 @router.post("/tasks", response_model=TaskResponse)
 async def create_task(
     req: CreateTaskRequest,
@@ -707,6 +725,15 @@ async def create_task(
     """
     logger.info("收到创建任务请求: image_dir=%s", req.image_dir)
     manager = _get_manager()
+
+    # D6 闸二：全图片 xor 全 PDF 兜底（绕过上传层的服务器源 / 直传 image_dir）。
+    # 混合 → 400 不建任务，避免渲染后产出半图半 PDF 文档。FS 扫描包 to_thread。
+    if await asyncio.to_thread(_has_mixed_input, req.image_dir):
+        raise ApiBusinessError(
+            APIErrorCode.MODE_CONFLICT, 400,
+            "一批输入要么全是图片要么全是 PDF，不可混合",
+        )
+
     defaults = manager.pipeline.config
 
     llm_cfg: LLMConfig | None = None

@@ -2,24 +2,16 @@
  * 文件上传组件：支持选择文件或上传整个目录（保留子目录结构）
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
+import {
+  ACCEPT_ATTR,
+  classifySelection,
+  isAcceptedFilename,
+} from "../features/task/fileKind";
 import { useFileUpload } from "../features/task/useFileUpload";
 import { renderLocalized, useTranslation } from "../i18n";
 import { UploadPreviewPanel } from "./UploadPreviewPanel";
-
-/** 允许的图片 MIME */
-const ACCEPT = "image/jpeg,image/png,image/bmp,image/tiff";
-
-/** 允许的图片扩展名（小写） */
-const ALLOWED_EXTENSIONS = new Set([
-  ".jpg",
-  ".jpeg",
-  ".png",
-  ".bmp",
-  ".tiff",
-  ".tif",
-]);
 
 interface FileUploaderProps {
   /** 上传完成后回调，传入服务端 image_dir */
@@ -28,13 +20,9 @@ interface FileUploaderProps {
   readonly disabled: boolean;
 }
 
-/** 从 File 列表中过滤出图片文件 */
-function filterImageFiles(files: File[]): File[] {
-  return files.filter((f) => {
-    const dot = f.name.lastIndexOf(".");
-    if (dot === -1) return false;
-    return ALLOWED_EXTENSIONS.has(f.name.slice(dot).toLowerCase());
-  });
+/** 从 File 列表中过滤出受支持文件（图片或 PDF） */
+function filterAcceptedFiles(files: File[]): File[] {
+  return files.filter((f) => isAcceptedFilename(f.name));
 }
 
 /**
@@ -57,6 +45,8 @@ export function FileUploader({
   const { t } = useTranslation();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dirInputRef = useRef<HTMLInputElement>(null);
+  /** 选择阶段的互斥违例提示（图片与 PDF 混选） */
+  const [mixedWarning, setMixedWarning] = useState(false);
   const {
     stage,
     uploadedCount,
@@ -75,15 +65,29 @@ export function FileUploader({
 
   const isUploading = stage === "uploading";
 
+  /**
+   * 互斥预校验：同一批要么全图片、要么全 PDF。
+   * 混选时置提示并拦下；通过则清除提示并返回 true。
+   */
+  const passesMutualExclusion = (accepted: readonly File[]): boolean => {
+    if (classifySelection(accepted.map((f) => f.name)) === "mixed") {
+      setMixedWarning(true);
+      return false;
+    }
+    setMixedWarning(false);
+    return true;
+  };
+
   /** 多文件选择（平铺，无目录结构） */
   const handleFileChange = (
     event: React.ChangeEvent<HTMLInputElement>,
   ): void => {
     const { files } = event.target;
     if (files === null || files.length === 0) return;
-    const imageFiles = filterImageFiles([...files]);
-    if (imageFiles.length === 0) return;
-    startUpload(imageFiles);
+    const accepted = filterAcceptedFiles([...files]);
+    if (accepted.length === 0) return;
+    if (!passesMutualExclusion(accepted)) return;
+    startUpload(accepted);
   };
 
   /** 目录选择（保留子目录结构） */
@@ -93,16 +97,16 @@ export function FileUploader({
     const { files } = event.target;
     if (files === null || files.length === 0) return;
 
-    const allFiles = [...files];
-    const imageFiles = filterImageFiles(allFiles);
-    if (imageFiles.length === 0) return;
+    const accepted = filterAcceptedFiles([...files]);
+    if (accepted.length === 0) return;
+    if (!passesMutualExclusion(accepted)) return;
 
     // 提取相对路径（去掉最外层目录）
-    const relativePaths = imageFiles.map((f) =>
+    const relativePaths = accepted.map((f) =>
       stripRootDir(f.webkitRelativePath || f.name),
     );
 
-    startUpload(imageFiles, relativePaths);
+    startUpload(accepted, relativePaths);
   };
 
   const handleComplete = (): void => {
@@ -143,7 +147,7 @@ export function FileUploader({
             ref={fileInputRef}
             type="file"
             multiple
-            accept={ACCEPT}
+            accept={ACCEPT_ATTR}
             onChange={handleFileChange}
             disabled={disabled}
             className="file-input-hidden"
@@ -161,6 +165,11 @@ export function FileUploader({
           <p className="upload-hint">
             {t("fileUploader.fileTypeHint")}
           </p>
+          {mixedWarning && (
+            <p className="upload-mixed-warning" role="alert">
+              {t("fileUploader.mixedInputError")}
+            </p>
+          )}
         </div>
       )}
 

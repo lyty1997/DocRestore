@@ -739,3 +739,33 @@ resume 时区分「请求级 key 丢失」与「本就无需 key」，故按 iss
 
 **规避**：需 resume 的云端精修任务，把 key 配进环境变量 `DOCRESTORE_LLM_API_KEY`（重启后水合自动
 回填），而非仅放请求体；或重新建任务并在请求体重新提供 key。本地 LLM 用 `provider="local"`，不受影响。
+
+## Pillow 首次 RGB→PDF 保存 KeyError 'JPEG'（Epic A 渲染，2026-06-18）
+
+**现象**：在全新 Python 进程里第一步就 `Image.new("RGB", ...).save(path, save_all=True,
+append_images=[...])` 存多页 PDF，报 `KeyError: 'JPEG'`（`PdfImagePlugin._write_image`
+里 `Image.SAVE["JPEG"]` 不存在）；但 `features.check("jpg")` 明明为 True。
+
+**根因**：Pillow 插件**懒加载**。`Image.save()` 只触发 `preinit()`，而 PDF 保存对 RGB 页
+用 JPEG(DCTDecode) 编码，需要完整 `Image.init()` 注册的 `Image.SAVE["JPEG"]` 处理器。
+若进程内此前没有任何操作触发全量 init（如 `features.check`、open 一张 jpg），`Image.SAVE`
+里就没有 JPEG，保存即 KeyError。与 libjpeg 是否安装**无关**（本机 jpg 支持正常）。
+
+**规避**：造 PDF（fixture / 任何 RGB→PDF）前显式 `Image.init()`。已在
+`tests/pipeline/render/test_pdf.py::_make_pdf` 落地。生产渲染路径用 pypdfium2 读 PDF、
+不走 Pillow 存 PDF，不受影响。
+
+## 开 PII 误伤英文专有名词 / 图片标识符（已修复 2026-06-18）
+
+现象：
+- 开启 PII（人名/机构名脱敏）后，输出大量误伤：`FGRFP→[机构名]FP`、图片 src `..._501_94_after_1.jpg→..._[机构名]_1.jpg`、LaTeX `\mu→[人名]`、HTML `break-word;'>kcat→break-word[人名]`、`Metallosphaera sedula→[人名] sedula`。
+- 关 PII 输出正常——问题专属实体（人名/机构名）替换路径，结构化 regex 脱敏无辜。
+
+根因（两层相乘）：
+- 检测层：`pipeline` 把含图片引用/HTML/LaTeX/代码的**完整 markdown** 喂给通用 spaCy NER，把 `xxx.jpg`/`;'>kcat`/`\mu`/整句误检为人名/机构名。
+- 替换层：`redactor._replace_entities` 用无词边界、无结构豁免的 `str.replace`，一条坏词全文穿透（词内子串 `FGR`→`FGRFP`、图片 src、HTML 属性、LaTeX）。
+
+处理策略（详见 [pii-entity-overredaction-fix.md](backend/pii-entity-overredaction-fix.md)）：
+- A 替换层结构感知：新增 `privacy/markup.py` 结构跨度单一真相源；实体替换只在自由文本段、ASCII 实体加词边界。
+- B 检测层：检测前 `mask_structure` 抹掉结构再喂 NER；`_looks_like_name` 净化丢弃文件名/markup 碎片/数字串/整句。
+- 残留：通用 NER 对"长得像名字的领域词"（物种名/期刊名）在正文里的误检属固有精度上限（设计 N1），结构已零损坏；如仍嫌噪可后续加英文停用表（设计 D1）。
