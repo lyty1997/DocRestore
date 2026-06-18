@@ -2535,21 +2535,39 @@ body {
 .wysiwyg-page-anchor-icon { font-size: 0.85em; }
 .wysiwyg-page-anchor-label { font-family: ui-monospace, monospace; }
 
-/* 数学公式节点（阶段 1：源码态显示，待阶段 2 换 KaTeX NodeView） */
+/* 数学公式节点（KaTeX NodeView，双击编辑） */
 .wysiwyg-prose .wysiwyg-math {
-  font-family: ui-monospace, monospace;
-  background: var(--color-surface-alt);
-  border: 1px solid var(--color-border);
+  cursor: pointer;
   border-radius: 4px;
-  color: var(--color-text);
 }
-.wysiwyg-prose .wysiwyg-math-inline { padding: 0 0.25em; }
+.wysiwyg-prose .wysiwyg-math-inline { padding: 0 0.15em; }
 .wysiwyg-prose .wysiwyg-math-block {
   display: block;
-  padding: 0.4em 0.6em;
-  margin: 0.4em 0;
-  white-space: pre-wrap;
-  word-break: break-all;
+  padding: 0.3em 0.4em;
+  margin: 0.5em 0;
+  overflow-x: auto;
+}
+.wysiwyg-prose .wysiwyg-math:hover {
+  background: var(--color-surface-alt);
+  outline: 1px dashed var(--color-border);
+}
+.wysiwyg-prose .wysiwyg-math-selected {
+  outline: 2px solid var(--color-accent, #4a90d9);
+  background: var(--color-surface-alt);
+}
+/* 双击进入编辑时的 latex 源码输入框 */
+.wysiwyg-math-edit {
+  width: 100%;
+  min-width: 12ch;
+  box-sizing: border-box;
+  font-family: ui-monospace, monospace;
+  font-size: 0.92em;
+  padding: 0.2em 0.4em;
+  border: 1px solid var(--color-accent, #4a90d9);
+  border-radius: 4px;
+  background: var(--color-surface, #fff);
+  color: var(--color-text);
+  resize: vertical;
 }
 
 /* placeholder（Tiptap Placeholder ext 注入的伪元素） */

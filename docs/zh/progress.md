@@ -2329,3 +2329,22 @@ PR #69 合入 dev 后，应用户「先做 #66」收尾最后一个评审0615 �
   项目 eslint ✓；`npm run build` ✓。
 - 阶段 2（待实现）：MathInline/MathBlock 加 KaTeX NodeView + 双击编辑 + 输入规则。设计见
   `docs/zh/frontend/editor-math-design.md` §9。
+
+## 2026-06-18 编辑器公式渲染 阶段2（KaTeX NodeView + 双击编辑）
+
+承接阶段 1（保真）。给 `MathInline`/`MathBlock` 加 KaTeX NodeView，实现编辑器内所见即所得 +
+双击编辑。
+
+- `mathNodes.ts`：`createMathNodeView(displayMode)` —— `katex.render` 渲染 latex（throwOnError
+  false / strict false，坏公式渲红字不崩）；双击进编辑（block=textarea / inline=input，回车提交、
+  Esc 取消、block Shift+回车换行），`setNodeMarkup` 写回 data-latex。NodeView **只影响编辑态显示，
+  不参与序列化**（getHTML 走 renderHTML 仍输出 data-latex）→ 阶段 1 round-trip 保真零回归。
+  事件用 addEventListener（联合元素类型经 HTMLElement 引用调用规避类型重载丢失）。
+- `MarkdownWysiwygEditor.tsx` 引入 `katex/dist/katex.min.css`（CSS 不进 mathNodes 以免污染单测
+  导入图）；`App.css` 公式样式改为渲染态 + hover/selected/编辑框。
+- 验证：`mathNodeView.test.ts` 6 用例（渲染 .katex/.katex-display、双击弹源码框、回车提交更新
+  属性+重渲染+序列化同步、坏公式不抛错）；前端全量 vitest 161 passed；tsc -b ✓；项目 eslint ✓；
+  build ✓；**Playwright 实测真实 Tiptap 编辑器**：块矩阵+行内公式 KaTeX 渲染、双击块公式弹出
+  完整 LaTeX 源码框，两张截图通过。
+- 至此编辑器公式两期均落地。未做（可选）：输入规则 / 工具栏「插入公式」（主场景是编辑 OCR
+  已产出公式）。设计见 `docs/zh/frontend/editor-math-design.md` §9。

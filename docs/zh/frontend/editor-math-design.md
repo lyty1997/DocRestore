@@ -1,6 +1,6 @@
 # 文档模式编辑器数学公式渲染 — 设计
 
-> 状态：**已确认（分两期）· 方案 B（自定义节点）· 阶段 1 已实现 / 阶段 2 待实现** · 2026-06-18
+> 状态：**已确认（分两期）· 方案 B（自定义节点）· 阶段 1+2 均已实现** · 2026-06-18
 > 关联：预览侧公式渲染已落地（`tech-stack.md` / `markdownSanitize.ts`），本文只覆盖
 > **编辑模式**（Tiptap WYSIWYG），PPT 模式无编辑器、不在范围内。
 >
@@ -107,6 +107,14 @@ A 做 md↔html 映射所需的同一处接缝，不浪费。
     只读 `data-latex` 还原。
   - `MarkdownWysiwygEditor.tsx` 注册两节点；`App.css` 加源码态样式。
   - `mathRoundtrip.test.ts`：string 两端 + **Tiptap 全链路**幂等（含 `\\`、下标、`\` 命令）。
-- **阶段 2（渲染 + 交互）⬜ 待实现**：给 `MathInline`/`MathBlock` 加 KaTeX `NodeView`
-  （复用预览侧 katex 配置，`throwOnError:false`）+ 双击编辑 `data-latex` + 输入规则
-  （`$$` 起块级、`$x$` 成行内）；视觉验证编辑器内公式渲染。
+- **阶段 2（渲染 + 交互）✅ 已实现**：`mathNodes.ts` 的 `createMathNodeView(displayMode)`
+  给两节点加 KaTeX `NodeView`（`katex.render`，`throwOnError:false` / `strict:false`，坏公式
+  渲红字不崩）；双击进入编辑（block 用 textarea / inline 用 input，回车提交、Esc 取消、
+  block 用 Shift+回车换行），`setNodeMarkup` 更新 `data-latex`。**NodeView 只影响编辑态显示、
+  不参与序列化**（`getHTML` 仍走 `renderHTML` 输出 `data-latex`），故阶段 1 的 round-trip 保真
+  不受影响。KaTeX CSS 由 `MarkdownWysiwygEditor` 引入（避开单测导入图）。
+  测试 `mathNodeView.test.ts`：渲染（编辑器内出现 `.katex` / `.katex-display`）、双击弹源码框、
+  回车提交更新属性 + 重渲染 + 序列化同步、坏公式不抛错；Playwright 实测真实编辑器渲染 + 编辑
+  截图通过。
+  - **未做（可选后续）**：输入规则（typed `$$`/`$x$` 自动成节点）、工具栏「插入公式」按钮——
+    当前主场景是编辑 OCR 已产出的公式，新建公式留待需要时补。

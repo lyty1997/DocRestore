@@ -18,6 +18,7 @@
  *   - 工具栏「插入截图」：打开 ``FigureCropDialog`` 让用户从源图重新框选插图，
  *     裁出后插入（供修复被 OCR 切碎 / 缺失的插图）
  */
+import "katex/dist/katex.min.css";
 
 import {
   Node as TiptapNode,
