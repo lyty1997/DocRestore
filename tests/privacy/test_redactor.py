@@ -23,6 +23,7 @@ from docrestore.privacy.redactor import (
     EntityLexicon,
     PIIRedactor,
     _is_safe_entity,
+    _looks_like_name,
     _replace_entities,
 )
 
@@ -275,12 +276,16 @@ class TestEntityReplaceSafety:
     def test_high_frequency_entity_warns_but_replaces(
         self, caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """异常高频实体仍执行替换，但发出告警（issue #13）。"""
-        text = "ab" * 60  # 出现 60 次 > 阈值 50
+        """异常高频实体仍执行替换，但发出告警（issue #13）。
+
+        用空格分隔的独立 token（词边界生效后，子串"ababab"不再被当 60 个 ab 替）。
+        """
+        text = "ab " * 60  # 60 个独立 token > 阈值 50
         with caplog.at_level("WARNING"):
             out, count = _replace_entities(text, ["ab"], "X")
         assert count == 60
-        assert out == "X" * 60
+        assert "ab" not in out
+        assert out == "X " * 60
         assert any("异常高" in r.message for r in caplog.records)
 
 
@@ -312,3 +317,106 @@ class TestRedactTokensOnly:
         kinds = {r.kind for r in records}
         assert "credential" in kinds
         assert "custom_word" in kinds
+
+
+class TestLooksLikeName:
+    """词表净化 _looks_like_name（B2）：挡掉结构碎片/文件名/数字串/整句误检。"""
+
+    def test_real_names_pass(self) -> None:
+        assert _looks_like_name("Zhang Wei") is True
+        assert _looks_like_name("张三") is True
+        assert _looks_like_name("Acme Inc") is True
+
+    def test_file_name_rejected(self) -> None:
+        assert _looks_like_name("photo_1.jpg") is False
+        assert _looks_like_name("a.PNG") is False
+
+    def test_markup_fragment_rejected(self) -> None:
+        assert _looks_like_name("a<b") is False
+        assert _looks_like_name(";'>cell") is False
+        assert _looks_like_name("L)-aspartate") is False
+
+    def test_digit_heavy_rejected(self) -> None:
+        # 字母占比 < 0.5（数字/标点为主）
+        assert _looks_like_name("12,34") is False
+
+    def test_whole_sentence_rejected(self) -> None:
+        assert _looks_like_name("x" * 65) is False
+
+
+class TestEntityReplacementStructureSafe:
+    """结构感知 + 词边界替换（A）：实体替换绝不改坏结构、不吃词内子串。"""
+
+    def test_word_boundary_no_substring_hit(self) -> None:
+        """ASCII 实体加词边界：FGR 不再命中 FGRFP，只替独立 FGR。"""
+        out, count = _replace_entities("FGRFP vs FGR alone", ["FGR"], "[X]")
+        assert count == 1
+        assert "FGRFP" in out
+        assert "[X] alone" in out
+
+    def test_image_src_path_preserved(self) -> None:
+        """图片 src 路径在保护段内，即便词表含该串也不替（结构零损坏）。"""
+        cfg = PIIConfig(enable=True, redact_org_name=True)
+        redactor = PIIRedactor(cfg)
+        md = '<img src="images/foobar_1.jpg" alt="x" />'
+        lexicon = EntityLexicon(
+            person_names=(), org_names=("foobar_1.jpg", "foobar"),
+        )
+        out, _ = redactor.apply_lexicon(md, lexicon)
+        assert out == md
+        assert cfg.org_name_placeholder not in out
+
+    def test_latex_math_preserved_free_text_replaced(self) -> None:
+        """LaTeX `$ ... $` 段受保护，段外同名正文仍被替。"""
+        cfg = PIIConfig(enable=True, redact_person_name=True)
+        redactor = PIIRedactor(cfg)
+        md = "$ alpha $ plain alpha here"
+        lexicon = EntityLexicon(person_names=("alpha",), org_names=())
+        out, _ = redactor.apply_lexicon(md, lexicon)
+        assert "$ alpha $" in out
+        assert f"plain {cfg.person_name_placeholder} here" in out
+
+    def test_html_tag_attr_preserved_cell_text_replaced(self) -> None:
+        """HTML 标签（含属性）受保护，标签间单元格正文仍被替。"""
+        cfg = PIIConfig(enable=True, redact_person_name=True)
+        redactor = PIIRedactor(cfg)
+        md = "<td title='alpha'>alpha</td>"
+        lexicon = EntityLexicon(person_names=("alpha",), org_names=())
+        out, _ = redactor.apply_lexicon(md, lexicon)
+        assert "<td title='alpha'>" in out
+        assert f">{cfg.person_name_placeholder}<" in out
+        assert "</td>" in out
+
+    def test_idempotent(self) -> None:
+        """对已脱敏文本再跑一次，结果不变（占位符不被二次破坏）。"""
+        cfg = PIIConfig(enable=True, redact_person_name=True)
+        redactor = PIIRedactor(cfg)
+        lexicon = EntityLexicon(person_names=("Alice",), org_names=())
+        once, _ = redactor.apply_lexicon("Alice met Bob", lexicon)
+        twice, _ = redactor.apply_lexicon(once, lexicon)
+        assert once == twice
+        assert "Alice" not in once
+
+    def test_regression_scientific_doc_structure_preserved(self) -> None:
+        """回归：模拟真实 NER 脏词表，科技文档结构与术语零损坏。"""
+        cfg = PIIConfig(
+            enable=True, redact_person_name=True, redact_org_name=True,
+        )
+        redactor = PIIRedactor(cfg)
+        md = (
+            "## method FGRFP vs RXNFP\n"
+            '<img src="images/photo_501_94_after_1.jpg" alt="x" />\n'
+            "tail $ \\mu $L/min"
+        )
+        lexicon = EntityLexicon(
+            person_names=("\\mu",),
+            org_names=("FGR", "RXN", "501_94_after_1.jpg", "501_94_after"),
+        )
+        out, _ = redactor.apply_lexicon(md, lexicon)
+        # 词内子串不替
+        assert "FGRFP" in out
+        assert "RXNFP" in out
+        # 图片 src 路径原样
+        assert 'src="images/photo_501_94_after_1.jpg"' in out
+        # LaTeX 原样
+        assert "$ \\mu $" in out

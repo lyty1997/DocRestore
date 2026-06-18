@@ -754,3 +754,18 @@ append_images=[...])` 存多页 PDF，报 `KeyError: 'JPEG'`（`PdfImagePlugin._
 **规避**：造 PDF（fixture / 任何 RGB→PDF）前显式 `Image.init()`。已在
 `tests/pipeline/render/test_pdf.py::_make_pdf` 落地。生产渲染路径用 pypdfium2 读 PDF、
 不走 Pillow 存 PDF，不受影响。
+
+## 开 PII 误伤英文专有名词 / 图片标识符（已修复 2026-06-18）
+
+现象：
+- 开启 PII（人名/机构名脱敏）后，输出大量误伤：`FGRFP→[机构名]FP`、图片 src `..._501_94_after_1.jpg→..._[机构名]_1.jpg`、LaTeX `\mu→[人名]`、HTML `break-word;'>kcat→break-word[人名]`、`Metallosphaera sedula→[人名] sedula`。
+- 关 PII 输出正常——问题专属实体（人名/机构名）替换路径，结构化 regex 脱敏无辜。
+
+根因（两层相乘）：
+- 检测层：`pipeline` 把含图片引用/HTML/LaTeX/代码的**完整 markdown** 喂给通用 spaCy NER，把 `xxx.jpg`/`;'>kcat`/`\mu`/整句误检为人名/机构名。
+- 替换层：`redactor._replace_entities` 用无词边界、无结构豁免的 `str.replace`，一条坏词全文穿透（词内子串 `FGR`→`FGRFP`、图片 src、HTML 属性、LaTeX）。
+
+处理策略（详见 [pii-entity-overredaction-fix.md](backend/pii-entity-overredaction-fix.md)）：
+- A 替换层结构感知：新增 `privacy/markup.py` 结构跨度单一真相源；实体替换只在自由文本段、ASCII 实体加词边界。
+- B 检测层：检测前 `mask_structure` 抹掉结构再喂 NER；`_looks_like_name` 净化丢弃文件名/markup 碎片/数字串/整句。
+- 残留：通用 NER 对"长得像名字的领域词"（物种名/期刊名）在正文里的误检属固有精度上限（设计 N1），结构已零损坏；如仍嫌噪可后续加英文停用表（设计 D1）。

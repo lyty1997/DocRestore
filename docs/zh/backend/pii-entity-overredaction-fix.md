@@ -5,9 +5,12 @@ Licensed under the Apache License, Version 2.0 (the "License").
 
 # PII 实体脱敏误伤修复（结构损坏 + 误检）详细设计
 
-> 状态：**设计待确认**（2026-06-18）——根因已实锤复现，方案待用户拍板后实现。
+> 状态：**已落地**（2026-06-18，分支 `bugfix/pii-entity-overredaction`）——按默认决策
+> （D1 不加停用表 / D2 净化落 redactor / D3 A+B 同出）实现。真实样本验证：图片路径 /
+> `FGRFP`·`RXNFP` / LaTeX / HTML 结构全完好，替换数 43→25（残留为 N1 正文误检）。
+> 测试 `tests/privacy/test_redactor.py`（+11）+ `test_ner.py`，门禁 EXIT=0 / pytest 1403 passed。
 > 上游：[pii-unification.md](pii-unification.md)（PIIGuard 收口）、[pii-local-ner.md](pii-local-ner.md)（S3 本地 NER）、[pii-cloud-egress-gate.md](pii-cloud-egress-gate.md)（#67 出云闸口）。
-> 代码现状：`backend/docrestore/privacy/redactor.py`、`privacy/ner.py`、`pipeline/pipeline.py`（检测/替换调用点）。
+> 落地文件：新增 `privacy/markup.py`（结构跨度单一真相源）；改 `privacy/redactor.py`（`_replace_entities` 结构感知+词边界、`_looks_like_name` 净化）、`privacy/ner.py`（检测前 `mask_structure`）。
 
 ## 0. 背景与现象
 
@@ -137,13 +140,14 @@ text = text.replace(name, placeholder)   # 全局子串替换，无词边界、�
 
 ## 6. 改动面
 
-| 文件 | 改动 |
+| 文件 | 改动（已落地） |
 |---|---|
-| `backend/docrestore/privacy/redactor.py` | `_replace_entities` 改结构感知 + 词边界；抽结构跨度正则；修正 `apply_lexicon` docstring |
-| `backend/docrestore/privacy/ner.py` | `_collect_entities` 前置 B1 mask + 后置 B2 `_looks_like_name` 净化（或净化放 redactor 统一） |
-| `backend/docrestore/pipeline/pipeline.py` | 无逻辑改动（检测/替换仍走 guard，签名不变）；仅确认调用点不受影响 |
-| `tests/privacy/test_redactor.py` `test_ner.py` | 增 T1–T6 |
-| `docs/zh/known-issues.md` | 修复后补"已知问题→解决"条目 |
+| `backend/docrestore/privacy/markup.py` | **新增**：结构跨度正则单一真相源 `STRUCTURE_SPAN_RE` + `split_protected` + `mask_structure` |
+| `backend/docrestore/privacy/redactor.py` | `_replace_entities` 改结构感知（`split_protected`）+ 词边界（`_sub_in_free`）；新增 B2 净化 `_looks_like_name`（D2 单点收口）；`_LONG_ENTITY_WARN`→`_MAX_ENTITY_LEN` 丢弃；修正 `apply_lexicon` docstring |
+| `backend/docrestore/privacy/ner.py` | `_collect_entities` 检测前 `mask_structure`（B1） |
+| `backend/docrestore/pipeline/pipeline.py` | 无改动（检测/替换仍走 guard，签名不变） |
+| `tests/privacy/test_redactor.py` | 更新高频用例为词边界语义；新增 `TestLooksLikeName`(5) + `TestEntityReplacementStructureSafe`(6) |
+| `docs/zh/known-issues.md` | 补"已知问题→解决"条目 |
 
 ## 7. 风险 / 取舍
 
