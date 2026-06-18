@@ -2267,3 +2267,45 @@ PR #69 合入 dev 后，应用户「先做 #66」收尾最后一个评审0615 �
 **门禁**：后端 `pytest tests/api/test_routes.py -k "Browse or Stage"` 11 passed（含新增 browse 列 PDF / stage 受单 PDF / stage 拒混合 3 例）；前端项目 eslint 干净（hook 内 npx ESLint 10.5.0 与 eslint-plugin-react 版本不兼容报 `getFilename`，非本次代码）、`tsc -b` 通过、vitest 组件 35 passed。
 
 **遗留**：UI 视觉验证（📄 图标 + PDF 占位预览）需后端+前端栈起来 + 目录内有 PDF 才能截图实景，未跑；逻辑由 typecheck/单测覆盖。
+
+## 2026-06-18 文档/PPT 预览数学公式渲染（KaTeX）
+
+**需求**：OCR/LLM 产出的 `$...$` / `$$...$$` 公式在预览界面被当普通文本原样显示，需渲染成数学；文档模式与 PPT 模式都要支持。
+
+**实现**（两模式共用 `DocCodePreview` 一处渲染入口）：
+- 新增依赖 `katex@0.16.47`（与 rehype-katex 内置版对齐，避免 CSS/JS 类名错位）+ `remark-math@6` + `rehype-katex@7`。
+- `markdownSanitize.ts` 集中导出共享插件链 `PREVIEW_REMARK_PLUGINS=[remarkGfm,remarkMath]` / `PREVIEW_REHYPE_PLUGINS=[rehypeRaw,[rehypeSanitize,schema],rehypeKatex]`，组件与测试共用避免漂移。**顺序关键**：KaTeX 放 sanitize 之后，使其 MathML/带样式 span 不被剥掉；不可信 HTML 已先过 sanitize，KaTeX `trust:false`（默认）输出无 XSS。schema 多放行 `div.className`（让 remark-math 的 `math-display` 占位类存活供 katex 识别）。KaTeX `throwOnError:false`：坏公式渲红字不崩页。
+- `DocCodePreview.tsx` 改用共享插件链 + `import "katex/dist/katex.min.css"`。
+- `markdown.ts` 加 `normalizeDisplayMath`：把"整行就是一条 `$$...$$`"（OCR 常压成一行）拆成独占行的 display 形式，否则 micromark 退化成行内；`escapeNonHtmlTags` 改为跳过公式区，避免 LaTeX 里的 `<`/`>` 被误转义。接入 `preprocessMarkdown`。
+
+**验证**：前端全量 vitest 145 passed（含新增 KaTeX display/inline/容错/sanitize 共存、normalizeDisplayMath、escape 跳过公式区用例）；tsc -b ✓；`npm run build` ✓（KaTeX 字体/CSS 正确打包）；Playwright 实渲用户原始公式截图——能渲染、display 居中、无 katex-error。
+
+**遗留/边界**：
+- 用户示例公式渲染成功但矩阵塌成单行——根因是 **OCR/LLM 抽取质量**（`\ ` 反斜杠空格当成空格未换行应为 `\\`、`\mathbf{1}{m×m}` 缺下标 `_`、`\operatorname{L o w e r T r i}` 字母被拆带空格），非渲染问题。需在 LLM 精修 prompt / OCR 侧治本，不做脆弱的字符串硬替换。
+- Tiptap 编辑器（编辑模式）暂不渲染公式（marked→HTML 不识别数学），公式以纯文本编辑；如需所见即所得需加自定义 math 节点，单独排期。
+- 单 `$` 行内公式：remark-math 默认把 `$...$` 当行内数学，文档里字面 `$`（价格）可能误判，技术文档场景可接受。
+
+## 2026-06-18 OCR LaTeX 抽取治本（精修 prompt）+ 编辑器公式渲染设计
+
+承接上一条（预览侧 KaTeX 渲染）：渲染管线 OK，但用户公式矩阵塌成单行是 **OCR/LLM 抽取
+质量**问题，治本在精修 prompt。
+
+**#2 已实现**（`backend/docrestore/llm/prompts.py`，3 套独立 prompt 中改 2 套）：
+- 文档分段 `REFINE_SYSTEM_PROMPT`：原本**完全没提公式**，新增"## 数学公式 LaTeX 规范化"小节
+  （规则 18–21）：保数学含义不变（禁求值/化简/臆造），只修 OCR 语法错误——矩阵/方程组环境内
+  `\ `（反斜杠+空格）/裸空格行分隔还原 `\\`、合并 `\operatorname{}`/`\mathrm{}` 内被拆标识符
+  （`L o w e r T r i`→`LowerTri`）、补漏标的下标/上标、配平括号。
+- PPT 按页 `SLIDE_REFINE_SYSTEM_PROMPT`：规则 3 由"公式原样保留、不得改写"改写为"保留含义
+  +修 OCR 语法错误"，化解"原样保留 vs 修语法"的张力。
+- 整篇 `FINAL_REFINE_SYSTEM_PROMPT`：**不动**（纯跨段去重职责；公式已在分段级修好，加进去会
+  破坏其单一职责）。
+- 不做脆弱字符串硬替换（`\ ` 是合法 LaTeX 控制空格，盲替误伤）；靠 LLM 理解语义来修。
+- 改 prompt 自动使 LLM 磁盘缓存 fingerprint 变化（旧结果失效、重精修），符合预期。
+- 测试 `tests/llm/test_prompts.py` 加 `test_both_prompts_have_latex_normalization_rule`；
+  既有断言（跨页/不做跨页去重/复制代码）不受影响。`pytest tests/llm/` 149 passed 1 skipped。
+
+**#1 已出设计**（`docs/zh/frontend/editor-math-design.md`）：文档模式 Tiptap 编辑器公式渲染。
+现状：编辑器走 `markdownRoundtrip.ts`（marked/turndown）另一条链路，公式不渲染且 round-trip
+可能被 `_`/`\` 转义破坏。设计分两期：①保真（round-trip 把公式当原子保护 + turndown 规则，
+**先做、最痛**）②渲染+交互（接 Tiptap 官方 `@tiptap/extension-mathematics` 或自定义 Math 节点，
+`data-latex` 为唯一真相，KaTeX NodeView + 双击编辑）。**待用户确认分期与方案 A/B 后实现**。
