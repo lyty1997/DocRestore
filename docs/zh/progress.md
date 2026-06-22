@@ -2348,3 +2348,27 @@ PR #69 合入 dev 后，应用户「先做 #66」收尾最后一个评审0615 �
   完整 LaTeX 源码框，两张截图通过。
 - 至此编辑器公式两期均落地。未做（可选）：输入规则 / 工具栏「插入公式」（主场景是编辑 OCR
   已产出公式）。设计见 `docs/zh/frontend/editor-math-design.md` §9。
+
+## 2026-06-22 编辑器「插入公式」按钮 + MathLive 可视化编辑设计（ultracode 研究工作流）
+
+承接编辑器公式两期。用户要"插入公式按钮 + 不懂 LaTeX 也能所见即所得编辑"。
+
+**插入按钮（已实现）**：`mathNodes.ts` 导出 `insertMathNode(editor, displayMode)`——插入空 math 节点
+后扫描选中它 → `selectNode` 检测空 latex 自动进入编辑（免再双击）；块级插入会拆段，故用"扫描最后
+一个同类空节点"选中而非选区反推位置。工具栏（`MarkdownWysiwygEditor.tsx`）加行内 `$x$` / 块级
+`$x$▦` 两按钮；三语 i18n `editor.insertMathInline`/`insertMathBlock`。
+- 验证：`mathNodeView.test.ts` 加 2 用例（插入块级→空节点+自动编辑框+提交序列化 / 插入行内）；
+  前端全量 vitest 163 passed；tsc/eslint/build ✓；**Playwright 实测真实编辑器**：光标处插入、已有
+  公式不被破坏、自动弹编辑框，截图通过（注意：默认选区落在已有公式上会替换之，真实"光标在正文"
+  流程正常）。
+
+**MathLive 可视化编辑设计（待确认）**：跑了 ultracode 研究工作流（8 agents：MathLive 简报 + 替代方案
+对比 + 4 路对抗式真包/真浏览器验证）。结论落 `editor-math-design.md` 第三期（§10-16）：
+- 选 **MathLive**（v0.110/MIT，五项交集唯一全中），作「第二编辑形态」非替换（整体替换=过度工程：
+  地基级焦点摩擦 + 225KB + 碰过即规范化；完全不做=欠工程）。保留 textarea 作源码精确回退。
+- 四大硬约束（吸收对抗验证）：① round-trip 判据用 `input`-dirty 标志而非 getValue 字符串比较（碰过
+  即整段规范化 all-or-nothing）；② jsdom 测 MathLive 会让 CI 退出码=1，单测 mock 桩、真测走 Playwright；
+  ③ ProseMirror 焦点不可共享 + `setContent` 中途销毁丢内容 + StrictMode 单例泄漏；④ 资源最低风险，
+  字体白嫖 katex CSS、`soundsDirectory=null`、零打包增量。
+- 分期 3a 依赖/资源 → 3b NodeView 接 math-field + dirty 闸口（先做 round-trip 真浏览器 spike）→ 3c
+  源码回退+i18n。**待用户确认 §16 四问后开工**。

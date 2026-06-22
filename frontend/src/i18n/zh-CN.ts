@@ -259,6 +259,8 @@ export const zhCN = {
   "editor.insertTable": "插入表格",
   "editor.link": "链接",
   "editor.insertFigure": "插入截图（从源图重新框选插图）",
+  "editor.insertMathInline": "插入行内公式",
+  "editor.insertMathBlock": "插入块级公式",
   "editor.linkPrompt": "输入链接 URL（留空清除链接）",
   "editor.undo": "撤销 (Ctrl+Z)",
   "editor.redo": "重做 (Ctrl+Y)",

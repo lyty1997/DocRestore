@@ -47,7 +47,7 @@ import {
   editorImagesToAssetUrls,
 } from "../features/task/markdown";
 import { htmlToMarkdown, markdownToHtml } from "../features/task/markdownRoundtrip";
-import { MathBlock, MathInline } from "../features/task/mathNodes";
+import { MathBlock, MathInline, insertMathNode } from "../features/task/mathNodes";
 import {
   getCenterPagePosition,
   scrollToPagePosition,
@@ -246,6 +246,12 @@ function Toolbar({ editor, t, onInsertFigure }: ToolbarProps): React.JSX.Element
       {btn("🔗", editor.isActive("link"), setLink, t("editor.link"))}
       {onInsertFigure !== undefined
         && btn("🖼", false, onInsertFigure, t("editor.insertFigure"))}
+      {btn("$x$", false,
+        () => { insertMathNode(editor, false); },
+        t("editor.insertMathInline"))}
+      {btn("$x$▦", false,
+        () => { insertMathNode(editor, true); },
+        t("editor.insertMathBlock"))}
 
       <span className="wysiwyg-tb-sep" />
 

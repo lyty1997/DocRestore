@@ -248,6 +248,8 @@ export const zhTW: Record<TranslationKey, string> = {
   "editor.insertTable": "插入表格",
   "editor.link": "連結",
   "editor.insertFigure": "插入截圖（從原圖重新框選插圖）",
+  "editor.insertMathInline": "插入行內公式",
+  "editor.insertMathBlock": "插入區塊公式",
   "editor.linkPrompt": "輸入 URL（留空清除連結）",
   "editor.undo": "撤銷 (Ctrl+Z)",
   "editor.redo": "重做 (Ctrl+Y)",

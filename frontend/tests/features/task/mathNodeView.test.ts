@@ -8,7 +8,11 @@ import { StarterKit } from "@tiptap/starter-kit";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { htmlToMarkdown, markdownToHtml } from "../../../src/features/task/markdownRoundtrip";
-import { MathBlock, MathInline } from "../../../src/features/task/mathNodes";
+import {
+  MathBlock,
+  MathInline,
+  insertMathNode,
+} from "../../../src/features/task/mathNodes";
 
 let editor: Editor | undefined;
 
@@ -96,5 +100,44 @@ describe("双击编辑公式", () => {
     // 序列化反映新 latex
     expect(ed.getHTML()).toContain('data-latex="a^2+b^2"');
     expect(htmlToMarkdown(ed.getHTML())).toContain("a^2+b^2");
+  });
+});
+
+describe("插入公式（工具栏）", () => {
+  it("插入块级公式：建空 mathBlock 节点并自动进入编辑", () => {
+    const ed = mountEditor("正文");
+    insertMathNode(ed, true);
+    // 节点已插入
+    const pos = findPos(ed, "mathBlock");
+    expect(pos).not.toBeUndefined();
+    if (pos === undefined) return;
+    expect(ed.state.doc.nodeAt(pos)?.attrs.latex).toBe("");
+    // 空公式被选中 → selectNode 自动进入编辑 → 出现 latex 输入框
+    const input = ed.view.dom.querySelector<HTMLTextAreaElement>(
+      "textarea.wysiwyg-math-edit",
+    );
+    expect(input).not.toBeNull();
+    // 填入并回车提交，序列化为 $$..$$
+    if (input === null) return;
+    input.value = "x^2";
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    expect(ed.state.doc.nodeAt(pos)?.attrs.latex).toBe("x^2");
+    expect(htmlToMarkdown(ed.getHTML())).toContain("x^2");
+  });
+
+  it("插入行内公式：建空 mathInline 节点", () => {
+    const ed = mountEditor("前后");
+    insertMathNode(ed, false);
+    const pos = findPos(ed, "mathInline");
+    expect(pos).not.toBeUndefined();
+    if (pos === undefined) return;
+    expect(ed.state.doc.nodeAt(pos)?.type.name).toBe("mathInline");
+    // 行内空公式同样自动进入编辑（input 元素）
+    const input = ed.view.dom.querySelector<HTMLInputElement>(
+      "input.wysiwyg-math-edit",
+    );
+    expect(input).not.toBeNull();
   });
 });

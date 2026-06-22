@@ -13,9 +13,11 @@
 import {
   Node as TiptapNode,
   mergeAttributes,
+  type Editor,
   type NodeViewRendererProps,
 } from "@tiptap/core";
 import type { Node as PMNode } from "@tiptap/pm/model";
+import { NodeSelection } from "@tiptap/pm/state";
 import type { NodeView } from "@tiptap/pm/view";
 import katex from "katex";
 
@@ -127,6 +129,11 @@ function createMathNodeView(
       },
       selectNode: (): void => {
         dom.classList.add("wysiwyg-math-selected");
+        // 空公式被选中（如「插入公式」刚插入或单击占位）→ 自动进入编辑，
+        // 免去再双击；非空公式仅高亮（双击才编辑）。
+        if (!editing && readLatex(current.attrs) === "") {
+          enterEdit();
+        }
       },
       deselectNode: (): void => {
         dom.classList.remove("wysiwyg-math-selected");
@@ -221,3 +228,35 @@ export const MathBlock = TiptapNode.create({
     return createMathNodeView(true);
   },
 });
+
+/**
+ * 工具栏「插入公式」：插入一个空 math 节点（行内 / 块级），并把选区落到该
+ * 节点上 —— 触发 NodeView.selectNode → 空公式自动进入编辑（见 selectNode）。
+ *
+ * @param editor      Tiptap 编辑器
+ * @param displayMode true=块级 `$$..$$` / false=行内 `$..$`
+ */
+export function insertMathNode(editor: Editor, displayMode: boolean): void {
+  const type = displayMode ? "mathBlock" : "mathInline";
+  editor
+    .chain()
+    .focus()
+    .insertContent({ type, attrs: { latex: "" } })
+    .command(({ tr, dispatch }): boolean => {
+      // 选中刚插入的空公式节点 → 触发 NodeView.selectNode → 空公式自动进入编辑。
+      // 块级插入会拆段、节点位置不易由选区反推，故直接扫描「最后一个同类空节点」
+      //（本函数仅工具栏调用、插入后立即编辑，最新插入即文档序最后一个空节点）。
+      if (dispatch) {
+        let target: number | undefined;
+        tr.doc.descendants((n, p): boolean => {
+          if (n.type.name === type && readLatex(n.attrs) === "") target = p;
+          return true;
+        });
+        if (target !== undefined) {
+          tr.setSelection(NodeSelection.create(tr.doc, target));
+        }
+      }
+      return true;
+    })
+    .run();
+}

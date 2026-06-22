@@ -256,6 +256,8 @@ export const en: Record<TranslationKey, string> = {
   "editor.insertTable": "Insert table",
   "editor.link": "Link",
   "editor.insertFigure": "Insert figure (re-crop from a source image)",
+  "editor.insertMathInline": "Insert inline formula",
+  "editor.insertMathBlock": "Insert block formula",
   "editor.linkPrompt": "Enter URL (leave empty to remove)",
   "editor.undo": "Undo (Ctrl+Z)",
   "editor.redo": "Redo (Ctrl+Y)",
