@@ -966,6 +966,32 @@ body {
   box-shadow: 0 0 10px var(--color-success-bg);
 }
 
+/* ── 下载控件：附加导出格式（Word/PDF）勾选 + 下载按钮（Epic D） ── */
+.download-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.download-export-label {
+  font-size: 0.8125rem;
+  opacity: 0.75;
+}
+
+.download-export-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.8125rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.download-export-option input {
+  cursor: pointer;
+}
+
 /* ── Markdown preview ──────────────────────────── */
 .markdown-preview {
   padding: 1.5rem;

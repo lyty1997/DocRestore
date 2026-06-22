@@ -382,9 +382,22 @@ export async function resumeTask(taskId: string): Promise<ActionResponse> {
   return handleResponse(response, ActionResponseSchema);
 }
 
-/** 下载结果 zip 的 URL（附加 token 供 <a href> 直接使用） */
-export function getDownloadUrl(taskId: string): string {
-  return appendTokenToUrl(`${API_BASE}/tasks/${taskId}/download`);
+/**
+ * 下载结果 zip 的 URL（附加 token 供 <a href> 直接使用）。
+ *
+ * Epic D：``formats`` 非空时拼 ``?formats=docx,pdf``，后端把 document.md 按需
+ * 导出成对应格式一并打进 zip。空 / 省略则纯 markdown zip（行为不变）。
+ */
+export function getDownloadUrl(
+  taskId: string,
+  formats?: readonly string[],
+): string {
+  const base = `${API_BASE}/tasks/${taskId}/download`;
+  if (formats !== undefined && formats.length > 0) {
+    const qs = new URLSearchParams({ formats: formats.join(",") }).toString();
+    return appendTokenToUrl(`${base}?${qs}`);
+  }
+  return appendTokenToUrl(base);
 }
 
 /** 构建 assets URL（附加 token 供 <img src> 直接使用） */

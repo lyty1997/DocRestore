@@ -185,6 +185,9 @@ export const zhCN = {
   // ── 任务结果 ──
   "taskResult.title": "处理结果",
   "taskResult.downloadZip": "下载结果（zip）",
+  "taskResult.exportLabel": "附加导出：",
+  "taskResult.exportFormat_docx": "Word",
+  "taskResult.exportFormat_pdf": "PDF",
   "taskResult.docTab": "文档 {index}",
   "taskResult.processNew": "处理新文档",
   "taskResult.resetBtn": "重新开始",
@@ -398,6 +401,10 @@ export const zhCN = {
     "本地 NER 未就绪：已开启人名 / 机构名脱敏但 spaCy 或语言模型未安装。请在任务表单中一键配置本地 NER 环境，或关闭隐私脱敏。",
   "errors.api.ner_setup_in_progress": "本地 NER 环境安装进行中，请稍候。",
   "errors.api.ner_setup_invalid_model": "非法的模型名，已拒绝安装。",
+  "errors.api.export_format_unsupported": "不支持的导出格式：{format}",
+  "errors.api.export_tool_unavailable":
+    "导出依赖未安装：{tool}。请在服务器安装后重试，或改用 zip（markdown）下载。",
+  "errors.api.export_failed": "导出失败（{format}），请重试或改用 zip 下载。",
 
   // ── HTTP 状态码诊断 hint ──
   "errors.http.413":

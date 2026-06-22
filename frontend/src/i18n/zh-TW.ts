@@ -174,6 +174,9 @@ export const zhTW: Record<TranslationKey, string> = {
   // ── 任務結果 ──
   "taskResult.title": "處理結果",
   "taskResult.downloadZip": "下載結果（zip）",
+  "taskResult.exportLabel": "附加匯出：",
+  "taskResult.exportFormat_docx": "Word",
+  "taskResult.exportFormat_pdf": "PDF",
   "taskResult.docTab": "文件 {index}",
   "taskResult.processNew": "處理新文件",
   "taskResult.resetBtn": "重新開始",
@@ -402,6 +405,10 @@ export const zhTW: Record<TranslationKey, string> = {
     "本地 NER 未就緒：已開啟人名 / 機構名脫敏但 spaCy 或語言模型未安裝。請在任務表單中一鍵設定本地 NER 環境，或關閉隱私脫敏。",
   "errors.api.ner_setup_in_progress": "本地 NER 環境安裝進行中，請稍候。",
   "errors.api.ner_setup_invalid_model": "非法的模型名，已拒絕安裝。",
+  "errors.api.export_format_unsupported": "不支援的匯出格式：{format}",
+  "errors.api.export_tool_unavailable":
+    "匯出依賴未安裝：{tool}。請在伺服器安裝後重試，或改用 zip（markdown）下載。",
+  "errors.api.export_failed": "匯出失敗（{format}），請重試或改用 zip 下載。",
 
   // ── HTTP 狀態碼診斷 hint ──
   "errors.http.413":

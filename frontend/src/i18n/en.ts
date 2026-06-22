@@ -181,6 +181,9 @@ export const en: Record<TranslationKey, string> = {
   // ── Task result ──
   "taskResult.title": "Results",
   "taskResult.downloadZip": "Download Results (zip)",
+  "taskResult.exportLabel": "Also export:",
+  "taskResult.exportFormat_docx": "Word",
+  "taskResult.exportFormat_pdf": "PDF",
   "taskResult.docTab": "Document {index}",
   "taskResult.processNew": "Process New Document",
   "taskResult.resetBtn": "Start Over",
@@ -416,6 +419,11 @@ export const en: Record<TranslationKey, string> = {
     "Local NER environment installation is in progress, please wait.",
   "errors.api.ner_setup_invalid_model":
     "Invalid model name; installation rejected.",
+  "errors.api.export_format_unsupported": "Unsupported export format: {format}",
+  "errors.api.export_tool_unavailable":
+    "Export dependency not installed: {tool}. Install it on the server and retry, or download the zip (markdown) instead.",
+  "errors.api.export_failed":
+    "Export failed ({format}). Please retry or download the zip instead.",
 
   // ── HTTP status diagnostic hints ──
   "errors.http.413":

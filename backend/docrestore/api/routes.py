@@ -81,6 +81,14 @@ from docrestore.pipeline.config import (
     PIIConfig,
     PowerPointRestoreConfig,
 )
+from docrestore.output.exporters import (
+    SUPPORTED_FORMATS,
+    ExportFailed,
+    ExportToolUnavailable,
+    export_cache_path,
+    export_content_hash,
+    get_exporter,
+)
 from docrestore.pipeline.path_guard import (
     OutputDirRejected,
     validate_output_dir,
@@ -203,12 +211,22 @@ def _resolve_asset_path(output_dir: Path, rel_path: PurePosixPath) -> Path | Non
     return target
 
 
-def _build_result_zip_bytes(output_dir: Path, doc_dirs: list[str]) -> bytes:
+def _build_result_zip_bytes(
+    output_dir: Path,
+    doc_dirs: list[str],
+    *,
+    export_formats: list[str] | None = None,
+) -> bytes:
     """打包任务结果为 zip 字节。
 
     单文档（doc_dirs 为空或只有空字符串）：document.md + images/
     多文档：{doc_dir}/document.md + {doc_dir}/images/ × N
+
+    ``export_formats``（Epic D）：额外按需把每个 doc_dir 的 ``document.md`` 导出成
+    docx/pdf 等格式（产物名 ``document.{ext}``）一并写入 zip；为空则零行为变化。
+    本函数为阻塞调用（含导出子进程/IO），由下载路由用 ``asyncio.to_thread`` 包裹。
     """
+    formats = export_formats or []
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         # 确定要打包的子目录列表
@@ -217,11 +235,94 @@ def _build_result_zip_bytes(output_dir: Path, doc_dirs: list[str]) -> bytes:
         if not dirs_to_pack:
             # 单文档：根目录
             _add_doc_to_zip(zf, output_dir, "")
+            _add_exports_to_zip(zf, output_dir, "", formats)
         else:
             for d in dirs_to_pack:
                 _add_doc_to_zip(zf, output_dir / d, d)
+                _add_exports_to_zip(zf, output_dir / d, d, formats)
 
     return buf.getvalue()
+
+
+def _parse_export_formats(raw: str | None) -> list[str]:
+    """解析 ``?formats=docx,pdf``：fail-closed 白名单 + 保序去重。
+
+    空 / None → ``[]``（退化为纯 markdown zip，零行为变化）。
+    含未知 / 未启用格式 → ``ApiBusinessError(EXPORT_FORMAT_UNSUPPORTED, 400)``。
+    """
+    if not raw:
+        return []
+    seen: set[str] = set()
+    result: list[str] = []
+    for part in raw.split(","):
+        fmt = part.strip().lower()
+        if not fmt or fmt in seen:
+            continue
+        if fmt not in SUPPORTED_FORMATS:
+            raise ApiBusinessError(
+                APIErrorCode.EXPORT_FORMAT_UNSUPPORTED,
+                400,
+                f"不支持的导出格式: {fmt}",
+                params={"format": fmt, "supported": sorted(SUPPORTED_FORMATS)},
+            )
+        seen.add(fmt)
+        result.append(fmt)
+    return result
+
+
+def _ensure_export_product(doc_dir: Path, fmt: str) -> Path:
+    """生成（或命中缓存复用）单个 doc_dir 的导出产物，返回产物路径。
+
+    缓存键为 ``document.md`` 内容哈希，命中即复用，避免每次下载重跑子进程。
+    依赖缺失 → 503；导出失败 → 500（均 fail-closed，携带 i18n params）。
+    """
+    exporter = get_exporter(fmt)
+    if exporter is None:  # 已由 _parse_export_formats 白名单挡过；防御性兜底
+        raise ApiBusinessError(
+            APIErrorCode.EXPORT_FORMAT_UNSUPPORTED, 400,
+            f"不支持的导出格式: {fmt}", params={"format": fmt},
+        )
+
+    doc_md = doc_dir / "document.md"
+    content_hash = export_content_hash(doc_md)
+    cache = export_cache_path(doc_dir, exporter.suffix, content_hash)
+    if cache.is_file():
+        return cache
+
+    try:
+        exporter.ensure_available()
+        exporter.export(doc_md, doc_dir / "images", cache)
+    except ExportToolUnavailable as exc:
+        raise ApiBusinessError(
+            APIErrorCode.EXPORT_TOOL_UNAVAILABLE, 503,
+            f"导出依赖不可用: {exc.tool}",
+            params={"tool": exc.tool, "format": fmt},
+        ) from exc
+    except ExportFailed as exc:
+        raise ApiBusinessError(
+            APIErrorCode.EXPORT_FAILED, 500,
+            f"导出失败: {fmt}",
+            params={"tool": exc.tool, "format": fmt},
+        ) from exc
+    return cache
+
+
+def _add_exports_to_zip(
+    zf: zipfile.ZipFile,
+    doc_dir: Path,
+    prefix: str,
+    formats: list[str],
+) -> None:
+    """把选定格式的导出产物以 ``document.{ext}`` 写入 zip（doc_dir 无 md 则跳过）。"""
+    if not formats or not (doc_dir / "document.md").is_file():
+        return
+    for fmt in formats:
+        product = _ensure_export_product(doc_dir, fmt)
+        suffix = product.suffix.lstrip(".")
+        arcname = (
+            f"{prefix}/document.{suffix}" if prefix else f"document.{suffix}"
+        )
+        zf.write(product, arcname=arcname)
 
 
 #: 代码模式额外打包内容：
@@ -1278,8 +1379,14 @@ def _code_file_language_from_index(
 
 
 @router.get("/tasks/{task_id}/download")
-async def download_task_result(task_id: str) -> Response:
-    """下载任务结果 zip（AGE-13）。"""
+async def download_task_result(
+    task_id: str, formats: str | None = None,
+) -> Response:
+    """下载任务结果 zip（AGE-13）。
+
+    可选 ``?formats=docx,pdf``（Epic D）：额外把 ``document.md`` 按需导出成对应格式
+    一并打进 zip（白名单校验，缺依赖 fail-closed）。不带 formats 时行为不变。
+    """
     manager = _get_manager()
     task = manager.get_task(task_id)
     if task is None:
@@ -1287,6 +1394,7 @@ async def download_task_result(task_id: str) -> Response:
             APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
         )
 
+    export_formats = _parse_export_formats(formats)
     output_dir = Path(task.output_dir)
 
     # 收集子目录列表；跳过失败的子文档（markdown 未落盘，没什么可下载的）
@@ -1306,7 +1414,13 @@ async def download_task_result(task_id: str) -> Response:
             APIErrorCode.TASK_RESULT_NOT_READY, 404, "任务尚未完成或已失败",
         )
 
-    zip_bytes = _build_result_zip_bytes(output_dir, doc_dirs)
+    # 导出含阻塞子进程/IO（pandoc/weasyprint），offload 到线程池避免阻塞事件循环。
+    zip_bytes = await asyncio.to_thread(
+        _build_result_zip_bytes,
+        output_dir,
+        doc_dirs,
+        export_formats=export_formats,
+    )
     filename = f"docrestore_{task_id}.zip"
     return Response(
         content=zip_bytes,

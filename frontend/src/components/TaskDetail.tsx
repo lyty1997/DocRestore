@@ -9,7 +9,6 @@ import { useCallback, useEffect, useState } from "react";
 import {
   cancelTask,
   deleteTask,
-  getDownloadUrl,
   getTask,
   getTaskResults,
   resumeTask,
@@ -24,6 +23,7 @@ import { useTaskProgress } from "../features/task/useTaskProgress";
 import { useTranslation } from "../i18n";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { DocCodePreview } from "./DocCodePreview";
+import { DownloadControls } from "./DownloadControls";
 import { TaskProgress } from "./TaskProgress";
 
 /** 格式化时间（locale 由 i18n 提供） */
@@ -246,13 +246,10 @@ export function TaskDetail({
 
           {status === "completed" && (
             <>
-              <a
-                href={getDownloadUrl(taskId)}
-                download
-                className="download-btn"
-              >
-                {t("taskDetail.downloadZip")}
-              </a>
+              <DownloadControls
+                taskId={taskId}
+                downloadLabelKey="taskDetail.downloadZip"
+              />
               <button
                 type="button"
                 className="action-btn btn-delete"
