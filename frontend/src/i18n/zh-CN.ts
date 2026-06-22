@@ -160,6 +160,7 @@ export const zhCN = {
   "taskProgress.subtasksLabel": "并行处理 {count} 个子文档",
   "taskProgress.phaseOcr": "OCR",
   "taskProgress.phaseLlm": "LLM 精修",
+  "taskProgress.phasePostprocess": "后处理",
   "taskProgress.mainLabel": "主进度",
   "taskProgress.streamingCount": "第 {current} 小段（流式切分）",
   // 服务端结构化进度消息（pipeline report_fn 下发的 message_key 对应）

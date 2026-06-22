@@ -95,7 +95,7 @@ from docrestore.processing.content_crop import (
 
 if TYPE_CHECKING:
     from docrestore.ocr.engine_manager import EngineManager
-    from docrestore.pipeline.task_manager import TaskManager
+    from docrestore.pipeline.task_manager import Task, TaskManager
     from docrestore.privacy.ner_install import NERSetupManager
 
 logger = logging.getLogger(__name__)
@@ -294,12 +294,32 @@ def _build_task_response(task_id: str) -> TaskResponse:
             dataclasses.asdict(task.progress),
         )
 
+    # 任务级 LLM 精修开关 + 处理模式，供前端进度区调整「LLM 精修」轨展示。
+    # task.llm 为 None 表示用 pipeline 默认配置（默认 enable_refine=True）。
+    default_refine = manager.pipeline.config.llm.enable_refine
+    enable_refine = (
+        task.llm.enable_refine if task.llm is not None else default_refine
+    )
     return TaskResponse(
         task_id=task.task_id,
         status=task.status.value,
         progress=progress,
         error=task.error,
+        enable_refine=enable_refine,
+        mode=_resolve_task_mode(task),
     )
+
+
+def _resolve_task_mode(task: Task) -> str:
+    """从任务配置推导处理模式（doc/code/ppt）。
+
+    代码模式与 PPT 模式在创建时互斥，故按 code → ppt → doc 顺序判定即可。
+    """
+    if task.code is not None and task.code.enable:
+        return "code"
+    if task.ppt is not None and task.ppt.enable:
+        return "ppt"
+    return "doc"
 
 
 @ws_router.websocket("/tasks/{task_id}/progress")

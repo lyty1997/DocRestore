@@ -36,8 +36,14 @@ export const TaskResponseSchema = z.object({
   status: z.string(),
   progress: ProgressResponseSchema.nullable().optional(),
   error: z.string().nullable().optional(),
+  /** 该任务是否启用 LLM 精修；缺失（旧后端）按 true 兼容 */
+  enable_refine: z.boolean().default(true),
+  /** 处理模式：关精修时文档模式隐藏「LLM 精修」轨、PPT/代码改名「后处理」 */
+  mode: z.enum(["doc", "code", "ppt"]).default("doc"),
 });
 export type TaskResponse = z.infer<typeof TaskResponseSchema>;
+/** 处理模式（与后端 TaskResponse.mode / 表单三选一对齐） */
+export type ProcessingMode = TaskResponse["mode"];
 
 /** 任务结果响应 */
 export const TaskResultResponseSchema = z.object({

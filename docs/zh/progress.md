@@ -2410,3 +2410,26 @@ PR #69 合入 dev 后，应用户「先做 #66」收尾最后一个评审0615 �
 - **验证**：`tests/api/test_auth.py::TestHealthz`（配 token 时 /healthz 仍免鉴权 200）；
   整 `tests/api/` 228 passed/9 skipped；对真实 `create_app()`（配 token）运行时断言
   `/healthz` 依赖 `[]`、`/ocr/status` 依赖数 1。
+
+## 2026-06-22 关 LLM 精修时按模式隐藏/改名进度区第二轨
+
+需求：用户没开 LLM 精修时，进度区不该再展示「LLM 精修」进度。
+
+- **现状根因**：前端 `progressPhase.phaseOfStage` 把**所有非 ocr/init 的 stage**
+  （clean/merge/refine/gap_fill/final_refine/render/ppt_*/code_*）全归入 "llm" 桶，
+  那条名为「LLM 精修」的轨**实为整条后处理轨**。关精修时它在文档模式只剩一闪而过的
+  render（噪声），在 PPT/代码模式仍承载逐页渲染/归类等真实进度。
+- **决策（与用户确认，方案 B）**：精修开→不变（全模式「LLM 精修」）；精修关 + 文档模式→
+  **隐藏**第二轨；精修关 + PPT/代码模式→**保留**但改名「后处理」（`taskProgress.phasePostprocess`，三语）。
+- **信号链**：新建任务流从表单 `refineEnabled` + 模式经 `useTaskRunner`（新增 `refineEnabled`/`mode`
+  状态，startTask 捕获、reset 复位）透传给 `TaskProgress`；任务详情/resume 从后端取——
+  `TaskResponse` 新增 `enable_refine`/`mode`（`_build_task_response` 派生：`task.llm.enable_refine`
+  回退 pipeline 默认；`_resolve_task_mode` 按 code→ppt→doc），前端 schema 加同字段（`.default()`
+  兼容旧后端，**不用 `.catch()`**——unicorn/prefer-top-level-await 会把 zod `.catch` 误判成 Promise 链）。
+- **TaskProgress** 计算 `showLlm = refineEnabled || mode !== "doc"` + 动态 `llmLabel`，
+  `PhaseRows` 据此条件渲染第二轨（OCR 轨永远在）。
+- **验证**：前端新增 `tests/components/TaskProgress.test.tsx`（jsdom 真渲染断言 5 组合的轨可见性+标签）；
+  后端 `tests/api/test_task_response_mode.py`（_resolve_task_mode 四态 + TaskResponse 默认值）。
+  前端 170 vitest + 全量 lint/tsc + 生产构建绿；后端 tests/api 233 passed。无 CSS 改动。
+- **已知范围外**：用户开精修但未配 model（后端"将跳过 LLM 精修"）时该轨仍显示「LLM 精修」——
+  当前只按用户的精修开关判定，不接 model 可用性；属另一议题。

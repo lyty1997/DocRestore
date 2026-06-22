@@ -15,7 +15,11 @@ import {
   resumeTask,
   retryTask,
 } from "../api/client";
-import type { TaskListItem, TaskResultResponse } from "../api/schemas";
+import type {
+  ProcessingMode,
+  TaskListItem,
+  TaskResultResponse,
+} from "../api/schemas";
 import { useTaskProgress } from "../features/task/useTaskProgress";
 import { useTranslation } from "../i18n";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -63,6 +67,9 @@ export function TaskDetail({
   const [task, setTask] = useState<TaskListItem | undefined>();
   const [taskLoading, setTaskLoading] = useState(true);
   const [taskError, setTaskError] = useState<string | undefined>();
+  /* 任务级精修开关 + 模式（来自 getTask），供进度区隐藏/改名第二轨 */
+  const [taskRefine, setTaskRefine] = useState(true);
+  const [taskMode, setTaskMode] = useState<ProcessingMode>("doc");
 
   /* 文档结果（DocCodePreview 内部维持 selectedIdx / source-images / 代码模式
      探测 / 编辑状态，TaskDetail 只持有 results 顶层数组以便 retry 后刷新）。 */
@@ -88,6 +95,8 @@ export function TaskDetail({
         created_at: "",
         result_count: 0,
       });
+      setTaskRefine(resp.enable_refine);
+      setTaskMode(resp.mode);
     } catch {
       setTaskError(t("taskDetail.loadError"));
     } finally {
@@ -313,6 +322,8 @@ export function TaskDetail({
             wsState={wsState}
             pollingEnabled={pollingEnabled}
             llmUnavailable={llmUnavailable}
+            refineEnabled={taskRefine}
+            mode={taskMode}
           />
         </section>
       )}

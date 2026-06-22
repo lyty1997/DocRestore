@@ -152,6 +152,7 @@ export const zhTW: Record<TranslationKey, string> = {
   "taskProgress.subtasksLabel": "並行處理 {count} 篇子文件",
   "taskProgress.phaseOcr": "OCR",
   "taskProgress.phaseLlm": "LLM 精修",
+  "taskProgress.phasePostprocess": "後處理",
   "taskProgress.mainLabel": "主進度",
   "taskProgress.streamingCount": "第 {current} 小段（流式切分）",
   // 服務端結構化進度訊息（pipeline report_fn 下發的 message_key 對應）

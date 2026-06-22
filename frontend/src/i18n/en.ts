@@ -159,6 +159,7 @@ export const en: Record<TranslationKey, string> = {
   "taskProgress.subtasksLabel": "Processing {count} subdocuments in parallel",
   "taskProgress.phaseOcr": "OCR",
   "taskProgress.phaseLlm": "LLM Refine",
+  "taskProgress.phasePostprocess": "Post-processing",
   "taskProgress.mainLabel": "Main",
   "taskProgress.streamingCount": "Sub-segment {current} (streaming)",
   // Structured progress messages emitted by backend pipeline.

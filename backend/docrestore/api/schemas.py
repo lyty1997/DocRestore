@@ -266,6 +266,11 @@ class TaskResponse(BaseModel):
     status: str
     progress: ProgressResponse | None = None
     error: str | None = None
+    # 供前端进度区按任务调整展示：是否启用 LLM 精修 + 处理模式（doc/code/ppt）。
+    # 关精修时文档模式隐藏「LLM 精修」轨、PPT/代码模式该轨改名「后处理」。
+    # 默认值兼容旧前端/创建响应（仅含 task_id+status 时取默认）。
+    enable_refine: bool = True
+    mode: str = "doc"
 
 
 class TaskResultResponse(BaseModel):
