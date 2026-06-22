@@ -125,12 +125,15 @@ A 做 md↔html 映射所需的同一处接缝，不浪费。
 
 ---
 
-# 第三期：可视化公式编辑（MathLive 集成设计 · 待确认）
+# 第三期：可视化公式编辑（MathLive 集成 · 已实现）
 
-> 状态：**设计待确认** · 2026-06-22 · 关联：MathLive 技术简报 + 替代方案对比 + 4 路对抗式
+> 状态：**已确认 + 已实现** · 2026-06-22 · 关联：MathLive 技术简报 + 替代方案对比 + 4 路对抗式
 > 验证（jsdom / NodeView 焦点 / round-trip / 资源，均真包·真浏览器实测）。
-> 定位：在已落地的「KaTeX 渲染 + 双击 textarea 改源码」之上**叠加一个可选的可视化编辑形态**，
+> 定位：在已落地的「KaTeX 渲染 + 双击 textarea 改源码」之上**叠加一个可视化编辑形态**，
 > 不删现有方案。
+>
+> 用户拍板（2026-06-22）：① MathLive 作第二编辑形态、保留 textarea 源码回退；② 行内 + 块级
+> 一起上；③ 接受「编辑过的公式被规范化、未编辑逐字保真」。3a/3b/3c **均已实现**（见 §11.3）。
 
 ## 10. 目标
 让**不懂 LaTeX 的用户**在渲染态可视化编辑公式（光标进出分式/根号/上下标 + 虚拟键盘点按钮建
@@ -216,3 +219,28 @@ ProseMirror 作者确认**架构级硬约束**：焦点不可共享，聚焦 mat
 2. 行内公式首期是否也上 MathLive，还是「块级先上、行内暂留 textarea」（R3 行内选区有已知 hack）？
 3. 接受"编辑过的公式被 MathLive 规范化（语义等价/预览正确）、未编辑逐字保真"边界（第 13.3）？
 4. 分期（3a/3b/3c）+ 3b 前先做 round-trip 真浏览器 spike —— 照此推进？
+
+## 17. 实施进度（2026-06-22 已实现）
+
+§16 四问用户答复：① 认可第二形态+源码回退；② 行内+块级一起上；③ 接受规范化边界；④ 照分期推进。
+
+- **3a 依赖 + 资源 ✅**：装 `mathlive@0.110.0`；动态 `import("mathlive")` 拆为独立 chunk（gzip
+  ~219KB，不进首屏，仅进入可视化编辑时懒加载）；`MathfieldElement.soundsDirectory=null` 关音效；
+  字体白嫖项目已有 katex CSS（零增量）。**真 Chromium spike：未编辑 5/5 逐字保真**（矩阵 `\\`、
+  `\operatorname{LowerTri}`、`\mathbf`、`\boldsymbol`、`\frac` 全部原样），渲染正常无字体 404。
+- **3b NodeView + dirty 闸口 + 守卫 ✅**（`mathNodes.ts`）：`createMathNodeView` 重构——只读态 KaTeX
+  不变；`enterEdit` 默认 `mountVisual` 挂 `<math-field>`（行内 inline-math / 块级 math，桌面 focusin
+  弹虚拟键盘）；**dirty 闸口**：`input` 事件置 `dirty`，`finishEdit` 仅当 `dirty` 才取 `getValue`、
+  否则按 `sessionLatex` 原样还原（未编辑 0 腐蚀）；`stopEvent=editing&&dom.contains`；`destroy` 清
+  监听 + 计数归还；MathLive 加载失败 `mountSource` 回退 textarea。**R2 守卫**：`isMathEditing()` 计数，
+  `MarkdownWysiwygEditor` 外部 value 同步 effect 在编辑中跳过 `setContent`（防销毁 math-field 丢内容）。
+- **3c 源码回退 + i18n + 样式 + 视觉验证 ✅**：math-field/textarea 右上角「切换源码↔可视化」toggle
+  （`∑`/`</>`，i18n title 经扩展 options `sourceLabel`/`visualLabel` 由组件 `t()` 注入）；三语
+  `editor.mathEditSource`/`mathEditVisual`；`App.css` math-field 容器/虚拟键盘/toggle 样式。
+  **Playwright 实测真实编辑器**：双击矩阵→math-field+虚拟键盘弹出、`</>`切源码显逐字 latex、`∑`切回、
+  blur 提交 0 腐蚀渲回 KaTeX，i18n 标题正确，截图通过。
+- **测试**：`mathNodeView.test.ts` mock mathlive 让编辑回退源码，验 dblclick/插入/编辑回写/**dirty 闸口
+  隔离**（改 value 但不触发 input → 不写回）/Esc 取消；可视渲染/光标/规范化走 Playwright。
+  前端全量 vitest 165 passed；tsc/eslint/build 全绿。
+- **未做（可选）**：输入规则（typed `$$`/`$x$` 自动成节点）；R3 行内 atom 段首拖选 hack（实测当前
+  inline atom 选区可用，未触发，留待发现再补）；切 tab 中途编辑公式的 setContent 暂跳过（罕见，已注释）。

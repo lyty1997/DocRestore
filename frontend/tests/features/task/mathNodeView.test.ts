@@ -1,11 +1,15 @@
 /**
- * 编辑器公式 NodeView 测试（阶段 2）：KaTeX 渲染 + 双击编辑 +
- * 序列化（getHTML / round-trip）不受 NodeView 影响（保真仍成立）。
+ * 编辑器公式 NodeView 测试：KaTeX 只读渲染 + 序列化保真 + 编辑回写 + dirty 闸口。
+ *
+ * 编辑界面默认是可视化 `<math-field>`（MathLive）。jsdom 测不了 MathLive（挂载会让
+ * vitest 退出码=1，见 editor-math-design.md §15），故这里 mock 掉 mathlive 让编辑
+ * **自动回退源码 textarea**，在源码路径上验证 NodeView↔latex 回写与 dirty 闸口逻辑；
+ * 真实可视化渲染/光标/焦点/规范化走 Playwright。
  */
 
 import { Editor } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { htmlToMarkdown, markdownToHtml } from "../../../src/features/task/markdownRoundtrip";
 import {
@@ -13,6 +17,9 @@ import {
   MathInline,
   insertMathNode,
 } from "../../../src/features/task/mathNodes";
+
+// MathLive 不可用 → NodeView 编辑回退源码 textarea（确定性、不加载真包、不崩 jsdom）。
+vi.mock("mathlive", () => ({ MathfieldElement: undefined }));
 
 let editor: Editor | undefined;
 
@@ -39,11 +46,19 @@ function findPos(ed: Editor, typeName: string): number | undefined {
   return pos;
 }
 
+/** 等待编辑界面（回退后的源码框）出现——进入编辑是异步的（动态 import mathlive）。 */
+async function waitForEl<T extends Element>(ed: Editor, sel: string): Promise<T> {
+  return vi.waitFor(() => {
+    const el = ed.view.dom.querySelector<T>(sel);
+    if (el === null) throw new Error(`未出现: ${sel}`);
+    return el;
+  });
+}
+
 describe("公式 NodeView 渲染", () => {
   it("块级公式在编辑器内渲染为 KaTeX", () => {
     const ed = mountEditor("$$E=mc^2$$");
-    const katexEl = ed.view.dom.querySelector(".katex");
-    expect(katexEl).not.toBeNull();
+    expect(ed.view.dom.querySelector(".katex")).not.toBeNull();
     expect(ed.view.dom.querySelector(".katex-display")).not.toBeNull();
   });
 
@@ -66,78 +81,92 @@ describe("NodeView 不影响序列化（保真仍成立）", () => {
   });
 });
 
-describe("双击编辑公式", () => {
-  it("双击块级公式弹出 latex 输入框", () => {
+describe("双击编辑（MathLive 回退源码）", () => {
+  it("双击块级公式弹出 latex 源码框，载入原 latex", async () => {
     const ed = mountEditor("$$E=mc^2$$");
-    const mathEl = ed.view.dom.querySelector(".wysiwyg-math-block");
-    expect(mathEl).not.toBeNull();
-    mathEl?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
-    const input = ed.view.dom.querySelector<HTMLTextAreaElement>(
-      "textarea.wysiwyg-math-edit",
+    ed.view.dom
+      .querySelector(".wysiwyg-math-block")
+      ?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    const input = await waitForEl<HTMLTextAreaElement>(
+      ed, "textarea.wysiwyg-math-edit",
     );
-    expect(input).not.toBeNull();
-    expect(input?.value).toBe("E=mc^2");
+    expect(input.value).toBe("E=mc^2");
   });
 
-  it("编辑后回车提交：更新 latex 属性并重渲染，序列化随之变化", () => {
+  it("编辑后回车提交：更新 latex 属性，序列化随之变化", async () => {
     const ed = mountEditor("$$E=mc^2$$");
-    const mathEl = ed.view.dom.querySelector(".wysiwyg-math-block");
-    mathEl?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
-    const input = ed.view.dom.querySelector<HTMLTextAreaElement>(
-      "textarea.wysiwyg-math-edit",
+    ed.view.dom
+      .querySelector(".wysiwyg-math-block")
+      ?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    const input = await waitForEl<HTMLTextAreaElement>(
+      ed, "textarea.wysiwyg-math-edit",
     );
-    expect(input).not.toBeNull();
-    if (input === null) return;
     input.value = "a^2+b^2";
-    input.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
-    );
-    // 节点属性更新
+    input.dispatchEvent(new Event("input", { bubbles: true })); // 置 dirty
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     const pos = findPos(ed, "mathBlock");
-    expect(pos).not.toBeUndefined();
-    if (pos === undefined) return;
+    if (pos === undefined) throw new Error("no mathBlock");
     expect(ed.state.doc.nodeAt(pos)?.attrs.latex).toBe("a^2+b^2");
-    // 序列化反映新 latex
-    expect(ed.getHTML()).toContain('data-latex="a^2+b^2"');
     expect(htmlToMarkdown(ed.getHTML())).toContain("a^2+b^2");
+  });
+
+  it("dirty 闸口：改了 value 但未触发 input 事件 → 不写回（保原 latex）", async () => {
+    const ed = mountEditor("$$E=mc^2$$");
+    ed.view.dom
+      .querySelector(".wysiwyg-math-block")
+      ?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    const input = await waitForEl<HTMLTextAreaElement>(
+      ed, "textarea.wysiwyg-math-edit",
+    );
+    input.value = "HACKED"; // 直接改但不派发 input → dirty 仍 false
+    input.dispatchEvent(new FocusEvent("blur"));
+    const pos = findPos(ed, "mathBlock");
+    if (pos === undefined) throw new Error("no mathBlock");
+    expect(ed.state.doc.nodeAt(pos)?.attrs.latex).toBe("E=mc^2"); // 0 腐蚀
+  });
+
+  it("Esc 取消：丢弃改动、还原原 latex", async () => {
+    const ed = mountEditor("$$E=mc^2$$");
+    ed.view.dom
+      .querySelector(".wysiwyg-math-block")
+      ?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    const input = await waitForEl<HTMLTextAreaElement>(
+      ed, "textarea.wysiwyg-math-edit",
+    );
+    input.value = "changed";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    const pos = findPos(ed, "mathBlock");
+    if (pos === undefined) throw new Error("no mathBlock");
+    expect(ed.state.doc.nodeAt(pos)?.attrs.latex).toBe("E=mc^2");
   });
 });
 
 describe("插入公式（工具栏）", () => {
-  it("插入块级公式：建空 mathBlock 节点并自动进入编辑", () => {
+  it("插入块级公式：建空 mathBlock 节点并自动进入编辑", async () => {
     const ed = mountEditor("正文");
     insertMathNode(ed, true);
-    // 节点已插入
     const pos = findPos(ed, "mathBlock");
-    expect(pos).not.toBeUndefined();
-    if (pos === undefined) return;
+    if (pos === undefined) throw new Error("no mathBlock");
     expect(ed.state.doc.nodeAt(pos)?.attrs.latex).toBe("");
-    // 空公式被选中 → selectNode 自动进入编辑 → 出现 latex 输入框
-    const input = ed.view.dom.querySelector<HTMLTextAreaElement>(
-      "textarea.wysiwyg-math-edit",
+    // 空公式自动进入编辑 → 源码框出现，填入并回车
+    const input = await waitForEl<HTMLTextAreaElement>(
+      ed, "textarea.wysiwyg-math-edit",
     );
-    expect(input).not.toBeNull();
-    // 填入并回车提交，序列化为 $$..$$
-    if (input === null) return;
     input.value = "x^2";
-    input.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
-    );
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     expect(ed.state.doc.nodeAt(pos)?.attrs.latex).toBe("x^2");
     expect(htmlToMarkdown(ed.getHTML())).toContain("x^2");
   });
 
-  it("插入行内公式：建空 mathInline 节点", () => {
+  it("插入行内公式：建空 mathInline 节点并自动进入编辑", async () => {
     const ed = mountEditor("前后");
     insertMathNode(ed, false);
     const pos = findPos(ed, "mathInline");
-    expect(pos).not.toBeUndefined();
-    if (pos === undefined) return;
+    if (pos === undefined) throw new Error("no mathInline");
     expect(ed.state.doc.nodeAt(pos)?.type.name).toBe("mathInline");
-    // 行内空公式同样自动进入编辑（input 元素）
-    const input = ed.view.dom.querySelector<HTMLInputElement>(
-      "input.wysiwyg-math-edit",
-    );
+    const input = await waitForEl<HTMLInputElement>(ed, "input.wysiwyg-math-edit");
     expect(input).not.toBeNull();
   });
 });

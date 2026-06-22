@@ -47,7 +47,12 @@ import {
   editorImagesToAssetUrls,
 } from "../features/task/markdown";
 import { htmlToMarkdown, markdownToHtml } from "../features/task/markdownRoundtrip";
-import { MathBlock, MathInline, insertMathNode } from "../features/task/mathNodes";
+import {
+  MathBlock,
+  MathInline,
+  insertMathNode,
+  isMathEditing,
+} from "../features/task/mathNodes";
 import {
   getCenterPagePosition,
   scrollToPagePosition,
@@ -329,8 +334,14 @@ export const MarkdownWysiwygEditor = forwardRef<
     TableCell,
     Placeholder.configure({ placeholder: t("editor.placeholder") }),
     PageAnchor,
-    MathInline,
-    MathBlock,
+    MathInline.configure({
+      sourceLabel: t("editor.mathEditSource"),
+      visualLabel: t("editor.mathEditVisual"),
+    }),
+    MathBlock.configure({
+      sourceLabel: t("editor.mathEditSource"),
+      visualLabel: t("editor.mathEditVisual"),
+    }),
   ];
 
   const editor = useEditor({
@@ -351,9 +362,13 @@ export const MarkdownWysiwygEditor = forwardRef<
 
   /* 外部 value 变化时（例如切换文档 tab）同步到编辑器；
      但用户自己在编辑时 onUpdate 已经把 md 写进 lastEmittedRef，
-     此时 value === lastEmittedRef → 不重新 setContent，避免光标跳。 */
+     此时 value === lastEmittedRef → 不重新 setContent，避免光标跳。
+     R2：公式正在编辑时跳过 setContent——否则 NodeView 重建会销毁正在编辑的
+     math-field，未提交内容丢失。常见的 onChange 回灌已被上面的相等判断挡住，
+     此处兜底罕见的"编辑公式中途外部真改了 value"（如切 tab），宁可暂不回灌。 */
   useEffect(() => {
     if (value === lastEmittedRef.current) return;
+    if (isMathEditing()) return;
     editor.commands.setContent(valueToHtml(value), { emitUpdate: false });
     lastEmittedRef.current = value;
     // valueToHtml 依赖 taskId/docDir，但二者随 value（切文档）一起变化，

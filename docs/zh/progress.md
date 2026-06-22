@@ -2372,3 +2372,23 @@ PR #69 合入 dev 后，应用户「先做 #66」收尾最后一个评审0615 �
   字体白嫖 katex CSS、`soundsDirectory=null`、零打包增量。
 - 分期 3a 依赖/资源 → 3b NodeView 接 math-field + dirty 闸口（先做 round-trip 真浏览器 spike）→ 3c
   源码回退+i18n。**待用户确认 §16 四问后开工**。
+
+## 2026-06-22 编辑器可视化公式编辑 MathLive 集成（第三期 3a/3b/3c 全实现）
+
+用户拍板：MathLive 作第二编辑形态（保留 textarea 源码回退）+ 行内块级一起上 + 接受规范化取舍。
+按设计 `editor-math-design.md` §10-17 分三期实现，逐期真浏览器出证据。
+
+- **3a**：装 `mathlive@0.110.0`，动态 `import()` 拆独立 chunk（gzip 219KB 不进首屏）；
+  `soundsDirectory=null`、字体白嫖 katex CSS（零增量）。真 Chromium spike：未编辑 5/5 逐字保真。
+- **3b**（`mathNodes.ts`）：`createMathNodeView` 重构——`enterEdit` 默认 `mountVisual` 挂 `<math-field>`
+  （行内 inline-math/块级 math，桌面 focusin 弹虚拟键盘），加载失败 `mountSource` 回退 textarea；
+  **dirty 闸口**：`input` 置 dirty，`finishEdit` 仅 dirty 才 `getValue`、否则按 `sessionLatex` 0 腐蚀还原；
+  `stopEvent=editing&&dom.contains`；`destroy` 清监听。**R2 守卫** `isMathEditing()` 计数 +
+  `MarkdownWysiwygEditor` 编辑中跳过 `setContent`（防销毁 math-field 丢内容）。
+- **3c**：math-field/textarea 右上角「切换源码↔可视化」toggle（i18n title 经扩展 options 注入）；
+  三语 `editor.mathEditSource`/`mathEditVisual`；App.css 容器/键盘/toggle 样式。
+- **测试**：`mathNodeView.test.ts` mock mathlive 让编辑回退源码，验 dirty 闸口隔离（改 value 不触发
+  input → 不写回）+ 插入/编辑/Esc；可视/规范化走 Playwright。前端 vitest 165 passed；tsc/eslint/build 绿。
+- **Playwright 实测真实编辑器**：双击矩阵→math-field+虚拟键盘弹出、`</>`切源码显逐字 latex、`∑`切回、
+  blur 提交 0 腐蚀渲回 KaTeX、i18n 标题正确，截图通过。
+- **未做（可选）**：输入规则 typed `$$`/`$x$` 自动成节点；切 tab 中途编辑公式 setContent 暂跳过（罕见）。
