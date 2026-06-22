@@ -23,12 +23,29 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import os
+import shutil
+import signal
+import subprocess
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+try:
+    import resource as _resource
+except ImportError:  # pragma: no cover - 非 POSIX 平台
+    _resource = None  # type: ignore[assignment]
+
 #: 导出产物缓存目录名（落在每个 doc_dir 下，不进 asset 白名单、不裸打进 zip）
 EXPORT_CACHE_DIRNAME = ".exports"
+
+#: 导出子进程资源限额（POSIX）：墙钟超时为主，rlimit 为辅
+_EXPORT_RLIMIT_CPU_SECONDS = 60
+#: 单个产物大小上限（挡失控写盘；pandoc/weasyprint 正常产物远小于此）
+_EXPORT_RLIMIT_FSIZE_BYTES = 256 * 1024 * 1024
+#: 导出子进程墙钟超时
+_EXPORT_TIMEOUT_SECONDS = 120
 
 
 class ExportError(Exception):
@@ -95,3 +112,73 @@ def export_content_hash(doc_md: Path) -> str:
 def export_cache_path(doc_dir: Path, suffix: str, content_hash: str) -> Path:
     """导出产物缓存路径：``{doc_dir}/.exports/{content_hash}.{suffix}``。"""
     return doc_dir / EXPORT_CACHE_DIRNAME / f"{content_hash}.{suffix}"
+
+
+def resolve_tool(tool: str) -> str | None:
+    """定位外部工具二进制（``shutil.which``）；不存在返回 ``None``。"""
+    return shutil.which(tool)
+
+
+def _export_preexec() -> None:  # pragma: no cover - 仅子进程 fork 后执行
+    """导出子进程资源限额（仅 POSIX）：CPU + 产物大小，挡失控渲染。"""
+    if _resource is None:
+        return
+    for res, limit in (
+        (_resource.RLIMIT_CPU, _EXPORT_RLIMIT_CPU_SECONDS),
+        (_resource.RLIMIT_FSIZE, _EXPORT_RLIMIT_FSIZE_BYTES),
+    ):
+        with contextlib.suppress(ValueError, OSError):
+            _resource.setrlimit(res, (limit, limit))
+
+
+def _kill_export_group(proc: subprocess.Popen[bytes]) -> None:
+    """超时后强杀子进程组（POSIX），回退到只杀直接子进程。"""
+    if os.name == "posix":
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    proc.kill()
+
+
+def run_export_command(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    tool: str,
+    fmt: str,
+    timeout_s: int = _EXPORT_TIMEOUT_SECONDS,
+) -> None:
+    """运行外部导出命令（pandoc 等），fail-closed。
+
+    复用项目子进程纪律：``start_new_session`` 独占进程组、POSIX rlimit 限额、
+    ``communicate`` 墙钟超时、超时 ``killpg`` + 二次回收避免僵尸/孤儿。
+    非零退出 / 超时 → :class:`ExportFailed`（带 stderr 摘要）；
+    二进制在校验后被移走的竞态 → :class:`ExportToolUnavailable`。
+    """
+    try:
+        with subprocess.Popen(  # noqa: S603 — cmd 由本模块固定构造，无 shell
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            preexec_fn=_export_preexec if os.name == "posix" else None,  # noqa: PLW1509
+        ) as proc:
+            try:
+                _, stderr = proc.communicate(timeout=timeout_s)
+            except subprocess.TimeoutExpired as exc:
+                _kill_export_group(proc)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.communicate(timeout=10)
+                raise ExportFailed(tool, fmt, f"超时 {timeout_s}s") from exc
+            if proc.returncode != 0:
+                detail = (stderr or b"").decode("utf-8", "replace").strip()
+                raise ExportFailed(
+                    tool, fmt, detail[:500] or f"exit {proc.returncode}",
+                )
+    except FileNotFoundError as exc:  # 二进制在 ensure_available 后被移走
+        raise ExportToolUnavailable(tool) from exc
+    except OSError as exc:
+        raise ExportFailed(tool, fmt, str(exc)) from exc

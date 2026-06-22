@@ -12,42 +12,63 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""docx 导出器（D2 用 pandoc 实现）。
+"""docx 导出器（D2）：``document.md`` → Word，走 pandoc。
 
-D1 阶段先以 stub 打通契约（route → exporter → 缓存 → zip → 前端），
-``export()`` 写占位文件、``ensure_available()`` 恒可用。D2 将 ``export()`` 替换为
-``pandoc <md> -o <docx> --resource-path=<assets>``，``ensure_available()`` 改
-``shutil.which("pandoc")`` 检查。详见 ``docs/zh/export-mode.md`` §6。
+链路 ``pandoc <md> -f gfm+tex_math_dollars -o <docx> --resource-path=<doc_dir>``：
+
+- ``gfm`` 按 GitHub-Flavored Markdown 解析，吃 OCR 产出的 HTML ``<table>``。
+- ``tex_math_dollars`` 把 ``$...$`` 识别为 TeX 数学 → pandoc 原生转 OMML（Word 公式）。
+- ``--resource-path`` 让 ``images/{stem}_N.jpg`` 相对引用能被解析嵌入。
+
+pandoc 是外部二进制（~150MB）：缺失 fail-closed（:class:`ExportToolUnavailable`）。
+详见 ``docs/zh/export-mode.md`` §6。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-#: D1 占位文件头（D2 替换为真实 pandoc 转换后即不再出现）
-_STUB_HEADER = (
-    "DocRestore 导出占位（D1 stub）。"
-    "真实 docx 由 D2 pandoc 实现，详见 docs/zh/export-mode.md。\n\n"
+from docrestore.output.exporters.base import (
+    ExportToolUnavailable,
+    resolve_tool,
+    run_export_command,
 )
+
+#: pandoc 输入格式：GFM + 美元号 TeX 数学
+_PANDOC_FROM = "gfm+tex_math_dollars"
 
 
 class DocxExporter:
-    """``document.md`` → docx。D1 stub；D2 接 pandoc。"""
+    """``document.md`` → docx（pandoc）。"""
 
     suffix = "docx"
     tool = "pandoc"
 
     def ensure_available(self) -> None:
-        """D1 stub 无外部依赖恒可用；D2 改为 ``shutil.which("pandoc")`` 检查。"""
-        return
+        """pandoc 不在 PATH → fail-closed。"""
+        if resolve_tool(self.tool) is None:
+            raise ExportToolUnavailable(self.tool)
 
     def export(
         self,
         doc_md: Path,
-        assets_dir: Path,  # noqa: ARG002 — D1 stub 不用素材目录；D2 传 --resource-path
+        assets_dir: Path,  # noqa: ARG002 — 图片走 document.md 相对引用 + resource-path
         out_path: Path,
     ) -> None:
-        """D1：写占位文件（含源 markdown，便于契约测试从输入派生断言）。"""
+        """pandoc 转换 ``doc_md`` → ``out_path``（docx）。"""
+        pandoc = resolve_tool(self.tool)
+        if pandoc is None:
+            raise ExportToolUnavailable(self.tool)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        body = doc_md.read_text(encoding="utf-8")
-        out_path.write_text(_STUB_HEADER + body, encoding="utf-8")
+        doc_dir = doc_md.parent
+        cmd = [
+            pandoc,
+            str(doc_md),
+            "-f",
+            _PANDOC_FROM,
+            "-o",
+            str(out_path),
+            "--resource-path",
+            str(doc_dir),
+        ]
+        run_export_command(cmd, cwd=doc_dir, tool=self.tool, fmt=self.suffix)

@@ -46,6 +46,32 @@ def _names(data: bytes) -> set[str]:
     return set(zipfile.ZipFile(io.BytesIO(data)).namelist())
 
 
+class _FakeOkExporter:
+    """确定性假导出器（zip 装配 plumbing 测试用，不依赖 pandoc/weasyprint）。
+
+    suffix 跟随请求格式，``export`` 内嵌源 markdown，便于断言从输入派生关键内容。
+    """
+
+    tool = "fake"
+
+    def __init__(self, suffix: str) -> None:
+        self.suffix = suffix
+
+    def ensure_available(self) -> None:
+        return
+
+    def export(self, doc_md: Path, assets_dir: Path, out_path: Path) -> None:  # noqa: ARG002
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        body = doc_md.read_text(encoding="utf-8")
+        out_path.write_text(f"FAKE-{self.suffix}\n{body}", encoding="utf-8")
+
+
+@pytest.fixture
+def fake_exporters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把注册表换成确定性假导出器，隔离 zip 装配 plumbing 与真实工具。"""
+    monkeypatch.setattr(routes, "get_exporter", lambda fmt: _FakeOkExporter(fmt))
+
+
 class TestParseExportFormats:
     """``_parse_export_formats``：fail-closed 白名单 + 去重 + 大小写归一。"""
 
@@ -63,8 +89,12 @@ class TestParseExportFormats:
         assert ei.value.status_code == 400
 
 
+@pytest.mark.usefixtures("fake_exporters")
 class TestExportsInZip:
-    """选定格式 → ``document.{ext}`` 进 zip；空 formats 行为不变。"""
+    """选定格式 → ``document.{ext}`` 进 zip；空 formats 行为不变。
+
+    用假导出器隔离 zip 装配 plumbing，不依赖 pandoc/weasyprint。
+    """
 
     def test_no_formats_unchanged(self, tmp_path: Path) -> None:
         out = tmp_path / "doc"
