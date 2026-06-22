@@ -2392,3 +2392,21 @@ PR #69 合入 dev 后，应用户「先做 #66」收尾最后一个评审0615 �
 - **Playwright 实测真实编辑器**：双击矩阵→math-field+虚拟键盘弹出、`</>`切源码显逐字 latex、`∑`切回、
   blur 提交 0 腐蚀渲回 KaTeX、i18n 标题正确，截图通过。
 - **未做（可选）**：输入规则 typed `$$`/`$x$` 自动成节点；切 tab 中途编辑公式 setContent 暂跳过（罕见）。
+
+## 2026-06-22 启动脚本就绪探测改打免鉴权 /healthz（消 401 洪流）
+
+`./scripts/start.sh all` 启动时刷出大量 `GET /api/v1/ocr/status 401 Unauthorized`，
+并误报「后端 30s 内未响应」。
+
+- **根因**：默认开启 device token 鉴权（fail-closed），而 `wait_for_backend()` 的就绪探测
+  用 `curl -sf` 打**需要鉴权**的 `/api/v1/ocr/status`、不带 token → 后端回 401 →
+  `curl -f` 视作失败 → 整 30s 窗口一直重试（每次刷一条 401），耗尽后误判「未响应」
+  （后端其实早已就绪，前端加载带 token 后即 200）。
+- **修复**：就绪探测本该打**免鉴权存活端点**（liveness 职责是证明 uvicorn 绑定 + lifespan
+  完成，非鉴权）。新增 `health_router`（`routes.py`，镜像 `ws_router` 不挂 auth），`app.py`
+  以 `include_router(health_router, prefix="/api/v1")` 装配（无 `_auth_deps`）；`GET /api/v1/healthz`
+  仅回 `{"status":"ok"}`（不泄露版本/内部状态）。`start.sh` 探测 URL 改为 `/healthz`，
+  `curl -sf` 命中 200 即就绪 → 401 归零 + 一次命中不再误判超时。
+- **验证**：`tests/api/test_auth.py::TestHealthz`（配 token 时 /healthz 仍免鉴权 200）；
+  整 `tests/api/` 228 passed/9 skipped；对真实 `create_app()`（配 token）运行时断言
+  `/healthz` 依赖 `[]`、`/ocr/status` 依赖数 1。

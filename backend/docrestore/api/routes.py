@@ -102,6 +102,19 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 ws_router = APIRouter()  # WebSocket 路由（不挂 HTTP 认证，WS 用 require_auth_ws）
+health_router = APIRouter()  # 存活探针（不挂鉴权，供启动脚本/外部监控探测）
+
+
+@health_router.get("/healthz", include_in_schema=False)
+async def healthz() -> dict[str, str]:
+    """无鉴权存活探针。
+
+    职责仅是证明 uvicorn 已绑定且 lifespan 启动完成（能路由到此即就绪），
+    **不返回任何内部状态 / 版本**，避免信息泄露。启动脚本就绪探测改打此端点：
+    避免反复打鉴权端点刷 401 噪声，并被 fail-closed 401 误判成「后端未响应」。
+    """
+    return {"status": "ok"}
+
 
 # 由 app.py 在 lifespan 中注入
 _task_manager: TaskManager | None = None

@@ -39,7 +39,12 @@ from docrestore.api.errors import (
     ApiBusinessError,
     api_business_error_handler,
 )
-from docrestore.api.routes import router, set_task_manager, ws_router
+from docrestore.api.routes import (
+    health_router,
+    router,
+    set_task_manager,
+    ws_router,
+)
 from docrestore.api.upload import (
     cleanup_all_sessions,
     start_cleanup_task,
@@ -341,4 +346,6 @@ def create_app(  # noqa: C901
     )
     # WebSocket 路由单独注册，不挂 HTTPBearer 认证（WS 用 require_auth_ws）
     app.include_router(ws_router, prefix="/api/v1")
+    # 存活探针同样不挂鉴权：供启动脚本就绪探测 + 外部监控，避免打鉴权端点刷 401
+    app.include_router(health_router, prefix="/api/v1")
     return app

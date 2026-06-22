@@ -186,7 +186,10 @@ wait_for_backend() {
     # 等后端 bind 8000 + lifespan 跑完（engine_manager/DB/ppocr 预热调度
     # 等等）。没这个守护，vite proxy 会在前端首屏命中 ECONNREFUSED
     # 窗口（uvicorn 启动耗时 2~4s，Vite 200ms 就 ready）。
-    local url="http://127.0.0.1:${BACKEND_PORT}/api/v1/ocr/status"
+    # 探测打免鉴权的 /healthz：默认开启 device token 鉴权时，打鉴权端点会被
+    # fail-closed 挡成 401，curl -f 视作失败 → 整 30s 一直重试刷屏 401 并误报
+    # 「未响应」。/healthz 不挂鉴权，能命中即证明 lifespan 已启动完成。
+    local url="http://127.0.0.1:${BACKEND_PORT}/api/v1/healthz"
     local timeout_s=30
     local waited=0
     log "等待后端就绪 (最多 ${timeout_s}s)..."
