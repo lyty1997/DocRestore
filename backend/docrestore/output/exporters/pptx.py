@@ -16,13 +16,14 @@
 
 **为何不用 ``pandoc -t pptx``**（4 轮 spike 实证，2026-06-23）：pandoc 的
 pptx 写法**无法让文字与图片同处一张 slide**（块级图片必单独成页、内联图片被丢）。
-屏摄 PPT 页页有图，纯 pandoc 只能「图各自成页（膨胀）」或「丢图」，
-均不满足 `#82`「每页一 slide、图文在一起」。故改用 python-pptx 自拼页。
+故改用 python-pptx 自拼页。
 
-链路：按 ``\\n\\n---\\n\\n``（PPT 模式页分隔）切页（doc 模式无 ``---`` 时
-回退按顶层 ``#`` 切）→ 每页一 slide：首个标题→标题框、其余正文→文本框
-（``$..$`` 公式留 TeX 文本、不渲染——lite 取舍）、图片（``![]()`` 与
-``<img>`` 都解析）→ PIL 读尺寸缩放、线性排版。
+**为何按块解析 / 渲染原生表格**（2026-06-23 修复）：早期版本把整行文本直接塞进
+文本框，导致 ``document.md`` 里的 HTML ``<table>`` / ``<div>`` 原始标记**当字面文本
+漏到 slide 上**（用户可见一长串 ``<table border=1 ...>``）。现改为把一页拆成
+**有序块**（正文 / 表格 / 图片）：散文剥掉 HTML 标签只留文本、``<table>`` 复用
+公共解析层（:mod:`~docrestore.output.exporters.html_table`）渲染成**原生 pptx
+表格**（含合并区）、图片保序嵌入，竖向堆叠。``$..$`` 公式留 TeX 文本（lite 不渲染）。
 
 python-pptx 是纯 Python 依赖：**惰性导入** fail-closed
 （:class:`ExportToolUnavailable`）——注册表启动导入本模块，顶层不 import pptx。
@@ -31,13 +32,21 @@ python-pptx 是纯 Python 依赖：**惰性导入** fail-closed
 
 from __future__ import annotations
 
+import html
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any  # python-pptx 运行期对象无类型存根，边界处标 Any
+from typing import Any, TypeAlias  # python-pptx 运行期对象无类型存根，边界处标 Any
 
 from docrestore.output.exporters.base import (
     ExportFailed,
     ExportToolUnavailable,
+)
+from docrestore.output.exporters.html_table import (
+    RawCell,
+    build_grid,
+    grid_dimensions,
+    parse_one_table,
 )
 
 #: 水平线行（页分隔）：``---`` / ``***`` / ``___`` 三连及以上
@@ -46,23 +55,69 @@ _HR_SPLIT = re.compile(r"(?m)^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$")
 _H1 = re.compile(r"^#\s+")
 #: ATX 标题（任意级）
 _ATX = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
-#: markdown 图片 ``![alt](src)``
-_IMG_MD = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
-#: HTML 图片 ``<img src="...">``
-_IMG_HTML = re.compile(r"""<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>""", re.I)
+#: 页内块级 token：HTML 表格 / markdown 图片 / HTML 图片（保序扫描）
+_BLOCK_RE = re.compile(
+    r"(?P<table><table\b[^>]*>.*?</table>)"
+    r"|!\[[^\]]*\]\((?P<img_md>[^)]+)\)"
+    r"""|<img\b[^>]*\bsrc\s*=\s*["'](?P<img_html>[^"']+)["'][^>]*>""",
+    re.DOTALL | re.IGNORECASE,
+)
+#: ``<br>`` → 换行
+_BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+#: 块级闭合标签 → 换行（保留分行语义）
+_BLOCK_END_RE = re.compile(
+    r"</(?:div|p|li|tr|h[1-6]|blockquote)\s*>", re.IGNORECASE,
+)
+#: 其余 HTML 标签 → 删除（保留内部文本）
+_TAG_RE = re.compile(r"<[^>]+>")
 
 # ── 版式常量（EMU；1 inch = 914400 EMU；16:9 = 13.333in × 7.5in）──────────
+_EMU_PER_PT = 12700
 _SLIDE_W = 12192000
 _SLIDE_H = 6858000
-_MARGIN = 365760       # 0.4in
-_TITLE_TOP = 274320    # 0.3in
-_TITLE_H = 822960      # 0.9in
+_MARGIN = 365760        # 0.4in
+_TITLE_TOP = 274320     # 0.3in
+_TITLE_H = 822960       # 0.9in
 _CONTENT_TOP = 1188720  # 1.3in
-_GAP = 182880          # 0.2in
+_GAP = 137160           # 0.15in 块间距
 _TITLE_PT = 28
 _BODY_PT = 14
-#: 有图时正文占内容区宽度比例（其余留给图片栏）
-_TEXT_FRACTION = 0.55
+_TABLE_PT = 11
+#: 正文行高（含行距）估算：仅用于把下一块堆到合适位置
+_BODY_LINE_H = int(_BODY_PT * 1.5 * _EMU_PER_PT)
+#: 表格单行高估算
+_TABLE_ROW_H = int(_TABLE_PT * 2.2 * _EMU_PER_PT)
+#: 正文每行约可容字宽（按近似全宽字，偏保守→多留空避免重叠）
+_BODY_CHAR_W = int(_BODY_PT * 0.95 * _EMU_PER_PT)
+#: 内容区底边
+_CONTENT_BOTTOM = _SLIDE_H - _MARGIN
+#: 单块最小可用高度（剩余不足时给块的兜底高度，宁可轻微出血也不丢内容）
+_MIN_BLOCK_H = _EMU_PER_PT * 24
+
+
+@dataclass(frozen=True)
+class _TextBlock:
+    """一段正文（多行，已剥 HTML 标签）。"""
+
+    lines: list[str]
+
+
+@dataclass(frozen=True)
+class _TableBlock:
+    """一个 HTML 表格（已解析成行）。"""
+
+    rows: list[list[RawCell]]
+
+
+@dataclass(frozen=True)
+class _ImageBlock:
+    """一张图片引用（相对 src）。"""
+
+    src: str
+
+
+#: 页内有序块（正文 / 表格 / 图片）
+_Block: TypeAlias = _TextBlock | _TableBlock | _ImageBlock
 
 
 def _split_pages(markdown: str) -> list[str]:
@@ -91,30 +146,75 @@ def _split_by_headings(markdown: str) -> list[str]:
     return [p for p in pages if p]
 
 
-def _extract_page(page: str) -> tuple[str | None, list[str], list[str]]:
-    """拆一页 → ``(标题, 正文行, 图片 src 列表)``。
+def _strip_html(text: str) -> str:
+    """剥 HTML 标签保留内部文本：``<br>``/块级闭合 → 换行，其余标签删，实体解码。"""
+    text = _BR_RE.sub("\n", text)
+    text = _BLOCK_END_RE.sub("\n", text)
+    text = _TAG_RE.sub("", text)
+    return html.unescape(text)
 
-    首个 ATX 标题升为 slide 标题，其余标题降为正文文本行；图片从文本剥离单独收集；
-    ``$..$`` 公式作为普通文本保留（lite 不渲染）。
+
+def _prose_lines(prose: str) -> list[str]:
+    """块 token 之间的散文 → 去标签、按行拆、丢空行。"""
+    return [ln.strip() for ln in _strip_html(prose).splitlines() if ln.strip()]
+
+
+def _heading_or_text(line: str, title: str | None) -> tuple[str | None, str | None]:
+    """一行散文 → ``(更新后的标题, 要追加的正文行或 None)``。
+
+    首个 ATX 标题升为 slide 标题（不进正文），其余标题降为正文行。
+    """
+    heading = _ATX.match(line)
+    if heading is None:
+        return title, line
+    text = heading.group(2).strip()
+    if title is None:
+        return text, None
+    return title, text
+
+
+def _collect_prose(chunk: str, title: str | None, lines: list[str]) -> str | None:
+    """把一段散文的文本行追加进 ``lines``（原地），返回更新后的标题。"""
+    for line in _prose_lines(chunk):
+        title, text = _heading_or_text(line, title)
+        if text is not None:
+            lines.append(text)
+    return title
+
+
+def _match_to_block(match: re.Match[str]) -> _Block | None:
+    """块 token 匹配 → 表格 / 图片块；空表 / 空 src → ``None``。"""
+    table_html = match.group("table")
+    if table_html is not None:
+        rows = parse_one_table(table_html)
+        return _TableBlock(rows) if rows else None
+    src = match.group("img_md") or match.group("img_html")
+    return _ImageBlock(src.strip()) if src else None
+
+
+def _parse_page(page: str) -> tuple[str | None, list[_Block]]:
+    """拆一页 → ``(标题, 有序块列表)``。
+
+    ``<table>`` / 图片按出现顺序成独立块，块之间的散文剥 HTML 后并入文本块——
+    原始 ``<div>/<table>`` 标记不再当字面文本漏到 slide 上。
     """
     title: str | None = None
-    body: list[str] = []
-    images: list[str] = []
-    for raw_line in page.splitlines():
-        line = raw_line.rstrip()
-        images.extend(m.group(1) for m in _IMG_MD.finditer(line))
-        images.extend(m.group(1) for m in _IMG_HTML.finditer(line))
-        text = _IMG_HTML.sub("", _IMG_MD.sub("", line)).strip()
-        heading = _ATX.match(text)
-        if heading is not None:
-            if title is None:
-                title = heading.group(2).strip()
-            else:
-                body.append(heading.group(2).strip())
-            continue
-        if text:
-            body.append(text)
-    return title, body, images
+    blocks: list[_Block] = []
+    text_lines: list[str] = []
+    pos = 0
+    for match in _BLOCK_RE.finditer(page):
+        title = _collect_prose(page[pos : match.start()], title, text_lines)
+        block = _match_to_block(match)
+        if block is not None:
+            if text_lines:
+                blocks.append(_TextBlock(text_lines))
+                text_lines = []
+            blocks.append(block)
+        pos = match.end()
+    title = _collect_prose(page[pos:], title, text_lines)
+    if text_lines:
+        blocks.append(_TextBlock(text_lines))
+    return title, blocks
 
 
 def _resolve_image(doc_dir: Path, src: str) -> Path | None:
@@ -145,85 +245,105 @@ def _add_title(slide: Any, title: str) -> None:
     run.font.bold = True
 
 
-def _add_body(slide: Any, body: list[str], text_w: int) -> None:
-    """正文文本框（每行一段，``$..$`` 公式作为普通文本）。"""
+def _estimate_text_height(lines: list[str], width: int) -> int:
+    """估算文本块高度（按近似字宽折行计行数）：仅用于把下一块堆到合适位置。"""
+    per_line = max(1, width // _BODY_CHAR_W)
+    wrapped = sum(max(1, -(-len(line) // per_line)) for line in lines)
+    return wrapped * _BODY_LINE_H
+
+
+def _add_text_block(slide: Any, lines: list[str], top: int, width: int) -> int:
+    """正文文本框（每行一段，``$..$`` 公式作为普通文本），返回估算高度供堆叠。"""
     from pptx.util import Emu, Pt  # noqa: PLC0415
 
-    height = _SLIDE_H - _CONTENT_TOP - _MARGIN
-    box = slide.shapes.add_textbox(
-        Emu(_MARGIN), Emu(_CONTENT_TOP), Emu(text_w), Emu(height),
-    )
+    height = _estimate_text_height(lines, width)
+    box = slide.shapes.add_textbox(Emu(_MARGIN), Emu(top), Emu(width), Emu(height))
     frame = box.text_frame
     frame.word_wrap = True
-    for i, line in enumerate(body):
+    for i, line in enumerate(lines):
         para = frame.paragraphs[0] if i == 0 else frame.add_paragraph()
         run = para.add_run()
         run.text = line
         run.font.size = Pt(_BODY_PT)
+    return height
 
 
-def _place_image(
-    slide: Any, path: Path, left: int, top: int, max_w: int, max_h: int,
-) -> None:
-    """按 ``max_w × max_h`` 等比缩放后放置一张图片（读图失败则跳过）。"""
+def _add_table_block(
+    slide: Any, rows: list[list[RawCell]], top: int, width: int, max_h: int,
+) -> int:
+    """把 HTML 表渲染成原生 pptx 表格（含合并区），返回占用高度。"""
+    from pptx.util import Emu, Pt  # noqa: PLC0415
+
+    cells, merges = build_grid(rows)
+    nrows, ncols = grid_dimensions(cells, merges)
+    if nrows <= 0 or ncols <= 0:
+        return 0
+    height = min(nrows * _TABLE_ROW_H, max(_TABLE_ROW_H, max_h))
+    table = slide.shapes.add_table(
+        nrows, ncols, Emu(_MARGIN), Emu(top), Emu(width), Emu(height),
+    ).table
+    col_w = max(1, width // ncols)
+    for column in table.columns:
+        column.width = Emu(col_w)
+    for (r, c), text in cells.items():  # 先填原始单元格文本，再合并
+        cell = table.cell(r, c)
+        cell.text = text
+        for para in cell.text_frame.paragraphs:
+            for run in para.runs:
+                run.font.size = Pt(_TABLE_PT)
+    for r1, c1, r2, c2 in merges:
+        table.cell(r1, c1).merge(table.cell(r2, c2))
+    return height
+
+
+def _add_image_block(
+    slide: Any, src: str, doc_dir: Path, top: int, width: int, max_h: int,
+) -> int:
+    """放置一张图片（等比缩放到 ``width × max_h`` 内），返回占用高度；失败返回 0。"""
     from PIL import Image  # noqa: PLC0415 — Pillow 是硬依赖，懒导入保持模块轻量
     from pptx.util import Emu  # noqa: PLC0415
 
+    path = _resolve_image(doc_dir, src)
+    if path is None or max_h <= 0:
+        return 0
     try:
         with Image.open(path) as img:
             px_w, px_h = img.size
     except (OSError, ValueError):
-        return
-    if px_w <= 0 or px_h <= 0 or max_h <= 0:
-        return
-    scale = min(max_w / px_w, max_h / px_h)
+        return 0
+    if px_w <= 0 or px_h <= 0:
+        return 0
+    scale = min(width / px_w, max_h / px_h)
     disp_w = max(1, int(px_w * scale))
     disp_h = max(1, int(px_h * scale))
     slide.shapes.add_picture(
-        str(path), Emu(left), Emu(top), width=Emu(disp_w), height=Emu(disp_h),
+        str(path), Emu(_MARGIN), Emu(top), width=Emu(disp_w), height=Emu(disp_h),
     )
-
-
-def _add_images(
-    slide: Any, images: list[str], doc_dir: Path, left: int, width: int,
-) -> None:
-    """右栏竖向堆叠图片（越界 / 缺失的引用已被 :func:`_resolve_image` 过滤）。"""
-    paths = [
-        p for p in (_resolve_image(doc_dir, src) for src in images) if p is not None
-    ]
-    if not paths:
-        return
-    avail_h = _SLIDE_H - _CONTENT_TOP - _MARGIN
-    cell_h = avail_h // len(paths)
-    top = _CONTENT_TOP
-    for path in paths:
-        _place_image(slide, path, left, top, width, cell_h - _GAP)
-        top += cell_h
+    return disp_h
 
 
 def _render_slide(
-    slide: Any,
-    title: str | None,
-    body: list[str],
-    images: list[str],
-    doc_dir: Path,
+    slide: Any, title: str | None, blocks: list[_Block], doc_dir: Path,
 ) -> None:
-    """把一页内容画到一张 slide（有图则正文左栏、图片右栏；无图正文满宽）。"""
-    has_image_col = bool(images)
-    content_w = _SLIDE_W - 2 * _MARGIN
-    text_w = int(content_w * _TEXT_FRACTION) if has_image_col else content_w
+    """把一页内容竖向堆叠到一张 slide：标题在顶，正文 / 表格 / 图片按序往下。"""
     if title:
         _add_title(slide, title)
-    if body:
-        _add_body(slide, body, text_w)
-    if has_image_col:
-        img_left = _MARGIN + text_w + _GAP
-        img_w = _SLIDE_W - _MARGIN - img_left
-        _add_images(slide, images, doc_dir, img_left, img_w)
+    width = _SLIDE_W - 2 * _MARGIN
+    top = _CONTENT_TOP
+    for block in blocks:
+        remaining = max(_CONTENT_BOTTOM - top, _MIN_BLOCK_H)  # 兜底高度防丢内容
+        if isinstance(block, _TableBlock):
+            used = _add_table_block(slide, block.rows, top, width, remaining)
+        elif isinstance(block, _ImageBlock):
+            used = _add_image_block(slide, block.src, doc_dir, top, width, remaining)
+        else:
+            used = _add_text_block(slide, block.lines, top, width)
+        if used > 0:
+            top += used + _GAP
 
 
 class PptxExporter:
-    """``document.md`` → pptx（python-pptx，逐页一 slide）。"""
+    """``document.md`` → pptx（python-pptx，逐页一 slide，块级竖排）。"""
 
     suffix = "pptx"
     tool = "python-pptx"
@@ -241,9 +361,10 @@ class PptxExporter:
         assets_dir: Path,  # noqa: ARG002 — 图片走 document.md 相对引用解析
         out_path: Path,
     ) -> None:
-        """切页 → 每页一 slide → 保存 pptx。"""
+        """切页 → 每页一 slide（块级竖排）→ 保存 pptx。"""
         try:
             from pptx import Presentation  # noqa: PLC0415 — 惰性导入，缺依赖不阻塞启动
+            from pptx.util import Emu  # noqa: PLC0415
         except ImportError as exc:
             raise ExportToolUnavailable(self.tool) from exc
 
@@ -253,16 +374,14 @@ class PptxExporter:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             prs = Presentation()
-            prs.slide_width = _SLIDE_W
-            prs.slide_height = _SLIDE_H
+            prs.slide_width = Emu(_SLIDE_W)  # Emu 是 Length 子类，满足类型
+            prs.slide_height = Emu(_SLIDE_H)
             blank = prs.slide_layouts[6]  # 默认模板的 Blank 版式
-            rendered = 0
             for page in pages:
                 slide = prs.slides.add_slide(blank)
-                title, body, images = _extract_page(page)
-                _render_slide(slide, title, body, images, doc_dir)
-                rendered += 1
-            if rendered == 0:  # 空文档兜底：至少一张空 slide
+                title, blocks = _parse_page(page)
+                _render_slide(slide, title, blocks, doc_dir)
+            if not pages:  # 空文档兜底：至少一张空 slide
                 prs.slides.add_slide(blank)
             prs.save(str(out_path))
         except Exception as exc:  # noqa: BLE001 — python-pptx 异常统一 fail-closed

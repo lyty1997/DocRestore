@@ -105,8 +105,9 @@ output/exporters/
 ├── docx.py            # DocxExporter（D2，pandoc）
 ├── pdf.py             # PdfExporter（D3，weasyprint）
 ├── mathrender.py      # D3 公式 KaTeX 预渲染
-├── xlsx.py            # XlsxExporter（D4，HTML <table> → openpyxl）
-└── pptx.py            # PptxExporter（D5，逐页 → python-pptx）
+├── html_table.py      # HTML <table> 解析公共件（xlsx/pptx 共用：网格 + 合并区）
+├── xlsx.py            # XlsxExporter（D4，HTML <table> → openpyxl，每表一 sheet）
+└── pptx.py            # PptxExporter（D5，逐页 → python-pptx，块级竖排 + 原生表格）
 ```
 
 `Exporter` 协议（与 `#78` 对齐）：
@@ -165,25 +166,32 @@ class Exporter(Protocol):
 | `EXPORT_TOOL_UNAVAILABLE` | 503 | pandoc/weasyprint 缺失（`params={tool}`） |
 | `EXPORT_FAILED` | 500 | 导出子进程非零退出/异常（`params={tool, format}`） |
 
-## 6. D2 docx（pandoc）
+## 6. D2 docx（pandoc，两遍 HTML 中转）
 
-`document.md` → `document.docx`：
+`document.md` → `document.docx`，链路 **md → HTML5 → docx**：
 
+```text
+document.md --pandoc(-f gfm+tex_math_dollars -t html5 --mathml)--> 中间 HTML（落临时目录）
+中间 HTML --pandoc(-f html -t docx, --resource-path=doc_dir)--> document.docx
 ```
-pandoc <doc.md> -f gfm+tex_math_dollars -o <out.docx> --resource-path=<doc_dir>
-```
 
-- `-f gfm+tex_math_dollars`：按 GitHub-Flavored Markdown 解析，且把 `$...$` 识别为 TeX 数学
-  → pandoc 原生转 **OMML**（Word 公式），无需 KaTeX。
-- `--resource-path=<doc_dir>`：让 `images/{stem}_N.jpg` 相对引用能被 pandoc 解析嵌入。
-- HTML `<table>`（OCR 产出）：pandoc 的 GFM reader 能吃原始 HTML 块并转 Word 表格。
+- **为何两遍**（2026-06-23 修复）：`document.md` 的表格**一律是 HTML `<table>`**、配图常含
+  HTML `<img>`。pandoc 的 markdown(gfm) reader 把这些原始 HTML 当 `RawBlock html` 保留，而
+  **docx writer 直接丢弃原始 HTML** —— 单遍 `gfm → docx` 会让表格与 HTML 图片全部消失
+  （仅 `![]()` 图片侥幸保留）。HTML 是「能吃原始 HTML」的通用中间态（与 D3 PDF 同源）：
+  第二遍的 HTML reader 把 `<table>/<img>` 解析成 pandoc 原生表格/图片 → docx writer 正常渲染。
+- **`--mathml` 而非 `--mathjax`**（关键）：`--mathjax` 产 `\(..\)`，HTML reader 不再解析回数学
+  （OMML 丢失、留下字面 `\(..\)`）；`--mathml` 产 `<math>`，HTML reader 原生识别 → **OMML**（Word 公式）。
+- `--resource-path=<doc_dir>`（两遍都带）：中间 HTML 落独立临时目录，靠 resource-path 定位
+  `images/` 相对引用，两遍都能嵌图。
 - pandoc 是外部二进制（~150MB）：`docs/zh/deployment.md` 写明安装；缺失 fail-closed（§5.4）。
 
 ### 6.1 验收（D2）
 
-构造含 标题/列表/GFM 表格/`$E=mc^2$`/图片引用 的 `document.md` → 导出 docx →
-用 `python-docx` 读回，断言**从输入派生**的关键文本（标题文字、表格单元格文字）存在，
-公式段非空。**禁止写死数据集关键词**（CLAUDE.md 测试规则）。
+构造含 标题/`$E=mc^2$`/**HTML `<table>`**/markdown 图片 + **HTML `<img>`** 的 `document.md`
+（据实——真实 `document.md` 的表是 HTML 表，不是 GFM 管道表）→ 导出 docx → 用 `python-docx`
+读回，断言：①**从输入派生**的标题文字落正文；②派生单元格文字落 `document.tables`；③`oMath`
+（公式转 OMML）在；④`inline_shapes >= 2`（md 与 HTML 两张图都嵌入）。**禁止写死数据集关键词**。
 
 ## 7. D3 PDF（weasyprint + 公式）
 
@@ -282,9 +290,15 @@ xlsx/pptx 同样是 `document.md` 的纯函数，与 docx/PDF 同架构、零 pi
 均不满足 `#82`「每页一 slide、图文在一起」。**改用 python-pptx 自拼页**（与用户确认）。
 
 - **切页**：按 `\n\n---\n\n`（PPT 模式页分隔）切；doc 模式无 `---` 时回退按顶层 `#` 切；都没有则整篇一页。
-- **每页一 slide**（blank 版式自绘）：首个标题→slide 标题框；其余正文→正文文本框（`$..$` 公式留 TeX
-  文本、不渲染——lite 取舍）；图片（`![]()` 与 `<img>` 都解析）→ PIL 读尺寸缩放，线性排版
-  （有图则正文左栏、图右栏堆叠；无图正文满宽）。
+- **按块解析**（2026-06-23 修复）：早期版本把整行文本直接塞文本框，导致 `document.md` 里的 HTML
+  `<table>` / `<div>` 原始标记**当字面文本漏到 slide 上**（用户可见一长串 `<table border=1 ...>`）。
+  现把一页拆成**有序块**：`<table>` → 复用 §9.1 同一解析层（`html_table.py`）渲染成**原生 pptx
+  表格**（含合并区）；图片（`![]()` / `<img>`）→ 独立图片块；块之间的散文**剥掉 HTML 标签只留文本**
+  （`<br>`/块级闭合 → 换行，其余标签删，实体解码）。
+- **每页一 slide**（blank 版式自绘）：首个标题→slide 标题框；正文/表格/图片**按文档顺序竖向堆叠**
+  （游标式排版，剩余高度不足时给兜底高度、宁可轻微出血也不丢内容）；`$..$` 公式留 TeX 文本不渲染（lite 取舍）。
+- **公共解析层** `html_table.py`：从 `xlsx.py` 抽出 HTML 表解析（`parse_tables`/`parse_one_table`/
+  `build_grid`/`grid_dimensions`），xlsx（每表一 sheet）与 pptx（每表一原生表格）共用，单一真相源。
 - 依赖 `python-pptx`（纯 Python）：**懒导入** fail-closed（`ExportToolUnavailable("python-pptx")`）。
 
 ### 9.3 延后（Phase-2b，并入 `#74` 富 IR）

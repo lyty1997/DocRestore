@@ -26,9 +26,12 @@ from PIL import Image
 from docrestore.output.exporters.base import ExportToolUnavailable
 from docrestore.output.exporters.pptx import (
     PptxExporter,
-    _extract_page,
+    _ImageBlock,
+    _parse_page,
     _resolve_image,
     _split_pages,
+    _TableBlock,
+    _TextBlock,
 )
 
 
@@ -44,9 +47,16 @@ pptx_required = pytest.mark.skipif(
 _TITLE_A = "幻灯片标题甲ALPHA"
 _TITLE_B = "幻灯片标题乙BETA"
 _INLINE_TEX = "$E=mc^2$"
+_CELL_TEXT = "单元格内容Zeta"
+_DIV_TEXT = "居中说明文字Delta"
 _MARKDOWN = f"""# {_TITLE_A}
 
 第一页正文，行内公式 {_INLINE_TEX}。
+
+<div style="text-align:center;">{_DIV_TEXT}</div>
+
+<table border="1"><tr><td>列甲</td><td>列乙</td></tr>\
+<tr><td>{_CELL_TEXT}</td><td>123</td></tr></table>
 
 <img src="images/pic_0.png" alt="" />
 
@@ -84,18 +94,39 @@ class TestSplitAndExtract:
     def test_split_single_page(self) -> None:
         assert _split_pages("只有一段正文，无分隔") == ["只有一段正文，无分隔"]
 
-    def test_extract_title_body_images(self) -> None:
-        title, body, images = _extract_page(
-            '# T标题\n\n正文行ABC\n\n<img src="images/a.png">\n\n![](images/b.png)',
+    def test_parse_page_blocks_in_order(self) -> None:
+        title, blocks = _parse_page(
+            "# T标题\n\n正文行ABC\n\n<div>居中XYZ</div>\n\n"
+            '<table border="1"><tr><td>aa</td><td>bb</td></tr></table>\n\n'
+            '<img src="images/a.png">\n\n![](images/b.png)',
         )
         assert title == "T标题"
-        assert "正文行ABC" in body
-        assert images == ["images/a.png", "images/b.png"]
+        kinds = [type(b).__name__ for b in blocks]
+        assert "_TableBlock" in kinds  # HTML 表成独立表格块
+        assert kinds.count("_ImageBlock") == 2  # <img> 与 ![]() 各一块
+        # div 内文保留为正文行，HTML 标签全部剥除（不再当字面文本漏出）
+        text_lines = [
+            ln for b in blocks if isinstance(b, _TextBlock) for ln in b.lines
+        ]
+        assert "正文行ABC" in text_lines
+        assert "居中XYZ" in text_lines
+        assert all("<" not in ln for ln in text_lines)
 
-    def test_extract_no_title(self) -> None:
-        title, body, _images = _extract_page("纯正文一\n\n纯正文二")
+    def test_parse_page_table_and_image_blocks(self) -> None:
+        _title, blocks = _parse_page(
+            '<table border="1"><tr><td>x</td></tr></table>\n\n![](images/p.png)',
+        )
+        assert isinstance(blocks[0], _TableBlock)
+        assert isinstance(blocks[1], _ImageBlock)
+        assert blocks[1].src == "images/p.png"
+
+    def test_parse_page_no_title(self) -> None:
+        title, blocks = _parse_page("纯正文一\n\n纯正文二")
         assert title is None
-        assert body == ["纯正文一", "纯正文二"]
+        text_lines = [
+            ln for b in blocks if isinstance(b, _TextBlock) for ln in b.lines
+        ]
+        assert text_lines == ["纯正文一", "纯正文二"]
 
 
 class TestResolveImage:
@@ -147,10 +178,15 @@ class TestPptxExport:
 
         all_text = ""
         pictures = 0
+        table_cells: list[str] = []
         for slide in slides:
             for shape in slide.shapes:
                 if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
                     pictures += 1
+                elif shape.has_table:
+                    table_cells.extend(
+                        cell.text for row in shape.table.rows for cell in row.cells
+                    )
                 elif shape.has_text_frame:
                     all_text += shape.text_frame.text
         assert _TITLE_A in all_text  # 派生：第一页标题
@@ -158,3 +194,9 @@ class TestPptxExport:
         assert _INLINE_TEX in all_text  # 公式以 TeX 文本保留
         assert "\\frac" in all_text  # 独立公式 TeX 文本保留
         assert pictures >= 2  # <img> 与 ![]() 两张图都嵌入
+        # HTML 表渲染成原生表格：派生单元格在表格里
+        assert any(_CELL_TEXT in cell for cell in table_cells)
+        # div 内文保留为正文，但原始 HTML 标记不再当字面文本漏到 slide 上
+        assert _DIV_TEXT in all_text
+        assert "<table" not in all_text
+        assert "<div" not in all_text

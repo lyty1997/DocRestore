@@ -769,3 +769,27 @@ append_images=[...])` 存多页 PDF，报 `KeyError: 'JPEG'`（`PdfImagePlugin._
 - A 替换层结构感知：新增 `privacy/markup.py` 结构跨度单一真相源；实体替换只在自由文本段、ASCII 实体加词边界。
 - B 检测层：检测前 `mask_structure` 抹掉结构再喂 NER；`_looks_like_name` 净化丢弃文件名/markup 碎片/数字串/整句。
 - 残留：通用 NER 对"长得像名字的领域词"（物种名/期刊名）在正文里的误检属固有精度上限（设计 N1），结构已零损坏；如仍嫌噪可后续加英文停用表（设计 D1）。
+
+## 导出 pptx 漏出 HTML 标记 + docx 丢表格/图片（Epic D Phase-2a，已修复 2026-06-23）
+
+现象（用户报告）：
+- **pptx**：slide 上出现一长串 `<table border=1 style='...'>...` 与 `<div style="text-align:center;">a)</div>`
+  原始 HTML 标记当字面文本；表格没渲染成表格。
+- **docx**：表格与图片**全部丢失**，只剩纯文本；同一份 `document.md` 导出 **PDF 正常**。
+
+根因（同一类，"原始 HTML 不被目标 writer 认"）：
+- **docx**：`document.md` 的表是 HTML `<table>`、配图常含 HTML `<img>`。单遍 `pandoc -f gfm -t docx`
+  把原始 HTML 当 `RawBlock html` 保留，而 **docx writer 直接丢弃原始 HTML** → 表格 + HTML 图片消失
+  （仅 `![]()` 图片侥幸保留）。PDF 正常是因为 PDF 链路目标是 HTML（`-t html5`），原始 HTML 原样透传、
+  weasyprint 原生渲染。测试此前用 GFM 管道表（pandoc 原生认）测不出该回归。
+- **pptx**：自拼页时把整行文本直接塞进文本框，`<table>`/`<div>` 标记当普通文本一起塞。
+
+修复：
+- **docx 改两遍 HTML 中转**：`pandoc gfm+tex_math_dollars -t html5 --mathml`（原始 `<table>/<img>` 内联、
+  `$..$`→MathML）→ `pandoc -f html -t docx`（HTML reader 把 `<table>/<img>` 转原生、MathML→OMML）。
+  **`--mathml` 而非 `--mathjax`** 是关键：`--mathjax` 产 `\(..\)`，HTML reader 不再解析回数学（OMML 丢失）。
+- **pptx 改按块解析**：一页拆成有序块（正文/表格/图片），`<table>` 复用公共解析层 `html_table.py`
+  渲染成**原生 pptx 表格**（含合并区），散文剥 HTML 标签只留文本，竖向堆叠。
+- 测试据实改用 **HTML `<table>` + HTML `<img>`**（真实 `document.md` 格式）锁回归：docx 断言
+  `document.tables` 有派生单元格 + `inline_shapes >= 2`；pptx 断言原生表格有派生单元格 + 文本框无 `<table`/`<div` 漏出。
+- 详见 [export-mode.md](export-mode.md) §6（docx 两遍）/§9.2（pptx 按块）。

@@ -32,15 +32,19 @@ pandoc_required = pytest.mark.skipif(
 #: 从输入派生的关键内容（断言据此，不写死数据集关键词）
 _HEADING = "季度营收汇总报告"
 _CELL = "收入明细条目甲"
+# 关键：用 **HTML <table>** + **HTML <img>**（真实 document.md 的格式）。
+# 早期单遍 ``gfm → docx`` 会丢弃原始 HTML（表格 / <img> 消失），用 GFM 管道表
+# 测不出该回归；这里据实构造以锁住「两遍 HTML 中转」修复。
 _MARKDOWN = f"""# {_HEADING}
 
 正文一段，含行内公式 $E=mc^2$。
 
-| 项目 | 金额 |
-| --- | --- |
-| {_CELL} | 100 |
+<table border="1"><tr><td>项目</td><td>金额</td></tr>\
+<tr><td>{_CELL}</td><td>100</td></tr></table>
 
 ![配图](images/p1.jpg)
+
+<img src="images/p1.jpg" alt="HTML 图" />
 """
 
 #: 最小有效 1x1 PNG（pandoc 嵌图需可读图）
@@ -92,6 +96,7 @@ class TestDocxExport:
             c.text for tb in document.tables for r in tb.rows for c in r.cells
         ]
         assert any(_CELL in c for c in cells)
-        # 公式转 OMML（Word 数学），图片嵌入
+        # 公式转 OMML（Word 数学）
         assert "oMath" in document.element.xml
-        assert len(document.inline_shapes) > 0
+        # md ``![]()`` 与 HTML ``<img>`` 两张图都嵌入（锁住 HTML 图片不再被丢）
+        assert len(document.inline_shapes) >= 2

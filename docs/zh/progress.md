@@ -2486,3 +2486,26 @@ Phase-2 勘察（5 路并行只读）+ **4 轮 pandoc spike** 推翻了「需先
   两导出器模块自测留输入输出证据（xlsx 合并/数值、pptx 2 slide 图文同页）。
 - **范围**：与用户两次拍板——本轮 Phase-2a 两个都做下载时纯函数（非 pandoc、非 bbox）；注册表加两行、
   下载路由零改、四格式选择器（docx/pdf/xlsx/pptx）。
+
+### 2026-06-23 · Epic D 修复：pptx 漏 HTML 标记 + docx 丢表格/图片（用户报告）
+
+**现象**：同一份 `document.md`，导出 **PDF 正常**，但 ①pptx 把 `<table ...>`/`<div ...>`
+原始 HTML 标记当字面文本铺在 slide 上、表格没渲染；②docx 丢失全部表格与图片只剩文本。
+
+**根因（同类，"原始 HTML 不被目标 writer 认"）**：
+- docx：单遍 `pandoc -f gfm -t docx` 把 HTML `<table>`/`<img>` 当 `RawBlock html` 保留，
+  **docx writer 直接丢弃原始 HTML** → 表 + HTML 图消失（仅 `![]()` 图侥幸留）。PDF 正常因目标即 HTML。
+  旧测试用 GFM 管道表（pandoc 原生认），测不出该回归。
+- pptx：自拼页时整行文本直塞文本框，HTML 标记一并塞。
+
+**修复**：
+- docx 改**两遍 HTML 中转**：`pandoc gfm+tex_math_dollars -t html5 --mathml`（原始 `<table>/<img>`
+  内联、`$..$`→MathML）→ `pandoc -f html -t docx`（HTML reader 转原生表/图、MathML→OMML）。
+  **`--mathml` 而非 `--mathjax`** 是关键（`--mathjax` 产 `\(..\)`，HTML reader 不解析回数学→OMML 丢）。
+- pptx 改**按块解析**：一页拆有序块（正文/表格/图片），`<table>` 复用新公共件 `html_table.py`
+  渲染成**原生 pptx 表格**（含合并区），散文剥 HTML 标签只留文本，竖向堆叠。
+- 抽公共件 `output/exporters/html_table.py`（HTML 表解析：网格 + 合并区 + 尺寸），xlsx/pptx 共用。
+
+**证据**：`bash scripts/check_quality.sh` 全绿（**1461 passed, 45 skipped**，+6：html_table 5 + pptx 净 +1）；
+用户原文复现：docx tables=1/images=2/OMML=True、pptx slide1 原生表格+图无 HTML 漏出。
+测试据实改用 **HTML `<table>` + HTML `<img>`** 锁回归。详见 known-issues.md + export-mode.md §6/§9.2。

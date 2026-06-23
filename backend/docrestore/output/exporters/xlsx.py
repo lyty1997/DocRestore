@@ -29,7 +29,6 @@ openpyxl 是纯 Python 依赖（无系统库）：**惰性导入** fail-closed
 from __future__ import annotations
 
 import re
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import TypeAlias
 
@@ -37,9 +36,10 @@ from docrestore.output.exporters.base import (
     ExportFailed,
     ExportToolUnavailable,
 )
+from docrestore.output.exporters.html_table import RawCell
+from docrestore.output.exporters.html_table import build_grid as _build_grid
+from docrestore.output.exporters.html_table import parse_tables as _parse_tables
 
-#: 匹配一个 HTML 表格块（与 ``table_dedup.py`` 同口径）
-_TABLE_RE = re.compile(r"<table\b[^>]*>.*?</table>", re.DOTALL | re.IGNORECASE)
 #: 纯整数（禁前导 0，避免电话/编号被转成数字丢前导 0）
 _INT_RE = re.compile(r"-?[1-9]\d*|0")
 #: 纯小数
@@ -49,112 +49,6 @@ _MAX_TEXT_ROWS = 5000
 
 #: 单元格值的联合类型（openpyxl 接受 str/int/float）
 CellValue: TypeAlias = str | int | float
-#: 解析出的一行单元格：(文本, rowspan, colspan)
-RawCell: TypeAlias = tuple[str, int, int]
-
-
-def _clean_text(raw: str) -> str:
-    """折叠空白（``convert_charrefs`` 已解码实体）。"""
-    return " ".join(raw.split())
-
-
-def _int_attr(value: str | None) -> int:
-    """解析 ``rowspan``/``colspan`` 属性；非法 / 缺失 → 1。"""
-    if value is None:
-        return 1
-    try:
-        return max(1, int(value.strip()))
-    except ValueError:
-        return 1
-
-
-class _TableHTMLParser(HTMLParser):
-    """解析单个 ``<table>`` → ``rows``（每行是 :data:`RawCell` 列表）。"""
-
-    def __init__(self) -> None:
-        """初始化解析状态（``convert_charrefs`` 自动解码 HTML 实体）。"""
-        super().__init__(convert_charrefs=True)
-        self.rows: list[list[RawCell]] = []
-        self._cur_row: list[RawCell] | None = None
-        self._buf: list[str] = []
-        self._in_cell = False
-        self._span: tuple[int, int] = (1, 1)
-
-    def handle_starttag(
-        self, tag: str, attrs: list[tuple[str, str | None]],
-    ) -> None:
-        """进入行 / 单元格；记录跨行跨列；``<br>`` 折成空格。"""
-        name = tag.lower()
-        if name == "tr":
-            self._cur_row = []
-        elif name in {"td", "th"}:
-            self._in_cell = True
-            self._buf = []
-            amap = dict(attrs)
-            self._span = (
-                _int_attr(amap.get("rowspan")),
-                _int_attr(amap.get("colspan")),
-            )
-        elif name == "br" and self._in_cell:
-            self._buf.append(" ")
-
-    def handle_data(self, data: str) -> None:
-        """累积当前单元格内的文本（嵌套标签的文本一并归该单元格）。"""
-        if self._in_cell:
-            self._buf.append(data)
-
-    def handle_endtag(self, tag: str) -> None:
-        """单元格 / 行收尾，落地到 ``rows``。"""
-        name = tag.lower()
-        if name in {"td", "th"} and self._in_cell:
-            rowspan, colspan = self._span
-            if self._cur_row is not None:
-                self._cur_row.append(
-                    (_clean_text("".join(self._buf)), rowspan, colspan),
-                )
-            self._in_cell = False
-        elif name == "tr" and self._cur_row is not None:
-            self.rows.append(self._cur_row)
-            self._cur_row = None
-
-
-def _parse_tables(markdown: str) -> list[list[list[RawCell]]]:
-    """抽取 markdown 中所有 ``<table>`` → 各表的 ``rows``（丢弃空表）。"""
-    tables: list[list[list[RawCell]]] = []
-    for match in _TABLE_RE.finditer(markdown):
-        parser = _TableHTMLParser()
-        parser.feed(match.group(0))
-        parser.close()
-        non_empty = [row for row in parser.rows if row]
-        if non_empty:
-            tables.append(non_empty)
-    return tables
-
-
-def _build_grid(
-    rows: list[list[RawCell]],
-) -> tuple[dict[tuple[int, int], str], list[tuple[int, int, int, int]]]:
-    """按 occupancy 算法把带 ``rowspan/colspan`` 的行展开成网格 + 合并区。
-
-    返回 ``(cells, merges)``：``cells[(r, c)] = text``（0 基），
-    ``merges`` 为 ``(r1, c1, r2, c2)`` 列表（仅跨行 / 跨列的单元格）。
-    """
-    cells: dict[tuple[int, int], str] = {}
-    merges: list[tuple[int, int, int, int]] = []
-    occupied: set[tuple[int, int]] = set()
-    for r, row in enumerate(rows):
-        c = 0
-        for text, rowspan, colspan in row:
-            while (r, c) in occupied:
-                c += 1
-            cells[(r, c)] = text
-            for dr in range(rowspan):
-                for dc in range(colspan):
-                    occupied.add((r + dr, c + dc))
-            if rowspan > 1 or colspan > 1:
-                merges.append((r, c, r + rowspan - 1, c + colspan - 1))
-            c += colspan
-    return cells, merges
 
 
 def _coerce_cell(text: str) -> CellValue:
