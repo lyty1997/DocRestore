@@ -88,6 +88,10 @@ class TestParseExportFormats:
         assert ei.value.code is APIErrorCode.EXPORT_FORMAT_UNSUPPORTED
         assert ei.value.status_code == 400
 
+    def test_phase2_formats_accepted(self) -> None:
+        # Phase-2a 新增 xlsx/pptx 进白名单（注册表自动纳入）
+        assert _parse_export_formats("xlsx,pptx") == ["xlsx", "pptx"]
+
 
 @pytest.mark.usefixtures("fake_exporters")
 class TestExportsInZip:

@@ -2463,3 +2463,26 @@ PR #69 合入 dev 后，应用户「先做 #66」收尾最后一个评审0615 �
   表格行列 / 逐页版式**结构化 IR**（当前 `<table>` 不透明、PPT 逐页 bbox 在 `pipeline.py:1389`
   压扁），是独立大工程，设计 §9 已记旁路点；与 #74 E1 富 IR 相关。生产若不部署
   `frontend/node_modules`，需另让后端可达 katex 包。
+
+### 2026-06-23 · Epic D Phase-2a：D4 xlsx + D5 pptx（下载时纯函数）
+
+承 Phase-1，按更新后的 `export-mode.md` §9 实现 D4/D5（dev 工作区，**待提交**）。
+Phase-2 勘察（5 路并行只读）+ **4 轮 pandoc spike** 推翻了「需先落 pipeline 结构化 IR」的初判：
+
+- **D4 xlsx（#81）**：`document.md` 表格本就是 HTML `<table>`（携带 `colspan/rowspan`）——它**就是**
+  结构化 IR。`xlsx.py` 用 `html.parser` 解析 → openpyxl 每表一 sheet（occupancy 算法处理合并区、
+  数字单元格转数值），无表退化为单 `Document` sheet。**无需改 pipeline**。
+- **D5 pptx（#82）**：spike 实证 `pandoc -t pptx` **无法让图文同处一张 slide**（块级图片必单独成页、
+  内联图片被丢），不满足「每页一 slide、图文在一起」→ **改用 python-pptx 自拼页**（与用户确认）：
+  按 `---` 切页（doc 模式回退按 `#`）、每页一 slide=标题框+正文框+图片（`<img>`/`![]()` 都解析、
+  PIL 缩放线性排版），公式留 TeX 文本（lite 不渲染）。
+- **延后（Phase-2b，并入 #74 富 IR）**：PPT 按 region bbox 精确定位（需逐页版式 IR，且 per-region
+  文本不干净存在，收益不确定）。
+- **新增依赖**：openpyxl / python-pptx（均纯 Python 无系统库，懒导入 fail-closed 503）；入 `pyproject`
+  主依赖 + mypy override + deployment.md §1.3 矩阵。
+- **证据**：`bash scripts/check_quality.sh` 全绿（**1455 passed, 45 skipped**，Phase-1 基线 1431 → +24）；
+  新增后端测试 23（xlsx 12 + pptx 11，含真 round-trip：合并区 `B1:C1`/`A2:A3`、数值为 int、
+  slide 数=页数、`<img>`+`![]()` 双图嵌入、公式 TeX 文本在）+ 前端 1（Excel+PPT 拼参）+ zip 白名单 1；
+  两导出器模块自测留输入输出证据（xlsx 合并/数值、pptx 2 slide 图文同页）。
+- **范围**：与用户两次拍板——本轮 Phase-2a 两个都做下载时纯函数（非 pandoc、非 bbox）；注册表加两行、
+  下载路由零改、四格式选择器（docx/pdf/xlsx/pptx）。

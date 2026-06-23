@@ -188,6 +188,8 @@ export const zhCN = {
   "taskResult.exportLabel": "附加导出：",
   "taskResult.exportFormat_docx": "Word",
   "taskResult.exportFormat_pdf": "PDF",
+  "taskResult.exportFormat_xlsx": "Excel",
+  "taskResult.exportFormat_pptx": "PPT",
   "taskResult.docTab": "文档 {index}",
   "taskResult.processNew": "处理新文档",
   "taskResult.resetBtn": "重新开始",

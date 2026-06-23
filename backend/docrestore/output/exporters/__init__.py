@@ -31,11 +31,15 @@ from docrestore.output.exporters.base import (
 )
 from docrestore.output.exporters.docx import DocxExporter
 from docrestore.output.exporters.pdf import PdfExporter
+from docrestore.output.exporters.pptx import PptxExporter
+from docrestore.output.exporters.xlsx import XlsxExporter
 
 #: 格式名 → 导出器实例。导出器无状态，模块加载时实例化即可。
 EXPORTERS: dict[str, Exporter] = {
     "docx": DocxExporter(),
     "pdf": PdfExporter(),
+    "xlsx": XlsxExporter(),
+    "pptx": PptxExporter(),
 }
 
 #: 支持的导出格式集合（供下载路由 fail-closed 白名单校验）

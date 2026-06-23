@@ -13,13 +13,15 @@ import { useTranslation } from "../i18n";
 import type { TranslationKey } from "../i18n/zh-CN";
 
 /** 当前支持的附加导出格式（与后端 SUPPORTED_FORMATS 对齐） */
-const EXPORT_FORMATS = ["docx", "pdf"] as const;
+const EXPORT_FORMATS = ["docx", "pdf", "xlsx", "pptx"] as const;
 type ExportFormat = (typeof EXPORT_FORMATS)[number];
 
 /** 格式 → i18n 标签 key（显式映射，保持 t() 键的类型安全） */
 const FORMAT_LABEL_KEY: Record<ExportFormat, TranslationKey> = {
   docx: "taskResult.exportFormat_docx",
   pdf: "taskResult.exportFormat_pdf",
+  xlsx: "taskResult.exportFormat_xlsx",
+  pptx: "taskResult.exportFormat_pptx",
 };
 
 interface DownloadControlsProps {

@@ -184,6 +184,8 @@ export const en: Record<TranslationKey, string> = {
   "taskResult.exportLabel": "Also export:",
   "taskResult.exportFormat_docx": "Word",
   "taskResult.exportFormat_pdf": "PDF",
+  "taskResult.exportFormat_xlsx": "Excel",
+  "taskResult.exportFormat_pptx": "PPT",
   "taskResult.docTab": "Document {index}",
   "taskResult.processNew": "Process New Document",
   "taskResult.resetBtn": "Start Over",

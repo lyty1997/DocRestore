@@ -48,6 +48,15 @@ describe("DownloadControls 附加导出格式", () => {
     );
   });
 
+  it("勾选 Excel+PPT：formats=xlsx,pptx", () => {
+    const { container, getByRole } = renderControls();
+    fireEvent.click(getByRole("checkbox", { name: "Excel" }));
+    fireEvent.click(getByRole("checkbox", { name: "PPT" }));
+    expect(decodeURIComponent(downloadHref(container))).toContain(
+      "formats=xlsx,pptx",
+    );
+  });
+
   it("取消勾选后回到纯 zip", () => {
     const { container, getByRole } = renderControls();
     const word = getByRole("checkbox", { name: "Word" });

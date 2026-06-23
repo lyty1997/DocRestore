@@ -13,16 +13,18 @@ DocRestore 当前只输出 **markdown**（`document.md` + `images/`），下载�
 
 - **docx**（D2）：Word 文档，标题/列表/表格/公式/图片不丢。
 - **PDF**（D3）：版式化输出，公式与表格目视正确。
-- **xlsx**（D4，phase-2）：表格 → Excel 单元格。
-- **pptx**（D5，phase-2）：PPT 还原模式逐页 → 真幻灯片。
+- **xlsx**（D4，Phase-2a）：表格 → Excel 单元格。
+- **pptx**（D5，Phase-2a）：PPT 还原模式逐页 → 真幻灯片。
 
 **核心洞察（决定全盘架构）**：docx/PDF 是**已落盘 `document.md` 的纯函数**——
 不需要任何 pipeline 中间数据。Epic `#73` 自己的目标也写明「改动收敛在 `output/` + 下载 API 一处」。
 故导出**不进 pipeline**，只在**下载环节**按需运行（详见 §3）。
 
-xlsx/pptx 则不同：markdown 字符串无法可靠重建合并单元格 / 逐页版式，需要 pipeline
-**旁路落结构化 IR**（当前 PPT 逐页 `bbox` 在 `pipeline.py:1389` 被压扁成单串 markdown、
-表格是不透明 `<table>` 文本）。这正是它们被标 phase-2 的原因（详见 §9）。
+xlsx/pptx 起初被判为「需 pipeline 旁路结构化 IR」，但 Phase-2 勘察（5 路并行只读）+ 4 轮 pandoc
+spike 推翻了该前提（详见 §9）：`document.md` 里的表格本就是**结构化 HTML `<table>`**（携带行列与
+`colspan/rowspan`），PPT 模式各页以 `\n\n---\n\n` 分隔——两者都能在**下载环节**从 `document.md`
+纯函数重建，**无需改 pipeline**。故 D4/D5 与 docx/PDF 同架构落地（Phase-2a）；真正需要 IR 的只剩
+「PPT 按 region bbox 精确定位」，延后并入 `#74` 富 IR（Phase-2b）。
 
 ## 2. 范围与阶段划分
 
@@ -31,13 +33,15 @@ xlsx/pptx 则不同：markdown 字符串无法可靠重建合并单元格 / 逐�
 | **Phase-1** | D1 导出层骨架 | — | ✅ 做 |
 | **Phase-1** | D2 docx（pandoc） | D1 | ✅ 做 |
 | **Phase-1** | D3 PDF（weasyprint） | D1，关联 `#77` | ✅ 做 |
-| phase-2 | D4 xlsx（openpyxl） | D1 + 表格结构化 IR | ⏸ 延后 |
-| phase-2 | D5 pptx（python-pptx） | D1 + PPT 版式 IR | ⏸ 延后 |
+| **Phase-2a** | D4 xlsx（openpyxl，解析 HTML 表） | D1 | ✅ 做 |
+| **Phase-2a** | D5 pptx（python-pptx，逐页一 slide） | D1 | ✅ 做 |
+| phase-2b | D5 按 region bbox 精确定位 | PPT 版式 IR（`#74`） | ⏸ 延后 |
 
 **范围约束（已与用户拍板）：**
 
 - **下载时按需导出**，非建任务时勾选（§3 决策）。
-- 本轮只做 **docx + PDF**；xlsx/pptx 延后到 IR 旁路就绪。
+- Phase-1 做 **docx + PDF**；Phase-2a 增 **xlsx + pptx**（均下载时纯函数，无 pipeline 改动）。
+  唯「PPT 按 bbox 精确定位」需富 IR，延后并入 `#74`（Phase-2b）。
 - 导出是**纯本地子进程/库**（pandoc / weasyprint），**无云端出口**——不新增 PII 外泄面
   （`document.md` 已是 PII 脱敏后的最终产物，见 [privacy.md](backend/privacy.md)）。
 - 不引入新的互斥处理模式；导出正交于 文档/代码/PPT 三模式与 图片/PDF 两输入源。
@@ -98,8 +102,11 @@ request → model_copy → Task 快照 → DB 列 → process_tree → process_m
 output/exporters/
 ├── __init__.py        # EXPORTERS 注册表 + get_exporter() + SUPPORTED_FORMATS
 ├── base.py            # Exporter 协议 + ExportError + 子进程/缓存工具
-├── docx.py            # PandocDocxExporter（D2）
-└── pdf.py             # WeasyPrintPdfExporter（D3）
+├── docx.py            # DocxExporter（D2，pandoc）
+├── pdf.py             # PdfExporter（D3，weasyprint）
+├── mathrender.py      # D3 公式 KaTeX 预渲染
+├── xlsx.py            # XlsxExporter（D4，HTML <table> → openpyxl）
+└── pptx.py            # PptxExporter（D5，逐页 → python-pptx）
 ```
 
 `Exporter` 协议（与 `#78` 对齐）：
@@ -112,7 +119,8 @@ class Exporter(Protocol):
 ```
 
 - `EXPORTERS: dict[str, Exporter]`，`get_exporter(fmt)`；`SUPPORTED_FORMATS = frozenset(EXPORTERS)`。
-- phase-2 在此追加 `xlsx.py` / `pptx.py`，注册表加两行即可，**下载路由零改**。
+- Phase-2a 已追加 `xlsx.py` / `pptx.py`：实现协议 + 注册表各加一行，**下载路由零改**
+  （`SUPPORTED_FORMATS` 白名单自动纳入）。
 
 ### 5.2 下载路由集成
 
@@ -249,19 +257,42 @@ KaTeX/Node：`export()` 探测 `has_math(html)`，无公式则纯 pandoc+weasypr
 
 > 不在 `TaskForm` 加多选：导出与处理解耦，表单不背下载期状态（呼应 §3 决策）。
 
-## 9. Phase-2 预留（D4/D5，本轮不实现）
+## 9. Phase-2a：D4 xlsx / D5 pptx（下载时纯函数）
 
-仅记录将来的旁路点，**本轮不写代码、不改 pipeline**：
+Phase-2 勘察（5 路并行只读）+ 4 轮 pandoc spike 推翻了「必须先落 pipeline 结构化 IR」的初判：
+xlsx/pptx 同样是 `document.md` 的纯函数，与 docx/PDF 同架构、零 pipeline 改动。
 
-- **D4 xlsx**：需表格**行列结构化 IR**。当前 `<table>` 是不透明文本（`table_dedup.py` 也只按
-  文本签名去重）。旁路点：`_finalize_single_doc`（`pipeline.py:2261`，dedup 之后）解析剩余
-  `<table>` → `{rows, cols, cells}` IR，挂 `PipelineResult.layout_ir`（新增 `dict|None` sidecar）。
-  注意：OCR 无 cell 级 bbox，IR 只到「行列+单元格内容」粒度。
-- **D5 pptx**：需**逐页版式 IR**。当前 `_ppt_pipeline`（`pipeline.py:1227-1391`）把
-  `ordered_pages` 各页 `regions` 在 `1389` 行压扁成单 list、版式随 markdown 合并丢失。旁路点：
-  `render_ppt_document` 调用前（页信息尚在 `ordered_pages`），按页抽 `layout_ir['pages']`。
-- 两者共用 `PipelineResult.layout_ir` sidecar（非破坏性 `None` 默认），与 `#74 E1` 富 IR 工作相关，
-  IR schema 需先对齐再实现。
+### 9.1 D4 xlsx（openpyxl，解析 HTML `<table>`）
+
+关键事实：`document.md` 里的表格**一律是 HTML `<table>`**（LLM prompt 默认保留 HTML 原样，
+`table_dedup.py` 也按 `<tr>/<td>` 去重），**从不产 GFM 管道表**。HTML `<table>` 本身携带行列与
+`colspan/rowspan`——**它就是结构化 IR**，无需 pipeline 旁路。
+
+- `xlsx.py` 用 `html.parser` 解析每个 `<table>` → 单元格矩阵 + 合并区（occupancy 算法处理跨行跨列）。
+- openpyxl：**每表一 sheet**（`Table 1/2/...`）；纯数字单元格转数值（`"100"`→100）；合并区 `merge_cells`。
+- **无表退化**：文档无 `<table>` 时，落单 sheet `Document`，每非空 markdown 行一行（产物非空，便于派生断言）。
+- 依赖 `openpyxl`（纯 Python，无系统库）：**懒导入** fail-closed（`ExportToolUnavailable("openpyxl")`），
+  与 weasyprint 同范式（注册表启动导入 `xlsx.py`，顶层不 import openpyxl）。
+
+### 9.2 D5 pptx（python-pptx，逐页一 slide）
+
+**spike 决策（关键，2026-06-23）**：先验证 `pandoc -t pptx`——可原生切片 + `$..$`→OMML，但有
+**硬限制**：pandoc 的 pptx 写法**无法让文字与图片同处一张 slide**（块级图片必单独成页、内联图片被丢，
+4 轮 spike 实证）。屏摄 PPT 页页有图，纯 pandoc 路线只能「图各自成页（slide 膨胀）」或「丢图」，
+均不满足 `#82`「每页一 slide、图文在一起」。**改用 python-pptx 自拼页**（与用户确认）。
+
+- **切页**：按 `\n\n---\n\n`（PPT 模式页分隔）切；doc 模式无 `---` 时回退按顶层 `#` 切；都没有则整篇一页。
+- **每页一 slide**（blank 版式自绘）：首个标题→slide 标题框；其余正文→正文文本框（`$..$` 公式留 TeX
+  文本、不渲染——lite 取舍）；图片（`![]()` 与 `<img>` 都解析）→ PIL 读尺寸缩放，线性排版
+  （有图则正文左栏、图右栏堆叠；无图正文满宽）。
+- 依赖 `python-pptx`（纯 Python）：**懒导入** fail-closed（`ExportToolUnavailable("python-pptx")`）。
+
+### 9.3 延后（Phase-2b，并入 `#74` 富 IR）
+
+「PPT 按 region bbox 精确定位文本框/图片」需逐页版式 IR——当前 `_ppt_pipeline`
+（`pipeline.py:1227-1391`）在 `1389` 行把各页 `regions` 压扁、bbox 永久丢失，且 per-region 文本
+不干净存在（VL 输出页级 markdown）。旁路点：`render_ppt_document` 前按页抽 `layout_ir['pages']`，
+挂 `PipelineResult.layout_ir` sidecar（非破坏性 `None` 默认），与 `#74 E1` 富 IR 对齐后再实现。
 
 ## 10. 测试策略
 
@@ -287,7 +318,11 @@ KaTeX/Node：`export()` 探测 `has_math(html)`，无公式则纯 pandoc+weasypr
 - **缓存（§5.3）**：刚刚好偏保守。导出可重复触发（每次下载），无缓存则每次重跑子进程；
   只哈希 md 是 phase-1 够用的最简键。
 - **公式机制 spike（§7.1）**：刚刚好。不预先背 Node 依赖，用证据决定，D1/D2 不被阻塞。
-- **phase-2 仅留旁路点（§9）**：刚刚好。不提前造 IR（YAGNI），但记清落点避免将来盲改。
+- **D4 xlsx 解析 HTML 表（§9.1）**：刚刚好。HTML `<table>` 已是结构化 IR，下载时解析即可；
+  按初判去 pipeline 造表格 IR 才是过度工程（被 5 路勘察证伪）。
+- **D5 python-pptx 自拼页（§9.2）**：刚刚好。pandoc 满足不了「图文同页」是 spike 实证的硬限制，
+  退回纯 pandoc 是欠工程（丢图/膨胀）；现在就做 bbox 精确定位是过度工程（需富 IR，并入 `#74`）。
+- **Phase-2b 仅留旁路点（§9.3）**：刚刚好。不提前造 IR（YAGNI），但记清落点避免将来盲改。
 
 ## 12. 验收清单（Phase-1）
 
@@ -298,4 +333,14 @@ KaTeX/Node：`export()` 探测 `has_math(html)`，无公式则纯 pandoc+weasypr
 - [ ] 前端：下载区格式选择器 + 错误本地化 + vitest 绿。
 - [ ] `bash scripts/check_quality.sh` 全绿；progress.md / memory / deployment.md 更新。
 - [ ] 按依赖序关 `#78`/`#79`/`#80`，Epic `#73` 勾选 phase-1。
+
+## 13. 验收清单（Phase-2a：D4/D5）
+
+- [ ] D4：含 `<table>`（带 `colspan/rowspan`）的 md → xlsx，openpyxl 读回派生单元格文字 + 合并区
+      + 数值单元格为数字；无表 → 单 `Document` sheet 含派生正文行；缺 openpyxl skip + 部署写明。
+- [ ] D5：2 页（标题/正文/图片/公式）md → pptx，python-pptx 读回 slide 数=页数、各页标题派生文字、
+      图片嵌入、公式 TeX 文本在；`<img>` 与 `![]()` 均解析；缺 python-pptx skip。
+- [ ] 注册表加 `xlsx`/`pptx`；下载 `?formats=xlsx,pptx` 进 zip；前端 4 格式选择器 + 三语标签。
+- [ ] `bash scripts/check_quality.sh` 全绿；deployment.md 依赖矩阵 + progress.md + memory 更新。
+- [ ] 关 `#81`/`#82`，Epic `#73` 勾选 D4/D5（`#74` bbox 精确定位另立 Phase-2b）。
 

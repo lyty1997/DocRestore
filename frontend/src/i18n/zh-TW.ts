@@ -177,6 +177,8 @@ export const zhTW: Record<TranslationKey, string> = {
   "taskResult.exportLabel": "附加匯出：",
   "taskResult.exportFormat_docx": "Word",
   "taskResult.exportFormat_pdf": "PDF",
+  "taskResult.exportFormat_xlsx": "Excel",
+  "taskResult.exportFormat_pptx": "PPT",
   "taskResult.docTab": "文件 {index}",
   "taskResult.processNew": "處理新文件",
   "taskResult.resetBtn": "重新開始",
