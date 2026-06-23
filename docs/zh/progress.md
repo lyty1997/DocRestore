@@ -2433,3 +2433,33 @@ PR #69 合入 dev 后，应用户「先做 #66」收尾最后一个评审0615 �
   前端 170 vitest + 全量 lint/tsc + 生产构建绿；后端 tests/api 233 passed。无 CSS 改动。
 - **已知范围外**：用户开精修但未配 model（后端"将跳过 LLM 精修"）时该轨仍显示「LLM 精修」——
   当前只按用户的精修开关判定，不接 model 可用性；属另一议题。
+
+## 2026-06-23 Epic D Phase-1：输出导出 docx/PDF（下载时按需）
+
+按设计 `docs/zh/export-mode.md` 实现 Epic D（#73）Phase-1，dev 分支三次提交
+`3ebda39`(D1) / `66e4555`(D2) / `f85f9d2`(D3)。
+
+- **关键架构决策（与用户确认，偏离 #78 原文）**：导出是**已落盘 `document.md` 的纯函数**，
+  故走**下载时按需**而非「建任务时勾选」——避免把 `export_formats` 穿过 8 跳 pipeline+DB+表单
+  的过度工程，改动收敛在 `output/exporters/` + 下载路由一处（呼应 Epic #73「收敛一处」目标）。
+- **D1 骨架（#78）**：新增 `output/exporters/`（`Exporter` 协议 + 注册表 + 缓存 + 子进程纪律）；
+  下载路由 `GET /tasks/{id}/download?formats=docx,pdf`（fail-closed 白名单 + `asyncio.to_thread`
+  + `.exports/` 内容哈希缓存 + 产物以 `document.{ext}` 入 zip，空 formats 行为不变）；
+  错误码 `EXPORT_FORMAT_UNSUPPORTED/TOOL_UNAVAILABLE/FAILED` 三语；前端 `DownloadControls`
+  下载区格式勾选（TaskResult/TaskDetail 复用，`getDownloadUrl(formats)` 拼参）。
+- **D2 docx（#79）**：`pandoc gfm+tex_math_dollars → docx`（HTML 表格 / 公式 OMML / 图片嵌入）；
+  复用 `base.run_export_command` 子进程纪律（独占进程组/rlimit/超时/killpg/fail-closed）。
+- **D3 PDF（#80）**：**spike 否决 weasyprint MathML**（上标/分数/根号塌陷 + annotation 重影），
+  改 `pandoc --mathjax`（保留 TeX）→ **KaTeX(Node) 预渲染**（`output:'html'` 免重影）→
+  `weasyprint`（挂 `katex.min.css`）。目视：上标/分数/根号/积分/`pmatrix` 全正确，与前端 #77 一致。
+  仅含公式文档才需 Node/katex（`has_math` 探测），缺则 fail-closed 503。
+- **新增依赖（部署见 deployment.md §1.3，均可选 fail-closed）**：pandoc（docx/pdf）、
+  weasyprint+cairo/pango（pdf）、Node+katex（含公式 pdf）。本机已装：pandoc 2.12（env bin 软链）、
+  weasyprint 69.0、pypdf 6.14、Node 22 + 复用 `frontend/node_modules/katex@0.16.47`。
+- **证据**：`bash scripts/check_quality.sh` 全绿（mypy/ruff/typos/前端 tc+lint/pytest
+  **1431 passed, 45 skipped**）；导出新增测试后端 12（D1 plumbing 用假导出器解耦 + D2 docx + D3 pdf
+  round-trip）+ 前端 4（DownloadControls）；D1/D3 前端/PDF 视觉均截图确认。
+- **遗留 / 范围外**：Phase-2 **D4 xlsx（#81）/ D5 pptx（#82）未做**——需先在 pipeline 旁路落
+  表格行列 / 逐页版式**结构化 IR**（当前 `<table>` 不透明、PPT 逐页 bbox 在 `pipeline.py:1389`
+  压扁），是独立大工程，设计 §9 已记旁路点；与 #74 E1 富 IR 相关。生产若不部署
+  `frontend/node_modules`，需另让后端可达 katex 包。
