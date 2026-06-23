@@ -47,6 +47,22 @@ class TextLine:
 
 
 @dataclass
+class LayoutRegion:
+    """VL 版面块：bbox（原图像素）+ 类型 + 内容 + 裁图引用。
+
+    PPT 版面定位导出（Epic D Phase-2b）专用：把 OCR 引擎原生输出的版面分区
+    （标题/正文/表格/图片）按原屏摄图位置摆放，取代「逐页竖向堆叠」。文档/
+    代码模式忽略此字段，零影响。引擎可选——不产出版面分区的引擎留空，导出端
+    fail-safe 退回竖排。
+    """
+
+    bbox: tuple[int, int, int, int]  # (x1, y1, x2, y2) 像素坐标（落在 image_size 内）
+    label: str  # paragraph_title/text/figure_title/table/image/chart
+    content: str  # 文字类=文字/HTML 表；image/chart=空串（见 image_ref）
+    image_ref: str = ""  # image/chart 专用：认领到的 images/N.jpg（相对引用）
+
+
+@dataclass
 class PageOCR:
     """单张照片的 OCR 结果"""
 
@@ -60,6 +76,9 @@ class PageOCR:
     #: 行级 bbox + text + score。代码模式必填，用于行号列锚点布局识别。
     #: 不支持行级输出的 OCR 引擎可留空，代码模式会给出能力错误。
     text_lines: list[TextLine] = field(default_factory=list)
+    #: VL 版面区域（bbox + 类型 + 内容/裁图引用）。PPT 版面定位导出专用，
+    #: 不产出版面分区的 OCR 引擎留空，导出端 fail-safe 退回竖排。
+    layout_regions: list[LayoutRegion] = field(default_factory=list)
 
 
 @dataclass
