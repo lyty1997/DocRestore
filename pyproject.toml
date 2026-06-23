@@ -102,6 +102,7 @@ module = [
     "cv2", "cv2.*",
     "pypdfium2", "pypdfium2.*",
     "spacy", "spacy.*",
+    "weasyprint", "weasyprint.*",
 ]
 ignore_missing_imports = true
 

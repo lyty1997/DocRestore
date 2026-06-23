@@ -181,10 +181,10 @@ pandoc <doc.md> -f gfm+tex_math_dollars -o <out.docx> --resource-path=<doc_dir>
 
 `document.md` → `document.pdf`，链路 **md → HTML → PDF**：
 
-```plantuml(text-equivalent)
-document.md --pandoc(-t html5 --mathml)--> HTML(+MathML 公式, 保留 <table>)
-HTML --inline images/ + KaTeX CSS--> 自包含 HTML
-自包含 HTML --weasyprint--> document.pdf
+```text
+document.md --pandoc(-t html5 --mathjax, 保留 \(..\) TeX + <table>)--> HTML
+HTML --KaTeX(Node) 预渲染公式 span + 挂 katex.min.css--> 自包含 HTML
+自包含 HTML --weasyprint(base_url=doc_dir 解析 images/)--> document.pdf
 ```
 
 **为何 weasyprint 而非 pandoc→TeX**：我们的 `document.md` 同时含 **HTML 表格**（OCR 产出）
@@ -192,24 +192,42 @@ HTML --inline images/ + KaTeX CSS--> 自包含 HTML
 
 | 引擎 | HTML 表格 | LaTeX 公式 | 依赖 |
 |---|---|---|---|
-| **weasyprint（采用）** | ✅ HTML 原生 | 需先转 MathML/CSS | weasyprint（cairo/pango 系统库） |
+| **weasyprint（采用）** | ✅ HTML 原生 | 需先 KaTeX 转 CSS（§7.1） | weasyprint（cairo/pango）+ Node/katex |
 | pandoc + TeX(tectonic) | ✗ 易丢/乱 | ✅ 原生 | TeX 工具链（重） |
 
 表格是结构上更难重建的东西、且 OCR 以 HTML 形态产出，故优先保表格 → 选 weasyprint。
 
-### 7.1 公式机制子决策（D3 实现期 spike 定）
+### 7.1 公式机制（spike 已定：KaTeX 预渲染）
 
-weasyprint **不跑 JS**，`$...$` 必须先变成静态可排版的标记。两条路，**实现 D3 时先 spike 出证据**：
+weasyprint **不跑 JS**，`$...$` 必须先变成静态可排版的标记。D3 实现期 spike 拍板：
 
-1. **首选：pandoc `--mathml`（无 Node）**。pandoc `-t html5 --mathml` 把 `$...$` 原生转
-   **MathML**；weasyprint 对 MathML 有内置（部分）支持。**只用 pandoc + weasyprint 两件套**
-   （pandoc 已为 D2 引入），零 Node、零额外公式依赖。先 spike 验证 weasyprint 对真实公式矩阵的
-   MathML 保真度。
-2. **回退：KaTeX 预渲染（Node）**。若 weasyprint MathML 保真不足，则 shell 到 Node `katex`
-   把 `$...$` 预渲染成纯 CSS span（weasyprint 可排版），并内联 KaTeX CSS。版本对齐前端
-   `katex@^0.16.47`，复用 `#77` 的视觉一致性，但新增 Node 运行时依赖。
+**spike 证据（2026-06-23）**：先试 pandoc `--mathml` → weasyprint。结果**保真不足**——
+weasyprint 对 MathML 支持太弱：`E=mc^2` 上标丢失（塌成 `mc2`）、分数 `a/b` 无分数线、
+`\sqrt` 无根号、`\frac{1}{3}` 塌成 `13`；且 weasyprint 还会把 MathML 里的
+`<annotation>`（pandoc 嵌的原始 TeX）一并渲染出来导致**公式重影**。MathML 路否决。
 
-D1/D2 **不依赖**本子决策；D3 落地时以「目视公式正确」证据择一并记入本节 + progress.md。
+**采用：KaTeX 预渲染（Node）**——与前端 `#77` 同引擎，视觉一致。链路：
+
+1. pandoc `-t html5 **--mathjax**`（**非 `--mathml`**）：保留 `\(..\)` / `\[..\]` 原始 TeX 于
+   `<span class="math inline|display">`，并透传 HTML `<table>`。
+2. `mathrender.prerender_math`：正则抽 math span 的 TeX → `_katex_render.cjs`（Node）批量
+   `katex.renderToString(tex, {output:'html', displayMode})` → 替换回 HTML。
+   `output:'html'` **只产 CSS 排版 HTML、不含 katex-mathml**，规避重影。
+3. weasyprint 渲染 HTML，附 `katex.min.css` 为样式表（weasyprint 以 CSS 所在目录解析
+   `@font-face` 字体）。spike 目视：上标/分数/根号/积分/`pmatrix` 均正确（见 progress.md 截图）。
+
+**依赖代价**：KaTeX 是 JS-only（无 Python 移植），引入 **Node 运行时 + katex 包**
+（dev 复用 `frontend/node_modules/katex`，生产见 `deployment.md`）。**仅含公式的文档**才触发
+KaTeX/Node：`export()` 探测 `has_math(html)`，无公式则纯 pandoc+weasyprint（不需 Node）；
+有公式但 Node/katex 缺失 → `EXPORT_TOOL_UNAVAILABLE`（fail-closed，不静默降级）。
+
+依赖矩阵：
+
+| 文档 | pandoc | weasyprint | Node + katex |
+|---|---|---|---|
+| docx（D2） | ✅ | — | — |
+| pdf 无公式 | ✅ | ✅ | — |
+| pdf 含公式 | ✅ | ✅ | ✅ |
 
 ### 7.2 验收（D3）
 
