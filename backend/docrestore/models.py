@@ -60,6 +60,9 @@ class LayoutRegion:
     label: str  # paragraph_title/text/figure_title/table/image/chart
     content: str  # 文字类=文字/HTML 表；image/chart=空串（见 image_ref）
     image_ref: str = ""  # image/chart 专用：认领到的 images/N.jpg（相对引用）
+    #: 前景(文字)色 / 背景色（捕获期采样，§11）；弃权=None→渲染退默认黑字无填充。
+    fg_color: tuple[int, int, int] | None = None
+    bg_color: tuple[int, int, int] | None = None
 
 
 @dataclass

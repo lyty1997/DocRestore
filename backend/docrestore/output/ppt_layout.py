@@ -43,6 +43,8 @@ class PptLayoutRegion:
     label: str  # paragraph_title/text/figure_title/table/image/chart
     content: str = ""  # 文字类=文字/HTML 表；image/chart=空（见 image_ref）
     image_ref: str = ""  # image/chart：最终输出相对引用 images/{stem}_N.ext
+    fg_color: tuple[int, int, int] | None = None  # 前景(文字)色，§11；None=退默认黑
+    bg_color: tuple[int, int, int] | None = None  # 背景色，§11；None=不填充
 
 
 @dataclass(frozen=True)
@@ -126,7 +128,7 @@ def layout_region_from_ocr(
     ``content`` 由调用方传入（已脱敏；关精修=raw、开精修=精修后）；image/chart
     区域（``image_ref`` 非空）忽略 content、把 raw 引用映射成最终输出路径。
     """
-    if region.image_ref:
+    if region.image_ref:  # 图片区域：走裁图，颜色无意义
         return PptLayoutRegion(
             bbox=region.bbox,
             label=region.label,
@@ -134,7 +136,12 @@ def layout_region_from_ocr(
             image_ref=resolve_output_image_ref(stem, region.image_ref),
         )
     return PptLayoutRegion(
-        bbox=region.bbox, label=region.label, content=content, image_ref="",
+        bbox=region.bbox,
+        label=region.label,
+        content=content,
+        image_ref="",
+        fg_color=region.fg_color,  # 文字区域：透传捕获期采样色（§11）
+        bg_color=region.bg_color,
     )
 
 
@@ -181,6 +188,16 @@ def to_dict(layout: PptLayout) -> dict[str, object]:
                         "label": region.label,
                         "content": region.content,
                         "image_ref": region.image_ref,
+                        "fg_color": (
+                            list(region.fg_color)
+                            if region.fg_color is not None
+                            else None
+                        ),
+                        "bg_color": (
+                            list(region.bg_color)
+                            if region.bg_color is not None
+                            else None
+                        ),
                     }
                     for region in page.regions
                 ],
@@ -212,8 +229,25 @@ def _as_int_quad(raw: object) -> tuple[int, int, int, int] | None:
     return (vals[0], vals[1], vals[2], vals[3])
 
 
+def _as_rgb(raw: object) -> tuple[int, int, int] | None:
+    """长度 3 的 0..255 整型序列 → RGB；缺失 / 非法 → None（不报错，向后兼容）。"""
+    if not isinstance(raw, list) or len(raw) != 3:
+        return None
+    try:
+        vals = [int(v) for v in raw]
+    except (TypeError, ValueError):
+        return None
+    if any(v < 0 or v > 255 for v in vals):
+        return None
+    return (vals[0], vals[1], vals[2])
+
+
 def _region_from_dict(raw: object) -> PptLayoutRegion | None:
-    """单区域 dict → ``PptLayoutRegion``；任一字段非法返回 None。"""
+    """单区域 dict → ``PptLayoutRegion``；核心字段非法返回 None。
+
+    颜色字段（fg_color/bg_color）缺失或非法降级为 None（向后兼容旧无色 sidecar、
+    不致整区失败）；核心字段（bbox/label/content/image_ref）仍严格校验。
+    """
     if not isinstance(raw, dict):
         return None
     bbox = _as_int_quad(raw.get("bbox"))
@@ -228,7 +262,12 @@ def _region_from_dict(raw: object) -> PptLayoutRegion | None:
     ):
         return None
     return PptLayoutRegion(
-        bbox=bbox, label=label, content=content, image_ref=image_ref,
+        bbox=bbox,
+        label=label,
+        content=content,
+        image_ref=image_ref,
+        fg_color=_as_rgb(raw.get("fg_color")),
+        bg_color=_as_rgb(raw.get("bg_color")),
     )
 
 

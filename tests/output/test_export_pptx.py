@@ -25,9 +25,11 @@ from PIL import Image
 
 from docrestore.output.exporters.base import ExportToolUnavailable
 from docrestore.output.exporters.pptx import (
+    _EMU_PER_PT,
     PptxExporter,
     _ImageBlock,
     _parse_page,
+    _positioned_font_pt,
     _resolve_image,
     _split_pages,
     _TableBlock,
@@ -216,6 +218,10 @@ _POS_CELL = "定位单元格Theta"
 _POS_IMG = "images/pos_0.png"
 _CANVAS = (12192000, 6858000)  # 1920x1080 首页 → 16:9 画布
 _IMG_SIZE = (1920, 1080)
+_POS_BODY = "定位正文Omega"
+_FG = (230, 40, 40)  # 采样前景色
+_BG_DARK = (20, 30, 80)  # 深背景 → 应实心填充
+_BG_NEAR_WHITE = (250, 250, 250)  # 近白背景 → 不填充
 
 
 def _positioned_doc(doc_dir: Path) -> Path:
@@ -352,3 +358,101 @@ class TestPptxPositioned:
         )
         # 该页退竖排：document.md 对应页（按 idx 对齐）的标题出现
         assert fallback_title in all_text
+
+
+def _colored_doc(doc_dir: Path) -> Path:
+    """单页 sidecar：深底标题（带前景 + 背景色）+ 近白底正文（带前景色、不应填充）。"""
+    (doc_dir / "document.md").write_text(
+        f"# {_POS_TITLE}\n\n{_POS_BODY}\n", encoding="utf-8",
+    )
+    (doc_dir / "images").mkdir()
+    layout = PptLayout(
+        slide_size_emu=_CANVAS,
+        pages=[PptLayoutPage(
+            filename="slideA.jpg",
+            image_size=_IMG_SIZE,
+            regions=[
+                PptLayoutRegion(
+                    (0, 0, 1920, 200), "paragraph_title", _POS_TITLE,
+                    fg_color=_FG, bg_color=_BG_DARK,
+                ),
+                PptLayoutRegion(
+                    (0, 300, 1920, 500), "text", _POS_BODY,
+                    fg_color=(0, 0, 0), bg_color=_BG_NEAR_WHITE,
+                ),
+            ],
+        )],
+    )
+    write_ppt_layout(doc_dir, layout)
+    return doc_dir / "document.md"
+
+
+@pptx_required
+class TestPptxPositionedColor:
+    """定位文本施加采样前景色 + 条件背景填充（§11.3）。"""
+
+    def test_fg_color_and_conditional_bg_fill(self, tmp_path: Path) -> None:
+        from pptx import Presentation
+        from pptx.dml.color import RGBColor
+        from pptx.enum.dml import MSO_FILL
+
+        doc_md = _colored_doc(tmp_path)
+        out = tmp_path / ".exports" / "color.pptx"
+        PptxExporter().export(doc_md, tmp_path / "images", out)
+
+        prs = Presentation(str(out))
+        title_shape = None
+        body_shape = None
+        for shape in prs.slides[0].shapes:
+            if not shape.has_text_frame:
+                continue
+            if _POS_TITLE in shape.text_frame.text:
+                title_shape = shape
+            elif _POS_BODY in shape.text_frame.text:
+                body_shape = shape
+        assert title_shape is not None
+        assert body_shape is not None
+
+        # 前景色施加到 run
+        run = title_shape.text_frame.paragraphs[0].runs[0]
+        assert str(run.font.color.rgb) == str(RGBColor(*_FG))
+        # 深背景 → 实心填充该底色
+        assert title_shape.fill.type == MSO_FILL.SOLID
+        assert str(title_shape.fill.fore_color.rgb) == str(RGBColor(*_BG_DARK))
+        # 近白背景 → 不填充（保持 slide 默认白底）
+        assert body_shape.fill.type != MSO_FILL.SOLID
+
+
+class TestPositionedFontPt:
+    """渲染期字号从 EMU box 反推 + clamp + 宽度护栏（§11.2）。"""
+
+    _WIDE = 10**9  # 足够宽，不触发宽度护栏
+
+    def test_single_line_from_box_height(self) -> None:
+        # 盒高 30pt、单行 → 30 / 1.2 = 25pt（落入正文 clamp [9,40]）
+        pt = _positioned_font_pt(30 * _EMU_PER_PT, ["短"], self._WIDE, title=False)
+        assert pt == 25.0
+
+    def test_clamp_to_min(self) -> None:
+        pt = _positioned_font_pt(1, ["x"], self._WIDE, title=False)
+        assert pt == 9.0
+
+    def test_clamp_to_max_body(self) -> None:
+        pt = _positioned_font_pt(1000 * _EMU_PER_PT, ["x"], self._WIDE, title=False)
+        assert pt == 40.0
+
+    def test_title_raises_lower_bound(self) -> None:
+        pt = _positioned_font_pt(1, ["标题"], self._WIDE, title=True)
+        assert pt == 12.0
+
+    def test_multiline_divides_by_line_count(self) -> None:
+        h = 100 * _EMU_PER_PT
+        single = _positioned_font_pt(h, ["x"], self._WIDE, title=False)
+        multi = _positioned_font_pt(h, ["x"] * 5, self._WIDE, title=False)
+        assert multi < single
+
+    def test_width_guard_shrinks_long_line(self) -> None:
+        h = 40 * _EMU_PER_PT
+        wide = _positioned_font_pt(h, ["A" * 50], self._WIDE, title=False)
+        narrow = _positioned_font_pt(h, ["A" * 50], 100 * _EMU_PER_PT, title=False)
+        assert narrow < wide

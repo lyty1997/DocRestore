@@ -279,18 +279,35 @@ def _add_text_block(slide: Any, lines: list[str], top: int, width: int) -> int:
     return height
 
 
+def _rgb(color: tuple[int, int, int]) -> Any:
+    """构造 pptx ``RGBColor``：经 Any 间接引用屏蔽第三方 untyped 构造器。"""
+    import pptx.dml.color as pptx_color  # noqa: PLC0415
+
+    rgb_ctor: Any = pptx_color.RGBColor
+    return rgb_ctor(*color)
+
+
 def _populate_table(
-    table: Any, cells: GridCells, merges: list[Merge], font_pt: int,
+    table: Any,
+    cells: GridCells,
+    merges: list[Merge],
+    font_pt: int,
+    font_color: tuple[int, int, int] | None = None,
 ) -> None:
-    """填充原生 pptx 表格：先逐单元格写文本 + 设字号，再做合并（块流/定位共用）。"""
+    """填充原生 pptx 表格：逐格写文本 + 字号 + 可选前景色，再合并。"""
     from pptx.util import Pt  # noqa: PLC0415
 
+    color = None
+    if font_color is not None:
+        color = _rgb(font_color)
     for (r, c), text in cells.items():  # 先填原始单元格文本，再合并
         cell = table.cell(r, c)
         cell.text = text
         for para in cell.text_frame.paragraphs:
             for run in para.runs:
                 run.font.size = Pt(font_pt)
+                if color is not None:
+                    run.font.color.rgb = color
     for r1, c1, r2, c2 in merges:
         table.cell(r1, c1).merge(table.cell(r2, c2))
 
@@ -364,38 +381,96 @@ def _render_slide(
 
 # ── 版面定位渲染（Phase-2b）：按 .ppt_layout.json 的 bbox 摆放区域 ───────────
 
-#: 标题类标签：定位文本框加粗（视觉层级，字号仍 lite 固定）
+#: 标题类标签：定位文本框加粗 + 字号下限抬高（视觉层级）
 _LABEL_TITLE = frozenset({"paragraph_title", "figure_title"})
+#: 近白阈值：背景各通道 ≥ 此值视为白底，不填充（slide 默认白底即可，§11.3）
+_NEAR_WHITE = 240
+#: 定位文本字号 clamp（pt）：正文 [9,40] / 标题 [12,54]（§11.2）
+_POS_FONT_MIN, _POS_FONT_MAX = 9.0, 40.0
+_POS_TITLE_MIN, _POS_TITLE_MAX = 12.0, 54.0
+#: 行盒高 → 字号反推系数（含行距）
+_LINE_TO_FONT = 1.2
+#: 近似字宽 / 字号比（宽度护栏估行宽用，偏保守防溢出）
+_FONT_CHAR_W_RATIO = 0.6
+
+
+def _positioned_font_pt(
+    box_height_emu: int,
+    lines: list[str],
+    box_width_emu: int,
+    *,
+    title: bool,
+) -> float:
+    """从 EMU box 反推字号（§11.2）：盒高 / 行数 / 行距，加宽度护栏，clamp 到 0.5pt。"""
+    lo, hi = (
+        (_POS_TITLE_MIN, _POS_TITLE_MAX) if title
+        else (_POS_FONT_MIN, _POS_FONT_MAX)
+    )
+    n = max(1, len(lines))
+    raw = (box_height_emu / n / _EMU_PER_PT) / _LINE_TO_FONT
+    max_chars = max((len(line) for line in lines), default=1)
+    # 宽度护栏：最长行按近似字宽估行宽，超 box 宽则按比例缩字号（raw 抵消，独立盒高）
+    width_limited = box_width_emu / (
+        max(1, max_chars) * _FONT_CHAR_W_RATIO * _EMU_PER_PT
+    )
+    raw = min(raw, width_limited)
+    return round(max(lo, min(hi, raw)) * 2) / 2
+
+
+def _apply_textbox_fill(shape: Any, bg_color: tuple[int, int, int] | None) -> None:
+    """非白背景 → 文本框实心填充 + 无边框（暗色模式 / 彩色标题栏的浅字才可见，§11.3）。
+
+    bg_color 为 None 或近白（各通道 ≥ ``_NEAR_WHITE``）→ 不填充（保持 slide 默认白底、
+    不画多余色块）。"""
+    if bg_color is None or all(c >= _NEAR_WHITE for c in bg_color):
+        return
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = _rgb(bg_color)
+    shape.line.fill.background()  # 无边框，避免色块描边
 
 
 def _add_positioned_text(
-    slide: Any, content: str, label: str, box: tuple[int, int, int, int],
+    slide: Any,
+    content: str,
+    label: str,
+    box: tuple[int, int, int, int],
+    fg_color: tuple[int, int, int] | None = None,
+    bg_color: tuple[int, int, int] | None = None,
 ) -> bool:
-    """在 box（EMU）位置放文本框；剥标签后无内容则不放、返回是否真放了内容。"""
+    """在 box（EMU）放文本框：渲染期字号（§11.2）+ 前景色 + 条件背景填充（§11.3）。
+
+    剥标签后无内容则不放、返回是否真放了内容。fg_color/bg_color 为 None 退默认黑字
+    无填充；bg 近白时不填充。"""
     from pptx.util import Emu, Pt  # noqa: PLC0415
 
     lines = _prose_lines(content)  # 去标签防御 + 按行拆
     if not lines:
         return False
     left, top, width, height = box
-    frame = slide.shapes.add_textbox(
-        Emu(left), Emu(top), Emu(width), Emu(height),
-    ).text_frame
+    title = label in _LABEL_TITLE
+    shape = slide.shapes.add_textbox(Emu(left), Emu(top), Emu(width), Emu(height))
+    _apply_textbox_fill(shape, bg_color)
+    frame = shape.text_frame
     frame.word_wrap = True
-    bold = label in _LABEL_TITLE
+    font_pt = _positioned_font_pt(height, lines, width, title=title)
     for i, line in enumerate(lines):
         para = frame.paragraphs[0] if i == 0 else frame.add_paragraph()
         run = para.add_run()
         run.text = line
-        run.font.size = Pt(_BODY_PT)
-        run.font.bold = bold
+        run.font.size = Pt(font_pt)
+        run.font.bold = title
+        if fg_color is not None:
+            run.font.color.rgb = _rgb(fg_color)
     return True
 
 
 def _add_positioned_table(
-    slide: Any, content: str, box: tuple[int, int, int, int],
+    slide: Any,
+    content: str,
+    box: tuple[int, int, int, int],
+    font_color: tuple[int, int, int] | None = None,
 ) -> bool:
-    """在 box（EMU）位置渲染原生 pptx 表格（HTML 表），返回是否成功。"""
+    """在 box（EMU）位置渲染原生 pptx 表格（HTML 表，可选前景色），返回是否成功。"""
     from pptx.util import Emu  # noqa: PLC0415
 
     rows = parse_one_table(content)
@@ -412,7 +487,7 @@ def _add_positioned_table(
     col_w = max(1, width // ncols)
     for column in table.columns:
         column.width = Emu(col_w)
-    _populate_table(table, cells, merges, _TABLE_PT)
+    _populate_table(table, cells, merges, _TABLE_PT, font_color)
     return True
 
 
@@ -457,9 +532,14 @@ def _render_positioned_page(
         if region.image_ref:
             added = _add_positioned_image(slide, region.image_ref, doc_dir, box)
         elif region.label == "table":
-            added = _add_positioned_table(slide, region.content, box)
+            added = _add_positioned_table(
+                slide, region.content, box, region.fg_color,
+            )
         else:
-            added = _add_positioned_text(slide, region.content, region.label, box)
+            added = _add_positioned_text(
+                slide, region.content, region.label, box,
+                region.fg_color, region.bg_color,
+            )
         if added:
             rendered += 1
     return rendered

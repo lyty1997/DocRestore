@@ -1,5 +1,28 @@
 # 开发进度
 
+## 2026-06-24 - Epic D Phase-2b 增强：positioned-pptx 区域颜色采样 + 字号估计
+
+设计 `docs/zh/ppt-layout-export.md` §11。让 positioned-pptx 重排文字接近原屏摄图的颜色与字号
+（此前固定 14pt 纯黑无背景）。设计先经 3 路对抗式 design panel 收敛算法，再实现：
+
+- **`ocr/region_color.py`（新）**：捕获期纯函数 `sample_region_color(img_rgb, bbox)`——量化直方图
+  取色（8 级 / 512 桶）+ **面积判前后景**（少数簇=文字、多数簇=背景，对暗色模式成立）+ 全套弃权
+  守卫（对比 / 占比 / 尺寸）+ fail-safe。`paddle_ocr.ocr()` 经 `_attach_region_colors`（to_thread）接入。
+- **数据/序列化**：`LayoutRegion` / `PptLayoutRegion` 加 `fg_color/bg_color`；`ppt_layout` to/from_dict
+  容错读写（缺键 / 非法→None，**向后兼容旧无色 sidecar、不 bump version**）；`layout_region_from_ocr` 透传。
+- **渲染**：`pptx._add_positioned_text` 施前景色 + **条件背景填充**（近白不填、深色 / banner 填，浅字才可见）+
+  **渲染期字号** `_positioned_font_pt`（EMU 盒高 / 行数 / 行距，clamp + 宽度护栏）；表格施前景色保留 `_TABLE_PT`。
+  `RGBColor` untyped 构造经 `_rgb` Any 间接屏蔽 `no-untyped-call`（全量 mypy 才暴露、per-file hook 漏）。
+- **真机调优（关键）**：合成单测全过但真机 3 slide 13 区域 **12 个弃权**——根因 JPEG / 抗锯齿把底色散到
+  邻桶、`frac_bg` 0.35 太严。据真机把量化 16→8 级、frac_bg 0.35→0.15 → 12/13 采到合理色（表格正确弃权）。
+  复用 Phase-2b 残留 `.rectified/` + 真 sidecar bbox **免 GPU 标定**；详见 known-issues。
+- **真机 E2E**：真 sidecar 注入采样色 → 导出 positioned pptx → soffice 渲染目视：暗蓝 banner 正确填深底浅字、
+  正文深字浅底、2D 版面 + 字号比例忠实还原（503 / 508）。
+
+**证据/门禁**：新增 22 测试（region_color 9 + ppt_layout 色 5 + export_pptx 色/字号 7 + sidecar 透传 1），
+`bash scripts/check_quality.sh` 全绿（**1527 passed, 45 skipped**，mypy/ruff/typos/前端 typecheck+lint 全过）。
+**未提交**（待用户确认）。
+
 ## 2026-06-18 - Epic A A2（#76 前端 PDF 输入）落地 → Epic A 收口
 
 按设计 `docs/zh/pdf-mode.md` 实现 A2 前端，分支 `feature/s-a1-pdf-render`，提交 `019f97d`：

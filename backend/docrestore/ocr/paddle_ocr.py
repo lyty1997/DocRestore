@@ -25,7 +25,10 @@ import json
 import logging
 import os
 import re
+from dataclasses import replace
 from pathlib import Path
+
+import numpy as np
 
 from docrestore.models import LayoutRegion, PageOCR, Region, TextLine
 from docrestore.ocr.base import (
@@ -34,6 +37,7 @@ from docrestore.ocr.base import (
     WorkerBackedOCREngine,
 )
 from docrestore.ocr.column_filter import ColumnFilter
+from docrestore.ocr.region_color import sample_region_color
 from docrestore.pipeline.config import OCRConfig
 
 logger = logging.getLogger(__name__)
@@ -144,6 +148,44 @@ def _build_layout_regions(
             image_ref=image_ref,
         ))
     return regions
+
+
+def _attach_region_colors(
+    image_path: Path,
+    image_size: tuple[int, int],
+    regions: list[LayoutRegion],
+) -> list[LayoutRegion]:
+    """给文字类版面区域采样前景 / 背景色（§11）；fail-safe：失败原样返回。
+
+    整页解码一次源图（image_path 即本次 OCR 跑的图，coordinates 同其像素空间）；
+    逐区域采样，image/chart 区域跳过（走裁图、不需颜色）。解码失败 / 尺寸与
+    image_size 不符（如内容裁剪改了坐标空间）/ 任何异常 → 原样返回（颜色留 None、
+    渲染退默认黑字无填充），绝不炸 OCR 主流程。同步函数，async 调用方用 to_thread 包裹。
+    """
+    if not regions:
+        return regions
+    try:
+        from PIL import Image  # noqa: PLC0415 — Pillow 硬依赖，懒导入保持模块轻量
+
+        with Image.open(image_path) as img:
+            arr = np.asarray(img.convert("RGB"), dtype=np.uint8)
+    except (OSError, ValueError):
+        return regions
+    h, w = arr.shape[:2]
+    if (w, h) != image_size:  # 坐标空间与像素不符 → 不采样，保持 fail-safe
+        return regions
+    out: list[LayoutRegion] = []
+    for region in regions:
+        if region.image_ref:  # 图片区域不采色
+            out.append(region)
+            continue
+        sampled = sample_region_color(arr, region.bbox)
+        if sampled is None:
+            out.append(region)
+            continue
+        fg, bg = sampled
+        out.append(replace(region, fg_color=fg, bg_color=bg))
+    return out
 
 
 class PaddleOCREngine(WorkerBackedOCREngine):
@@ -307,6 +349,13 @@ class PaddleOCREngine(WorkerBackedOCREngine):
             if region.cropped_path is not None:
                 region.cropped_path = ocr_dir / region.cropped_path
 
+        # 版面区域与侧栏检测解耦：不受 column_filter 门控，非 VL 引擎自然为空。
+        layout_regions = _build_layout_regions(coordinates_raw, raw_text)
+        # 文字区域捕获期采样前景 / 背景色（§11），纯 CPU numpy 走 to_thread。
+        layout_regions = await asyncio.to_thread(
+            _attach_region_colors, image_path, image_size, layout_regions,
+        )
+
         return PageOCR(
             image_path=image_path,
             image_size=image_size,
@@ -315,8 +364,7 @@ class PaddleOCREngine(WorkerBackedOCREngine):
             output_dir=ocr_dir,
             has_eos=True,
             text_lines=text_lines,
-            # 版面区域与侧栏检测解耦：不受 column_filter 门控，非 VL 引擎自然为空。
-            layout_regions=_build_layout_regions(coordinates_raw, raw_text),
+            layout_regions=layout_regions,
         )
 
     async def _send_ocr_cmd(

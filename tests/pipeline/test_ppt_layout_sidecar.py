@@ -251,3 +251,25 @@ async def test_sidecar_image_ref_uses_ocr_dir_stem_after_rectify(
     assert layout is not None
     # 用 OCR 目录 stem（slideA_after），非原图 stem（slideA）
     assert layout.pages[0].regions[0].image_ref == "images/slideA_after_2.jpg"
+
+
+async def test_sidecar_threads_region_colors(tmp_path: Path) -> None:
+    """文字区域捕获期采样的前景 / 背景色透传到 sidecar（§11）。"""
+    out = tmp_path / "out"
+    page = _make_page(
+        out, "slideA", "正文带色", (1920, 1080),
+        [LayoutRegion(
+            (0, 0, 100, 50), "text", "正文带色",
+            fg_color=(230, 40, 40), bg_color=(20, 30, 80),
+        )],
+    )
+
+    pipeline = Pipeline(_cfg())
+    queue = await _queue_of([page])
+    await pipeline._ppt_pipeline(queue, out, _report, llm=None, total=1)
+
+    layout = load_ppt_layout(out)
+    assert layout is not None
+    region = layout.pages[0].regions[0]
+    assert region.fg_color == (230, 40, 40)
+    assert region.bg_color == (20, 30, 80)

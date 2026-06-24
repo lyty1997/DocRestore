@@ -245,3 +245,79 @@ def test_load_corrupt_json_returns_none(tmp_path: Path) -> None:
     """sidecar JSON 损坏 → None（不抛错）。"""
     (tmp_path / PPT_LAYOUT_FILENAME).write_text("{ broken", encoding="utf-8")
     assert load_ppt_layout(tmp_path) is None
+
+
+# ── 颜色字段（§11）：透传 / round-trip / 向后兼容 / 降级 ────────
+
+
+def test_layout_region_from_ocr_text_threads_colors() -> None:
+    """文字区域：透传捕获期采样的前景 / 背景色。"""
+    ocr = LayoutRegion(
+        bbox=(0, 0, 50, 50), label="text", content="原文",
+        fg_color=(10, 20, 30), bg_color=(200, 210, 220),
+    )
+    region = layout_region_from_ocr(ocr, stem="s", content="脱敏后")
+    assert region.fg_color == (10, 20, 30)
+    assert region.bg_color == (200, 210, 220)
+
+
+def test_layout_region_from_ocr_image_has_no_colors() -> None:
+    """图片区域：颜色无意义，恒为 None（即便 OCR 区域误带色）。"""
+    ocr = LayoutRegion(
+        bbox=(0, 0, 50, 50), label="image", content="", image_ref="images/0.jpg",
+        fg_color=(10, 20, 30), bg_color=(200, 210, 220),
+    )
+    region = layout_region_from_ocr(ocr, stem="s", content="")
+    assert region.fg_color is None
+    assert region.bg_color is None
+
+
+def test_to_from_dict_roundtrip_with_colors() -> None:
+    """带颜色字段 to_dict → from_dict 恒等。"""
+    region = PptLayoutRegion(
+        (0, 0, 100, 30), "paragraph_title", "标题",
+        fg_color=(240, 240, 250), bg_color=(20, 30, 80),
+    )
+    layout = PptLayout(
+        slide_size_emu=(_SLIDE_W, 6858000),
+        pages=[PptLayoutPage("a.jpg", (1920, 1080), [region])],
+    )
+    assert from_dict(to_dict(layout)) == layout
+
+
+def _one_region_dict(region: dict[str, object]) -> dict[str, object]:
+    """包一层合法的单页单区域 sidecar dict。"""
+    return {
+        "version": 1,
+        "slide_size_emu": [_SLIDE_W, 6858000],
+        "pages": [{
+            "filename": "a.jpg",
+            "image_size": [1920, 1080],
+            "regions": [region],
+        }],
+    }
+
+
+def test_from_dict_missing_color_keys_backward_compatible() -> None:
+    """旧无色 sidecar（缺 fg_color/bg_color 键）→ 读成 None，不退整页。"""
+    data = _one_region_dict({"bbox": [0, 0, 10, 10], "label": "text", "content": "x"})
+    layout = from_dict(data)
+    assert layout is not None
+    region = layout.pages[0].regions[0]
+    assert region.fg_color is None
+    assert region.bg_color is None
+
+
+def test_from_dict_invalid_color_degrades_to_none() -> None:
+    """非法颜色值（长度 / 越界）→ 降级 None，核心字段仍解析、不退整页。"""
+    data = _one_region_dict({
+        "bbox": [0, 0, 10, 10], "label": "text", "content": "x",
+        "fg_color": [1, 2],  # 长度非法
+        "bg_color": [300, 0, 0],  # 越界
+    })
+    layout = from_dict(data)
+    assert layout is not None
+    region = layout.pages[0].regions[0]
+    assert region.content == "x"  # 核心字段不受影响
+    assert region.fg_color is None
+    assert region.bg_color is None
