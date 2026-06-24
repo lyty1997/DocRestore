@@ -240,7 +240,9 @@ text / image / chart / table / figure_title`。各标签的 `content` 来源：
 1. ✅ **已完成**（commit `677e3e2`）捕获 `LayoutRegion`（含 image_ref 认领）+ 单测（喂构造 coordinates → 断言区域/映射）。
 2. ✅ **已完成**（2026-06-24）`.ppt_layout.json` 落盘 + 坐标变换纯函数（§5）+ 单测（已知 bbox → EMU 落点）。
    落点：`output/ppt_layout.py`（纯模块）+ `pipeline.py::_write_ppt_layout_sidecar`（装配后落盘、文字过 PII 闸口）。
-3. ⏳ 导出器 positioned 渲染分支 + fail-safe 退竖排 + 单测（sidecar 在/缺两路）。
+3. ✅ **已完成**（2026-06-24）导出器 positioned 渲染分支 + fail-safe 退竖排 + 单测（sidecar 在/缺两路）。
+   落点：`pptx.py::_build_presentation` 分发（sidecar 合法 → `_build_positioned` 按 `region_box_emu`
+   定位渲染文本框/原生表/图，任一异常退 `_build_block_flow`；某页无可用区域按 idx 退该页竖排）。
 4. ⏳ 开精修：区域单元 idx 锚点精修 + idx 重挂 + 整页退 raw 兜底 + 单测（mock LLM 含/缺 idx）。
 
 ## 10. 验收清单

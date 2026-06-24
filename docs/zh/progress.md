@@ -2531,4 +2531,15 @@ Phase-2 勘察（5 路并行只读）+ **4 轮 pandoc spike** 推翻了「需先
 - 21 个纯函数单测 + 3 个集成测试（落盘+映射 / 非 VL 不落盘 / 开 PII 脱敏一致）。
 
 **证据**：`bash scripts/check_quality.sh` 全绿（**1500 passed, 45 skipped**，mypy 88 文件）。
-**待续**：子任务 3（导出器 positioned 渲染 + fail-safe 退竖排）、子任务 4（开精修 idx 锚点重挂）。
+
+**子任务 3：导出器 positioned 渲染分支 + fail-safe 退竖排**（2026-06-24）
+- `pptx.py` 加 `_build_presentation` 分发：`load_ppt_layout` 合法 → `_build_positioned`（画布按
+  sidecar 尺寸、逐页逐区域 `region_box_emu` 定位渲染——`image_ref`→图、`label==table`→原生表、
+  else→文本框，box 内居中/对齐）；任一异常 → `logger.warning` 退 `_build_block_flow`（现状竖排，
+  零回归）；某页无可用区域（bbox 全非法）→ 按 idx 退该页竖排。
+- 抽 `_populate_table` 公共件（块流/定位共用单元格填充+合并）。`export()` 改走分发器。
+- 3 个真导出测试（python-pptx 读回）：定位落点（标题框/原生表/图落在 `region_box_emu` 区间）、
+  损坏 sidecar 退块流（2 slide）、非法 bbox 逐页退竖排（标题按 idx 对齐）。
+- **证据**：门禁全绿（**1503 passed, 45 skipped**，mypy 88 文件）。
+
+**待续**：子任务 4（开精修 idx 锚点重挂 + 整页退 raw）。

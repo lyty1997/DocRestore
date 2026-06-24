@@ -301,12 +301,19 @@ xlsx/pptx 同样是 `document.md` 的纯函数，与 docx/PDF 同架构、零 pi
   `build_grid`/`grid_dimensions`），xlsx（每表一 sheet）与 pptx（每表一原生表格）共用，单一真相源。
 - 依赖 `python-pptx`（纯 Python）：**懒导入** fail-closed（`ExportToolUnavailable("python-pptx")`）。
 
-### 9.3 延后（Phase-2b，并入 `#74` 富 IR）
+### 9.3 PPT 版面定位（Phase-2b，实现中）
 
-「PPT 按 region bbox 精确定位文本框/图片」需逐页版式 IR——当前 `_ppt_pipeline`
-（`pipeline.py:1227-1391`）在 `1389` 行把各页 `regions` 压扁、bbox 永久丢失，且 per-region 文本
-不干净存在（VL 输出页级 markdown）。旁路点：`render_ppt_document` 前按页抽 `layout_ir['pages']`，
-挂 `PipelineResult.layout_ir` sidecar（非破坏性 `None` 默认），与 `#74 E1` 富 IR 对齐后再实现。
+「PPT 按 region bbox 精确定位文本框/图片/表格」**已开工**（早期判「延后」的「bbox 永久丢失/
+per-region 文本不干净」前提经 spike 证伪——VL 的 `coordinates` 在 OCR 源头就带干净分区）。设计与
+进度真相源见 [`ppt-layout-export.md`](ppt-layout-export.md)。落地概览：
+- **捕获**（子任务1）：`PageOCR.layout_regions`（`models.py`）+ `paddle_ocr._build_layout_regions`
+  从 VL `coordinates` 接住 bbox+类型+内容，image/chart 按阅读序认领 `<img>`。
+- **落盘 + 坐标变换**（子任务2）：`output/ppt_layout.py`（`.ppt_layout.json` 位置真相源 +
+  像素 bbox→slide EMU letterbox 变换）；`_ppt_pipeline::_write_ppt_layout_sidecar` 装配后落盘
+  （文字过同一 PII 闸口）。
+- **定位渲染**（子任务3）：`pptx.py::_build_presentation` 分发——sidecar 合法 → 按 bbox 定位渲染
+  （文本框/原生表/图），任一异常或某页无可用区域 → fail-safe 退竖排块流（§9.2），零回归。
+- **开精修**（子任务4，待做）：区域单元 idx 锚点精修 + 按 idx 重挂 bbox。
 
 ## 10. 测试策略
 

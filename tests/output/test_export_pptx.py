@@ -33,6 +33,13 @@ from docrestore.output.exporters.pptx import (
     _TableBlock,
     _TextBlock,
 )
+from docrestore.output.ppt_layout import (
+    PptLayout,
+    PptLayoutPage,
+    PptLayoutRegion,
+    region_box_emu,
+    write_ppt_layout,
+)
 
 
 def _pptx_ready() -> bool:
@@ -200,3 +207,148 @@ class TestPptxExport:
         assert _DIV_TEXT in all_text
         assert "<table" not in all_text
         assert "<div" not in all_text
+
+
+# ── 版面定位导出（Phase-2b）：sidecar 在 → 按 bbox 定位 ──────────────────────
+
+_POS_TITLE = "定位标题Gamma"
+_POS_CELL = "定位单元格Theta"
+_POS_IMG = "images/pos_0.png"
+_CANVAS = (12192000, 6858000)  # 1920x1080 首页 → 16:9 画布
+_IMG_SIZE = (1920, 1080)
+
+
+def _positioned_doc(doc_dir: Path) -> Path:
+    """构造 document.md + 图片 + .ppt_layout.json（单页：标题/表格/图片三区域）。"""
+    (doc_dir / "document.md").write_text(
+        f"# {_POS_TITLE}\n\n占位正文\n", encoding="utf-8",
+    )
+    images = doc_dir / "images"
+    images.mkdir()
+    Image.new("RGB", (120, 80), (40, 160, 200)).save(images / "pos_0.png")
+    layout = PptLayout(
+        slide_size_emu=_CANVAS,
+        pages=[PptLayoutPage(
+            filename="slideA.jpg",
+            image_size=_IMG_SIZE,
+            regions=[
+                PptLayoutRegion((0, 0, 1920, 200), "paragraph_title", _POS_TITLE),
+                PptLayoutRegion(
+                    (0, 300, 960, 800), "table",
+                    f'<table border="1"><tr><td>{_POS_CELL}</td></tr></table>',
+                ),
+                PptLayoutRegion(
+                    (1000, 300, 1920, 800), "image", "", image_ref=_POS_IMG,
+                ),
+            ],
+        )],
+    )
+    write_ppt_layout(doc_dir, layout)
+    return doc_dir / "document.md"
+
+
+@pptx_required
+class TestPptxPositioned:
+    """sidecar 在 → 按 bbox 定位渲染；非法/空页 → fail-safe 退竖排。"""
+
+    def test_positioned_places_regions_at_bbox(self, tmp_path: Path) -> None:
+        from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+        doc_md = _positioned_doc(tmp_path)
+        out = tmp_path / ".exports" / "pos.pptx"
+        PptxExporter().export(doc_md, tmp_path / "images", out)
+
+        prs = Presentation(str(out))
+        # 画布按 sidecar 尺寸（首页长宽比）
+        assert prs.slide_width == _CANVAS[0]
+        assert prs.slide_height == _CANVAS[1]
+        slides = list(prs.slides)
+        assert len(slides) == 1  # 一个 layout 页 → 一张 slide
+
+        title_box = region_box_emu(_CANVAS, _IMG_SIZE, (0, 0, 1920, 200))
+        table_box = region_box_emu(_CANVAS, _IMG_SIZE, (0, 300, 960, 800))
+        image_box = region_box_emu(_CANVAS, _IMG_SIZE, (1000, 300, 1920, 800))
+        assert title_box is not None
+        assert table_box is not None
+        assert image_box is not None
+
+        title_shape = None
+        table_shape = None
+        picture = None
+        for shape in slides[0].shapes:
+            if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                picture = shape
+            elif shape.has_table:
+                table_shape = shape
+            elif shape.has_text_frame and _POS_TITLE in shape.text_frame.text:
+                title_shape = shape
+
+        # 标题文本框落在标题区域 bbox（exporter 调 region_box_emu 定位）
+        assert title_shape is not None
+        assert title_shape.left == title_box[0]
+        assert title_shape.top == title_box[1]
+        assert title_shape.width == title_box[2]
+        # 表格渲染成原生表格，落在表格区域、含派生单元格
+        assert table_shape is not None
+        assert table_shape.left == table_box[0]
+        assert table_shape.top == table_box[1]
+        cells = [c.text for row in table_shape.table.rows for c in row.cells]
+        assert any(_POS_CELL in c for c in cells)
+        # 图片嵌入并落在图片区域 box 内（box 内居中）
+        assert picture is not None
+        assert image_box[0] <= picture.left
+        assert picture.left + picture.width <= image_box[0] + image_box[2]
+
+    def test_corrupt_sidecar_falls_back_to_block_flow(
+        self, tmp_path: Path,
+    ) -> None:
+        from pptx import Presentation
+
+        # 两页 document.md（块流按 --- 切两页）+ 损坏 sidecar
+        (tmp_path / "document.md").write_text(
+            "# 页一AAA\n\n正文一\n\n---\n\n# 页二BBB\n\n正文二\n",
+            encoding="utf-8",
+        )
+        (tmp_path / ".ppt_layout.json").write_text("{ broken", encoding="utf-8")
+        out = tmp_path / ".exports" / "fb.pptx"
+        PptxExporter().export(
+            tmp_path / "document.md", tmp_path / "images", out,
+        )
+
+        prs = Presentation(str(out))
+        # 损坏 sidecar → load 返回 None → 退竖排块流（两页两 slide），不报错
+        assert len(list(prs.slides)) == 2
+
+    def test_page_with_invalid_bbox_falls_back_per_page(
+        self, tmp_path: Path,
+    ) -> None:
+        from pptx import Presentation
+
+        fallback_title = "退化页CCC"
+        (tmp_path / "document.md").write_text(
+            f"# {fallback_title}\n\n竖排正文\n", encoding="utf-8",
+        )
+        # 单页 sidecar，区域 bbox 零面积（非法）→ 该页无可用区域 → 退竖排
+        layout = PptLayout(
+            slide_size_emu=_CANVAS,
+            pages=[PptLayoutPage(
+                filename="slideA.jpg",
+                image_size=_IMG_SIZE,
+                regions=[PptLayoutRegion((10, 10, 10, 10), "text", "不该出现")],
+            )],
+        )
+        write_ppt_layout(tmp_path, layout)
+        out = tmp_path / ".exports" / "pp.pptx"
+        PptxExporter().export(
+            tmp_path / "document.md", tmp_path / "images", out,
+        )
+
+        prs = Presentation(str(out))
+        slides = list(prs.slides)
+        assert len(slides) == 1
+        all_text = "".join(
+            s.text_frame.text for s in slides[0].shapes if s.has_text_frame
+        )
+        # 该页退竖排：document.md 对应页（按 idx 对齐）的标题出现
+        assert fallback_title in all_text

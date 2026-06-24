@@ -33,6 +33,7 @@ python-pptx 是纯 Python 依赖：**惰性导入** fail-closed
 from __future__ import annotations
 
 import html
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,11 +44,21 @@ from docrestore.output.exporters.base import (
     ExportToolUnavailable,
 )
 from docrestore.output.exporters.html_table import (
+    GridCells,
+    Merge,
     RawCell,
     build_grid,
     grid_dimensions,
     parse_one_table,
 )
+from docrestore.output.ppt_layout import (
+    PptLayout,
+    PptLayoutPage,
+    load_ppt_layout,
+    region_box_emu,
+)
+
+logger = logging.getLogger(__name__)
 
 #: 水平线行（页分隔）：``---`` / ``***`` / ``___`` 三连及以上
 _HR_SPLIT = re.compile(r"(?m)^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$")
@@ -268,11 +279,27 @@ def _add_text_block(slide: Any, lines: list[str], top: int, width: int) -> int:
     return height
 
 
+def _populate_table(
+    table: Any, cells: GridCells, merges: list[Merge], font_pt: int,
+) -> None:
+    """填充原生 pptx 表格：先逐单元格写文本 + 设字号，再做合并（块流/定位共用）。"""
+    from pptx.util import Pt  # noqa: PLC0415
+
+    for (r, c), text in cells.items():  # 先填原始单元格文本，再合并
+        cell = table.cell(r, c)
+        cell.text = text
+        for para in cell.text_frame.paragraphs:
+            for run in para.runs:
+                run.font.size = Pt(font_pt)
+    for r1, c1, r2, c2 in merges:
+        table.cell(r1, c1).merge(table.cell(r2, c2))
+
+
 def _add_table_block(
     slide: Any, rows: list[list[RawCell]], top: int, width: int, max_h: int,
 ) -> int:
     """把 HTML 表渲染成原生 pptx 表格（含合并区），返回占用高度。"""
-    from pptx.util import Emu, Pt  # noqa: PLC0415
+    from pptx.util import Emu  # noqa: PLC0415
 
     cells, merges = build_grid(rows)
     nrows, ncols = grid_dimensions(cells, merges)
@@ -285,14 +312,7 @@ def _add_table_block(
     col_w = max(1, width // ncols)
     for column in table.columns:
         column.width = Emu(col_w)
-    for (r, c), text in cells.items():  # 先填原始单元格文本，再合并
-        cell = table.cell(r, c)
-        cell.text = text
-        for para in cell.text_frame.paragraphs:
-            for run in para.runs:
-                run.font.size = Pt(_TABLE_PT)
-    for r1, c1, r2, c2 in merges:
-        table.cell(r1, c1).merge(table.cell(r2, c2))
+    _populate_table(table, cells, merges, _TABLE_PT)
     return height
 
 
@@ -342,6 +362,166 @@ def _render_slide(
             top += used + _GAP
 
 
+# ── 版面定位渲染（Phase-2b）：按 .ppt_layout.json 的 bbox 摆放区域 ───────────
+
+#: 标题类标签：定位文本框加粗（视觉层级，字号仍 lite 固定）
+_LABEL_TITLE = frozenset({"paragraph_title", "figure_title"})
+
+
+def _add_positioned_text(
+    slide: Any, content: str, label: str, box: tuple[int, int, int, int],
+) -> bool:
+    """在 box（EMU）位置放文本框；剥标签后无内容则不放、返回是否真放了内容。"""
+    from pptx.util import Emu, Pt  # noqa: PLC0415
+
+    lines = _prose_lines(content)  # 去标签防御 + 按行拆
+    if not lines:
+        return False
+    left, top, width, height = box
+    frame = slide.shapes.add_textbox(
+        Emu(left), Emu(top), Emu(width), Emu(height),
+    ).text_frame
+    frame.word_wrap = True
+    bold = label in _LABEL_TITLE
+    for i, line in enumerate(lines):
+        para = frame.paragraphs[0] if i == 0 else frame.add_paragraph()
+        run = para.add_run()
+        run.text = line
+        run.font.size = Pt(_BODY_PT)
+        run.font.bold = bold
+    return True
+
+
+def _add_positioned_table(
+    slide: Any, content: str, box: tuple[int, int, int, int],
+) -> bool:
+    """在 box（EMU）位置渲染原生 pptx 表格（HTML 表），返回是否成功。"""
+    from pptx.util import Emu  # noqa: PLC0415
+
+    rows = parse_one_table(content)
+    if not rows:
+        return False
+    cells, merges = build_grid(rows)
+    nrows, ncols = grid_dimensions(cells, merges)
+    if nrows <= 0 or ncols <= 0:
+        return False
+    left, top, width, height = box
+    table = slide.shapes.add_table(
+        nrows, ncols, Emu(left), Emu(top), Emu(width), Emu(height),
+    ).table
+    col_w = max(1, width // ncols)
+    for column in table.columns:
+        column.width = Emu(col_w)
+    _populate_table(table, cells, merges, _TABLE_PT)
+    return True
+
+
+def _add_positioned_image(
+    slide: Any, image_ref: str, doc_dir: Path, box: tuple[int, int, int, int],
+) -> bool:
+    """在 box（EMU）内等比缩放居中放图片，返回是否成功。"""
+    from PIL import Image  # noqa: PLC0415 — Pillow 是硬依赖，懒导入保持模块轻量
+    from pptx.util import Emu  # noqa: PLC0415
+
+    path = _resolve_image(doc_dir, image_ref)
+    if path is None:
+        return False
+    try:
+        with Image.open(path) as img:
+            px_w, px_h = img.size
+    except (OSError, ValueError):
+        return False
+    if px_w <= 0 or px_h <= 0:
+        return False
+    left, top, width, height = box
+    scale = min(width / px_w, height / px_h)
+    disp_w = max(1, int(px_w * scale))
+    disp_h = max(1, int(px_h * scale))
+    off_x = left + (width - disp_w) // 2  # box 内居中
+    off_y = top + (height - disp_h) // 2
+    slide.shapes.add_picture(
+        str(path), Emu(off_x), Emu(off_y), width=Emu(disp_w), height=Emu(disp_h),
+    )
+    return True
+
+
+def _render_positioned_page(
+    slide: Any, page: PptLayoutPage, canvas: tuple[int, int], doc_dir: Path,
+) -> int:
+    """按 bbox 定位渲染一页区域，返回成功落下的 shape 数（0=该页无可用区域）。"""
+    rendered = 0
+    for region in page.regions:
+        box = region_box_emu(canvas, page.image_size, region.bbox)
+        if box is None:  # bbox 非法 / 零面积 → 跳过该区域
+            continue
+        if region.image_ref:
+            added = _add_positioned_image(slide, region.image_ref, doc_dir, box)
+        elif region.label == "table":
+            added = _add_positioned_table(slide, region.content, box)
+        else:
+            added = _add_positioned_text(slide, region.content, region.label, box)
+        if added:
+            rendered += 1
+    return rendered
+
+
+def _build_block_flow(markdown: str, doc_dir: Path) -> Any:
+    """竖排块流（现状 / fallback）：切页 → 每页一 slide 块级竖排，返回 Presentation。"""
+    from pptx import Presentation  # noqa: PLC0415 — 惰性导入，缺依赖不阻塞启动
+    from pptx.util import Emu  # noqa: PLC0415
+
+    prs = Presentation()
+    prs.slide_width = Emu(_SLIDE_W)  # Emu 是 Length 子类，满足类型
+    prs.slide_height = Emu(_SLIDE_H)
+    blank = prs.slide_layouts[6]  # 默认模板的 Blank 版式
+    pages = _split_pages(markdown)
+    for page in pages:
+        slide = prs.slides.add_slide(blank)
+        title, blocks = _parse_page(page)
+        _render_slide(slide, title, blocks, doc_dir)
+    if not pages:  # 空文档兜底：至少一张空 slide
+        prs.slides.add_slide(blank)
+    return prs
+
+
+def _build_positioned(markdown: str, doc_dir: Path, layout: PptLayout) -> Any:
+    """版面定位渲染：画布按 sidecar 尺寸，逐页按 bbox 摆区域；某页无可用区域 →
+    该页退竖排（按 document.md 对应页），返回 Presentation。任一异常向上抛，由
+    调用方退整篇竖排。"""
+    from pptx import Presentation  # noqa: PLC0415
+    from pptx.util import Emu  # noqa: PLC0415
+
+    prs = Presentation()
+    cw, ch = layout.slide_size_emu
+    prs.slide_width = Emu(cw)
+    prs.slide_height = Emu(ch)
+    blank = prs.slide_layouts[6]
+    block_pages = _split_pages(markdown)  # 供空页回退
+    for i, page in enumerate(layout.pages):
+        slide = prs.slides.add_slide(blank)
+        rendered = _render_positioned_page(
+            slide, page, layout.slide_size_emu, doc_dir,
+        )
+        if rendered == 0 and i < len(block_pages):  # 该页无可用区域 → 退竖排
+            title, blocks = _parse_page(block_pages[i])
+            _render_slide(slide, title, blocks, doc_dir)
+    if not layout.pages:
+        prs.slides.add_slide(blank)
+    return prs
+
+
+def _build_presentation(
+    markdown: str, doc_dir: Path, layout: PptLayout | None,
+) -> Any:
+    """选渲染路径：sidecar 合法 → 定位（失败退竖排）；缺/非法 → 竖排块流。"""
+    if layout is not None:
+        try:
+            return _build_positioned(markdown, doc_dir, layout)
+        except Exception:  # noqa: BLE001 — 定位 best-effort，任一异常退整篇竖排
+            logger.warning("PPT 版面定位渲染失败，退回竖排块流", exc_info=True)
+    return _build_block_flow(markdown, doc_dir)
+
+
 class PptxExporter:
     """``document.md`` → pptx（python-pptx，逐页一 slide，块级竖排）。"""
 
@@ -361,28 +541,18 @@ class PptxExporter:
         assets_dir: Path,  # noqa: ARG002 — 图片走 document.md 相对引用解析
         out_path: Path,
     ) -> None:
-        """切页 → 每页一 slide（块级竖排）→ 保存 pptx。"""
+        """sidecar 在 → 按 bbox 定位渲染（失败退竖排）；缺 → 竖排块流 → 保存 pptx。"""
         try:
-            from pptx import Presentation  # noqa: PLC0415 — 惰性导入，缺依赖不阻塞启动
-            from pptx.util import Emu  # noqa: PLC0415
+            import pptx  # noqa: F401, PLC0415 — 惰性导入仅做可用性探测
         except ImportError as exc:
             raise ExportToolUnavailable(self.tool) from exc
 
         markdown = doc_md.read_text(encoding="utf-8")
-        pages = _split_pages(markdown)
         doc_dir = doc_md.parent
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        layout = load_ppt_layout(doc_dir)  # 缺/损坏 → None → 退竖排块流
         try:
-            prs = Presentation()
-            prs.slide_width = Emu(_SLIDE_W)  # Emu 是 Length 子类，满足类型
-            prs.slide_height = Emu(_SLIDE_H)
-            blank = prs.slide_layouts[6]  # 默认模板的 Blank 版式
-            for page in pages:
-                slide = prs.slides.add_slide(blank)
-                title, blocks = _parse_page(page)
-                _render_slide(slide, title, blocks, doc_dir)
-            if not pages:  # 空文档兜底：至少一张空 slide
-                prs.slides.add_slide(blank)
+            prs = _build_presentation(markdown, doc_dir, layout)
             prs.save(str(out_path))
         except Exception as exc:  # noqa: BLE001 — python-pptx 异常统一 fail-closed
             raise ExportFailed(self.tool, self.suffix, str(exc)[:500]) from exc
