@@ -9,7 +9,10 @@
 
 import { useMemo } from "react";
 
-import type { TaskProgress as TaskProgressData } from "../api/schemas";
+import type {
+  ProcessingMode,
+  TaskProgress as TaskProgressData,
+} from "../api/schemas";
 import type { LlmUnavailableWarning } from "../features/task/useTaskRunner";
 import type {
   ProgressBuckets,
@@ -24,6 +27,10 @@ interface TaskProgressProps {
   pollingEnabled: boolean;
   /** LLM 熔断告警；undefined=未触发，不渲染 banner */
   llmUnavailable?: LlmUnavailableWarning | undefined;
+  /** 本任务是否启用 LLM 精修；缺省 true（兼容旧调用） */
+  refineEnabled?: boolean | undefined;
+  /** 处理模式；缺省 doc。决定关精修时第二轨隐藏（doc）还是改名「后处理」（ppt/code） */
+  mode?: ProcessingMode | undefined;
 }
 
 export function TaskProgress({
@@ -32,8 +39,17 @@ export function TaskProgress({
   wsState,
   pollingEnabled,
   llmUnavailable,
+  refineEnabled = true,
+  mode = "doc",
 }: TaskProgressProps): React.JSX.Element {
   const { t } = useTranslation();
+
+  // 关精修时：文档模式第二轨纯噪声（只剩一闪而过的渲染）→ 隐藏；PPT/代码模式
+  // 该轨仍承载逐页渲染/归类等真实后处理进度 → 保留，但从「LLM 精修」改名「后处理」。
+  const showLlm = refineEnabled || mode !== "doc";
+  const llmLabel = refineEnabled
+    ? t("taskProgress.phaseLlm")
+    : t("taskProgress.phasePostprocess");
 
   const stageLabels = useMemo<Record<string, string>>(
     () => ({
@@ -98,7 +114,8 @@ export function TaskProgress({
           stageLabelOf={stageLabelOf}
           waitingLabel={t("taskProgress.waiting")}
           ocrLabel={t("taskProgress.phaseOcr")}
-          llmLabel={t("taskProgress.phaseLlm")}
+          llmLabel={llmLabel}
+          showLlm={showLlm}
         />
       ) : undefined}
 
@@ -118,7 +135,8 @@ export function TaskProgress({
                 stageLabelOf={stageLabelOf}
                 waitingLabel={t("taskProgress.waiting")}
                 ocrLabel={t("taskProgress.phaseOcr")}
-                llmLabel={t("taskProgress.phaseLlm")}
+                llmLabel={llmLabel}
+                showLlm={showLlm}
                 indent
               />
             </div>
@@ -135,6 +153,8 @@ interface PhaseRowsProps {
   waitingLabel: string;
   ocrLabel: string;
   llmLabel: string;
+  /** false=隐藏第二轨（关精修 + 文档模式）；true=显示 */
+  showLlm: boolean;
   indent?: boolean;
 }
 
@@ -144,6 +164,7 @@ function PhaseRows({
   waitingLabel,
   ocrLabel,
   llmLabel,
+  showLlm,
   indent,
 }: PhaseRowsProps): React.JSX.Element {
   const ocr = bucket?.ocr;
@@ -158,14 +179,16 @@ function PhaseRows({
         phaseKind="ocr"
         indent={indent === true}
       />
-      <ProgressRow
-        progress={llm}
-        stageLabel={stageLabelOf(llm)}
-        waitingLabel={waitingLabel}
-        phaseLabel={llmLabel}
-        phaseKind="llm"
-        indent={indent === true}
-      />
+      {showLlm ? (
+        <ProgressRow
+          progress={llm}
+          stageLabel={stageLabelOf(llm)}
+          waitingLabel={waitingLabel}
+          phaseLabel={llmLabel}
+          phaseKind="llm"
+          indent={indent === true}
+        />
+      ) : undefined}
     </>
   );
 }

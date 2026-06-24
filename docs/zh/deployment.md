@@ -31,6 +31,24 @@ limitations under the License.
 - CUDA：12.8（PaddleOCR 默认）或 11.8（DeepSeek-OCR-2）
 - Conda：Miniconda / Anaconda
 
+### 1.3 文档导出依赖（可选，Epic D）
+
+导出为 **docx / PDF / xlsx / pptx**（下载区勾选）是**可选**能力：缺依赖时该格式 **fail-closed**
+（返回 503，前端三语提示），用户仍可下载 markdown zip。依赖须装在**后端运行所在环境**
+（`docrestore` conda env），因为后端用 `shutil.which("pandoc")` / `import weasyprint` /
+`shutil.which("node")` / `import openpyxl` / `import pptx` 探测。详见 [export-mode.md](export-mode.md)。
+
+| 导出能力 | 依赖 | 安装 |
+|---|---|---|
+| **docx** | pandoc（二进制 ~150MB） | `conda install -n docrestore -c conda-forge pandoc` 或系统 `apt install pandoc` |
+| **PDF（无公式）** | weasyprint + cairo/pango 系统库 | `pip install weasyprint`；Ubuntu 另需 `apt install libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 libffi-dev` |
+| **PDF（含公式）** | 上述 + Node.js + katex 包 | 前端 `npm install` 已带 `frontend/node_modules/katex`；后端经 Node 调用它做公式预渲染（无公式的 PDF 不需 Node） |
+| **xlsx**（D4） | openpyxl（纯 Python，无系统库） | `pip install openpyxl`（已入 `pyproject` 主依赖） |
+| **pptx**（D5） | python-pptx（纯 Python，无系统库；图片缩放复用 Pillow） | `pip install python-pptx`（已入 `pyproject` 主依赖） |
+
+> 公式 PDF 用 KaTeX（与前端 `#77` 同引擎，视觉一致）。KaTeX 是 JS-only，故需 Node 运行时。
+> 若生产部署**不**保留 `frontend/node_modules`，需另让后端可达 `katex` 包（如单独 `npm i katex`）。
+
 ## 2. 快速开始
 
 ### 2.1 安装环境

@@ -13,6 +13,7 @@ import {
 import {
   TaskProgressSchema,
   type CropBox,
+  type ProcessingMode,
   type TaskResultResponse,
 } from "../../api/schemas";
 import { fromUnknown, type LocalizedError } from "../../i18n";
@@ -58,6 +59,10 @@ interface UseTaskRunnerReturn {
   wsState: WsState;
   /** 是否在轮询 */
   pollingEnabled: boolean;
+  /** 本任务是否启用 LLM 精修（关精修时进度区隐藏/改名第二轨）。默认 true */
+  refineEnabled: boolean;
+  /** 处理模式（doc/code/ppt），供进度区按模式调整第二轨展示 */
+  mode: ProcessingMode;
   /** 启动任务 */
   startTask: (
     imageDir: string,
@@ -104,6 +109,8 @@ export function useTaskRunner(): UseTaskRunnerReturn {
   const [error, setError] = useState<LocalizedError | undefined>();
   const [wsState, setWsState] = useState<WsState>("closed");
   const [pollingEnabled, setPollingEnabled] = useState(false);
+  const [refineEnabled, setRefineEnabled] = useState(true);
+  const [mode, setMode] = useState<ProcessingMode>("doc");
 
   // 用 ref 保存清理函数，避免闭包陈旧
   const wsRef = useRef<WebSocket | undefined>(undefined);
@@ -388,6 +395,14 @@ export function useTaskRunner(): UseTaskRunnerReturn {
       setError(undefined);
       setWsState("closed");
       setPollingEnabled(false);
+      // 记录本次任务的精修开关与模式，供进度区决定第二轨隐藏（关精修+文档）
+      // 还是改名「后处理」（关精修+PPT/代码）。llm 省略时后端默认开精修。
+      setRefineEnabled(llm?.enable_refine ?? true);
+      setMode(
+        code?.enable === true
+          ? "code"
+          : (ppt?.enable === true ? "ppt" : "doc"),
+      );
 
       void (async () => {
         try {
@@ -428,6 +443,8 @@ export function useTaskRunner(): UseTaskRunnerReturn {
     setError(undefined);
     setWsState("closed");
     setPollingEnabled(false);
+    setRefineEnabled(true);
+    setMode("doc");
   }, [cleanup]);
 
   return {
@@ -441,6 +458,8 @@ export function useTaskRunner(): UseTaskRunnerReturn {
     error,
     wsState,
     pollingEnabled,
+    refineEnabled,
+    mode,
     startTask,
     reset,
   };

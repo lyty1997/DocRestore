@@ -25,15 +25,22 @@ import json
 import logging
 import os
 import re
+from dataclasses import replace
 from pathlib import Path
 
-from docrestore.models import PageOCR, Region, TextLine
+import numpy as np
+
+from docrestore.models import LayoutRegion, PageOCR, Region, TextLine
 from docrestore.ocr.base import (
     OCR_DEBUG_COORDS_FILENAME,
     OCR_RESULT_FILENAME,
     WorkerBackedOCREngine,
 )
 from docrestore.ocr.column_filter import ColumnFilter
+from docrestore.ocr.region_color import (
+    estimate_white_balance,
+    sample_region_color,
+)
 from docrestore.pipeline.config import OCRConfig
 
 logger = logging.getLogger(__name__)
@@ -65,6 +72,125 @@ def _parse_image_refs(markdown: str) -> list[Region]:
         ))
 
     return regions
+
+
+# image/chart 类版面区域：block_content 为空，按阅读序认领 raw_text 的 <img src>。
+_IMAGE_REGION_LABELS = frozenset({"image", "chart"})
+
+# 阅读序提取 raw_text 里的图片 src（markdown ![](...) 与 HTML <img src> 混排保序）。
+_IMG_REF_RE = re.compile(
+    r"!\[[^\]]*\]\((images/[^)]+)\)"
+    r'|<img\s+[^>]*src="(images/[^"]+)"',
+)
+
+
+def _iter_image_refs(markdown: str) -> list[str]:
+    """按文档阅读序提取 markdown/HTML 图片的 src（images/...）。
+
+    与 _parse_image_refs 不同：保留两种格式的**交错出现顺序**，供版面区域
+    按阅读序认领（_parse_image_refs 先扒 md 再扒 html，跨格式顺序会错）。
+    """
+    refs: list[str] = []
+    for match in _IMG_REF_RE.finditer(markdown):
+        src = match.group(1) or match.group(2)
+        if src:
+            refs.append(src)
+    return refs
+
+
+def _coerce_bbox(raw: object) -> tuple[int, int, int, int] | None:
+    """把 worker 的 bbox（[x1,y1,x2,y2]）收敛成整型四元组；非法返回 None。"""
+    if not isinstance(raw, list) or len(raw) != 4:
+        return None
+    try:
+        coords = [int(v) for v in raw]
+    except (TypeError, ValueError):
+        return None
+    return (coords[0], coords[1], coords[2], coords[3])
+
+
+def _build_layout_regions(
+    coordinates: object,
+    raw_text: str,
+) -> list[LayoutRegion]:
+    """从 worker 的 coordinates + raw_text 构造版面区域（PPT 定位导出用）。
+
+    - coordinates：[{label, bbox:[x1,y1,x2,y2], text}]，像素坐标、阅读序
+      （非 VL 引擎为 None/[]，直接返回空，fail-safe）。
+    - 文字类区域（标题/正文/表格等）：content = block 文字（spike 证实干净可用）。
+    - image/chart 区域（block 文字为空）：content 留空，按**阅读序**认领 raw_text
+      第 k 个 <img src="images/N.jpg"> 写入 image_ref（裁图实际落
+      {stem}_OCR/images/，渲染期再解析为绝对路径）。
+    - 任一项 bbox 非法则跳过；coordinates 非 list 返回空。
+    """
+    if not isinstance(coordinates, list):
+        return []
+
+    img_refs = _iter_image_refs(raw_text)
+    img_cursor = 0
+    regions: list[LayoutRegion] = []
+    for item in coordinates:
+        if not isinstance(item, dict):
+            continue
+        bbox = _coerce_bbox(item.get("bbox"))
+        if bbox is None:
+            continue
+        label = str(item.get("label", "text"))
+        content = str(item.get("text", ""))
+        image_ref = ""
+        if label in _IMAGE_REGION_LABELS:
+            # 图片块内容为空，按阅读序认领下一张未认领的图片引用。
+            if img_cursor < len(img_refs):
+                image_ref = img_refs[img_cursor]
+                img_cursor += 1
+            content = ""
+        regions.append(LayoutRegion(
+            bbox=bbox,
+            label=label,
+            content=content,
+            image_ref=image_ref,
+        ))
+    return regions
+
+
+def _attach_region_colors(
+    image_path: Path,
+    image_size: tuple[int, int],
+    regions: list[LayoutRegion],
+) -> list[LayoutRegion]:
+    """给文字类版面区域采样前景 / 背景色（§11）；fail-safe：失败原样返回。
+
+    整页解码一次源图（image_path 即本次 OCR 跑的图，coordinates 同其像素空间）；
+    逐区域采样，image/chart 区域跳过（走裁图、不需颜色）。解码失败 / 尺寸与
+    image_size 不符（如内容裁剪改了坐标空间）/ 任何异常 → 原样返回（颜色留 None、
+    渲染退默认黑字无填充），绝不炸 OCR 主流程。同步函数，async 调用方用 to_thread 包裹。
+    """
+    if not regions:
+        return regions
+    try:
+        from PIL import Image  # noqa: PLC0415 — Pillow 硬依赖，懒导入保持模块轻量
+
+        with Image.open(image_path) as img:
+            arr = np.asarray(img.convert("RGB"), dtype=np.uint8)
+    except (OSError, ValueError):
+        return regions
+    h, w = arr.shape[:2]
+    if (w, h) != image_size:  # 坐标空间与像素不符 → 不采样，保持 fail-safe
+        return regions
+    # 整页估一次白平衡增益，矫正相机偏色（偏蓝白底→采成蓝、误填蓝背景）。
+    white_balance = estimate_white_balance(arr)
+    out: list[LayoutRegion] = []
+    for region in regions:
+        if region.image_ref:  # 图片区域不采色
+            out.append(region)
+            continue
+        sampled = sample_region_color(arr, region.bbox, white_balance)
+        if sampled is None:
+            out.append(region)
+            continue
+        fg, bg = sampled
+        out.append(replace(region, fg_color=fg, bg_color=bg))
+    return out
 
 
 class PaddleOCREngine(WorkerBackedOCREngine):
@@ -228,6 +354,13 @@ class PaddleOCREngine(WorkerBackedOCREngine):
             if region.cropped_path is not None:
                 region.cropped_path = ocr_dir / region.cropped_path
 
+        # 版面区域与侧栏检测解耦：不受 column_filter 门控，非 VL 引擎自然为空。
+        layout_regions = _build_layout_regions(coordinates_raw, raw_text)
+        # 文字区域捕获期采样前景 / 背景色（§11），纯 CPU numpy 走 to_thread。
+        layout_regions = await asyncio.to_thread(
+            _attach_region_colors, image_path, image_size, layout_regions,
+        )
+
         return PageOCR(
             image_path=image_path,
             image_size=image_size,
@@ -236,6 +369,7 @@ class PaddleOCREngine(WorkerBackedOCREngine):
             output_dir=ocr_dir,
             has_eos=True,
             text_lines=text_lines,
+            layout_regions=layout_regions,
         )
 
     async def _send_ocr_cmd(

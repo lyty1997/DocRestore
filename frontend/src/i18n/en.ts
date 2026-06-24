@@ -159,6 +159,7 @@ export const en: Record<TranslationKey, string> = {
   "taskProgress.subtasksLabel": "Processing {count} subdocuments in parallel",
   "taskProgress.phaseOcr": "OCR",
   "taskProgress.phaseLlm": "LLM Refine",
+  "taskProgress.phasePostprocess": "Post-processing",
   "taskProgress.mainLabel": "Main",
   "taskProgress.streamingCount": "Sub-segment {current} (streaming)",
   // Structured progress messages emitted by backend pipeline.
@@ -180,6 +181,11 @@ export const en: Record<TranslationKey, string> = {
   // ── Task result ──
   "taskResult.title": "Results",
   "taskResult.downloadZip": "Download Results (zip)",
+  "taskResult.exportLabel": "Also export:",
+  "taskResult.exportFormat_docx": "Word",
+  "taskResult.exportFormat_pdf": "PDF",
+  "taskResult.exportFormat_xlsx": "Excel",
+  "taskResult.exportFormat_pptx": "PPT",
   "taskResult.docTab": "Document {index}",
   "taskResult.processNew": "Process New Document",
   "taskResult.resetBtn": "Start Over",
@@ -256,6 +262,10 @@ export const en: Record<TranslationKey, string> = {
   "editor.insertTable": "Insert table",
   "editor.link": "Link",
   "editor.insertFigure": "Insert figure (re-crop from a source image)",
+  "editor.insertMathInline": "Insert inline formula",
+  "editor.insertMathBlock": "Insert block formula",
+  "editor.mathEditSource": "Edit LaTeX source",
+  "editor.mathEditVisual": "Visual editor",
   "editor.linkPrompt": "Enter URL (leave empty to remove)",
   "editor.undo": "Undo (Ctrl+Z)",
   "editor.redo": "Redo (Ctrl+Y)",
@@ -331,7 +341,7 @@ export const en: Record<TranslationKey, string> = {
   "sourcePicker.serverTab": "Server",
   "sourcePicker.currentPath": "Current path: ",
   "sourcePicker.parentDir": ".. (Parent directory)",
-  "sourcePicker.emptyDir": "(No images or subdirectories here)",
+  "sourcePicker.emptyDir": "(No images, PDFs, or subdirectories here)",
   "sourcePicker.useThisDir": "Use this directory",
   "sourcePicker.useSelectedFiles": "Use {count} selected file(s)",
   "sourcePicker.confirmed": "Selected: {path}",
@@ -411,6 +421,11 @@ export const en: Record<TranslationKey, string> = {
     "Local NER environment installation is in progress, please wait.",
   "errors.api.ner_setup_invalid_model":
     "Invalid model name; installation rejected.",
+  "errors.api.export_format_unsupported": "Unsupported export format: {format}",
+  "errors.api.export_tool_unavailable":
+    "Export dependency not installed: {tool}. Install it on the server and retry, or download the zip (markdown) instead.",
+  "errors.api.export_failed":
+    "Export failed ({format}). Please retry or download the zip instead.",
 
   // ── HTTP status diagnostic hints ──
   "errors.http.413":

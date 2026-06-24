@@ -117,6 +117,23 @@ class TestBuildRefinePrompt:
         """
         assert "复制代码" in SLIDE_REFINE_SYSTEM_PROMPT
 
+    def test_both_prompts_have_latex_normalization_rule(self) -> None:
+        """文档版与 PPT 版都含"修 OCR LaTeX 语法错误、不改数学含义"的规范化指令。
+
+        OCR 抽取常把矩阵行分隔 `\\\\` 误识成 `\\ `、拆开 `\\operatorname{}` 内标识符、
+        漏标下标——前端只负责渲染，治本靠精修 prompt 引导模型修语法但不改语义。
+        """
+        # 文档分段精修：新增独立"数学公式 LaTeX 规范化"小节
+        assert "## 数学公式 LaTeX 规范化" in REFINE_SYSTEM_PROMPT
+        assert "矩阵" in REFINE_SYSTEM_PROMPT
+        assert r"\operatorname{LowerTri}" in REFINE_SYSTEM_PROMPT
+        # PPT 按页精修：规则 3 由"原样保留"改为"保留含义 + 修语法"
+        assert "修正 OCR 抽取造成的" in SLIDE_REFINE_SYSTEM_PROMPT
+        assert "矩阵" in SLIDE_REFINE_SYSTEM_PROMPT
+        # 两版都明确不得改数学含义（保真兜底）
+        assert "数学含义" in REFINE_SYSTEM_PROMPT
+        assert "一律不变" in SLIDE_REFINE_SYSTEM_PROMPT
+
 
 class TestParseGaps:
     """parse_gaps 测试"""

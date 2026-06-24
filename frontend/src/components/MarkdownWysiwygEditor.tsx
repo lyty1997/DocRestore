@@ -18,6 +18,7 @@
  *   - 工具栏「插入截图」：打开 ``FigureCropDialog`` 让用户从源图重新框选插图，
  *     裁出后插入（供修复被 OCR 切碎 / 缺失的插图）
  */
+import "katex/dist/katex.min.css";
 
 import {
   Node as TiptapNode,
@@ -46,6 +47,12 @@ import {
   editorImagesToAssetUrls,
 } from "../features/task/markdown";
 import { htmlToMarkdown, markdownToHtml } from "../features/task/markdownRoundtrip";
+import {
+  MathBlock,
+  MathInline,
+  insertMathNode,
+  isMathEditing,
+} from "../features/task/mathNodes";
 import {
   getCenterPagePosition,
   scrollToPagePosition,
@@ -244,6 +251,12 @@ function Toolbar({ editor, t, onInsertFigure }: ToolbarProps): React.JSX.Element
       {btn("🔗", editor.isActive("link"), setLink, t("editor.link"))}
       {onInsertFigure !== undefined
         && btn("🖼", false, onInsertFigure, t("editor.insertFigure"))}
+      {btn("$x$", false,
+        () => { insertMathNode(editor, false); },
+        t("editor.insertMathInline"))}
+      {btn("$x$▦", false,
+        () => { insertMathNode(editor, true); },
+        t("editor.insertMathBlock"))}
 
       <span className="wysiwyg-tb-sep" />
 
@@ -321,6 +334,14 @@ export const MarkdownWysiwygEditor = forwardRef<
     TableCell,
     Placeholder.configure({ placeholder: t("editor.placeholder") }),
     PageAnchor,
+    MathInline.configure({
+      sourceLabel: t("editor.mathEditSource"),
+      visualLabel: t("editor.mathEditVisual"),
+    }),
+    MathBlock.configure({
+      sourceLabel: t("editor.mathEditSource"),
+      visualLabel: t("editor.mathEditVisual"),
+    }),
   ];
 
   const editor = useEditor({
@@ -341,9 +362,13 @@ export const MarkdownWysiwygEditor = forwardRef<
 
   /* 外部 value 变化时（例如切换文档 tab）同步到编辑器；
      但用户自己在编辑时 onUpdate 已经把 md 写进 lastEmittedRef，
-     此时 value === lastEmittedRef → 不重新 setContent，避免光标跳。 */
+     此时 value === lastEmittedRef → 不重新 setContent，避免光标跳。
+     R2：公式正在编辑时跳过 setContent——否则 NodeView 重建会销毁正在编辑的
+     math-field，未提交内容丢失。常见的 onChange 回灌已被上面的相等判断挡住，
+     此处兜底罕见的"编辑公式中途外部真改了 value"（如切 tab），宁可暂不回灌。 */
   useEffect(() => {
     if (value === lastEmittedRef.current) return;
+    if (isMathEditing()) return;
     editor.commands.setContent(valueToHtml(value), { emitUpdate: false });
     lastEmittedRef.current = value;
     // valueToHtml 依赖 taskId/docDir，但二者随 value（切文档）一起变化，

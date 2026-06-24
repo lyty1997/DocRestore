@@ -152,6 +152,7 @@ export const zhTW: Record<TranslationKey, string> = {
   "taskProgress.subtasksLabel": "並行處理 {count} 篇子文件",
   "taskProgress.phaseOcr": "OCR",
   "taskProgress.phaseLlm": "LLM 精修",
+  "taskProgress.phasePostprocess": "後處理",
   "taskProgress.mainLabel": "主進度",
   "taskProgress.streamingCount": "第 {current} 小段（流式切分）",
   // 服務端結構化進度訊息（pipeline report_fn 下發的 message_key 對應）
@@ -173,6 +174,11 @@ export const zhTW: Record<TranslationKey, string> = {
   // ── 任務結果 ──
   "taskResult.title": "處理結果",
   "taskResult.downloadZip": "下載結果（zip）",
+  "taskResult.exportLabel": "附加匯出：",
+  "taskResult.exportFormat_docx": "Word",
+  "taskResult.exportFormat_pdf": "PDF",
+  "taskResult.exportFormat_xlsx": "Excel",
+  "taskResult.exportFormat_pptx": "PPT",
   "taskResult.docTab": "文件 {index}",
   "taskResult.processNew": "處理新文件",
   "taskResult.resetBtn": "重新開始",
@@ -248,6 +254,10 @@ export const zhTW: Record<TranslationKey, string> = {
   "editor.insertTable": "插入表格",
   "editor.link": "連結",
   "editor.insertFigure": "插入截圖（從原圖重新框選插圖）",
+  "editor.insertMathInline": "插入行內公式",
+  "editor.insertMathBlock": "插入區塊公式",
+  "editor.mathEditSource": "切到 LaTeX 原始碼",
+  "editor.mathEditVisual": "切到視覺化編輯",
   "editor.linkPrompt": "輸入 URL（留空清除連結）",
   "editor.undo": "撤銷 (Ctrl+Z)",
   "editor.redo": "重做 (Ctrl+Y)",
@@ -322,7 +332,7 @@ export const zhTW: Record<TranslationKey, string> = {
   "sourcePicker.serverTab": "伺服器",
   "sourcePicker.currentPath": "目前路徑：",
   "sourcePicker.parentDir": ".. (上級目錄)",
-  "sourcePicker.emptyDir": "（目前目錄下無圖片和子目錄）",
+  "sourcePicker.emptyDir": "（目前目錄下無圖片/PDF 和子目錄）",
   "sourcePicker.useThisDir": "使用目前目錄",
   "sourcePicker.useSelectedFiles": "使用選取的 {count} 個檔案",
   "sourcePicker.confirmed": "已選取：{path}",
@@ -397,6 +407,10 @@ export const zhTW: Record<TranslationKey, string> = {
     "本地 NER 未就緒：已開啟人名 / 機構名脫敏但 spaCy 或語言模型未安裝。請在任務表單中一鍵設定本地 NER 環境，或關閉隱私脫敏。",
   "errors.api.ner_setup_in_progress": "本地 NER 環境安裝進行中，請稍候。",
   "errors.api.ner_setup_invalid_model": "非法的模型名，已拒絕安裝。",
+  "errors.api.export_format_unsupported": "不支援的匯出格式：{format}",
+  "errors.api.export_tool_unavailable":
+    "匯出依賴未安裝：{tool}。請在伺服器安裝後重試，或改用 zip（markdown）下載。",
+  "errors.api.export_failed": "匯出失敗（{format}），請重試或改用 zip 下載。",
 
   // ── HTTP 狀態碼診斷 hint ──
   "errors.http.413":

@@ -38,6 +38,8 @@ function App(): React.JSX.Element {
     error,
     wsState,
     pollingEnabled,
+    refineEnabled,
+    mode,
     startTask,
     reset,
   } = useTaskRunner();
@@ -117,6 +119,8 @@ function App(): React.JSX.Element {
                   wsState={wsState}
                   pollingEnabled={pollingEnabled}
                   llmUnavailable={llmUnavailable}
+                  refineEnabled={refineEnabled}
+                  mode={mode}
                 />
                 {taskId !== undefined && (
                   <button

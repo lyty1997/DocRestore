@@ -33,12 +33,43 @@ export function injectPageAnchors(text: string): string {
   );
 }
 
-/** 转义非白名单 HTML 标签，保留合法的 OCR 产出标签 */
+/**
+ * 把"整行就是一条 `$$...$$`"的块级公式拆成独占行的 display 形式。
+ *
+ * OCR/LLM 常把块级公式压成一行 `$$ ... $$`，而 micromark-extension-math 只在
+ * `$$` 独占成行时才按 display（居中块级）渲染，单行 `$$...$$` 会退化成行内公式。
+ * 这里规范化为：
+ *   ```
+ *   $$
+ *   ...
+ *   $$
+ *   ```
+ * 对已经是多行块级的公式幂等（无害地重排空行）；不动行内 `$...$`。
+ */
+export function normalizeDisplayMath(text: string): string {
+  return text.replaceAll(
+    /^[ \t]*\$\$[ \t]*([\s\S]*?)[ \t]*\$\$[ \t]*$/gm,
+    (_match, body: string) => `\n$$\n${body.trim()}\n$$\n`,
+  );
+}
+
+/**
+ * 转义非白名单 HTML 标签，保留合法的 OCR 产出标签。
+ *
+ * 跳过数学公式区（`$$...$$` / `$...$`）：LaTeX 里的 `<`、`>`（如 `\langle`、
+ * 不等式）不应被当成 HTML 标签转义，否则破坏公式。真正的 XSS 由后续
+ * rehype-sanitize 兜底，本函数只负责渲染保真。
+ */
 export function escapeNonHtmlTags(text: string): string {
-  return text.replaceAll(/<([^>]*)>/g, (match, inner: string) => {
-    if (ALLOWED_TAG_RE.test(inner)) return match;
-    return `&lt;${inner}&gt;`;
-  });
+  return text.replaceAll(
+    /(\$\$[\s\S]*?\$\$|\$[^$\n]*?\$)|<([^>]*)>/g,
+    (match, math: string | undefined, inner: string | undefined) => {
+      if (math !== undefined) return math; // 公式区原样保留
+      if (inner === undefined) return match;
+      if (ALLOWED_TAG_RE.test(inner)) return match;
+      return `&lt;${inner}&gt;`;
+    },
+  );
 }
 
 /**
@@ -48,10 +79,10 @@ export function escapeNonHtmlTags(text: string): string {
  * - `XXX_OCR/images/...` → OCR 中间产物，移除（不存在实际文件）
  */
 /**
- * 预处理 markdown：重写图片 URL + 转义非法 HTML 标签
+ * 预处理 markdown：注入页锚点 + 规范化块级公式 + 重写图片 URL + 转义非法 HTML 标签
  *
- * 调用顺序：先处理图片引用，再转义非白名单标签，
- * 确保合法的 <img> 标签不会被误转义。
+ * 调用顺序：先注锚点，再规范化块级公式，再处理图片引用，最后转义非白名单标签
+ * （escapeNonHtmlTags 已跳过公式区），确保合法的 <img> 标签与公式不会被误转义。
  */
 export function preprocessMarkdown(
   markdown: string,
@@ -59,7 +90,8 @@ export function preprocessMarkdown(
   docDir?: string,
 ): string {
   const withAnchors = injectPageAnchors(markdown);
-  const rewritten = rewriteImageUrls(withAnchors, taskId, docDir);
+  const withMath = normalizeDisplayMath(withAnchors);
+  const rewritten = rewriteImageUrls(withMath, taskId, docDir);
   return escapeNonHtmlTags(rewritten);
 }
 

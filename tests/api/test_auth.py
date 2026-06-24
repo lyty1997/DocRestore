@@ -36,6 +36,7 @@ from docrestore.api.auth import (
     require_auth,
 )
 from docrestore.api.errors import ApiBusinessError, api_business_error_handler
+from docrestore.api.routes import health_router
 
 # 测试用 token
 _TEST_TOKEN = "test-secret-token-abc123"  # noqa: S105
@@ -172,6 +173,32 @@ class TestAuthDisabled:
         resp = await open_client.get("/protected")
         assert resp.status_code == 200
         assert resp.json() == {"ok": True}
+
+
+class TestHealthz:
+    """存活探针 /healthz 不受鉴权约束（启动脚本就绪探测用）。"""
+
+    @pytest.mark.asyncio
+    async def test_healthz_open_even_with_token(self) -> None:
+        """即便配置了 API token，/healthz 也应免鉴权返回 200。
+
+        回归保护：start.sh 就绪探测原本打鉴权端点 /ocr/status，被 fail-closed
+        401 刷屏且误判超时；改打此免鉴权端点。若有人误把 health_router 挂上
+        require_auth，本用例会变红。
+        """
+        configure_auth(_TEST_TOKEN)  # 全局开启鉴权
+        app = FastAPI()
+        app.add_exception_handler(
+            ApiBusinessError, api_business_error_handler,  # type: ignore[arg-type]
+        )
+        app.include_router(health_router, prefix="/api/v1")
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport, base_url="http://test",
+        ) as ac:
+            resp = await ac.get("/api/v1/healthz")  # 不带任何 token
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
 
 
 class TestErrorSanitization:

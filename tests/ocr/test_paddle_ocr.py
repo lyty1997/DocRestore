@@ -170,6 +170,11 @@ async def test_ocr_success(
             "image_size": [1920, 1080],
             "image_count": 1,
             "ocr_dir": str(tmp_path / "test_OCR"),
+            "coordinates": [
+                {"label": "paragraph_title", "bbox": [10, 20, 100, 40],
+                 "text": "标题"},
+                {"label": "image", "bbox": [10, 60, 200, 300], "text": ""},
+            ],
         },
     ])
 
@@ -201,6 +206,17 @@ async def test_ocr_success(
         assert "标题" in result.raw_text
         assert len(result.regions) == 1
         assert result.regions[0].label == "image"
+        # 版面区域：与侧栏检测解耦，直接从 coordinates 捕获并挂在 PageOCR 上。
+        assert len(result.layout_regions) == 2
+        title_region = result.layout_regions[0]
+        assert title_region.label == "paragraph_title"
+        assert title_region.content == "标题"
+        assert title_region.image_ref == ""
+        image_region = result.layout_regions[1]
+        assert image_region.label == "image"
+        assert image_region.content == ""
+        # 图片区域按阅读序认领 raw_text 的图片引用
+        assert image_region.image_ref == "images/0.jpg"
 
 
 @pytest.mark.asyncio

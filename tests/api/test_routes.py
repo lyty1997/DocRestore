@@ -255,6 +255,29 @@ class TestFilesystemBrowse:
         assert by_name["album"]["image_count"] == 2
         assert by_name["empty"]["image_count"] == 0
 
+    @pytest.mark.asyncio
+    async def test_browse_dirs_include_files_lists_pdf(
+        self,
+        api_client: AsyncClient,
+        tmp_path: Path,
+    ) -> None:
+        """include_files=true 时 PDF 文件也被列出（与本地上传同口径）。"""
+        (tmp_path / "doc.pdf").write_bytes(b"%PDF-1.4")
+        (tmp_path / "photo.jpg").write_bytes(b"jpegdata")
+        (tmp_path / "note.txt").write_bytes(b"skip")
+
+        resp = await api_client.get(
+            "/api/v1/filesystem/dirs",
+            params={"path": str(tmp_path), "include_files": "true"},
+        )
+        assert resp.status_code == 200
+        by_name = {e["name"]: e for e in resp.json()["entries"]}
+        assert "doc.pdf" in by_name
+        assert by_name["doc.pdf"]["is_dir"] is False
+        assert "photo.jpg" in by_name
+        # 非图片 / 非 PDF 仍被过滤
+        assert "note.txt" not in by_name
+
 
 class TestStageServerSource:
     """/sources/server stage 接口"""
@@ -350,6 +373,44 @@ class TestStageServerSource:
         image_dir = Path(resp.json()["image_dir"])
         names = sorted(p.name for p in image_dir.iterdir())  # noqa: ASYNC240
         assert names == ["x.jpg", "x_1.jpg"]
+
+    @pytest.mark.asyncio
+    async def test_stage_accepts_single_pdf(
+        self,
+        api_client: AsyncClient,
+        tmp_path: Path,
+    ) -> None:
+        """合法单个 PDF → stage 成功，符号链接指向源 PDF。"""
+        src = tmp_path / "report.pdf"
+        src.write_bytes(b"%PDF-1.4")
+
+        resp = await api_client.post(
+            "/api/v1/sources/server",
+            json={"paths": [str(src)]},
+        )
+        assert resp.status_code == 200
+        image_dir = Path(resp.json()["image_dir"])
+        linked = image_dir / "report.pdf"
+        assert linked.is_symlink()  # noqa: ASYNC240
+        assert linked.resolve() == src.resolve()  # noqa: ASYNC240
+
+    @pytest.mark.asyncio
+    async def test_stage_rejects_mixed_image_and_pdf(
+        self,
+        api_client: AsyncClient,
+        tmp_path: Path,
+    ) -> None:
+        """图片 + PDF 混选 → 400（全图片 xor 全 PDF 互斥，闸一/闸二对称）。"""
+        img = tmp_path / "a.jpg"
+        pdf = tmp_path / "b.pdf"
+        img.write_bytes(b"jpeg")
+        pdf.write_bytes(b"%PDF-1.4")
+
+        resp = await api_client.post(
+            "/api/v1/sources/server",
+            json={"paths": [str(img), str(pdf)]},
+        )
+        assert resp.status_code == 400
 
 
 class TestResolveCropImage:

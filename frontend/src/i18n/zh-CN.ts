@@ -160,6 +160,7 @@ export const zhCN = {
   "taskProgress.subtasksLabel": "并行处理 {count} 个子文档",
   "taskProgress.phaseOcr": "OCR",
   "taskProgress.phaseLlm": "LLM 精修",
+  "taskProgress.phasePostprocess": "后处理",
   "taskProgress.mainLabel": "主进度",
   "taskProgress.streamingCount": "第 {current} 小段（流式切分）",
   // 服务端结构化进度消息（pipeline report_fn 下发的 message_key 对应）
@@ -184,6 +185,11 @@ export const zhCN = {
   // ── 任务结果 ──
   "taskResult.title": "处理结果",
   "taskResult.downloadZip": "下载结果（zip）",
+  "taskResult.exportLabel": "附加导出：",
+  "taskResult.exportFormat_docx": "Word",
+  "taskResult.exportFormat_pdf": "PDF",
+  "taskResult.exportFormat_xlsx": "Excel",
+  "taskResult.exportFormat_pptx": "PPT",
   "taskResult.docTab": "文档 {index}",
   "taskResult.processNew": "处理新文档",
   "taskResult.resetBtn": "重新开始",
@@ -259,6 +265,10 @@ export const zhCN = {
   "editor.insertTable": "插入表格",
   "editor.link": "链接",
   "editor.insertFigure": "插入截图（从源图重新框选插图）",
+  "editor.insertMathInline": "插入行内公式",
+  "editor.insertMathBlock": "插入块级公式",
+  "editor.mathEditSource": "切到 LaTeX 源码",
+  "editor.mathEditVisual": "切到可视化编辑",
   "editor.linkPrompt": "输入链接 URL（留空清除链接）",
   "editor.undo": "撤销 (Ctrl+Z)",
   "editor.redo": "重做 (Ctrl+Y)",
@@ -333,7 +343,7 @@ export const zhCN = {
   "sourcePicker.serverTab": "服务器",
   "sourcePicker.currentPath": "当前路径：",
   "sourcePicker.parentDir": ".. (上级目录)",
-  "sourcePicker.emptyDir": "（当前目录下无图片和子目录）",
+  "sourcePicker.emptyDir": "（当前目录下无图片/PDF 和子目录）",
   "sourcePicker.useThisDir": "使用当前目录",
   "sourcePicker.useSelectedFiles": "使用选中的 {count} 个文件",
   "sourcePicker.confirmed": "已选择：{path}",
@@ -393,6 +403,10 @@ export const zhCN = {
     "本地 NER 未就绪：已开启人名 / 机构名脱敏但 spaCy 或语言模型未安装。请在任务表单中一键配置本地 NER 环境，或关闭隐私脱敏。",
   "errors.api.ner_setup_in_progress": "本地 NER 环境安装进行中，请稍候。",
   "errors.api.ner_setup_invalid_model": "非法的模型名，已拒绝安装。",
+  "errors.api.export_format_unsupported": "不支持的导出格式：{format}",
+  "errors.api.export_tool_unavailable":
+    "导出依赖未安装：{tool}。请在服务器安装后重试，或改用 zip（markdown）下载。",
+  "errors.api.export_failed": "导出失败（{format}），请重试或改用 zip 下载。",
 
   // ── HTTP 状态码诊断 hint ──
   "errors.http.413":

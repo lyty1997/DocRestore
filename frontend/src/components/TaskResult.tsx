@@ -7,10 +7,10 @@
 
 import { useState } from "react";
 
-import { getDownloadUrl } from "../api/client";
 import type { TaskResultResponse } from "../api/schemas";
 import { useTranslation } from "../i18n";
 import { DocCodePreview } from "./DocCodePreview";
+import { DownloadControls } from "./DownloadControls";
 
 interface TaskResultProps {
   /** App.tsx 传 ``key={taskId}`` 保证切换任务时整体重挂载，组件内部
@@ -27,7 +27,6 @@ export function TaskResult({
   const [docResults, setDocResults] = useState<TaskResultResponse[]>(
     () => [...initialResults],
   );
-  const downloadUrl = getDownloadUrl(taskId);
 
   return (
     <div className="task-result">
@@ -40,9 +39,10 @@ export function TaskResult({
         onResultsChange={(next) => { setDocResults([...next]); }}
         failedDocStyle="panel"
         headerExtras={
-          <a href={downloadUrl} download className="download-btn">
-            {t("taskResult.downloadZip")}
-          </a>
+          <DownloadControls
+            taskId={taskId}
+            downloadLabelKey="taskResult.downloadZip"
+          />
         }
       />
     </div>

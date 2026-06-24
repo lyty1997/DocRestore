@@ -22,7 +22,7 @@ limitations under the License.
 - **框架**：React 19
 - **语言**：TypeScript 5.9（strict mode）
 - **样式**：CSS Modules
-- **Markdown 渲染**：react-markdown 10 + remark-gfm + rehype-raw
+- **Markdown 渲染**：react-markdown 10 + remark-gfm + rehype-raw + rehype-sanitize；数学公式 remark-math + rehype-katex（KaTeX）。插件链与 sanitize 白名单集中在 `src/features/task/markdownSanitize.ts`，文档/PPT 模式预览（`DocCodePreview`）共用。顺序关键：`rehypeRaw → rehypeSanitize → rehypeKatex`（KaTeX 放最后，使其输出不被 sanitize 剥掉；不可信 HTML 已先过 sanitize，KaTeX `trust:false` 输出无 XSS）。块级公式 `$$...$$` 经 `preprocessMarkdown` 的 `normalizeDisplayMath` 规范成独占行后才居中渲染（OCR 常压成一行）
 - **Markdown WYSIWYG 编辑**：@tiptap/react 3.22 + StarterKit + extension-image/link/placeholder/table（文档模式手工精修使用，源码位于 `frontend/src/components/MarkdownWysiwygEditor.tsx`）
 - **数据校验**：zod v4
 - **i18n**：自建 Context（`src/i18n/`），支持 zh-CN / zh-TW / en 三语

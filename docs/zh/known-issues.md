@@ -769,3 +769,89 @@ append_images=[...])` 存多页 PDF，报 `KeyError: 'JPEG'`（`PdfImagePlugin._
 - A 替换层结构感知：新增 `privacy/markup.py` 结构跨度单一真相源；实体替换只在自由文本段、ASCII 实体加词边界。
 - B 检测层：检测前 `mask_structure` 抹掉结构再喂 NER；`_looks_like_name` 净化丢弃文件名/markup 碎片/数字串/整句。
 - 残留：通用 NER 对"长得像名字的领域词"（物种名/期刊名）在正文里的误检属固有精度上限（设计 N1），结构已零损坏；如仍嫌噪可后续加英文停用表（设计 D1）。
+
+## 导出 pptx 漏出 HTML 标记 + docx 丢表格/图片（Epic D Phase-2a，已修复 2026-06-23）
+
+现象（用户报告）：
+- **pptx**：slide 上出现一长串 `<table border=1 style='...'>...` 与 `<div style="text-align:center;">a)</div>`
+  原始 HTML 标记当字面文本；表格没渲染成表格。
+- **docx**：表格与图片**全部丢失**，只剩纯文本；同一份 `document.md` 导出 **PDF 正常**。
+
+根因（同一类，"原始 HTML 不被目标 writer 认"）：
+- **docx**：`document.md` 的表是 HTML `<table>`、配图常含 HTML `<img>`。单遍 `pandoc -f gfm -t docx`
+  把原始 HTML 当 `RawBlock html` 保留，而 **docx writer 直接丢弃原始 HTML** → 表格 + HTML 图片消失
+  （仅 `![]()` 图片侥幸保留）。PDF 正常是因为 PDF 链路目标是 HTML（`-t html5`），原始 HTML 原样透传、
+  weasyprint 原生渲染。测试此前用 GFM 管道表（pandoc 原生认）测不出该回归。
+- **pptx**：自拼页时把整行文本直接塞进文本框，`<table>`/`<div>` 标记当普通文本一起塞。
+
+修复：
+- **docx 改两遍 HTML 中转**：`pandoc gfm+tex_math_dollars -t html5 --mathml`（原始 `<table>/<img>` 内联、
+  `$..$`→MathML）→ `pandoc -f html -t docx`（HTML reader 把 `<table>/<img>` 转原生、MathML→OMML）。
+  **`--mathml` 而非 `--mathjax`** 是关键：`--mathjax` 产 `\(..\)`，HTML reader 不再解析回数学（OMML 丢失）。
+- **pptx 改按块解析**：一页拆成有序块（正文/表格/图片），`<table>` 复用公共解析层 `html_table.py`
+  渲染成**原生 pptx 表格**（含合并区），散文剥 HTML 标签只留文本，竖向堆叠。
+- 测试据实改用 **HTML `<table>` + HTML `<img>`**（真实 `document.md` 格式）锁回归：docx 断言
+  `document.tables` 有派生单元格 + `inline_shapes >= 2`；pptx 断言原生表格有派生单元格 + 文本框无 `<table`/`<div` 漏出。
+- 详见 [export-mode.md](export-mode.md) §6（docx 两遍）/§9.2（pptx 按块）。
+
+## PPT 版面定位 sidecar 图片引用丢失 `_after` 前缀（E2E 实测发现，已修复 2026-06-24）
+
+**现象**：真机 E2E（活 VL OCR 跑 3 张 PPT slide）后，`.ppt_layout.json` 的图片区域
+`image_ref` 形如 `images/{stem}_4.jpg`，但盘上真实裁图是 `images/{stem}_after_4.jpg`，
+导出器 `_resolve_image` 解析不到 → positioned pptx 图片区域空缺。
+
+**根因**：PPT 模式 `rectify=True` 时 OCR 跑在矫正后图 `{stem}_after.jpg` 上，`PageOCR.output_dir`
+= `{stem}_after_OCR`，`Renderer` 按它命名裁图为 `images/{stem}_after_N.jpg`；但 producer
+（`pipeline.py:1964`）把 `page.image_path` **改回了原图**（stem 无 `_after`），而
+`_write_ppt_layout_sidecar` 误用 `page.image_path.stem` 算最终引用 → 少了 `_after`。
+`document.md` 的图引用正常，因 `Renderer` 自己用 `page.output_dir.name` 算。
+
+**修复**：sidecar 改用与 `Renderer`/`rewrite_image_refs_to_ocr_dir` **同源**的命名 stem——
+`page.output_dir.name` 去掉 `_OCR` 后缀（兼容 `{stem}_after_OCR` / `{stem}_cropped_OCR` /
+`{stem}_OCR`），fallback `page.image_path.stem`。回归单测 `test_ppt_layout_sidecar.py::
+test_sidecar_image_ref_uses_ocr_dir_stem_after_rectify` 锁定。
+
+**附带**：`_stream_pipeline` 原 `contextlib.suppress(Exception)` 把 OCR 生产者真实异常吞掉、
+被消费者「未产出任何页」掩盖，排障困难——改为抽 `_cancel_producer_log_real` 取消后 `warning`
+记录生产者真异常（不改变抛出语义），便于日后定位 OCR 失败根因。
+
+**教训**：跨组件「同一资源的命名」必须单一真相源（这里是 OCR 目录名），不能各算各的；纯函数单测
+用 `{stem}_OCR` 凑巧 stem 相同测不出，**真机 E2E（矫正后 stem 含 `_after`）才暴露**。
+
+## PPT 区域取色：合成测试通过但真机几乎全弃权（量化过细 + frac_bg 阈值太严）
+
+**现象（2026-06-24）**：positioned-pptx 区域颜色采样（§11）合成像素图单测全过（黑字白底 / 暗色模式 /
+彩字取色全对、弃权用例全 None），但拿真机 3 slide 的真 VL 区域跑，**13 个文字区域里 12 个弃权**、
+只剩 1 个采到色——功能在真实幻灯片上几乎不生效。
+
+**根因**：弃权守卫 `frac_bg`（最大量化桶占样本比例）门槛 0.35 把真机文字区域全卡掉。诊断打印各区域
+守卫值发现：contrast / Δlum 都很高（195~252 / 108~144，**明显是文字区**，前景背景分离良好），唯独
+`frac_bg` 普遍 0.13~0.39（中位 0.25）卡在 0.35 下。深层原因是**真机屏摄的 JPEG 压缩 + 抗锯齿
+把单一底色散布到多个相邻量化桶**：背景虽占 70%+ 像素，但 16 级量化（`>>4`，桶宽 16）下被噪声 ±8
+劈成 2×2×2 个邻桶，最大单桶只兜住 ~25%。合成图底色**完全均匀**（单桶 ~85%）所以测不出。
+
+**修复**：量化粒度 16 级（`>>4`）→ **8 级（`>>5`，桶宽 32）**，噪声 ±8 多落同桶；frac_bg 阈值
+0.35 → **0.15**（真机文字区 8 级下 frac_bg 中位升到 0.35、最小 0.17）。代表色仍取**桶内真实像素均值**，
+粗量化不损色精度（只影响分桶聚合）。改后真机 12/13 文字区采到合理色（表格因 contrast<60 正确弃权），
+暗色蓝底 banner 正确取浅前景 / 深背景；合成弃权用例（纯色块 / 低对比 / 双色块 / 噪声）仍全 None。
+
+**教训**：**纯合成测试无法替代真机调参**——合成图的「完美均匀色块」掩盖了真实屏摄的 JPEG / 抗锯齿
+色散，阈值在合成上随便定都过、到真机才暴露过严。涉及「从真实退化图像采统计量」的阈值，**必须拿真机
+数据标定**（复用 Phase-2b 残留 `.rectified/` + 真 sidecar bbox，免 GPU 即可标定）。
+
+## PPT 区域取色：相机白平衡偏色被原样搬进 pptx（白底拍成蓝→填成蓝背景）
+
+**现象（2026-06-24，用户报）**：positioned-pptx 颜色采样把**相机拍摄的色差**原样还原——拍照白平衡
+偏蓝，本该白的背景被采成淡蓝（如 `(135,167,230)`），渲染就把白底文本框填成蓝色，导出 slide 背景发蓝。
+
+**根因**：采样如实反映像素，但像素本身带相机偏色。**过度忠实**地复刻了拍摄缺陷而非原始幻灯片。
+
+**修复**：加全局**白平衡校正**。`estimate_white_balance(arr)` 整页估每通道增益 `gain_c=255/白点_c`
+（白点=每通道 95 百分位=背景白），把背景白映射回真白；增益限幅 4.0、白点最亮通道 <100 则不校正
+（暗色主题不强制白化）。增益**只施于最终输出色**（守卫仍用未校正色，真机标定阈值不动）。配套把渲染
+「视为白底不填」规则从「各通道≥240」改成 **`_is_effectively_white`：最暗通道≥200 且通道极差≤30**
+（浅且近中性）——因校正后白底落浅中性灰（`(210,224,229)` 这类 <240），饱和度判别既吸残留偏色、
+又不误伤真彩浅色（浅蓝 `(200,220,255)` 极差 55 仍填）。真机重渲染：白底还原白、仅真彩 banner 填色。
+
+**教训**：「还原原文」≠「复刻照片」——采样统计量会把**拍摄链路的系统性偏差**（白平衡 / 曝光 / 色偏）
+一并搬进结果。凡「从照片采颜色 / 亮度」的特征，须在采样前 / 后做一次**拍摄畸变归一化**（白平衡是最常见的一项）。

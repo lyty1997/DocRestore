@@ -7,7 +7,9 @@ import { describe, expect, it } from "vitest";
 import {
   editorAssetUrlsToImages,
   editorImagesToAssetUrls,
+  escapeNonHtmlTags,
   injectPageAnchors,
+  normalizeDisplayMath,
   preprocessMarkdown,
   rewriteImageUrls,
 } from "../../../src/features/task/markdown";
@@ -134,6 +136,37 @@ describe("preprocessMarkdown (集成：锚点 + 图片重写 + 标签转义)", (
     // 锚点保留
     expect(out).toContain('<span class="page-anchor" data-page="a.jpg">');
     // 非白名单 <Unknown> 被转义
+    expect(out).toContain("&lt;Unknown&gt;");
+  });
+});
+
+describe("normalizeDisplayMath", () => {
+  it("单行 $$...$$ 拆成独占行的 display 形式", () => {
+    const out = normalizeDisplayMath("$$ E = mc^2 $$");
+    expect(out).toContain("$$\nE = mc^2\n$$");
+  });
+
+  it("已是多行块级时幂等（仍是独占行 $$，公式体不变）", () => {
+    const body = "a + b";
+    const out = normalizeDisplayMath(`$$\n${body}\n$$`);
+    expect(out).toContain(`$$\n${body}\n$$`);
+  });
+
+  it("不动行内 $...$（保持行内）", () => {
+    const input = "前 $a+b$ 后";
+    expect(normalizeDisplayMath(input)).toBe(input);
+  });
+});
+
+describe("escapeNonHtmlTags 跳过公式区", () => {
+  it("公式内的 < > 不被转义（避免破坏 LaTeX）", () => {
+    const input = "$a < b > c$";
+    expect(escapeNonHtmlTags(input)).toBe(input);
+  });
+
+  it("公式外的非白名单标签仍被转义", () => {
+    const out = escapeNonHtmlTags("$x<y$ 和 <Unknown>");
+    expect(out).toContain("$x<y$");
     expect(out).toContain("&lt;Unknown&gt;");
   });
 });

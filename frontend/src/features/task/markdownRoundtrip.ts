@@ -14,7 +14,61 @@ import { marked } from "marked";
 import TurndownService from "turndown";
 import { gfm } from "turndown-plugin-gfm";
 
+import {
+  MATH_DISPLAY_DATA,
+  MATH_INLINE_DATA,
+} from "./mathNodes";
+
 const PAGE_ANCHOR_RE = /<!--\s*page:\s*([^>]+?)\s*-->/g;
+
+/** 块级公式 `$$...$$`（可跨行，非贪婪）。 */
+const MATH_BLOCK_RE = /\$\$([\s\S]+?)\$\$/g;
+/** 行内公式 `$...$`（不跨行、非空、内部无 `$`）。 */
+const MATH_INLINE_RE = /\$([^$\n]+?)\$/g;
+
+/** HTML 属性值转义（latex 进 data-latex 时；turndown 读出时 DOM 自动反转义）。 */
+function escapeHtmlAttr(s: string): string {
+  return s
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+/** HTML 文本内容转义（占位元素可见文本，避免 latex 里的 `<`/`&` 破坏结构）。 */
+function escapeHtmlText(s: string): string {
+  return s
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+/**
+ * 把 markdown 里的 `$$...$$` / `$...$` 公式替换成占位元素，latex 存进
+ * `data-latex` 属性（唯一真相），交给 marked / Tiptap 时不再被当 markdown 解析。
+ *
+ * - 先块级后行内：`$$` 先被消费，避免行内规则把 `$$` 拆成两个 `$`
+ * - 占位元素带可见文本（= latex）保证非空，否则 turndown blank 检测会丢弃它
+ *   （与 page-anchor 同坑）；Tiptap 是 atom 节点，只认 data-latex、忽略可见文本
+ */
+function mathToPlaceholders(markdown: string): string {
+  const withBlock = markdown.replaceAll(
+    MATH_BLOCK_RE,
+    (_m, tex: string): string => {
+      const body = tex.trim();
+      return (
+        `\n<div ${MATH_DISPLAY_DATA} data-latex="${escapeHtmlAttr(body)}">`
+        + `${escapeHtmlText(body)}</div>\n`
+      );
+    },
+  );
+  return withBlock.replaceAll(
+    MATH_INLINE_RE,
+    (_m, tex: string): string =>
+      `<span ${MATH_INLINE_DATA} data-latex="${escapeHtmlAttr(tex)}">`
+      + `${escapeHtmlText(tex)}</span>`,
+  );
+}
 
 /**
  * 把 markdown 转为可塞进 Tiptap 的 HTML。
@@ -33,8 +87,11 @@ export function markdownToHtml(markdown: string): string {
       return `<div data-page-anchor data-page="${safe}">📄 ${safe}</div>\n`;
     },
   );
+  // 公式 → 占位元素（latex 进 data-latex），放在 marked 前，避免 marked 把
+  // 公式里的 `_` `*` `\` 当 markdown 解析破坏 LaTeX。
+  const withMath = mathToPlaceholders(withAnchorBlocks);
   marked.setOptions({ gfm: true, breaks: false, async: false });
-  return marked.parse(withAnchorBlocks) as string;
+  return marked.parse(withMath) as string;
 }
 
 
@@ -73,6 +130,21 @@ function getTurndown(): TurndownService {
       const text = (node as Comment).data;
       return `\n<!--${text}-->\n`;
     },
+  });
+
+  // 数学公式节点 → 还原 `$...$` / `$$...$$`：只读 data-latex 原文，
+  // 不 turndown 其内部（避免 KaTeX/源码文本被转义破坏 LaTeX）。
+  td.addRule("mathInline", {
+    filter: (node: HTMLElement): boolean =>
+      node.nodeName === "SPAN" && node.dataset.mathInline !== undefined,
+    replacement: (_content: string, node: Node): string =>
+      `$${(node as HTMLElement).dataset.latex ?? ""}$`,
+  });
+  td.addRule("mathBlock", {
+    filter: (node: HTMLElement): boolean =>
+      node.nodeName === "DIV" && node.dataset.mathDisplay !== undefined,
+    replacement: (_content: string, node: Node): string =>
+      `\n$$\n${(node as HTMLElement).dataset.latex ?? ""}\n$$\n`,
   });
 
   _turndown = td;

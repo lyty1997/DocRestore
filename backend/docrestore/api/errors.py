@@ -107,6 +107,14 @@ class APIErrorCode(StrEnum):
     #: 请求级 output_dir 不在受信工作根下（防 DELETE 任务 rmtree 任意目录）
     OUTPUT_DIR_REJECTED = "OUTPUT_DIR_REJECTED"
 
+    # ── 输出导出（Epic D：docx / pdf / ...）──────────
+    #: formats 含未知 / 未启用的导出格式（fail-closed 白名单，params.format）
+    EXPORT_FORMAT_UNSUPPORTED = "EXPORT_FORMAT_UNSUPPORTED"
+    #: 导出依赖（pandoc / weasyprint）缺失，fail-closed（params.tool / format）
+    EXPORT_TOOL_UNAVAILABLE = "EXPORT_TOOL_UNAVAILABLE"
+    #: 导出过程失败（子进程非零退出 / 渲染异常，params.tool / format）
+    EXPORT_FAILED = "EXPORT_FAILED"
+
     # ── 本地 NER（人名/机构名上云前脱敏）─────────────
     #: 开启了人名/机构名脱敏但本地 NER（spaCy/模型）未就绪。fail-fast 拒绝建任务，
     #: 避免名字裸送云端或白跑 OCR；响应 params.remediable=true，前端弹一键配置入口。

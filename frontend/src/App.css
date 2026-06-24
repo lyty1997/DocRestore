@@ -966,6 +966,32 @@ body {
   box-shadow: 0 0 10px var(--color-success-bg);
 }
 
+/* ── 下载控件：附加导出格式（Word/PDF）勾选 + 下载按钮（Epic D） ── */
+.download-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.download-export-label {
+  font-size: 0.8125rem;
+  opacity: 0.75;
+}
+
+.download-export-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.8125rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.download-export-option input {
+  cursor: pointer;
+}
+
 /* ── Markdown preview ──────────────────────────── */
 .markdown-preview {
   padding: 1.5rem;
@@ -1337,6 +1363,17 @@ body {
   width: 100%;
   object-fit: contain;
   border-radius: 3px;
+}
+
+/* PDF 无缩略图：用大号文件图标占位，撑满与图片预览一致的高度 */
+.server-picker-preview-pdf {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  font-size: 64px;
+  line-height: 1;
 }
 
 .server-picker-preview-name {
@@ -2523,6 +2560,89 @@ body {
 }
 .wysiwyg-page-anchor-icon { font-size: 0.85em; }
 .wysiwyg-page-anchor-label { font-family: ui-monospace, monospace; }
+
+/* 数学公式节点（KaTeX NodeView，双击编辑） */
+.wysiwyg-prose .wysiwyg-math {
+  cursor: pointer;
+  border-radius: 4px;
+}
+.wysiwyg-prose .wysiwyg-math-inline { padding: 0 0.15em; }
+.wysiwyg-prose .wysiwyg-math-block {
+  display: block;
+  padding: 0.3em 0.4em;
+  margin: 0.5em 0;
+  overflow-x: auto;
+}
+.wysiwyg-prose .wysiwyg-math:hover {
+  background: var(--color-surface-alt);
+  outline: 1px dashed var(--color-border);
+}
+.wysiwyg-prose .wysiwyg-math-selected {
+  outline: 2px solid var(--color-accent, #4a90d9);
+  background: var(--color-surface-alt);
+}
+/* 编辑界面容器：编辑框/公式域 + 右上角「切换源码/可视化」按钮 */
+.wysiwyg-math-editwrap {
+  position: relative;
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 0.25em;
+  width: 100%;
+}
+.wysiwyg-prose .wysiwyg-math-inline .wysiwyg-math-editwrap {
+  display: inline-flex;
+  width: auto;
+}
+/* 双击进入编辑时的 latex 源码输入框 */
+.wysiwyg-math-edit {
+  width: 100%;
+  min-width: 12ch;
+  box-sizing: border-box;
+  font-family: ui-monospace, monospace;
+  font-size: 0.92em;
+  padding: 0.2em 0.4em;
+  border: 1px solid var(--color-accent, #4a90d9);
+  border-radius: 4px;
+  background: var(--color-surface, #fff);
+  color: var(--color-text);
+  resize: vertical;
+}
+/* MathLive 可视化编辑域（进入编辑时挂载；只读态仍是 KaTeX） */
+.wysiwyg-prose math-field {
+  flex: 1;
+  min-width: 4ch;
+  border: 1px solid var(--color-accent, #4a90d9);
+  border-radius: 4px;
+  background: var(--color-surface, #fff);
+  padding: 0.1em 0.3em;
+}
+.wysiwyg-prose .wysiwyg-math-block math-field {
+  display: block;
+  width: 100%;
+}
+/* 非触屏隐藏 math-field 自带的虚拟键盘切换按钮（桌面用 focusin 主动弹出） */
+@media not (pointer: coarse) {
+  .wysiwyg-prose math-field::part(virtual-keyboard-toggle) {
+    display: none;
+  }
+}
+/* 「切到源码 / 可视化」小按钮 */
+.wysiwyg-math-mode-toggle {
+  flex: none;
+  font-family: ui-monospace, monospace;
+  font-size: 0.78em;
+  line-height: 1.4;
+  padding: 0.05em 0.4em;
+  border: 1px solid var(--color-border);
+  border-radius: 3px;
+  background: var(--color-surface-alt);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.wysiwyg-math-mode-toggle:hover {
+  color: var(--color-text);
+  border-color: var(--color-accent, #4a90d9);
+}
 
 /* placeholder（Tiptap Placeholder ext 注入的伪元素） */
 .wysiwyg-prose p.is-editor-empty:first-child::before {

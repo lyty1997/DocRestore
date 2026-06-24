@@ -1170,9 +1170,7 @@ class Pipeline:
             # 消费者异常/取消 → 立即取消仍在跑的 OCR 生产者，避免它把剩余图全部
             # OCR 完才结束（持 gpu_lock 阻塞 shutdown / 遗弃任务 + GPU 空转）；
             # 吞掉其 CancelledError 等清理异常，保留消费者原异常向上抛。
-            ocr_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await ocr_task
+            await self._cancel_producer_log_real(ocr_task)
             raise
         finally:
             unsub_breaker()
@@ -1192,6 +1190,28 @@ class Pipeline:
                 exc_info=True,
             )
         return result
+
+    @staticmethod
+    async def _cancel_producer_log_real(
+        ocr_task: asyncio.Task[None],
+    ) -> None:
+        """取消并 await OCR 生产者，记录其真实异常（避免被消费者异常掩盖）。
+
+        消费者异常（如「OCR producer 未产出任何页」）往往是生产者首图异常的
+        二次结果；旧实现 ``suppress(Exception)`` 把根因吞掉，难以排障。此处取消
+        后 await，对 ``CancelledError`` 静默、对真实异常 ``warning`` 记录后由调用
+        方重新抛出消费者原异常（不改变抛出语义）。
+        """
+        ocr_task.cancel()
+        try:
+            await ocr_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.warning(
+                "OCR 生产者异常（被消费者异常掩盖，仅记录不改变抛出）",
+                exc_info=True,
+            )
 
     @staticmethod
     async def _subscribe_breaker(
@@ -1383,12 +1403,84 @@ class Pipeline:
             output_config=self._config.output,
             bodies=bodies,
         )
+        # PPT 版面定位 sidecar（Phase-2b）：落 .ppt_layout.json 位置真相源，供
+        # pptx 导出器按 bbox 定位。文字区域 content 过同一 PII 闸口（与
+        # document.md 同口径脱敏），图片区域映射到最终输出引用；本子任务用捕获的
+        # raw 区域内容（开精修按 idx 锚点重挂留待 subtask4）。非 VL/捕获失败 →
+        # build 返回 None 不落盘，导出端 fail-safe 退竖排。
+        await self._write_ppt_layout_sidecar(
+            ordered_pages, output_dir, guard, entity_lexicon,
+        )
         return PipelineResult(
             output_path=doc_path,
             markdown=memory_md,
             images=[r for page in ordered_pages for r in page.regions],
             warnings=[],
         )
+
+    async def _write_ppt_layout_sidecar(
+        self,
+        ordered_pages: list[PageOCR],
+        output_dir: Path,
+        guard: PIIGuard | None,
+        entity_lexicon: EntityLexicon | None,
+    ) -> None:
+        """落 PPT 版面定位 sidecar ``.ppt_layout.json``（Phase-2b 位置真相源）。
+
+        每页把捕获的 ``layout_regions`` 转成 sidecar 区域：文字区域 content 过同一
+        PII 出云闸口（``redact_for_cloud``，与 ``document.md`` 同口径脱敏，本地产物），
+        图片区域映射到最终输出引用（``images/{stem}_N.ext``）。非 VL/无版面区域 →
+        ``build_ppt_layout`` 返回 None 不落盘，导出端 fail-safe 退竖排。落盘失败仅告警，
+        不阻断主流程（版面定位是增强，缺 sidecar 退竖排）。
+        """
+        from docrestore.output.ppt_layout import (
+            build_ppt_layout,
+            layout_region_from_ocr,
+            write_ppt_layout,
+        )
+
+        def _redact(text: str) -> str:
+            """文字区域脱敏：开 PII 时走出云闸口（结构化 + 实体），否则原文。"""
+            if guard is None:
+                return text
+            return guard.redact_for_cloud(text, entity_lexicon)
+
+        def _render_stem(page: PageOCR) -> str:
+            """渲染期裁图命名用的 stem：与 ``Renderer`` 一致，取 ``page.output_dir``
+            （``{stem}_OCR`` / 矫正后 ``{stem}_after_OCR`` / ``{stem}_cropped_OCR``）
+            去掉 ``_OCR``。**不能用 ``page.image_path.stem``**：PPT 矫正后 OCR 跑在
+            ``{stem}_after.jpg`` 上、裁图落 ``images/{stem}_after_N.jpg``，而
+            producer 已把 ``image_path`` 改回原图（stem 无 ``_after``）。"""
+            ocr_dir = page.output_dir
+            if ocr_dir is not None and ocr_dir.name.endswith("_OCR"):
+                return ocr_dir.name[: -len("_OCR")]
+            return page.image_path.stem
+
+        layout_pages = [
+            (
+                page.image_path.name,
+                page.image_size,
+                [
+                    layout_region_from_ocr(
+                        region,
+                        stem=_render_stem(page),
+                        content=_redact(region.content),
+                    )
+                    for region in page.layout_regions
+                ],
+            )
+            for page in ordered_pages
+        ]
+        layout = build_ppt_layout(layout_pages)
+        if layout is None:
+            return
+        try:
+            await asyncio.to_thread(write_ppt_layout, output_dir, layout)
+        except OSError:
+            logger.warning(
+                "PPT 版面 sidecar 落盘失败（不阻断主流程，导出退竖排）",
+                exc_info=True,
+            )
 
     async def _code_pipeline(  # noqa: C901
         self,

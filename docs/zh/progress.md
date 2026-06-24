@@ -1,5 +1,36 @@
 # 开发进度
 
+## 2026-06-24 - Epic D Phase-2b 增强：positioned-pptx 区域颜色采样 + 字号估计
+
+设计 `docs/zh/ppt-layout-export.md` §11。让 positioned-pptx 重排文字接近原屏摄图的颜色与字号
+（此前固定 14pt 纯黑无背景）。设计先经 3 路对抗式 design panel 收敛算法，再实现：
+
+- **`ocr/region_color.py`（新）**：捕获期纯函数 `sample_region_color(img_rgb, bbox)`——量化直方图
+  取色（8 级 / 512 桶）+ **面积判前后景**（少数簇=文字、多数簇=背景，对暗色模式成立）+ 全套弃权
+  守卫（对比 / 占比 / 尺寸）+ fail-safe。`paddle_ocr.ocr()` 经 `_attach_region_colors`（to_thread）接入。
+- **数据/序列化**：`LayoutRegion` / `PptLayoutRegion` 加 `fg_color/bg_color`；`ppt_layout` to/from_dict
+  容错读写（缺键 / 非法→None，**向后兼容旧无色 sidecar、不 bump version**）；`layout_region_from_ocr` 透传。
+- **渲染**：`pptx._add_positioned_text` 施前景色 + **条件背景填充**（近白不填、深色 / banner 填，浅字才可见）+
+  **渲染期字号** `_positioned_font_pt`（EMU 盒高 / 行数 / 行距，clamp + 宽度护栏）；表格施前景色保留 `_TABLE_PT`。
+  `RGBColor` untyped 构造经 `_rgb` Any 间接屏蔽 `no-untyped-call`（全量 mypy 才暴露、per-file hook 漏）。
+- **真机调优（关键）**：合成单测全过但真机 3 slide 13 区域 **12 个弃权**——根因 JPEG / 抗锯齿把底色散到
+  邻桶、`frac_bg` 0.35 太严。据真机把量化 16→8 级、frac_bg 0.35→0.15 → 12/13 采到合理色（表格正确弃权）。
+  复用 Phase-2b 残留 `.rectified/` + 真 sidecar bbox **免 GPU 标定**；详见 known-issues。
+- **真机 E2E**：真 sidecar 注入采样色 → 导出 positioned pptx → soffice 渲染目视：暗蓝 banner 正确填深底浅字、
+  正文深字浅底、2D 版面 + 字号比例忠实还原（503 / 508）。
+
+**证据/门禁**：新增 22 测试（region_color 9 + ppt_layout 色 5 + export_pptx 色/字号 7 + sidecar 透传 1），
+`bash scripts/check_quality.sh` 全绿（1527 passed）。已提交 `a772f62`（dev）。
+
+### 跟进修复：相机白平衡偏色被原样搬进 pptx（用户报）
+
+用户反馈：拍照白平衡偏蓝，本该白的背景被采成淡蓝、渲染填成蓝背景——**过度忠实复刻拍摄缺陷**。
+修复：`region_color.estimate_white_balance` 整页估每通道增益（白点=95 百分位背景白，`gain=255/白点`，
+限幅 + 暗色主题守卫），`_attach_region_colors` 估一次传 `sample_region_color`，增益只施于输出色
+（守卫仍用未校正色）；渲染「视为白底」判别由「≥240」改 `_is_effectively_white`（最暗≥200 且通道极差≤30，
+吸残留偏色又不误伤真彩浅色）。真机重渲染：白底还原白、仅真彩 banner 填色。详见 known-issues。
+新增 6 测试（WB 2 + effectively_white 4），门禁全绿（**1533 passed, 45 skipped**）。**未提交**（待用户确认）。
+
 ## 2026-06-18 - Epic A A2（#76 前端 PDF 输入）落地 → Epic A 收口
 
 按设计 `docs/zh/pdf-mode.md` 实现 A2 前端，分支 `feature/s-a1-pdf-render`，提交 `019f97d`：
@@ -2251,3 +2282,327 @@ PR #69 合入 dev 后，应用户「先做 #66」收尾最后一个评审0615 �
 8. `test_auth` 加模块级 autouse fixture 还原 `_API_TOKEN`/`_INSECURE_MODE` 防顺序 flaky。
 
 **门禁**：`bash scripts/check_quality.sh` EXIT=0（mypy 76 文件 / ruff / typos / 前端 / pytest 1371 passed 45 skipped）。待开 `feature/s-cleanup-66 → dev` PR。至此评审0615（#61–#66）代码层全部落 dev，仅余 dev→main release 收口关闭 issue。
+
+## 2026-06-18 服务器源选择器对 PDF 放行（小修复）
+
+**问题**：选择服务器路径时只能选目录、不能选单个文件——根因是服务器浏览（`/filesystem/dirs`）与暂存（`/sources/server`）沿用 `routes.py` 的 `_IMAGE_EXTS`（仅 6 种图片，不含 `.pdf`），导致浏览目录时 PDF 文件被 `_build_dir_entry` 过滤掉、直传 PDF 路径被 `_resolve_stage_path` 400 拒。本地上传走 `fileKind.ts`/`upload.py` 的 PDF 口径，故"本地能选单 PDF、服务器不能"。
+
+**改动**（设计见 `docs/zh/pdf-mode.md` §11）：
+- `routes.py` 新增 `_BROWSE_FILE_EXTS = _IMAGE_EXTS | {".pdf"}`（与上传 `_ALLOWED_EXTENSIONS` 同口径，源图预览/裁剪仍用窄口径 `_IMAGE_EXTS`）；`_build_dir_entry` 列出 + `_resolve_stage_path` 校验改用之。
+- `_stage_files` 加"全图片 xor 全 PDF"互斥（复用 `MODE_CONFLICT`），与闸一（上传）/闸二（建任务）对称，混合早拒。
+- 前端 `SourcePicker.tsx`：文件项图标按类型 📄/🖼；PDF 不走 `<img>` 缩略图，用 📄 占位（+`App.css .server-picker-preview-pdf`）。
+- i18n `sourcePicker.emptyDir` 三语补"PDF"。
+
+**下游零改动**（已核验）：单 PDF symlink → 临时目录 → 闸二 `_has_mixed_input` 对仅 PDF 放行 → `_expand_pdfs` 用 `iterdir()`+`is_file()`（跟随 symlink、文件名后缀即 `.pdf`）正确识别 → 复用既有 `render_pdf_to_dir`。
+
+**门禁**：后端 `pytest tests/api/test_routes.py -k "Browse or Stage"` 11 passed（含新增 browse 列 PDF / stage 受单 PDF / stage 拒混合 3 例）；前端项目 eslint 干净（hook 内 npx ESLint 10.5.0 与 eslint-plugin-react 版本不兼容报 `getFilename`，非本次代码）、`tsc -b` 通过、vitest 组件 35 passed。
+
+**遗留**：UI 视觉验证（📄 图标 + PDF 占位预览）需后端+前端栈起来 + 目录内有 PDF 才能截图实景，未跑；逻辑由 typecheck/单测覆盖。
+
+## 2026-06-18 文档/PPT 预览数学公式渲染（KaTeX）
+
+**需求**：OCR/LLM 产出的 `$...$` / `$$...$$` 公式在预览界面被当普通文本原样显示，需渲染成数学；文档模式与 PPT 模式都要支持。
+
+**实现**（两模式共用 `DocCodePreview` 一处渲染入口）：
+- 新增依赖 `katex@0.16.47`（与 rehype-katex 内置版对齐，避免 CSS/JS 类名错位）+ `remark-math@6` + `rehype-katex@7`。
+- `markdownSanitize.ts` 集中导出共享插件链 `PREVIEW_REMARK_PLUGINS=[remarkGfm,remarkMath]` / `PREVIEW_REHYPE_PLUGINS=[rehypeRaw,[rehypeSanitize,schema],rehypeKatex]`，组件与测试共用避免漂移。**顺序关键**：KaTeX 放 sanitize 之后，使其 MathML/带样式 span 不被剥掉；不可信 HTML 已先过 sanitize，KaTeX `trust:false`（默认）输出无 XSS。schema 多放行 `div.className`（让 remark-math 的 `math-display` 占位类存活供 katex 识别）。KaTeX `throwOnError:false`：坏公式渲红字不崩页。
+- `DocCodePreview.tsx` 改用共享插件链 + `import "katex/dist/katex.min.css"`。
+- `markdown.ts` 加 `normalizeDisplayMath`：把"整行就是一条 `$$...$$`"（OCR 常压成一行）拆成独占行的 display 形式，否则 micromark 退化成行内；`escapeNonHtmlTags` 改为跳过公式区，避免 LaTeX 里的 `<`/`>` 被误转义。接入 `preprocessMarkdown`。
+
+**验证**：前端全量 vitest 145 passed（含新增 KaTeX display/inline/容错/sanitize 共存、normalizeDisplayMath、escape 跳过公式区用例）；tsc -b ✓；`npm run build` ✓（KaTeX 字体/CSS 正确打包）；Playwright 实渲用户原始公式截图——能渲染、display 居中、无 katex-error。
+
+**遗留/边界**：
+- 用户示例公式渲染成功但矩阵塌成单行——根因是 **OCR/LLM 抽取质量**（`\ ` 反斜杠空格当成空格未换行应为 `\\`、`\mathbf{1}{m×m}` 缺下标 `_`、`\operatorname{L o w e r T r i}` 字母被拆带空格），非渲染问题。需在 LLM 精修 prompt / OCR 侧治本，不做脆弱的字符串硬替换。
+- Tiptap 编辑器（编辑模式）暂不渲染公式（marked→HTML 不识别数学），公式以纯文本编辑；如需所见即所得需加自定义 math 节点，单独排期。
+- 单 `$` 行内公式：remark-math 默认把 `$...$` 当行内数学，文档里字面 `$`（价格）可能误判，技术文档场景可接受。
+
+## 2026-06-18 OCR LaTeX 抽取治本（精修 prompt）+ 编辑器公式渲染设计
+
+承接上一条（预览侧 KaTeX 渲染）：渲染管线 OK，但用户公式矩阵塌成单行是 **OCR/LLM 抽取
+质量**问题，治本在精修 prompt。
+
+**#2 已实现**（`backend/docrestore/llm/prompts.py`，3 套独立 prompt 中改 2 套）：
+- 文档分段 `REFINE_SYSTEM_PROMPT`：原本**完全没提公式**，新增"## 数学公式 LaTeX 规范化"小节
+  （规则 18–21）：保数学含义不变（禁求值/化简/臆造），只修 OCR 语法错误——矩阵/方程组环境内
+  `\ `（反斜杠+空格）/裸空格行分隔还原 `\\`、合并 `\operatorname{}`/`\mathrm{}` 内被拆标识符
+  （`L o w e r T r i`→`LowerTri`）、补漏标的下标/上标、配平括号。
+- PPT 按页 `SLIDE_REFINE_SYSTEM_PROMPT`：规则 3 由"公式原样保留、不得改写"改写为"保留含义
+  +修 OCR 语法错误"，化解"原样保留 vs 修语法"的张力。
+- 整篇 `FINAL_REFINE_SYSTEM_PROMPT`：**不动**（纯跨段去重职责；公式已在分段级修好，加进去会
+  破坏其单一职责）。
+- 不做脆弱字符串硬替换（`\ ` 是合法 LaTeX 控制空格，盲替误伤）；靠 LLM 理解语义来修。
+- 改 prompt 自动使 LLM 磁盘缓存 fingerprint 变化（旧结果失效、重精修），符合预期。
+- 测试 `tests/llm/test_prompts.py` 加 `test_both_prompts_have_latex_normalization_rule`；
+  既有断言（跨页/不做跨页去重/复制代码）不受影响。`pytest tests/llm/` 149 passed 1 skipped。
+
+**#1 已出设计**（`docs/zh/frontend/editor-math-design.md`）：文档模式 Tiptap 编辑器公式渲染。
+现状：编辑器走 `markdownRoundtrip.ts`（marked/turndown）另一条链路，公式不渲染且 round-trip
+可能被 `_`/`\` 转义破坏。设计分两期：①保真（round-trip 把公式当原子保护 + turndown 规则，
+**先做、最痛**）②渲染+交互（接 Tiptap 官方 `@tiptap/extension-mathematics` 或自定义 Math 节点，
+`data-latex` 为唯一真相，KaTeX NodeView + 双击编辑）。**待用户确认分期与方案 A/B 后实现**。
+
+## 2026-06-18 编辑器公式渲染 阶段1（round-trip 保真，方案 B）
+
+用户确认：分两期、方案 B（自定义 Math 节点 + KaTeX，与预览同栈）。先做阶段 1 保真。
+
+- 现状/动机：文档模式 Tiptap 编辑器走 `markdownRoundtrip.ts`（marked/turndown）另一条链路，
+  公式不渲染且 round-trip 会被 `_`/`\` 转义破坏（marked 当强调、turndown 转义）。
+- 实现：
+  · `mathNodes.ts`（新）：`MathInline`(inline atom)/`MathBlock`(block atom)，原始 LaTeX 存
+    `data-latex`（唯一真相），atom 节点以源码态 `$...$` 显示——本期不渲染但不被改坏。
+  · `markdownRoundtrip.ts`：`mathToPlaceholders` 在 marked 前把 `$$..$$`/`$..$` 抽成
+    `data-math-display`/`data-math-inline` 占位（先块后行内避免 `$$` 被拆；占位非空避开
+    turndown blank 丢弃；latex 进 data-latex 属性，marked/turndown 都不解析）；turndown 加
+    `mathInline`/`mathBlock` 规则只读 data-latex 还原 `$..$`/`$$..$$`。
+  · `MarkdownWysiwygEditor.tsx` 注册两节点；`App.css` 加源码态样式。
+- 验证：`tests/features/task/mathRoundtrip.test.ts` 10 用例（string 两端 + **经 Tiptap 全链路**
+  幂等，覆盖矩阵 `\\`、下标 `_`、`\alpha` 命令）全过；前端全量 vitest 155 passed；tsc -b ✓；
+  项目 eslint ✓；`npm run build` ✓。
+- 阶段 2（待实现）：MathInline/MathBlock 加 KaTeX NodeView + 双击编辑 + 输入规则。设计见
+  `docs/zh/frontend/editor-math-design.md` §9。
+
+## 2026-06-18 编辑器公式渲染 阶段2（KaTeX NodeView + 双击编辑）
+
+承接阶段 1（保真）。给 `MathInline`/`MathBlock` 加 KaTeX NodeView，实现编辑器内所见即所得 +
+双击编辑。
+
+- `mathNodes.ts`：`createMathNodeView(displayMode)` —— `katex.render` 渲染 latex（throwOnError
+  false / strict false，坏公式渲红字不崩）；双击进编辑（block=textarea / inline=input，回车提交、
+  Esc 取消、block Shift+回车换行），`setNodeMarkup` 写回 data-latex。NodeView **只影响编辑态显示，
+  不参与序列化**（getHTML 走 renderHTML 仍输出 data-latex）→ 阶段 1 round-trip 保真零回归。
+  事件用 addEventListener（联合元素类型经 HTMLElement 引用调用规避类型重载丢失）。
+- `MarkdownWysiwygEditor.tsx` 引入 `katex/dist/katex.min.css`（CSS 不进 mathNodes 以免污染单测
+  导入图）；`App.css` 公式样式改为渲染态 + hover/selected/编辑框。
+- 验证：`mathNodeView.test.ts` 6 用例（渲染 .katex/.katex-display、双击弹源码框、回车提交更新
+  属性+重渲染+序列化同步、坏公式不抛错）；前端全量 vitest 161 passed；tsc -b ✓；项目 eslint ✓；
+  build ✓；**Playwright 实测真实 Tiptap 编辑器**：块矩阵+行内公式 KaTeX 渲染、双击块公式弹出
+  完整 LaTeX 源码框，两张截图通过。
+- 至此编辑器公式两期均落地。未做（可选）：输入规则 / 工具栏「插入公式」（主场景是编辑 OCR
+  已产出公式）。设计见 `docs/zh/frontend/editor-math-design.md` §9。
+
+## 2026-06-22 编辑器「插入公式」按钮 + MathLive 可视化编辑设计（ultracode 研究工作流）
+
+承接编辑器公式两期。用户要"插入公式按钮 + 不懂 LaTeX 也能所见即所得编辑"。
+
+**插入按钮（已实现）**：`mathNodes.ts` 导出 `insertMathNode(editor, displayMode)`——插入空 math 节点
+后扫描选中它 → `selectNode` 检测空 latex 自动进入编辑（免再双击）；块级插入会拆段，故用"扫描最后
+一个同类空节点"选中而非选区反推位置。工具栏（`MarkdownWysiwygEditor.tsx`）加行内 `$x$` / 块级
+`$x$▦` 两按钮；三语 i18n `editor.insertMathInline`/`insertMathBlock`。
+- 验证：`mathNodeView.test.ts` 加 2 用例（插入块级→空节点+自动编辑框+提交序列化 / 插入行内）；
+  前端全量 vitest 163 passed；tsc/eslint/build ✓；**Playwright 实测真实编辑器**：光标处插入、已有
+  公式不被破坏、自动弹编辑框，截图通过（注意：默认选区落在已有公式上会替换之，真实"光标在正文"
+  流程正常）。
+
+**MathLive 可视化编辑设计（待确认）**：跑了 ultracode 研究工作流（8 agents：MathLive 简报 + 替代方案
+对比 + 4 路对抗式真包/真浏览器验证）。结论落 `editor-math-design.md` 第三期（§10-16）：
+- 选 **MathLive**（v0.110/MIT，五项交集唯一全中），作「第二编辑形态」非替换（整体替换=过度工程：
+  地基级焦点摩擦 + 225KB + 碰过即规范化；完全不做=欠工程）。保留 textarea 作源码精确回退。
+- 四大硬约束（吸收对抗验证）：① round-trip 判据用 `input`-dirty 标志而非 getValue 字符串比较（碰过
+  即整段规范化 all-or-nothing）；② jsdom 测 MathLive 会让 CI 退出码=1，单测 mock 桩、真测走 Playwright；
+  ③ ProseMirror 焦点不可共享 + `setContent` 中途销毁丢内容 + StrictMode 单例泄漏；④ 资源最低风险，
+  字体白嫖 katex CSS、`soundsDirectory=null`、零打包增量。
+- 分期 3a 依赖/资源 → 3b NodeView 接 math-field + dirty 闸口（先做 round-trip 真浏览器 spike）→ 3c
+  源码回退+i18n。**待用户确认 §16 四问后开工**。
+
+## 2026-06-22 编辑器可视化公式编辑 MathLive 集成（第三期 3a/3b/3c 全实现）
+
+用户拍板：MathLive 作第二编辑形态（保留 textarea 源码回退）+ 行内块级一起上 + 接受规范化取舍。
+按设计 `editor-math-design.md` §10-17 分三期实现，逐期真浏览器出证据。
+
+- **3a**：装 `mathlive@0.110.0`，动态 `import()` 拆独立 chunk（gzip 219KB 不进首屏）；
+  `soundsDirectory=null`、字体白嫖 katex CSS（零增量）。真 Chromium spike：未编辑 5/5 逐字保真。
+- **3b**（`mathNodes.ts`）：`createMathNodeView` 重构——`enterEdit` 默认 `mountVisual` 挂 `<math-field>`
+  （行内 inline-math/块级 math，桌面 focusin 弹虚拟键盘），加载失败 `mountSource` 回退 textarea；
+  **dirty 闸口**：`input` 置 dirty，`finishEdit` 仅 dirty 才 `getValue`、否则按 `sessionLatex` 0 腐蚀还原；
+  `stopEvent=editing&&dom.contains`；`destroy` 清监听。**R2 守卫** `isMathEditing()` 计数 +
+  `MarkdownWysiwygEditor` 编辑中跳过 `setContent`（防销毁 math-field 丢内容）。
+- **3c**：math-field/textarea 右上角「切换源码↔可视化」toggle（i18n title 经扩展 options 注入）；
+  三语 `editor.mathEditSource`/`mathEditVisual`；App.css 容器/键盘/toggle 样式。
+- **测试**：`mathNodeView.test.ts` mock mathlive 让编辑回退源码，验 dirty 闸口隔离（改 value 不触发
+  input → 不写回）+ 插入/编辑/Esc；可视/规范化走 Playwright。前端 vitest 165 passed；tsc/eslint/build 绿。
+- **Playwright 实测真实编辑器**：双击矩阵→math-field+虚拟键盘弹出、`</>`切源码显逐字 latex、`∑`切回、
+  blur 提交 0 腐蚀渲回 KaTeX、i18n 标题正确，截图通过。
+- **未做（可选）**：输入规则 typed `$$`/`$x$` 自动成节点；切 tab 中途编辑公式 setContent 暂跳过（罕见）。
+
+## 2026-06-22 启动脚本就绪探测改打免鉴权 /healthz（消 401 洪流）
+
+`./scripts/start.sh all` 启动时刷出大量 `GET /api/v1/ocr/status 401 Unauthorized`，
+并误报「后端 30s 内未响应」。
+
+- **根因**：默认开启 device token 鉴权（fail-closed），而 `wait_for_backend()` 的就绪探测
+  用 `curl -sf` 打**需要鉴权**的 `/api/v1/ocr/status`、不带 token → 后端回 401 →
+  `curl -f` 视作失败 → 整 30s 窗口一直重试（每次刷一条 401），耗尽后误判「未响应」
+  （后端其实早已就绪，前端加载带 token 后即 200）。
+- **修复**：就绪探测本该打**免鉴权存活端点**（liveness 职责是证明 uvicorn 绑定 + lifespan
+  完成，非鉴权）。新增 `health_router`（`routes.py`，镜像 `ws_router` 不挂 auth），`app.py`
+  以 `include_router(health_router, prefix="/api/v1")` 装配（无 `_auth_deps`）；`GET /api/v1/healthz`
+  仅回 `{"status":"ok"}`（不泄露版本/内部状态）。`start.sh` 探测 URL 改为 `/healthz`，
+  `curl -sf` 命中 200 即就绪 → 401 归零 + 一次命中不再误判超时。
+- **验证**：`tests/api/test_auth.py::TestHealthz`（配 token 时 /healthz 仍免鉴权 200）；
+  整 `tests/api/` 228 passed/9 skipped；对真实 `create_app()`（配 token）运行时断言
+  `/healthz` 依赖 `[]`、`/ocr/status` 依赖数 1。
+
+## 2026-06-22 关 LLM 精修时按模式隐藏/改名进度区第二轨
+
+需求：用户没开 LLM 精修时，进度区不该再展示「LLM 精修」进度。
+
+- **现状根因**：前端 `progressPhase.phaseOfStage` 把**所有非 ocr/init 的 stage**
+  （clean/merge/refine/gap_fill/final_refine/render/ppt_*/code_*）全归入 "llm" 桶，
+  那条名为「LLM 精修」的轨**实为整条后处理轨**。关精修时它在文档模式只剩一闪而过的
+  render（噪声），在 PPT/代码模式仍承载逐页渲染/归类等真实进度。
+- **决策（与用户确认，方案 B）**：精修开→不变（全模式「LLM 精修」）；精修关 + 文档模式→
+  **隐藏**第二轨；精修关 + PPT/代码模式→**保留**但改名「后处理」（`taskProgress.phasePostprocess`，三语）。
+- **信号链**：新建任务流从表单 `refineEnabled` + 模式经 `useTaskRunner`（新增 `refineEnabled`/`mode`
+  状态，startTask 捕获、reset 复位）透传给 `TaskProgress`；任务详情/resume 从后端取——
+  `TaskResponse` 新增 `enable_refine`/`mode`（`_build_task_response` 派生：`task.llm.enable_refine`
+  回退 pipeline 默认；`_resolve_task_mode` 按 code→ppt→doc），前端 schema 加同字段（`.default()`
+  兼容旧后端，**不用 `.catch()`**——unicorn/prefer-top-level-await 会把 zod `.catch` 误判成 Promise 链）。
+- **TaskProgress** 计算 `showLlm = refineEnabled || mode !== "doc"` + 动态 `llmLabel`，
+  `PhaseRows` 据此条件渲染第二轨（OCR 轨永远在）。
+- **验证**：前端新增 `tests/components/TaskProgress.test.tsx`（jsdom 真渲染断言 5 组合的轨可见性+标签）；
+  后端 `tests/api/test_task_response_mode.py`（_resolve_task_mode 四态 + TaskResponse 默认值）。
+  前端 170 vitest + 全量 lint/tsc + 生产构建绿；后端 tests/api 233 passed。无 CSS 改动。
+- **已知范围外**：用户开精修但未配 model（后端"将跳过 LLM 精修"）时该轨仍显示「LLM 精修」——
+  当前只按用户的精修开关判定，不接 model 可用性；属另一议题。
+
+## 2026-06-23 Epic D Phase-1：输出导出 docx/PDF（下载时按需）
+
+按设计 `docs/zh/export-mode.md` 实现 Epic D（#73）Phase-1，dev 分支三次提交
+`3ebda39`(D1) / `66e4555`(D2) / `f85f9d2`(D3)。
+
+- **关键架构决策（与用户确认，偏离 #78 原文）**：导出是**已落盘 `document.md` 的纯函数**，
+  故走**下载时按需**而非「建任务时勾选」——避免把 `export_formats` 穿过 8 跳 pipeline+DB+表单
+  的过度工程，改动收敛在 `output/exporters/` + 下载路由一处（呼应 Epic #73「收敛一处」目标）。
+- **D1 骨架（#78）**：新增 `output/exporters/`（`Exporter` 协议 + 注册表 + 缓存 + 子进程纪律）；
+  下载路由 `GET /tasks/{id}/download?formats=docx,pdf`（fail-closed 白名单 + `asyncio.to_thread`
+  + `.exports/` 内容哈希缓存 + 产物以 `document.{ext}` 入 zip，空 formats 行为不变）；
+  错误码 `EXPORT_FORMAT_UNSUPPORTED/TOOL_UNAVAILABLE/FAILED` 三语；前端 `DownloadControls`
+  下载区格式勾选（TaskResult/TaskDetail 复用，`getDownloadUrl(formats)` 拼参）。
+- **D2 docx（#79）**：`pandoc gfm+tex_math_dollars → docx`（HTML 表格 / 公式 OMML / 图片嵌入）；
+  复用 `base.run_export_command` 子进程纪律（独占进程组/rlimit/超时/killpg/fail-closed）。
+- **D3 PDF（#80）**：**spike 否决 weasyprint MathML**（上标/分数/根号塌陷 + annotation 重影），
+  改 `pandoc --mathjax`（保留 TeX）→ **KaTeX(Node) 预渲染**（`output:'html'` 免重影）→
+  `weasyprint`（挂 `katex.min.css`）。目视：上标/分数/根号/积分/`pmatrix` 全正确，与前端 #77 一致。
+  仅含公式文档才需 Node/katex（`has_math` 探测），缺则 fail-closed 503。
+- **新增依赖（部署见 deployment.md §1.3，均可选 fail-closed）**：pandoc（docx/pdf）、
+  weasyprint+cairo/pango（pdf）、Node+katex（含公式 pdf）。本机已装：pandoc 2.12（env bin 软链）、
+  weasyprint 69.0、pypdf 6.14、Node 22 + 复用 `frontend/node_modules/katex@0.16.47`。
+- **证据**：`bash scripts/check_quality.sh` 全绿（mypy/ruff/typos/前端 tc+lint/pytest
+  **1431 passed, 45 skipped**）；导出新增测试后端 12（D1 plumbing 用假导出器解耦 + D2 docx + D3 pdf
+  round-trip）+ 前端 4（DownloadControls）；D1/D3 前端/PDF 视觉均截图确认。
+- **遗留 / 范围外**：Phase-2 **D4 xlsx（#81）/ D5 pptx（#82）未做**——需先在 pipeline 旁路落
+  表格行列 / 逐页版式**结构化 IR**（当前 `<table>` 不透明、PPT 逐页 bbox 在 `pipeline.py:1389`
+  压扁），是独立大工程，设计 §9 已记旁路点；与 #74 E1 富 IR 相关。生产若不部署
+  `frontend/node_modules`，需另让后端可达 katex 包。
+
+### 2026-06-23 · Epic D Phase-2a：D4 xlsx + D5 pptx（下载时纯函数）
+
+承 Phase-1，按更新后的 `export-mode.md` §9 实现 D4/D5（dev 工作区，**待提交**）。
+Phase-2 勘察（5 路并行只读）+ **4 轮 pandoc spike** 推翻了「需先落 pipeline 结构化 IR」的初判：
+
+- **D4 xlsx（#81）**：`document.md` 表格本就是 HTML `<table>`（携带 `colspan/rowspan`）——它**就是**
+  结构化 IR。`xlsx.py` 用 `html.parser` 解析 → openpyxl 每表一 sheet（occupancy 算法处理合并区、
+  数字单元格转数值），无表退化为单 `Document` sheet。**无需改 pipeline**。
+- **D5 pptx（#82）**：spike 实证 `pandoc -t pptx` **无法让图文同处一张 slide**（块级图片必单独成页、
+  内联图片被丢），不满足「每页一 slide、图文在一起」→ **改用 python-pptx 自拼页**（与用户确认）：
+  按 `---` 切页（doc 模式回退按 `#`）、每页一 slide=标题框+正文框+图片（`<img>`/`![]()` 都解析、
+  PIL 缩放线性排版），公式留 TeX 文本（lite 不渲染）。
+- **延后（Phase-2b，并入 #74 富 IR）**：PPT 按 region bbox 精确定位（需逐页版式 IR，且 per-region
+  文本不干净存在，收益不确定）。
+- **新增依赖**：openpyxl / python-pptx（均纯 Python 无系统库，懒导入 fail-closed 503）；入 `pyproject`
+  主依赖 + mypy override + deployment.md §1.3 矩阵。
+- **证据**：`bash scripts/check_quality.sh` 全绿（**1455 passed, 45 skipped**，Phase-1 基线 1431 → +24）；
+  新增后端测试 23（xlsx 12 + pptx 11，含真 round-trip：合并区 `B1:C1`/`A2:A3`、数值为 int、
+  slide 数=页数、`<img>`+`![]()` 双图嵌入、公式 TeX 文本在）+ 前端 1（Excel+PPT 拼参）+ zip 白名单 1；
+  两导出器模块自测留输入输出证据（xlsx 合并/数值、pptx 2 slide 图文同页）。
+- **范围**：与用户两次拍板——本轮 Phase-2a 两个都做下载时纯函数（非 pandoc、非 bbox）；注册表加两行、
+  下载路由零改、四格式选择器（docx/pdf/xlsx/pptx）。
+
+### 2026-06-23 · Epic D 修复：pptx 漏 HTML 标记 + docx 丢表格/图片（用户报告）
+
+**现象**：同一份 `document.md`，导出 **PDF 正常**，但 ①pptx 把 `<table ...>`/`<div ...>`
+原始 HTML 标记当字面文本铺在 slide 上、表格没渲染；②docx 丢失全部表格与图片只剩文本。
+
+**根因（同类，"原始 HTML 不被目标 writer 认"）**：
+- docx：单遍 `pandoc -f gfm -t docx` 把 HTML `<table>`/`<img>` 当 `RawBlock html` 保留，
+  **docx writer 直接丢弃原始 HTML** → 表 + HTML 图消失（仅 `![]()` 图侥幸留）。PDF 正常因目标即 HTML。
+  旧测试用 GFM 管道表（pandoc 原生认），测不出该回归。
+- pptx：自拼页时整行文本直塞文本框，HTML 标记一并塞。
+
+**修复**：
+- docx 改**两遍 HTML 中转**：`pandoc gfm+tex_math_dollars -t html5 --mathml`（原始 `<table>/<img>`
+  内联、`$..$`→MathML）→ `pandoc -f html -t docx`（HTML reader 转原生表/图、MathML→OMML）。
+  **`--mathml` 而非 `--mathjax`** 是关键（`--mathjax` 产 `\(..\)`，HTML reader 不解析回数学→OMML 丢）。
+- pptx 改**按块解析**：一页拆有序块（正文/表格/图片），`<table>` 复用新公共件 `html_table.py`
+  渲染成**原生 pptx 表格**（含合并区），散文剥 HTML 标签只留文本，竖向堆叠。
+- 抽公共件 `output/exporters/html_table.py`（HTML 表解析：网格 + 合并区 + 尺寸），xlsx/pptx 共用。
+
+**证据**：`bash scripts/check_quality.sh` 全绿（**1461 passed, 45 skipped**，+6：html_table 5 + pptx 净 +1）；
+用户原文复现：docx tables=1/images=2/OMML=True、pptx slide1 原生表格+图无 HTML 漏出。
+测试据实改用 **HTML `<table>` + HTML `<img>`** 锁回归。详见 known-issues.md + export-mode.md §6/§9.2。
+
+## 2026-06-24 - Epic D Phase-2b（PPT 版面定位导出）子任务 1+2
+
+设计真相源 `docs/zh/ppt-layout-export.md`（spike 已验证）。分 4 个有序子任务逐个有证据闭环。
+
+**子任务 1：捕获 `LayoutRegion`**（commit `677e3e2`）
+- `models.py` 新增 `LayoutRegion`（bbox+label+content+image_ref）+ `PageOCR.layout_regions`（引擎可选）。
+- `paddle_ocr.py` `_build_layout_regions` 从手头 `coordinates_raw`+`raw_text` 构造：文字类保留
+  block 文字；image/chart 按**阅读序**认领 `raw_text` 第 k 个 `<img src>` 为 `image_ref`。与侧栏检测
+  解耦、非 VL 引擎自然为空，全链路 fail-safe。15 个纯函数单测 + `test_ocr_success` 扩 e2e。
+
+**子任务 2：`.ppt_layout.json` 落盘 + 坐标变换纯函数**（本次）
+- 新建 `output/ppt_layout.py`（纯模块）：数据模型 `PptLayout/Page/Region` + §5 坐标变换
+  （`compute_canvas_emu` 首页长宽比定画布、`region_box_emu` letterbox 居中 + clamp）+ 序列化
+  round-trip + fail-safe 反序列化 + 磁盘 I/O。图片区域 `resolve_output_image_ref` 镜像
+  `Renderer` 命名映射成 `images/{stem}_N.ext`。
+- `pipeline.py` `_write_ppt_layout_sidecar`：`_ppt_pipeline` 装配后落 sidecar。文字区域 content
+  过**同一 PII 出云闸口**（`redact_for_cloud`，与 `document.md` 同口径脱敏），非 VL/无区域 →
+  `build_ppt_layout` 返回 None 不落盘（导出端退竖排），落盘失败仅告警不阻断。
+- 21 个纯函数单测 + 3 个集成测试（落盘+映射 / 非 VL 不落盘 / 开 PII 脱敏一致）。
+
+**证据**：`bash scripts/check_quality.sh` 全绿（**1500 passed, 45 skipped**，mypy 88 文件）。
+
+**子任务 3：导出器 positioned 渲染分支 + fail-safe 退竖排**（2026-06-24）
+- `pptx.py` 加 `_build_presentation` 分发：`load_ppt_layout` 合法 → `_build_positioned`（画布按
+  sidecar 尺寸、逐页逐区域 `region_box_emu` 定位渲染——`image_ref`→图、`label==table`→原生表、
+  else→文本框，box 内居中/对齐）；任一异常 → `logger.warning` 退 `_build_block_flow`（现状竖排，
+  零回归）；某页无可用区域（bbox 全非法）→ 按 idx 退该页竖排。
+- 抽 `_populate_table` 公共件（块流/定位共用单元格填充+合并）。`export()` 改走分发器。
+- 3 个真导出测试（python-pptx 读回）：定位落点（标题框/原生表/图落在 `region_box_emu` 区间）、
+  损坏 sidecar 退块流（2 slide）、非法 bbox 逐页退竖排（标题按 idx 对齐）。
+- **证据**：门禁全绿（**1503 passed, 45 skipped**，mypy 88 文件）。
+
+**子任务 4：开精修时 sidecar 仍 raw（决策 C 简化）**（2026-06-24）
+- **用户决策 C**：positioned pptx 区域文字**始终用 raw**（0 额外 LLM 调用），原设计的「区域 idx
+  锚点精修 + 重挂」**否决**——它需对每页区域 payload 额外跑一次 LLM（与页级 body 精修是两份文本），
+  与「不新增调用」冲突，而短幻灯片文字 raw 通常够用。
+- **无新增渲染/精修代码**：精修只动 `bodies`（→ `document.md`），不碰捕获的 `layout_regions`
+  （→ sidecar），故 sidecar 天然 raw、无论精修开关。本子任务=锁定该保证 + 文档对齐。
+- 回归测试：`enable_refine=True` + stub 精修器加前缀 → 断言前缀只进 `document.md`、sidecar 区域
+  内容仍 raw。设计文档 §2/§3/§4.2/§4.3/§6/§7/§8/§9/§10 全面改写为决策 C（idx 锚点机制标注否决）。
+- **证据**：门禁全绿（**1504 passed, 45 skipped**，mypy 88 文件）。
+
+**Phase-2b 收口**：捕获 → 落盘 → 定位渲染 → 开精修隔离，四子任务闭环；关精修版面定位端到端打通。
+
+## 2026-06-24 - Epic D Phase-2b 真机 E2E 验证（活 VL OCR）+ 修一个跨组件命名 bug
+
+真机 E2E：活 PaddleOCR-VL-1.6（EngineManager 自启 vllm-server）跑 3 张代表 slide（503 表/图/chart、
+507 文字、508 多图）→ `_ppt_pipeline` 捕获 + 落 `.ppt_layout.json` → 导出 positioned pptx →
+soffice 渲染 + bbox 叠加图目视。
+
+**抓到并修复真 bug**：sidecar 图片 `image_ref` 丢 `_after` 前缀（矫正模式 OCR 跑在 `{stem}_after.jpg`、
+裁图落 `images/{stem}_after_N.jpg`，但 `_write_ppt_layout_sidecar` 误用被 producer 改回原图的
+`image_path.stem`）→ 导出器解析不到图。修：改用 `page.output_dir.name` 去 `_OCR` 的同源命名 stem。
+附带把 `_stream_pipeline` 吞生产者异常的 `suppress` 改成 `_cancel_producer_log_real` 记录真异常
+（否则被「OCR producer 未产出任何页」掩盖，难定位）。详见 known-issues.md。
+
+**目视结论（全部正确）**：
+- sidecar bbox 叠加到矫正图：标题/正文/表格/图片/chart 各区域 bbox 精准框住对应内容、`image_size`
+  与矫正图尺寸一致。
+- positioned pptx 渲染：503 还原「标题居顶 + 左反应式图 + 右说明文字 + 右下柱状图 + 左下原生表格」、
+  508 还原「标题 + 中部大架构图 + 下方多行文字」——**2D 版面忠实还原原 slide**，远胜竖向堆叠。
+- 4 个图片引用全部对上真裁图文件。
+
+**证据**：门禁全绿（**1505 passed, 45 skipped**，mypy 88 文件）+ E2E 渲染图/叠加图（/tmp/e2e_vis/）。
+Phase-2b 关精修版面定位**真机验证通过**。
