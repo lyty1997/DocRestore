@@ -1482,6 +1482,59 @@ class Pipeline:
                 exc_info=True,
             )
 
+    async def _write_doc_layout_sidecar(
+        self,
+        pages_ref: list[PageOCR],
+        output_dir: Path,
+        pii_cfg: PIIConfig,
+        entity_lexicon: EntityLexicon | None,
+    ) -> None:
+        """落通用版面 sidecar ``.layout.json``（Epic E 光标↔原图高亮真相源）。
+
+        每页把捕获的 ``layout_regions`` 转成 sidecar 块（``bbox + label + text``）：
+        文字过同一 PII 出云闸口（``redact_for_cloud``，与 ``document.md`` 同口径——
+        PII 开时脱敏后再落，保证前端拿光标块文字与 sidecar 文字归一化一致可匹配）。
+        非 VL / 无版面区域 → ``build_doc_layout`` 返回 None 不落盘，前端无数据不高亮。
+        落盘失败仅告警，不阻断主流程（高亮是增强）。
+        """
+        from docrestore.output.layout_sidecar import (
+            build_doc_layout,
+            layout_block_from_region,
+            write_doc_layout,
+        )
+
+        guard = PIIGuard(pii_cfg) if pii_cfg.enable else None
+
+        def _redact(text: str) -> str:
+            """文字脱敏：PII 开时走出云闸口（结构化 + 实体），否则原文。"""
+            if guard is None:
+                return text
+            return guard.redact_for_cloud(text, entity_lexicon)
+
+        layout_pages = [
+            (
+                page.image_path.name,
+                page.image_size,
+                [
+                    layout_block_from_region(
+                        region, text=_redact(region.content),
+                    )
+                    for region in page.layout_regions
+                ],
+            )
+            for page in pages_ref
+        ]
+        layout = build_doc_layout(layout_pages)
+        if layout is None:
+            return
+        try:
+            await asyncio.to_thread(write_doc_layout, output_dir, layout)
+        except OSError:
+            logger.warning(
+                "版面高亮 sidecar 落盘失败（不阻断主流程，前端不高亮）",
+                exc_info=True,
+            )
+
     async def _code_pipeline(  # noqa: C901
         self,
         page_queue: asyncio.Queue[PageOCR | None],
@@ -2457,6 +2510,13 @@ class Pipeline:
         # final_md 来自 renderer 返回值（带 <!-- page: xxx --> marker 的
         # 预览版），供前端左右同步滚动锚点定位。磁盘上的 document.md 是
         # 剥除 marker 的下载版，两者互不干扰。
+
+        # Epic E：落通用版面 sidecar .layout.json（光标↔原图 bbox 高亮真相源）。
+        # 用捕获期 layout_regions（OCR 期、按页原图，早于 dedup/精修），与
+        # document.md 同口径脱敏；非 VL/无区域不落盘，fail-safe 不阻断主流程。
+        await self._write_doc_layout_sidecar(
+            pages_ref, output_dir, pii_cfg, entity_lexicon,
+        )
 
         warnings = self._collect_warnings(
             refined_results, final_gaps, truncated,
