@@ -1170,9 +1170,7 @@ class Pipeline:
             # 消费者异常/取消 → 立即取消仍在跑的 OCR 生产者，避免它把剩余图全部
             # OCR 完才结束（持 gpu_lock 阻塞 shutdown / 遗弃任务 + GPU 空转）；
             # 吞掉其 CancelledError 等清理异常，保留消费者原异常向上抛。
-            ocr_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await ocr_task
+            await self._cancel_producer_log_real(ocr_task)
             raise
         finally:
             unsub_breaker()
@@ -1192,6 +1190,28 @@ class Pipeline:
                 exc_info=True,
             )
         return result
+
+    @staticmethod
+    async def _cancel_producer_log_real(
+        ocr_task: asyncio.Task[None],
+    ) -> None:
+        """取消并 await OCR 生产者，记录其真实异常（避免被消费者异常掩盖）。
+
+        消费者异常（如「OCR producer 未产出任何页」）往往是生产者首图异常的
+        二次结果；旧实现 ``suppress(Exception)`` 把根因吞掉，难以排障。此处取消
+        后 await，对 ``CancelledError`` 静默、对真实异常 ``warning`` 记录后由调用
+        方重新抛出消费者原异常（不改变抛出语义）。
+        """
+        ocr_task.cancel()
+        try:
+            await ocr_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.warning(
+                "OCR 生产者异常（被消费者异常掩盖，仅记录不改变抛出）",
+                exc_info=True,
+            )
 
     @staticmethod
     async def _subscribe_breaker(
@@ -1425,6 +1445,17 @@ class Pipeline:
                 return text
             return guard.redact_for_cloud(text, entity_lexicon)
 
+        def _render_stem(page: PageOCR) -> str:
+            """渲染期裁图命名用的 stem：与 ``Renderer`` 一致，取 ``page.output_dir``
+            （``{stem}_OCR`` / 矫正后 ``{stem}_after_OCR`` / ``{stem}_cropped_OCR``）
+            去掉 ``_OCR``。**不能用 ``page.image_path.stem``**：PPT 矫正后 OCR 跑在
+            ``{stem}_after.jpg`` 上、裁图落 ``images/{stem}_after_N.jpg``，而
+            producer 已把 ``image_path`` 改回原图（stem 无 ``_after``）。"""
+            ocr_dir = page.output_dir
+            if ocr_dir is not None and ocr_dir.name.endswith("_OCR"):
+                return ocr_dir.name[: -len("_OCR")]
+            return page.image_path.stem
+
         layout_pages = [
             (
                 page.image_path.name,
@@ -1432,7 +1463,7 @@ class Pipeline:
                 [
                     layout_region_from_ocr(
                         region,
-                        stem=page.image_path.stem,
+                        stem=_render_stem(page),
                         content=_redact(region.content),
                     )
                     for region in page.layout_regions

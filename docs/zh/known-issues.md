@@ -793,3 +793,27 @@ append_images=[...])` 存多页 PDF，报 `KeyError: 'JPEG'`（`PdfImagePlugin._
 - 测试据实改用 **HTML `<table>` + HTML `<img>`**（真实 `document.md` 格式）锁回归：docx 断言
   `document.tables` 有派生单元格 + `inline_shapes >= 2`；pptx 断言原生表格有派生单元格 + 文本框无 `<table`/`<div` 漏出。
 - 详见 [export-mode.md](export-mode.md) §6（docx 两遍）/§9.2（pptx 按块）。
+
+## PPT 版面定位 sidecar 图片引用丢失 `_after` 前缀（E2E 实测发现，已修复 2026-06-24）
+
+**现象**：真机 E2E（活 VL OCR 跑 3 张 PPT slide）后，`.ppt_layout.json` 的图片区域
+`image_ref` 形如 `images/{stem}_4.jpg`，但盘上真实裁图是 `images/{stem}_after_4.jpg`，
+导出器 `_resolve_image` 解析不到 → positioned pptx 图片区域空缺。
+
+**根因**：PPT 模式 `rectify=True` 时 OCR 跑在矫正后图 `{stem}_after.jpg` 上，`PageOCR.output_dir`
+= `{stem}_after_OCR`，`Renderer` 按它命名裁图为 `images/{stem}_after_N.jpg`；但 producer
+（`pipeline.py:1964`）把 `page.image_path` **改回了原图**（stem 无 `_after`），而
+`_write_ppt_layout_sidecar` 误用 `page.image_path.stem` 算最终引用 → 少了 `_after`。
+`document.md` 的图引用正常，因 `Renderer` 自己用 `page.output_dir.name` 算。
+
+**修复**：sidecar 改用与 `Renderer`/`rewrite_image_refs_to_ocr_dir` **同源**的命名 stem——
+`page.output_dir.name` 去掉 `_OCR` 后缀（兼容 `{stem}_after_OCR` / `{stem}_cropped_OCR` /
+`{stem}_OCR`），fallback `page.image_path.stem`。回归单测 `test_ppt_layout_sidecar.py::
+test_sidecar_image_ref_uses_ocr_dir_stem_after_rectify` 锁定。
+
+**附带**：`_stream_pipeline` 原 `contextlib.suppress(Exception)` 把 OCR 生产者真实异常吞掉、
+被消费者「未产出任何页」掩盖，排障困难——改为抽 `_cancel_producer_log_real` 取消后 `warning`
+记录生产者真异常（不改变抛出语义），便于日后定位 OCR 失败根因。
+
+**教训**：跨组件「同一资源的命名」必须单一真相源（这里是 OCR 目录名），不能各算各的；纯函数单测
+用 `{stem}_OCR` 凑巧 stem 相同测不出，**真机 E2E（矫正后 stem 含 `_after`）才暴露**。

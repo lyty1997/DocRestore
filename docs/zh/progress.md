@@ -2542,4 +2542,36 @@ Phase-2 勘察（5 路并行只读）+ **4 轮 pandoc spike** 推翻了「需先
   损坏 sidecar 退块流（2 slide）、非法 bbox 逐页退竖排（标题按 idx 对齐）。
 - **证据**：门禁全绿（**1503 passed, 45 skipped**，mypy 88 文件）。
 
-**待续**：子任务 4（开精修 idx 锚点重挂 + 整页退 raw）。
+**子任务 4：开精修时 sidecar 仍 raw（决策 C 简化）**（2026-06-24）
+- **用户决策 C**：positioned pptx 区域文字**始终用 raw**（0 额外 LLM 调用），原设计的「区域 idx
+  锚点精修 + 重挂」**否决**——它需对每页区域 payload 额外跑一次 LLM（与页级 body 精修是两份文本），
+  与「不新增调用」冲突，而短幻灯片文字 raw 通常够用。
+- **无新增渲染/精修代码**：精修只动 `bodies`（→ `document.md`），不碰捕获的 `layout_regions`
+  （→ sidecar），故 sidecar 天然 raw、无论精修开关。本子任务=锁定该保证 + 文档对齐。
+- 回归测试：`enable_refine=True` + stub 精修器加前缀 → 断言前缀只进 `document.md`、sidecar 区域
+  内容仍 raw。设计文档 §2/§3/§4.2/§4.3/§6/§7/§8/§9/§10 全面改写为决策 C（idx 锚点机制标注否决）。
+- **证据**：门禁全绿（**1504 passed, 45 skipped**，mypy 88 文件）。
+
+**Phase-2b 收口**：捕获 → 落盘 → 定位渲染 → 开精修隔离，四子任务闭环；关精修版面定位端到端打通。
+
+## 2026-06-24 - Epic D Phase-2b 真机 E2E 验证（活 VL OCR）+ 修一个跨组件命名 bug
+
+真机 E2E：活 PaddleOCR-VL-1.6（EngineManager 自启 vllm-server）跑 3 张代表 slide（503 表/图/chart、
+507 文字、508 多图）→ `_ppt_pipeline` 捕获 + 落 `.ppt_layout.json` → 导出 positioned pptx →
+soffice 渲染 + bbox 叠加图目视。
+
+**抓到并修复真 bug**：sidecar 图片 `image_ref` 丢 `_after` 前缀（矫正模式 OCR 跑在 `{stem}_after.jpg`、
+裁图落 `images/{stem}_after_N.jpg`，但 `_write_ppt_layout_sidecar` 误用被 producer 改回原图的
+`image_path.stem`）→ 导出器解析不到图。修：改用 `page.output_dir.name` 去 `_OCR` 的同源命名 stem。
+附带把 `_stream_pipeline` 吞生产者异常的 `suppress` 改成 `_cancel_producer_log_real` 记录真异常
+（否则被「OCR producer 未产出任何页」掩盖，难定位）。详见 known-issues.md。
+
+**目视结论（全部正确）**：
+- sidecar bbox 叠加到矫正图：标题/正文/表格/图片/chart 各区域 bbox 精准框住对应内容、`image_size`
+  与矫正图尺寸一致。
+- positioned pptx 渲染：503 还原「标题居顶 + 左反应式图 + 右说明文字 + 右下柱状图 + 左下原生表格」、
+  508 还原「标题 + 中部大架构图 + 下方多行文字」——**2D 版面忠实还原原 slide**，远胜竖向堆叠。
+- 4 个图片引用全部对上真裁图文件。
+
+**证据**：门禁全绿（**1505 passed, 45 skipped**，mypy 88 文件）+ E2E 渲染图/叠加图（/tmp/e2e_vis/）。
+Phase-2b 关精修版面定位**真机验证通过**。

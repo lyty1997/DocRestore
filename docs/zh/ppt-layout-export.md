@@ -1,7 +1,7 @@
 # PPT 版面位置导出设计（Epic D · Phase-2b / 关联 #74）
 
 > 目标：导出 pptx 时，把每个区域（标题/正文/表格/图片）**按原屏摄图的版面位置**摆放，
-> 而非现在的「逐页竖向堆叠」。方案 A（按 bbox 摆 + 原始内容）+ 区域级精修增强。
+> 而非现在的「逐页竖向堆叠」。方案 A（按 bbox 摆 + VL 原始内容；区域文字始终 raw，不单独精修）。
 >
 > 状态：**设计待确认**（2026-06-23）。确认后再写代码。真相源：本文件 + [export-mode.md](export-mode.md) §9。
 
@@ -22,35 +22,36 @@
 **结论**：bbox 数据在内存里转瞬即逝。要用就得在 pipeline 里**接住并持久化成 sidecar**，
 再喂给导出器。这是架构级改动（动 OCR 结果落盘链路），不再是 Phase-2a 那种纯下载时函数。
 
-## 2. 方案：A（bbox + 原始内容）+ 区域级精修，破解「内容对不齐」
+## 2. 方案：A（bbox + 原始内容），sidecar 始终用 raw 区域内容
 
 | 表示 | 来源 | 位置 | 内容 |
 |---|---|---|---|
-| `coordinates` | VL 原始 | ✅ bbox | ⚠️ 未精修（`block_content`） |
-| `document.md` | 精修后 | ❌ 无 | ✅ 精修 / 表格干净 HTML |
+| `coordinates` | VL 原始 | ✅ bbox | raw（`block_content`，spike 证实干净可用） |
+| `document.md` | 页级精修后 | ❌ 无 | ✅ 精修 / 表格干净 HTML |
 
-二者无干净 1:1 映射（页级精修可能合并/拆分/重排块）。**B 方案**（精修整页再回对齐区域）
-对齐脆。**采用**：把精修下沉到**区域粒度**——精修时 bbox 全程挂着，精修后内容天然 1:1
-对应 bbox，绕开对齐难点（用户拍板）。
+**用户决策（C，2026-06-24）**：positioned pptx 的区域内容**始终用 VL `block_content` raw**
+（无论精修开关），不对区域单独跑精修：
 
-- **关精修**：区域内容 = VL `block_content` 原文（位置精确、内容 raw，PPT 多为短标题/标签，
-  矫正后 raw 通常够用；表格仍走 §9.1 原生渲染）。
-- **开精修**：区域内容 = 区域级精修结果（见 §4.2，**按 index 重挂 bbox，不信 LLM 回吐坐标**）。
+- **省成本**：positioned 与页级精修解耦，**0 额外 LLM 调用**（页级精修照常产 `document.md`）。
+- **够用**：PPT 多为短标题/标签，矫正后 raw 通常够用；表格走 §9.1 原生渲染。
+- **取舍**：positioned pptx 文字不精修（公式类区域可能留 OCR 的 LaTeX 错误）；需要精修文本走
+  `document.md` → docx/pdf（页级精修不变、全保真）。
 
-不选 C（启发式版面）：用户要真位置，C 给不了。不选 B：对齐脆、收益不一定压过复杂度。
+> **「区域级 idx 锚点精修」已否决**：早期设计想把 bbox 作头锚点、整页精修后按 idx 重挂——
+> 但它需要对每页区域 payload **额外跑一次 LLM**（与页级 body 精修是两份不同文本），与「不
+> 新增调用」目标冲突，而短幻灯片文字 raw 通常够用，收益不抵成本。原 §4.2 机制不再实现。
+> 不选启发式版面：用户要真位置，给不了。
 
 ## 3. 数据流总览
 
 ```text
 VL worker coordinates[{label,bbox,text}]  ──capture──▶  PageOCR.layout_regions
                                                               │
-                  精修前注入 <!-- ppt-region bbox=... --> 头锚点（bbox 自包含）
-                                                              │
-                        整页 SLIDE_REFINE（约束+「保留锚点」）  ▼  开精修
-                                                              │
-              按锚点切分 → (bbox ↔ 精修后内容) 配对；锚点数不符则该页退 raw
+                （文字区域过 PII 出云闸口脱敏，与 document.md 同口径；内容 raw 不精修）
                                                               ▼
-              _ppt_pipeline 落 .ppt_layout.json（位置真相源）+ document.md 剥锚点
+              _ppt_pipeline 落 .ppt_layout.json（位置真相源，区域内容 raw）
+                                                              │
+              页级精修（开关开时）独立产 document.md，互不影响（决策 C）
                                                               │
                   下载导出 pptx.py：sidecar 存在 ──▶ 按 bbox 定位渲染
                                   sidecar 缺失 ──────▶ 回退 §9.2 竖排（现状）
@@ -86,41 +87,25 @@ class LayoutRegion:
 > 不动 `Region`/`_parse_image_refs`（图片引用链路保持），`layout_regions` 是**新增并行轨**，
 > 只 PPT 定位导出消费；文档模式忽略它，零影响。
 
-### 4.2 锚点法：精修前注入区域头锚点，精修后按锚点匹配（用户拍板）
+### 4.2 区域内容：始终 raw（决策 C，原 idx 锚点精修已否决）
 
-**思路（用户）**：进 LLM 精修**之前**，把每个区域的 bbox 作为**头部锚点字段**写在该区域
-内容前；精修照常整页跑（锚点随内容一起走）；输出 PPTX 时按锚点把 **bbox ↔ 精修后内容** 配对。
+sidecar 的文字区域 `content` = VL `block_content` raw（表格为 raw HTML），**与精修开关无关**：
 
-**为何优于「单独区域级 prompt」**：复用现有**整页**精修（1 次 LLM/页，非 N 次），靠显式锚点
-保持「位置 ↔ 内容」关联，绕开「按阅读序对齐」的脆点（精修合并/拆分块也不丢关联）。
+- 精修只动**页级 body**（`_ppt_pipeline` 的 `bodies` → `document.md`），**不碰**捕获的
+  `layout_regions`（→ sidecar）。故开精修时 sidecar 天然仍 raw，无需任何匹配/重挂逻辑。
+- 文字区域内容**仍过 PII 出云闸口**（`guard.redact_for_cloud`，与 `document.md` 同口径脱敏）——
+  脱敏是安全要求，与「是否精修」正交。
+- `image/chart` 区域 content 空、走 `image_ref`；`table` 区域 raw HTML 走 §9.1 原生渲染。
 
-实现（spike 后定稿——在**干净的 coords 区域单元**上做，不碰 `raw_text` 的 div 包装）：
-- **可精修单元**：只取**文字类**区域（`paragraph_title/text/figure_title/table`）的 `content`
-  送精修；`image/chart`（content 空）不进精修，bbox + 裁图直接落 sidecar。
-- **注入头锚点**：把一页的文字区域拼成一份带 idx 头的 payload（"bbox 存为头部字段"）：
-  ```text
-  <!-- r:0 -->
-  REME案例：DHB生物合成
-  <!-- r:1 -->
-  <table>...</table>
-  ```
-  idx 旁的 bbox/label **由我方按 idx 留底**（不进 payload，省得 LLM 改坐标）。
-- **精修**：沿用 `SLIDE_REFINE_SYSTEM_PROMPT`，加一条约束「逐字保留 `<!-- r:N -->` 行、按相同
-  idx 原数返回，表格保持 HTML」。整页**一次** LLM 调用。
-- **匹配**：输出按 `<!-- r:N -->` 切 → 精修文本按 **idx 重挂**对应 bbox（坐标全程是我方原值，
-  **不信 LLM 回吐**）→ 写 `.ppt_layout.json`。
-- **fail-safe**：输出 idx 集 ≠ 注入 idx 集（漏/并/拆）→ 该页文字区域**整页退 raw `content`**
-  （位置仍准、只是未精修），绝不错位。
-- **清理**：锚点仅 PPT 定位用，不进 `document.md`（document.md 仍走现有页级精修，§9 决策 3）。
-
-> 复用 `_get_refiner` 开关、`LLMCache`（新 cache key）、PII 出云闸口（payload 送云端前
-> `guard.redact_for_cloud`）。**比"在 raw_text 里塞锚点"更稳**：coords 区域天然是切好的单元，
-> 切分不依赖 LLM 对自由文本中锚点的保真，只依赖它保留几行 `<!-- r:N -->` 标记。
+> **原方案（idx 锚点精修）为何否决**：它要把每页文字区域拼成带 `<!-- r:N -->` 头的 payload
+> 额外跑一次 LLM、按 idx 重挂 bbox。但这是**与页级 body 精修并列的第二次调用**（两份不同文本），
+> 与「不新增 LLM 调用」冲突；而短幻灯片文字 raw 通常够用。用户权衡后选「sidecar 始终 raw、
+> 0 额外调用」（2026-06-24）。需要精修文本的用户走 `document.md` → docx/pdf。
 
 ### 4.3 持久化：`.ppt_layout.json` sidecar
 
-`_ppt_pipeline` 组装阶段（`pipeline.py:1381` 前后）按 §4.2 匹配结果（关精修=raw 内容、
-开精修=按锚点切出的精修内容）写一份位置真相源，落 `output_dir`：
+`_ppt_pipeline` 组装阶段（`pipeline.py:1381` 前后，`_write_ppt_layout_sidecar`）把各页
+`layout_regions` 的 raw 内容（文字过 PII 脱敏，§4.2）写一份位置真相源，落 `output_dir`：
 
 ```json
 {
@@ -141,7 +126,7 @@ class LayoutRegion:
 ```
 
 - 只 PPT 模式产出；与 `document.md` 同目录、`.` 前缀（不进 asset 白名单、不裸打进 zip）。
-- 含坐标信息但**不含原始 PII**（区域内容已过精修+脱敏链路，与 document.md 同口径）。
+- 含坐标信息但**不含原始 PII**（区域内容 raw 但已过 PII 脱敏闸口，与 document.md 同口径）。
 - 缺失 = 老任务 / 非 PPT / 捕获失败 → 导出器自动退竖排。
 
 ### 4.4 导出：`pptx.py` 定位渲染（sidecar 存在时）
@@ -193,15 +178,14 @@ text / image / chart / table / figure_title`。各标签的 `content` 来源：
   raw_text `<img>` 阅读序一致**）。
 
 ⇒ **`coordinates` 本身就是一份干净的「bbox + 类型 + 内容（文字/HTML 表）」分区列表**，
-图片块再按阅读序认领 `raw_text` 的 `<img src>`。这比预想干净——**不需要把锚点对齐进
-`raw_text` 的 div 包装里**（§4.2 锚点直接加在 coords 区域单元前即可）。
+图片块再按阅读序认领 `raw_text` 的 `<img src>`。这比预想干净——区域内容直接可用，
+positioned 直接用 raw（§4.2 决策 C，不做区域精修）。
 
 **残留兜底**：极端页若 image/chart 区域数 ≠ raw_text `<img>` 数 → 该页图片退竖排附页尾，
 文字/表格仍按 bbox 定位（位置部分忠实，不阻塞主收益）。
 
-> 第二件 spike（精修能否稳定保留锚点）改为：因 `coordinates` 已是干净分区单元，精修在
-> **区域单元粒度**进行、按 idx 重挂 bbox（见 §4.2 更新），匹配可靠性不再依赖 LLM 对自由
-> 文本里锚点的保真——更稳。
+> 原计划的「第二件 spike（精修能否稳定保留锚点）」已无意义：决策 C 下区域内容始终 raw、
+> 不进精修，sidecar 与页级精修彻底解耦（§4.2），无锚点可保。
 
 ## 7. 边界与 fail-safe（全链路退化，绝不丢内容）
 
@@ -209,15 +193,15 @@ text / image / chart / table / figure_title`。各标签的 `content` 来源：
 - 某页 `regions` 为空 / 全部 bbox 非法（越界、零面积、x2<x1）→ 该页退竖排（按 `document.md` 对应页）。
 - 区域 EMU 越画布 → clamp 进画布。
 - 区域重叠（VL 偶发嵌套块）→ 按阅读序后绘者压前者（与原图层级一致）；文本框透明底不挡图。
-- 精修返回不合规 → §4.2 整页退 raw。
+- 区域内容始终 raw（决策 C），无精修匹配环节，故无「精修不合规」失败路径。
 
 ## 8. 过度 / 欠工程判定
 
 **刚刚好**：
-- 数据**本就存在**（VL 已出 bbox），只做「捕获→持久化→消费」三段管道 + 整页精修加一条锚点约束，
-  没有重建富 IR、没动 OCR 引擎、没动文档/代码模式、不新增 LLM 调用次数。
-- 全链路 fail-safe 退竖排/退 raw，零回归风险；positioned 与 flow 并存。
-- 锚点法用显式头锚点保持「位置 ↔ 内容」关联，规避 B 方案的按序对齐脆点——**用锚点换掉脆逻辑**。
+- 数据**本就存在**（VL 已出 bbox），只做「捕获→持久化→消费」三段管道，没有重建富 IR、没动
+  OCR 引擎、没动文档/代码模式、**0 额外 LLM 调用**（sidecar 用 raw，决策 C）。
+- 全链路 fail-safe 退竖排，零回归风险；positioned 与 flow 并存。
+- sidecar 与页级精修解耦：positioned 用 raw 区域内容、document.md 仍页级精修，互不影响。
 
 **没有欠工程**：figure 映射的不确定性用 spike 先验证、不可靠就降级，不蒙头硬上。
 
@@ -229,9 +213,8 @@ text / image / chart / table / figure_title`。各标签的 `content` 来源：
 **已定（2026-06-23 用户拍板）**：
 1. **slide 画布**：贴**首页原图长宽比**（最忠实原图）。
 2. **触发**：`.ppt_layout.json` 存在即默认 positioned，无新 UI / 无新参数。
-3. **精修关联**：进精修**前**把 bbox 作头锚点写进区域内容（自包含）；整页精修；输出 PPTX 时按
-   锚点把 bbox ↔ 精修内容配对（§4.2）。区域精修产物**仅供版面 sidecar**，`document.md`
-   仍走现有页级精修、剥掉锚点，互不影响、零回归。
+3. **区域内容**：sidecar 始终用 VL raw（文字过 PII 脱敏），**与精修开关无关**；页级精修只产
+   `document.md`，与 sidecar 解耦、0 额外 LLM 调用（决策 C，2026-06-24，原 idx 锚点精修否决）。
 
 **step 0 spike 已完成（2026-06-23）**：跑真 VL（slide 508/503），证据见 §6 + `/tmp/spike_out/`。
 结论：每区域有 bbox、文字/表格内容直接可用、figure↔crop 按阅读序映射可行——风险消解、设计简化。
@@ -243,16 +226,18 @@ text / image / chart / table / figure_title`。各标签的 `content` 来源：
 3. ✅ **已完成**（2026-06-24）导出器 positioned 渲染分支 + fail-safe 退竖排 + 单测（sidecar 在/缺两路）。
    落点：`pptx.py::_build_presentation` 分发（sidecar 合法 → `_build_positioned` 按 `region_box_emu`
    定位渲染文本框/原生表/图，任一异常退 `_build_block_flow`；某页无可用区域按 idx 退该页竖排）。
-4. ⏳ 开精修：区域单元 idx 锚点精修 + idx 重挂 + 整页退 raw 兜底 + 单测（mock LLM 含/缺 idx）。
+4. ✅ **已完成（决策简化）**（2026-06-24）开精修时 sidecar 仍 raw——精修只动页级 body、不碰
+   `layout_regions`，故无需 idx 锚点精修/重挂（见 §4.2）+ 回归单测（开精修 → document.md 被
+   精修但 sidecar 区域内容仍 raw）。
 
 ## 10. 验收清单
 
-- [ ] 捕获：VL 跑一页 → `PageOCR.layout_regions` 非空、bbox 非零、label/content 合理（单测 + 真 OCR）。
-- [ ] 精修匹配：注入 N 个头锚点 → 精修后按锚点切出 N 段配对 bbox；锚点数不符则整页退 raw（单测 mock LLM 输出含/缺锚点两路）。
-- [ ] 持久化：`_ppt_pipeline` 产 `.ppt_layout.json`，schema 合法、坐标系正确（集成测）。
-- [ ] 导出：sidecar 存在 → pptx 各 region 落在缩放后 bbox 位置（python-pptx 读回断言 shape 的 left/top/width 在预期区间）；
-      sidecar 缺失 → 退竖排（现有用例不回归）。
-- [ ] 坐标变换：构造已知 image_size + bbox → 断言 EMU 落点（纯函数单测，从输入派生，不写死数据集关键词）。
-- [ ] 全链路 fail-safe：非法 sidecar / 空 regions / 非法 bbox → 退竖排不报错。
-- [ ] 门禁 `bash scripts/check_quality.sh` 全绿。
+- [x] 捕获：VL 跑一页 → `PageOCR.layout_regions` 非空、bbox 非零、label/content 合理（单测 + **真 OCR E2E**，2026-06-24，叠加图目视各区域 bbox 精准框住内容）。
+- [x] 开精修隔离：`enable_refine=True` → `document.md` 被页级精修，但 sidecar 区域内容仍 raw（单测 stub 精修器加前缀，断言前缀只进 document.md 不进 sidecar）。
+- [x] 持久化：`_ppt_pipeline` 产 `.ppt_layout.json`，schema 合法、坐标系正确（集成测 + 真 OCR E2E：canvas 按首页长宽比、`image_size` 与矫正图一致、4 图引用全对上真文件）。
+- [x] 导出：sidecar 存在 → pptx 各 region 落在缩放后 bbox 位置（单测 python-pptx 读回断言 left/top/width；**真 OCR E2E** soffice 渲染目视 503/508 2D 版面忠实还原）；sidecar 缺失 → 退竖排（现有用例不回归）。
+- [x] 坐标变换：构造已知 image_size + bbox → 断言 EMU 落点（纯函数单测，从输入派生，不写死数据集关键词）。
+- [x] 全链路 fail-safe：非法 sidecar / 空 regions / 非法 bbox → 退竖排不报错（单测覆盖）。
+- [x] 门禁 `bash scripts/check_quality.sh` 全绿（1505 passed, 45 skipped）。
+- [x] **真机 E2E**（2026-06-24）：活 VL OCR 3 slide → sidecar + positioned pptx 目视正确；修复 sidecar 图片引用 `_after` 命名 bbox（见 [known-issues.md](known-issues.md)）。
 
