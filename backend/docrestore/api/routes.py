@@ -52,6 +52,9 @@ from docrestore.api.schemas import (
     DirEntry,
     GPUInfoResponse,
     GPUListResponse,
+    LayoutBlockPayload,
+    LayoutPagePayload,
+    LayoutPayload,
     NERSetupStatusResponse,
     NERStatusResponse,
     OCRStatusResponse,
@@ -1565,6 +1568,65 @@ async def get_source_image(task_id: str, filename: str) -> FileResponse:
         )
 
     return FileResponse(path=target)
+
+
+@router.get(
+    "/tasks/{task_id}/layout",
+    response_model=LayoutPayload,
+)
+async def get_task_layout(
+    task_id: str,
+    doc_dir: str = "",
+) -> LayoutPayload:
+    """返回任务版面高亮载荷 ``.layout.json``（Epic E：光标↔原图 bbox 高亮）。
+
+    可选 ``doc_dir``（多文档场景的相对子目录）；单文档留空读根 output_dir。
+    无 sidecar（非 VL 引擎 / 老任务 / 文档模式未产出版面）→ 404 优雅，
+    前端 client 把 404 视作「无版面数据、不高亮」，不弹错误。
+    """
+    manager = _get_manager()
+    task = manager.get_task(task_id)
+    if task is None:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
+
+    def _load() -> LayoutPayload | None:
+        from docrestore.output.layout_sidecar import load_doc_layout
+
+        output_dir = Path(task.output_dir).resolve(strict=False)
+        # doc_dir 边界守卫：拒 .. / 绝对路径 / 越界（与 get_task_code_file 同口径）
+        if doc_dir:
+            if ".." in Path(doc_dir).parts or Path(doc_dir).is_absolute():
+                return None
+            target_dir = (output_dir / doc_dir).resolve(strict=False)
+            if not target_dir.is_relative_to(output_dir):
+                return None
+        else:
+            target_dir = output_dir
+        layout = load_doc_layout(target_dir)
+        if layout is None:
+            return None
+        return LayoutPayload(pages=[
+            LayoutPagePayload(
+                filename=page.filename,
+                image_size=page.image_size,
+                blocks=[
+                    LayoutBlockPayload(
+                        bbox=block.bbox, label=block.label, text=block.text,
+                    )
+                    for block in page.blocks
+                ],
+            )
+            for page in layout.pages
+        ])
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        raise ApiBusinessError(
+            APIErrorCode.LAYOUT_NOT_FOUND, 404, "版面数据不存在",
+        )
+    return payload
 
 
 # ── 任务管理操作 ──────────────────────────────────────

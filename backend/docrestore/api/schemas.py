@@ -396,6 +396,28 @@ class SourceImagesResponse(BaseModel):
     images: list[str]
 
 
+class LayoutBlockPayload(BaseModel):
+    """版面块：原图像素 bbox + 类型 + raw OCR 文字（前端模糊匹配光标块，Epic E）。"""
+
+    bbox: tuple[int, int, int, int]  # (x0, y0, x1, y1) 原图像素
+    label: str
+    text: str
+
+
+class LayoutPagePayload(BaseModel):
+    """单页版面：原图文件名 + 像素尺寸（bbox 坐标空间）+ 块列表。"""
+
+    filename: str
+    image_size: tuple[int, int]  # (width, height) 像素，作 % 换算分母
+    blocks: list[LayoutBlockPayload]
+
+
+class LayoutPayload(BaseModel):
+    """任务版面高亮载荷（Epic E）：各页块 bbox，供编辑器光标↔原图高亮。"""
+
+    pages: list[LayoutPagePayload]
+
+
 class UploadSessionResponse(BaseModel):
     """创建上传会话响应"""
 
