@@ -1,5 +1,32 @@
 # 开发进度
 
+## 2026-06-24 - Epic E（光标 ↔ 原图 bbox 高亮，#74）E1/E2/E3 全部落地
+
+设计 `docs/zh/cursor-bbox-highlight.md`（用户已确认）。编辑器里光标所在段 → 右侧原图对应版面块
+高亮成矩形。**架构反转**：不让「块→bbox 映射」穿透 dedup+精修（#83 原列「核心难点」，已证不可逆/脆弱），
+改成**展示期、页级模糊匹配**——sidecar 按页存块 bbox（OCR 期数据，早于 dedup/精修），前端光标移动时
+在「该页少量候选块」里模糊匹配 raw OCR 文字定位 bbox。
+
+- **E1 后端坐标层（#83）**：新建 `output/layout_sidecar.py`（纯模块，镜像 `ppt_layout.py` round-trip，
+  减熵到 `bbox+label+text`，反序列化「坏块跳过不整页失败」）；`pipeline._write_doc_layout_sidecar`
+  在文档模式收尾落 `.layout.json`，文字过同一 PII 出云闸口 `redact_for_cloud`（与 document.md 同口径）；
+  非 VL/无区域不落盘 fail-safe；dot 前缀天然不进下载 zip（zip 显式 allowlist）。
+- **E2 API 载荷（#84）**：`LayoutPayload` + 独立懒加载端点 `GET /tasks/{id}/layout?doc_dir=`
+  （doc_dir 边界守卫 `resolve`+`is_relative_to`，与 `get_task_code_file` 同口径），无 sidecar → 404；
+  新增 `LAYOUT_NOT_FOUND` + 三语 i18n；前端 `LayoutPayloadSchema` + `getTaskLayout`（404→undefined 不弹错）。
+- **E3 前端 overlay（#85）**：`features/task/blockMatch.ts`（§8 归一化+最长公共子串模糊匹配，阈值 0.5 退化不高亮）+
+  `features/task/blockHighlight.ts`（域类型 `CursorBlock`/`SourceImageHighlight` + `computeBlockHighlight`，
+  下沉 features 避免反向依赖）+ `BlockHighlightOverlay`（复用 CropEditor bbox→% 换算，分母用 payload
+  `image_size` 避 decode race）+ 编辑器 `blockAtCursor`（光标顶层块 `$from.node(1).textContent` + 最近前置
+  pageAnchor，debounce 80ms）→ `SourceImageList` 仅命中页叠框（`data-page` 移到 `.source-image-cell` 承载
+  相对定位，scroll-sync 零回归）。**未改 `markdownSanitize.ts`**（overlay 非 markdown 渲染，纠正 #85 顾虑）。
+- **本期范围**：编辑器光标驱动 / 只做正向 / 文档模式（PPT 矫正图坐标系不符显示图，前端高亮延后 phase-2）。
+
+**证据/门禁**：后端 mypy --strict 全绿（88 文件）+ Epic E 后端 21 测（layout_sidecar 12 + doc sidecar 4 +
+layout 端点 5），output+pipeline 397 回归绿；前端 203 测全绿（新增 blockMatch 10 + blockHighlight 6 +
+overlay 3 + SourceImageList 3 + blockAtCursor 真实 Tiptap 3 + client 3）+ typecheck/lint 干净；
+**真机静态 harness 截图**核对 overlay 落段精准、非命中页无框。**未提交**（待用户「提交」）。
+
 ## 2026-06-24 - Epic D Phase-2b 增强：positioned-pptx 区域颜色采样 + 字号估计
 
 设计 `docs/zh/ppt-layout-export.md` §11。让 positioned-pptx 重排文字接近原屏摄图的颜色与字号

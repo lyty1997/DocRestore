@@ -113,7 +113,10 @@ describe("CodeViewer", () => {
     );
 
     expect(codeAnchor.className).toBe("code-page-anchor");
-    expect(imageAnchor.getAttribute("alt")).toBe("raw/page2.JPG");
+    // data-page 锚点现落在源图单元（.source-image-cell）上，原图为其内层 <img>
+    expect(imageAnchor.querySelector("img")?.getAttribute("alt")).toBe(
+      "raw/page2.JPG",
+    );
   });
 
   it("旧 files-index 没有来源页行号范围时仍按来源页顺序生成锚点", async () => {

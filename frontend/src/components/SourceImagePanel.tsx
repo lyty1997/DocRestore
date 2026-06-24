@@ -7,6 +7,7 @@
 
 import { forwardRef } from "react";
 
+import type { SourceImageHighlight } from "../features/task/blockHighlight";
 import { imageNameToListItem } from "../features/task/sourceImagePreview";
 import { useTranslation } from "../i18n";
 import { SourceImageList } from "./SourceImageList";
@@ -14,13 +15,15 @@ import { SourceImageList } from "./SourceImageList";
 interface SourceImagePanelProps {
   readonly taskId: string;
   readonly images: readonly string[];
+  /** 光标块 bbox 高亮（Epic E）；仅文档编辑模式传入，缺省不高亮。 */
+  readonly highlight?: SourceImageHighlight | undefined;
 }
 
 export const SourceImagePanel = forwardRef<
   HTMLDivElement,
   SourceImagePanelProps
 >(function SourceImagePanel(
-  { taskId, images },
+  { taskId, images, highlight },
   scrollRef,
 ): React.JSX.Element {
   const { t } = useTranslation();
@@ -34,6 +37,7 @@ export const SourceImagePanel = forwardRef<
         images={images.map((name) => imageNameToListItem(name))}
         listClassName="source-images-list"
         imageClassName="source-image-item"
+        highlight={highlight}
       />
     </div>
   );

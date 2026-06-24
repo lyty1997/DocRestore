@@ -27,6 +27,8 @@ import {
   GpuListResponseSchema,
   CropDetectResponseSchema,
   CropFigureResponseSchema,
+  LayoutPayloadSchema,
+  type LayoutPayload,
   type ActionResponse,
   type BrowseDirsResponse,
   type CreateTaskResponse,
@@ -497,6 +499,29 @@ export async function listSourceImages(
     headers: apiHeaders(),
   });
   return handleResponse(response, SourceImagesResponseSchema);
+}
+
+/**
+ * 获取任务版面高亮载荷（Epic E：编辑器光标↔原图 bbox 高亮）。
+ *
+ * 无 sidecar（非 VL 引擎 / 老任务 / 文档模式未产出版面）→ 后端 404 →
+ * 返回 undefined（前端不高亮、不弹错误）；多文档可传 docDir 取对应子目录。
+ */
+export async function getTaskLayout(
+  taskId: string,
+  docDir?: string,
+): Promise<LayoutPayload | undefined> {
+  const query =
+    docDir !== undefined && docDir !== ""
+      ? `?doc_dir=${encodeURIComponent(docDir)}`
+      : "";
+  const response = await fetch(`${API_BASE}/tasks/${taskId}/layout${query}`, {
+    headers: apiHeaders(),
+  });
+  if (response.status === 404) {
+    return undefined;
+  }
+  return handleResponse(response, LayoutPayloadSchema);
 }
 
 /** 构建源图片 URL（附加 token 供 <img src> 直接使用） */

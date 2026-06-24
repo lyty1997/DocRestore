@@ -383,6 +383,7 @@ export const zhTW: Record<TranslationKey, string> = {
   "errors.api.files_index_not_found": "任務未產生程式碼索引（非程式碼模式或未完成）",
   "errors.api.files_index_parse_error": "程式碼索引解析失敗：{reason}",
   "errors.api.files_index_bad_format": "程式碼索引格式異常（非陣列）",
+  "errors.api.layout_not_found": "版面資料不存在",
   "errors.api.read_failed": "讀取失敗：{reason}",
   "errors.api.invalid_filename": "非法檔名",
   "errors.api.markdown_update_failed": "儲存失敗：{reason}",

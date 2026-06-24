@@ -395,6 +395,7 @@ export const en: Record<TranslationKey, string> = {
     "Files index not generated (non-code mode or not finished)",
   "errors.api.files_index_parse_error": "Failed to parse files index: {reason}",
   "errors.api.files_index_bad_format": "Files index format invalid (not an array)",
+  "errors.api.layout_not_found": "Layout data not found",
   "errors.api.read_failed": "Read failed: {reason}",
   "errors.api.invalid_filename": "Invalid filename",
   "errors.api.markdown_update_failed": "Save failed: {reason}",

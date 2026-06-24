@@ -1,0 +1,69 @@
+import { cleanup, render } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
+
+import { SourceImageList } from "../../src/components/SourceImageList";
+import type { SourceImageListItem } from "../../src/features/task/sourceImagePreview";
+import { LanguageProvider } from "../../src/i18n";
+
+afterEach(cleanup);
+
+const IMAGES: readonly SourceImageListItem[] = [
+  { name: "IMG_0001.jpg", pageKey: "IMG_0001.jpg" },
+  { name: "IMG_0002.jpg", pageKey: "IMG_0002.jpg" },
+];
+
+function renderList(
+  highlight?: Parameters<typeof SourceImageList>[0]["highlight"],
+): HTMLElement {
+  const { container } = render(
+    <LanguageProvider>
+      <SourceImageList
+        taskId="t1"
+        images={IMAGES}
+        listClassName="source-images-list"
+        imageClassName="source-image-item"
+        highlight={highlight}
+      />
+    </LanguageProvider>,
+  );
+  return container;
+}
+
+describe("SourceImageList bbox 高亮", () => {
+  it("无 highlight → 不渲染任何 overlay", () => {
+    const container = renderList();
+    expect(
+      container.querySelectorAll(".block-highlight-overlay"),
+    ).toHaveLength(0);
+  });
+
+  it("命中页只在对应 data-page 的图上叠一个 overlay", () => {
+    const container = renderList({
+      pageKey: "IMG_0001.jpg",
+      bbox: [0, 0, 100, 50],
+      imageSize: [800, 600],
+    });
+    const overlays = container.querySelectorAll(".block-highlight-overlay");
+    expect(overlays).toHaveLength(1);
+
+    const hitCell = container.querySelector<HTMLElement>(
+      '[data-page="IMG_0001.jpg"]',
+    );
+    const otherCell = container.querySelector<HTMLElement>(
+      '[data-page="IMG_0002.jpg"]',
+    );
+    expect(hitCell?.querySelector(".block-highlight-overlay")).not.toBeNull();
+    expect(otherCell?.querySelector(".block-highlight-overlay")).toBeNull();
+  });
+
+  it("highlight 指向不存在的页 → 无 overlay", () => {
+    const container = renderList({
+      pageKey: "GHOST.jpg",
+      bbox: [0, 0, 10, 10],
+      imageSize: [800, 600],
+    });
+    expect(
+      container.querySelectorAll(".block-highlight-overlay"),
+    ).toHaveLength(0);
+  });
+});

@@ -379,6 +379,7 @@ export const zhCN = {
   "errors.api.files_index_not_found": "任务未生成代码索引（非代码模式或未完成）",
   "errors.api.files_index_parse_error": "代码索引解析失败：{reason}",
   "errors.api.files_index_bad_format": "代码索引格式异常（非数组）",
+  "errors.api.layout_not_found": "版面数据不存在",
   "errors.api.read_failed": "读取失败：{reason}",
   "errors.api.invalid_filename": "非法文件名",
   "errors.api.markdown_update_failed": "保存失败：{reason}",

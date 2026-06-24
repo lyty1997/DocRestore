@@ -12,15 +12,21 @@
 
 import "katex/dist/katex.min.css";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "react-markdown";
 
 import {
   getFilesIndex,
+  getTaskLayout,
   listSourceImages,
   updateResultMarkdown,
 } from "../api/client";
-import type { TaskResultResponse } from "../api/schemas";
+import type { LayoutPayload, TaskResultResponse } from "../api/schemas";
+import {
+  computeBlockHighlight,
+  type CursorBlock,
+  type SourceImageHighlight,
+} from "../features/task/blockHighlight";
 import { preprocessMarkdown } from "../features/task/markdown";
 import {
   PREVIEW_REHYPE_PLUGINS,
@@ -95,6 +101,15 @@ export function DocCodePreview({
   /* 编辑模式右侧滚动容器（编辑器就绪后经 onScrollContainerChange 填入） */
   const [editorScrollEl, setEditorScrollEl] = useState<HTMLElement>();
 
+  /* Epic E：光标块 ↔ 原图 bbox 高亮（仅文档编辑模式）。
+     layout = 该文档 .layout.json 载荷；cursorBlock = 编辑器上报的光标所在块。 */
+  const [layout, setLayout] = useState<LayoutPayload | undefined>();
+  const [cursorBlock, setCursorBlock] = useState<CursorBlock | undefined>();
+  const handleCursorBlock = useCallback(
+    (block: CursorBlock | undefined): void => { setCursorBlock(block); },
+    [],
+  );
+
   const selectedDoc = results[selectedIdx];
   const selectedDocFailed =
     selectedDoc !== undefined && selectedDoc.error !== "";
@@ -110,6 +125,14 @@ export function DocCodePreview({
     selectedDoc?.doc_dir,
     selectedDoc?.markdown ?? "",
   );
+
+  /* Epic E：仅在文档编辑模式且选中文档正常时才取版面、做高亮。 */
+  const canHighlight =
+    editMode &&
+    viewMode === "doc" &&
+    !selectedDocFailed &&
+    selectedDoc !== undefined;
+  const editDocDir = selectedDoc?.doc_dir;
 
   /* results 长度变化时收敛 selectedIdx */
   useEffect(() => {
@@ -148,6 +171,33 @@ export function DocCodePreview({
       cancelled = true;
     };
   }, [taskId]);
+
+  /* Epic E：进入文档编辑模式时取该文档 .layout.json（懒加载）；离开 / 切文档时
+     重置。无 sidecar（非 VL / 老任务）→ getTaskLayout 返回 undefined，不高亮。 */
+  useEffect(() => {
+    if (!canHighlight) {
+      setLayout(undefined);
+      setCursorBlock(undefined);
+      return;
+    }
+    let cancelled = false;
+    getTaskLayout(taskId, editDocDir)
+      .then((res) => {
+        if (!cancelled) setLayout(res);
+      })
+      .catch(() => {
+        if (!cancelled) setLayout(undefined);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [taskId, canHighlight, editDocDir]);
+
+  /* 光标块 → 命中页 bbox 高亮（纯计算，失配 → undefined 不高亮）。 */
+  const highlight = useMemo<SourceImageHighlight | undefined>(
+    () => computeBlockHighlight(layout, cursorBlock),
+    [layout, cursorBlock],
+  );
 
   usePreviewScrollSync(
     leftScrollEl,
@@ -370,6 +420,7 @@ export function DocCodePreview({
           ref={(el) => { setLeftScrollEl(el ?? undefined); }}
           taskId={taskId}
           images={filteredImages}
+          highlight={highlight}
         />
         {selectedDocFailed && failedDocStyle === "panel" && (
           <div className="doc-failed-panel">
@@ -390,6 +441,7 @@ export function DocCodePreview({
               docDir={selectedDoc.doc_dir}
               initialPagePosition={editStartPosition}
               onScrollContainerChange={setEditorScrollEl}
+              onCursorBlockChange={handleCursorBlock}
             />
           </div>
         )}

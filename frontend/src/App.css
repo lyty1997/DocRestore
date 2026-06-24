@@ -1091,6 +1091,26 @@ body {
   opacity: 0.85;
 }
 
+/* 源图单元：相对定位容器，承载 bbox 高亮 overlay（Epic E）。
+   line-height:0 去掉 <img> 行内底部间隙，使 overlay % 与图像素严格对齐。 */
+.source-image-cell {
+  position: relative;
+  width: 100%;
+  line-height: 0;
+}
+
+/* 光标块 ↔ 原图 bbox 高亮矩形（Epic E）：百分比定位，不拦截点击。 */
+.block-highlight-overlay {
+  position: absolute;
+  pointer-events: none;
+  border: 2px solid var(--color-primary-dark);
+  background: var(--color-primary-glow);
+  border-radius: 3px;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.5);
+  transition: left 0.12s ease, top 0.12s ease,
+    width 0.12s ease, height 0.12s ease;
+}
+
 .preview-split > .markdown-preview {
   flex: 1;
   min-width: 0;

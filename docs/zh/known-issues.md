@@ -855,3 +855,29 @@ test_sidecar_image_ref_uses_ocr_dir_stem_after_rectify` 锁定。
 
 **教训**：「还原原文」≠「复刻照片」——采样统计量会把**拍摄链路的系统性偏差**（白平衡 / 曝光 / 色偏）
 一并搬进结果。凡「从照片采颜色 / 亮度」的特征，须在采样前 / 后做一次**拍摄畸变归一化**（白平衡是最常见的一项）。
+
+## Epic E：源图 `data-page` 锚点从 `<img>` 移到外层 wrapper，破坏按 data-page 取 img 的测试
+
+现象（Epic E E3）：为承载 bbox 高亮 overlay，`SourceImageList` 把每张 `<img>` 包进
+`.source-image-cell`（`position:relative`），并把 `data-page` 从 `<img>` **移到外层 cell div**。
+`CodeViewer.test.tsx` 原断言 `.code-source-images-list [data-page="X"]` 取到的元素有 `alt` 属性
+（旧结构 data-page 在 img 上），结构变更后该选择器命中的是 cell div（无 `alt`）→ `getAttribute("alt")` 返回 null 失败。
+per-file lint/tsc hook 看不出（跨文件、运行期 DOM 断言），全量 `npx vitest run` 才暴露。
+
+处理策略：
+- 结构变更后，**按 data-page 取的是锚点容器，不再是图片本身**；要图片标识改查内层 `[data-page="X"] img` 的 `alt`。
+- scroll-sync 仍按 `[data-page]` 定位：cell 紧裹 img、垂直 offsetTop 等价，锚点数量不变，**零回归**（勿在 cell 与 img 上同时打 data-page，否则双锚点扰乱连续映射）。
+- **教训**：改动共享底层组件（`SourceImageList` 被文档+代码模式共用）的 DOM 结构后，必须跑**全量**前端测试，不能只信 per-file hook。
+
+## 前端 `unicorn/no-useless-undefined`：箭头/回调里禁 `return undefined`，函数声明里放行
+
+现象（Epic E E3）：在 `useMemo(() => { if (x) return undefined; ... })` 这类**箭头回调**里写
+`return undefined` 被 `unicorn/no-useless-undefined` 判错；但同样的 `return undefined` 写在**具名函数声明**
+（如 `function computeBlockHighlight(): T | undefined { if (...) return undefined; }`）里却放行。
+直接把 `undefined` 当实参传（`fn(LAYOUT, undefined)`）也被该规则判为「useless」。
+
+处理策略：
+- 需要早返回 `undefined` 的逻辑，抽成**具名函数声明**（顺带更可单测）；箭头/memo 只调用它。
+- 传 `undefined` 实参时改用具名变量（`const noCursor: T | undefined = undefined; fn(a, noCursor)`），
+  或对可选参数直接省略（`fn(a)`）。
+- 此约定与 codebase 既有写法一致（既有代码用三元 `cond ? undefined : val` 而非 `return undefined` 语句）。

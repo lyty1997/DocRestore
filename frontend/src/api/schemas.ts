@@ -362,3 +362,25 @@ export const CropFigureResponseSchema = z.object({
   asset_path: z.string(),
 });
 export type CropFigureResponse = z.infer<typeof CropFigureResponseSchema>;
+
+/** 版面块：原图像素 bbox (x0,y0,x1,y1) + 类型 + raw OCR 文字（光标模糊匹配，Epic E） */
+export const LayoutBlockPayloadSchema = z.object({
+  bbox: z.tuple([z.number(), z.number(), z.number(), z.number()]),
+  label: z.string(),
+  text: z.string(),
+});
+export type LayoutBlockPayload = z.infer<typeof LayoutBlockPayloadSchema>;
+
+/** 单页版面：原图文件名 + 像素尺寸 (w,h)（% 换算分母）+ 块列表 */
+export const LayoutPagePayloadSchema = z.object({
+  filename: z.string(),
+  image_size: z.tuple([z.number(), z.number()]),
+  blocks: z.array(LayoutBlockPayloadSchema),
+});
+export type LayoutPagePayload = z.infer<typeof LayoutPagePayloadSchema>;
+
+/** GET /tasks/{id}/layout 响应：各页块 bbox，供编辑器光标↔原图高亮（Epic E） */
+export const LayoutPayloadSchema = z.object({
+  pages: z.array(LayoutPagePayloadSchema),
+});
+export type LayoutPayload = z.infer<typeof LayoutPayloadSchema>;
