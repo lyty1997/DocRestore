@@ -2633,3 +2633,28 @@ soffice 渲染 + bbox 叠加图目视。
 
 **证据**：门禁全绿（**1505 passed, 45 skipped**，mypy 88 文件）+ E2E 渲染图/叠加图（/tmp/e2e_vis/）。
 Phase-2b 关精修版面定位**真机验证通过**。
+
+## 2026-06-24 - Epic E Phase-2 E4：只读预览 hover 高亮（#88）
+
+把光标→原图 bbox 高亮从「仅 WYSIWYG 编辑器」扩到**只读预览模式**，**零新算法**，复用 phase-1
+全部地基（`getTaskLayout` + `computeBlockHighlight` + `matchBlock` + `BlockHighlightOverlay` +
+`SourceImageList` overlay）。
+
+**改动**：
+- 新增纯函数 `features/task/previewBlockAtPointer.ts`，**镜像** `blockAtCursor`：块=命中元素向上到
+  `.markdown-preview` 直接子节点（对应编辑器 `$from.node(1)` depth-1，列表/表格整块），文本=`textContent`，
+  页=该块**最近前置** `[data-page]` 锚点（`compareDocumentPosition` 取文档序前最后一个）。
+- `DocCodePreview.tsx`：`canHighlight` 去掉 `editMode` 约束（预览+编辑两模式都取 layout、都传
+  `highlight`）；预览容器挂 `onMouseMove`(debounce 80ms)→`previewBlockAtPointer`→`setCursorBlock`、
+  `onMouseLeave` 清空；`editMode` 切换复位 + 卸载清定时器。
+- 设计文档 `cursor-bbox-highlight.md` §12 落 E4 设计与镜像语义对照表。
+
+**验证**：
+- 单测 `previewBlockAtPointer.test.ts`(9)：hover 段落/标题/块内子元素 → 正确 {page,text}；
+  容器外/空块/无前置页/null/包裹形态锚点等退化路径全覆盖。全量前端 **212 passed**（203→212）。
+- `tsc -b`（全项目）+ `eslint` 0 error（仅 2 条既有 react-refresh warning）。
+- 真机视觉验证：忠实 harness（真图 1.jpg 3018×2753 + E3 同款 overlay 标记/CSS + 真实匹配算法）
+  截三态——hover 第一段→上区蓝框、hover 第二段→框下移、移出→清空，% 换算精确（240/3018 等）。
+- overlay 组件与 E3 逐字复用（已像素核对），E4 仅新增触发交互，无视觉改动。
+
+**状态**：实现 + 验证完成，**未提交**（待用户「提交」）。phase-2 下一步建议 #89 反向联动。

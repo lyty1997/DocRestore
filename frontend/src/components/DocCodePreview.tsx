@@ -28,6 +28,7 @@ import {
   type SourceImageHighlight,
 } from "../features/task/blockHighlight";
 import { preprocessMarkdown } from "../features/task/markdown";
+import { previewBlockAtPointer } from "../features/task/previewBlockAtPointer";
 import {
   PREVIEW_REHYPE_PLUGINS,
   PREVIEW_REMARK_PLUGINS,
@@ -109,6 +110,29 @@ export function DocCodePreview({
     (block: CursorBlock | undefined): void => { setCursorBlock(block); },
     [],
   );
+  /* E4：预览模式 hover 防抖定时器（与编辑器 onSelectionUpdate 同 80ms）。 */
+  const previewHoverTimer = useRef<number | undefined>(undefined);
+  const handlePreviewMouseMove = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>): void => {
+      /* React 合成事件在 setTimeout 回调里 currentTarget 会被置空，先同步取出。 */
+      const container = event.currentTarget;
+      const target = event.target as Element | null;
+      if (previewHoverTimer.current !== undefined) {
+        globalThis.clearTimeout(previewHoverTimer.current);
+      }
+      previewHoverTimer.current = globalThis.setTimeout(() => {
+        setCursorBlock(previewBlockAtPointer(target, container));
+      }, 80);
+    },
+    [],
+  );
+  const handlePreviewMouseLeave = useCallback((): void => {
+    if (previewHoverTimer.current !== undefined) {
+      globalThis.clearTimeout(previewHoverTimer.current);
+      previewHoverTimer.current = undefined;
+    }
+    setCursorBlock(undefined);
+  }, []);
 
   const selectedDoc = results[selectedIdx];
   const selectedDocFailed =
@@ -126,9 +150,9 @@ export function DocCodePreview({
     selectedDoc?.markdown ?? "",
   );
 
-  /* Epic E：仅在文档编辑模式且选中文档正常时才取版面、做高亮。 */
+  /* Epic E：文档视图（预览或编辑）且选中文档正常时取版面、做高亮（E4 起
+     去掉 editMode 约束，预览模式也启用）。 */
   const canHighlight =
-    editMode &&
     viewMode === "doc" &&
     !selectedDocFailed &&
     selectedDoc !== undefined;
@@ -197,6 +221,22 @@ export function DocCodePreview({
   const highlight = useMemo<SourceImageHighlight | undefined>(
     () => computeBlockHighlight(layout, cursorBlock),
     [layout, cursorBlock],
+  );
+
+  /* E4：编辑 ↔ 预览互切时复位光标块，避免残留上一模式的高亮（新模式首次
+     交互前没有事件）。layout 不动（同文档共用）。 */
+  useEffect(() => {
+    setCursorBlock(undefined);
+  }, [editMode]);
+
+  /* E4：卸载时清掉 hover 防抖定时器。 */
+  useEffect(
+    () => () => {
+      if (previewHoverTimer.current !== undefined) {
+        globalThis.clearTimeout(previewHoverTimer.current);
+      }
+    },
+    [],
   );
 
   usePreviewScrollSync(
@@ -449,6 +489,8 @@ export function DocCodePreview({
           <div
             ref={(el) => { setRightScrollEl(el ?? undefined); }}
             className="markdown-preview"
+            onMouseMove={canHighlight ? handlePreviewMouseMove : undefined}
+            onMouseLeave={canHighlight ? handlePreviewMouseLeave : undefined}
           >
             <Markdown
               remarkPlugins={PREVIEW_REMARK_PLUGINS}

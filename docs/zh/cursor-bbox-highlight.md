@@ -275,10 +275,52 @@ height = (y1-y0) / image_size.h * 100  (%)
 
 ## 11. 范围外（Epic E phase-2）
 
-- 反向联动：点原图块 → 定位/滚动到 markdown 对应文字。
-- 只读预览 hover 高亮（本期仅编辑器光标驱动）。
-- PPT 模式前端高亮（坐标系/显示矫正图问题）。
-- 行级 bbox 高亮（VL `text_lines` 恒空，需后处理切行）。
+- 反向联动：点原图块 → 定位/滚动到 markdown 对应文字（#89）。
+- ~~只读预览 hover 高亮~~ → **已纳入 phase-2，见 §12（#88）**。
+- PPT 模式前端高亮（坐标系/显示矫正图问题，#90）。
+- 行级 bbox 高亮（VL `text_lines` 恒空，需后处理切行，#91）。
 - 精确块映射（穿透 dedup/精修的无损映射）。
+
+## 12. E4 只读预览 hover 高亮（#88，phase-2）
+
+> 状态：phase-2 首个子任务。把光标高亮从「仅 WYSIWYG 编辑器」扩到**只读预览模式**，
+> **零新算法**，复用 phase-1 全部地基（`getTaskLayout` + `computeBlockHighlight` +
+> `BlockHighlightOverlay` + `SourceImageList` overlay）。
+
+### 12.1 唯一新增：`previewBlockAtPointer`（镜像 `blockAtCursor`）
+
+预览侧无 Tiptap 节点，改从 DOM 求「光标块」。新建纯函数
+`features/task/previewBlockAtPointer.ts`：`previewBlockAtPointer(target, container) → CursorBlock | undefined`，
+语义与编辑器 `blockAtCursor`（§6.2）**一一对应**：
+
+| 维度 | 编辑器 `blockAtCursor` | 预览 `previewBlockAtPointer` |
+|---|---|---|
+| 「块」 | 光标所在**顶层块节点**（`$from.node(1)`，doc 直接子节点） | 命中元素向上到**容器直接子节点**（`.markdown-preview` 直接子块） |
+| 文本 | `node(1).textContent.trim()` | `block.textContent.trim()` |
+| 页 | 最近**前置** `pageAnchor` 的 `page` 属性 | 最近**前置** `[data-page]` 锚点的 `dataset.page` |
+| 退化 | 无页 / 空块 → undefined | 容器外 / 无前置页 / 空块 → undefined |
+
+取「容器直接子节点」而非「最近 p/h1-h4/li」是为了**严格镜像** `node(1)`：react-markdown v9
+把块直接渲染为 `.markdown-preview` 的直接子节点（无 wrapper），列表/表格作为整块（与编辑器
+depth-1 一致），匹配面与 E3 完全相同 → 同一段在预览/编辑两模式得到同一高亮。
+「最近前置 `[data-page]`」用 `compareDocumentPosition` 在文档序里取该块之前最后一个页锚点
+（`injectPageAnchors` 已把 `<!-- page: X -->` 转成 `<span class="page-anchor" data-page="…">`）。
+
+### 12.2 接线（`DocCodePreview`，链路其余零改）
+
+- `canHighlight` **去掉 `editMode` 约束** → `viewMode==='doc' && !selectedDocFailed && selectedDoc!==undefined`，
+  预览与编辑两模式都取 layout、都把 `highlight` 传 `SourceImagePanel`（原本仅编辑模式传）。
+- 预览容器 `.markdown-preview` 挂 `onMouseMove`（debounce ~80ms，同编辑器侧）→
+  `previewBlockAtPointer(e.target, e.currentTarget)` → `setCursorBlock`；`onMouseLeave` → 清空。
+  > React 合成事件在 `setTimeout` 回调里 `currentTarget` 会被置空，**同步**先把
+  > `target`/`container` 取出再进定时器。
+- `editMode` 切换时 `setCursorBlock(undefined)` 复位，避免切模式残留上一模式的高亮。
+
+### 12.3 验收（#88）
+
+- [x] `previewBlockAtPointer` 单测：构造含 `[data-page]` + 多块的预览 DOM，hover 不同块断言
+  `{page, text}`、容器外/空块/无前置页 → undefined（镜像 `blockAtCursor.test.ts`）。
+- [x] overlay 渲染**复用 E3 已像素核对的 `BlockHighlightOverlay`**（本期零视觉改动），
+  截图验证 hover 段落 → 原图叠框、移出清空。
 
 

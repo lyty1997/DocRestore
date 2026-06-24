@@ -881,3 +881,18 @@ per-file lint/tsc hook 看不出（跨文件、运行期 DOM 断言），全量 
 - 传 `undefined` 实参时改用具名变量（`const noCursor: T | undefined = undefined; fn(a, noCursor)`），
   或对可选参数直接省略（`fn(a)`）。
 - 此约定与 codebase 既有写法一致（既有代码用三元 `cond ? undefined : val` 而非 `return undefined` 语句）。
+
+## 前端 lint：`Element.textContent` 非空 + `unicorn/no-null` 拿真实 null 的写法
+
+现象（Epic E E4，#88）：
+- `block.textContent ?? ""` 被 `@typescript-eslint/no-unnecessary-condition` 判错——本项目 DOM 类型里
+  `Element.textContent` 推断为 `string`（非 `string | null`），`?? ""` 左侧不可能为空 → 多余。
+  对 `Element`（非裸 `Node`）直接 `block.textContent.trim()` 即可（Element 的 textContent 运行期恒为字符串）。
+- 单测里要传「运行期 null」给入参（如模拟 `e.target` 为 null）时，**禁止写 `null` 字面量**
+  （`unicorn/no-null`），也别用 `x ?? null` 把 `undefined` 转 null（同样判错）。
+
+处理策略：
+- 取真实 null 用 `container.querySelector(".does-not-exist")`（落空返回真 `null`，类型 `Element | null`），
+  既覆盖 null 运行期路径，又不写字面量。
+- 纯函数入参若既可能 null 又可能 undefined，签名直接放宽到 `Element | null | undefined`，
+  调用侧（`querySelector` 返回 `Element|null`、`at(-1)` 返回 `Element|undefined`）都能直传，免去 `?? null` 转换。
