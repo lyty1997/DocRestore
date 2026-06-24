@@ -236,11 +236,12 @@ text / image / chart / table / figure_title`。各标签的 `content` 来源：
 **step 0 spike 已完成（2026-06-23）**：跑真 VL（slide 508/503），证据见 §6 + `/tmp/spike_out/`。
 结论：每区域有 bbox、文字/表格内容直接可用、figure↔crop 按阅读序映射可行——风险消解、设计简化。
 
-**下一步 = 按本设计实现**，建议拆 4 个有序子任务（逐个有证据闭环）：
-1. 捕获 `LayoutRegion`（含 image_ref 认领）+ 单测（喂构造 coordinates → 断言区域/映射）。
-2. `.ppt_layout.json` 落盘 + 坐标变换纯函数（§5）+ 单测（已知 bbox → EMU 落点）。
-3. 导出器 positioned 渲染分支 + fail-safe 退竖排 + 单测（sidecar 在/缺两路）。
-4. 开精修：区域单元 idx 锚点精修 + idx 重挂 + 整页退 raw 兜底 + 单测（mock LLM 含/缺 idx）。
+**按本设计实现**，拆 4 个有序子任务（逐个有证据闭环）：
+1. ✅ **已完成**（commit `677e3e2`）捕获 `LayoutRegion`（含 image_ref 认领）+ 单测（喂构造 coordinates → 断言区域/映射）。
+2. ✅ **已完成**（2026-06-24）`.ppt_layout.json` 落盘 + 坐标变换纯函数（§5）+ 单测（已知 bbox → EMU 落点）。
+   落点：`output/ppt_layout.py`（纯模块）+ `pipeline.py::_write_ppt_layout_sidecar`（装配后落盘、文字过 PII 闸口）。
+3. ⏳ 导出器 positioned 渲染分支 + fail-safe 退竖排 + 单测（sidecar 在/缺两路）。
+4. ⏳ 开精修：区域单元 idx 锚点精修 + idx 重挂 + 整页退 raw 兜底 + 单测（mock LLM 含/缺 idx）。
 
 ## 10. 验收清单
 

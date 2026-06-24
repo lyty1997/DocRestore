@@ -1383,12 +1383,73 @@ class Pipeline:
             output_config=self._config.output,
             bodies=bodies,
         )
+        # PPT 版面定位 sidecar（Phase-2b）：落 .ppt_layout.json 位置真相源，供
+        # pptx 导出器按 bbox 定位。文字区域 content 过同一 PII 闸口（与
+        # document.md 同口径脱敏），图片区域映射到最终输出引用；本子任务用捕获的
+        # raw 区域内容（开精修按 idx 锚点重挂留待 subtask4）。非 VL/捕获失败 →
+        # build 返回 None 不落盘，导出端 fail-safe 退竖排。
+        await self._write_ppt_layout_sidecar(
+            ordered_pages, output_dir, guard, entity_lexicon,
+        )
         return PipelineResult(
             output_path=doc_path,
             markdown=memory_md,
             images=[r for page in ordered_pages for r in page.regions],
             warnings=[],
         )
+
+    async def _write_ppt_layout_sidecar(
+        self,
+        ordered_pages: list[PageOCR],
+        output_dir: Path,
+        guard: PIIGuard | None,
+        entity_lexicon: EntityLexicon | None,
+    ) -> None:
+        """落 PPT 版面定位 sidecar ``.ppt_layout.json``（Phase-2b 位置真相源）。
+
+        每页把捕获的 ``layout_regions`` 转成 sidecar 区域：文字区域 content 过同一
+        PII 出云闸口（``redact_for_cloud``，与 ``document.md`` 同口径脱敏，本地产物），
+        图片区域映射到最终输出引用（``images/{stem}_N.ext``）。非 VL/无版面区域 →
+        ``build_ppt_layout`` 返回 None 不落盘，导出端 fail-safe 退竖排。落盘失败仅告警，
+        不阻断主流程（版面定位是增强，缺 sidecar 退竖排）。
+        """
+        from docrestore.output.ppt_layout import (
+            build_ppt_layout,
+            layout_region_from_ocr,
+            write_ppt_layout,
+        )
+
+        def _redact(text: str) -> str:
+            """文字区域脱敏：开 PII 时走出云闸口（结构化 + 实体），否则原文。"""
+            if guard is None:
+                return text
+            return guard.redact_for_cloud(text, entity_lexicon)
+
+        layout_pages = [
+            (
+                page.image_path.name,
+                page.image_size,
+                [
+                    layout_region_from_ocr(
+                        region,
+                        stem=page.image_path.stem,
+                        content=_redact(region.content),
+                    )
+                    for region in page.layout_regions
+                ],
+            )
+            for page in ordered_pages
+        ]
+        layout = build_ppt_layout(layout_pages)
+        if layout is None:
+            return
+        try:
+            await asyncio.to_thread(write_ppt_layout, output_dir, layout)
+        except OSError:
+            logger.warning(
+                "PPT 版面 sidecar 落盘失败（不阻断主流程，导出退竖排）",
+                exc_info=True,
+            )
 
     async def _code_pipeline(  # noqa: C901
         self,

@@ -2509,3 +2509,26 @@ Phase-2 勘察（5 路并行只读）+ **4 轮 pandoc spike** 推翻了「需先
 **证据**：`bash scripts/check_quality.sh` 全绿（**1461 passed, 45 skipped**，+6：html_table 5 + pptx 净 +1）；
 用户原文复现：docx tables=1/images=2/OMML=True、pptx slide1 原生表格+图无 HTML 漏出。
 测试据实改用 **HTML `<table>` + HTML `<img>`** 锁回归。详见 known-issues.md + export-mode.md §6/§9.2。
+
+## 2026-06-24 - Epic D Phase-2b（PPT 版面定位导出）子任务 1+2
+
+设计真相源 `docs/zh/ppt-layout-export.md`（spike 已验证）。分 4 个有序子任务逐个有证据闭环。
+
+**子任务 1：捕获 `LayoutRegion`**（commit `677e3e2`）
+- `models.py` 新增 `LayoutRegion`（bbox+label+content+image_ref）+ `PageOCR.layout_regions`（引擎可选）。
+- `paddle_ocr.py` `_build_layout_regions` 从手头 `coordinates_raw`+`raw_text` 构造：文字类保留
+  block 文字；image/chart 按**阅读序**认领 `raw_text` 第 k 个 `<img src>` 为 `image_ref`。与侧栏检测
+  解耦、非 VL 引擎自然为空，全链路 fail-safe。15 个纯函数单测 + `test_ocr_success` 扩 e2e。
+
+**子任务 2：`.ppt_layout.json` 落盘 + 坐标变换纯函数**（本次）
+- 新建 `output/ppt_layout.py`（纯模块）：数据模型 `PptLayout/Page/Region` + §5 坐标变换
+  （`compute_canvas_emu` 首页长宽比定画布、`region_box_emu` letterbox 居中 + clamp）+ 序列化
+  round-trip + fail-safe 反序列化 + 磁盘 I/O。图片区域 `resolve_output_image_ref` 镜像
+  `Renderer` 命名映射成 `images/{stem}_N.ext`。
+- `pipeline.py` `_write_ppt_layout_sidecar`：`_ppt_pipeline` 装配后落 sidecar。文字区域 content
+  过**同一 PII 出云闸口**（`redact_for_cloud`，与 `document.md` 同口径脱敏），非 VL/无区域 →
+  `build_ppt_layout` 返回 None 不落盘（导出端退竖排），落盘失败仅告警不阻断。
+- 21 个纯函数单测 + 3 个集成测试（落盘+映射 / 非 VL 不落盘 / 开 PII 脱敏一致）。
+
+**证据**：`bash scripts/check_quality.sh` 全绿（**1500 passed, 45 skipped**，mypy 88 文件）。
+**待续**：子任务 3（导出器 positioned 渲染 + fail-safe 退竖排）、子任务 4（开精修 idx 锚点重挂）。
