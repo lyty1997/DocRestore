@@ -23,7 +23,10 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-from docrestore.ocr.region_color import sample_region_color
+from docrestore.ocr.region_color import (
+    estimate_white_balance,
+    sample_region_color,
+)
 
 Rgb = tuple[int, int, int]
 #: 默认竖条（模拟文字笔画，占少数像素）：行 20..40，三段列各 20px 宽
@@ -124,3 +127,26 @@ def test_bbox_out_of_bounds_clamped() -> None:
     assert result is not None
     _, got_bg = result
     assert _close(got_bg, bg)
+
+
+def test_white_balance_corrects_blue_cast_background() -> None:
+    """偏蓝白平衡：本应白的底被拍成淡蓝 → 白平衡校正后背景还原近白。"""
+    bg, fg = (180, 200, 255), (10, 30, 90)  # 淡蓝白底 + 深字
+    img = _strokes(bg, fg)
+    wb = estimate_white_balance(img)
+    assert wb is not None
+    raw = _sample_full(img)  # 不校正
+    h, w = img.shape[:2]
+    corrected = sample_region_color(img, (0, 0, w, h), wb)
+    assert raw is not None
+    assert corrected is not None
+    _, raw_bg = raw
+    _, corr_bg = corrected
+    # 校正后背景更接近白（最暗通道显著提升）
+    assert min(corr_bg) > min(raw_bg)
+    assert min(corr_bg) >= 230
+
+
+def test_white_balance_none_for_dark_image() -> None:
+    """暗色图（无亮背景）→ 不校正（None，不强制白化暗色主题）。"""
+    assert estimate_white_balance(_canvas(80, 200, (15, 20, 40))) is None

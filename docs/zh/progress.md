@@ -20,8 +20,16 @@
   正文深字浅底、2D 版面 + 字号比例忠实还原（503 / 508）。
 
 **证据/门禁**：新增 22 测试（region_color 9 + ppt_layout 色 5 + export_pptx 色/字号 7 + sidecar 透传 1），
-`bash scripts/check_quality.sh` 全绿（**1527 passed, 45 skipped**，mypy/ruff/typos/前端 typecheck+lint 全过）。
-**未提交**（待用户确认）。
+`bash scripts/check_quality.sh` 全绿（1527 passed）。已提交 `a772f62`（dev）。
+
+### 跟进修复：相机白平衡偏色被原样搬进 pptx（用户报）
+
+用户反馈：拍照白平衡偏蓝，本该白的背景被采成淡蓝、渲染填成蓝背景——**过度忠实复刻拍摄缺陷**。
+修复：`region_color.estimate_white_balance` 整页估每通道增益（白点=95 百分位背景白，`gain=255/白点`，
+限幅 + 暗色主题守卫），`_attach_region_colors` 估一次传 `sample_region_color`，增益只施于输出色
+（守卫仍用未校正色）；渲染「视为白底」判别由「≥240」改 `_is_effectively_white`（最暗≥200 且通道极差≤30，
+吸残留偏色又不误伤真彩浅色）。真机重渲染：白底还原白、仅真彩 banner 填色。详见 known-issues。
+新增 6 测试（WB 2 + effectively_white 4），门禁全绿（**1533 passed, 45 skipped**）。**未提交**（待用户确认）。
 
 ## 2026-06-18 - Epic A A2（#76 前端 PDF 输入）落地 → Epic A 收口
 

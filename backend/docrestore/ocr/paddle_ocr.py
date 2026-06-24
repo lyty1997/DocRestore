@@ -37,7 +37,10 @@ from docrestore.ocr.base import (
     WorkerBackedOCREngine,
 )
 from docrestore.ocr.column_filter import ColumnFilter
-from docrestore.ocr.region_color import sample_region_color
+from docrestore.ocr.region_color import (
+    estimate_white_balance,
+    sample_region_color,
+)
 from docrestore.pipeline.config import OCRConfig
 
 logger = logging.getLogger(__name__)
@@ -174,12 +177,14 @@ def _attach_region_colors(
     h, w = arr.shape[:2]
     if (w, h) != image_size:  # 坐标空间与像素不符 → 不采样，保持 fail-safe
         return regions
+    # 整页估一次白平衡增益，矫正相机偏色（偏蓝白底→采成蓝、误填蓝背景）。
+    white_balance = estimate_white_balance(arr)
     out: list[LayoutRegion] = []
     for region in regions:
         if region.image_ref:  # 图片区域不采色
             out.append(region)
             continue
-        sampled = sample_region_color(arr, region.bbox)
+        sampled = sample_region_color(arr, region.bbox, white_balance)
         if sampled is None:
             out.append(region)
             continue

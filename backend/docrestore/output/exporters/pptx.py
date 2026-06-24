@@ -383,8 +383,9 @@ def _render_slide(
 
 #: 标题类标签：定位文本框加粗 + 字号下限抬高（视觉层级）
 _LABEL_TITLE = frozenset({"paragraph_title", "figure_title"})
-#: 近白阈值：背景各通道 ≥ 此值视为白底，不填充（slide 默认白底即可，§11.3）
-_NEAR_WHITE = 240
+#: 「视为白底」阈值：背景浅且近中性 → 不填充（白平衡校正后白底=浅中性灰，§11.3）
+_FILL_WHITE_MIN = 200  # 背景最暗通道 ≥ 此
+_FILL_ACHROMATIC_SPREAD = 30  # 且通道极差 ≤ 此（近中性、非饱和色）
 #: 定位文本字号 clamp（pt）：正文 [9,40] / 标题 [12,54]（§11.2）
 _POS_FONT_MIN, _POS_FONT_MAX = 9.0, 40.0
 _POS_TITLE_MIN, _POS_TITLE_MAX = 12.0, 54.0
@@ -417,12 +418,21 @@ def _positioned_font_pt(
     return round(max(lo, min(hi, raw)) * 2) / 2
 
 
+def _is_effectively_white(bg: tuple[int, int, int]) -> bool:
+    """背景视为白底（不填充）：浅且近中性——白平衡校正后白底=浅中性灰，残留偏色被吸收，
+    而真彩色背景（banner / 色块）饱和度高、不满足。"""
+    return (
+        min(bg) >= _FILL_WHITE_MIN
+        and (max(bg) - min(bg)) <= _FILL_ACHROMATIC_SPREAD
+    )
+
+
 def _apply_textbox_fill(shape: Any, bg_color: tuple[int, int, int] | None) -> None:
     """非白背景 → 文本框实心填充 + 无边框（暗色模式 / 彩色标题栏的浅字才可见，§11.3）。
 
-    bg_color 为 None 或近白（各通道 ≥ ``_NEAR_WHITE``）→ 不填充（保持 slide 默认白底、
-    不画多余色块）。"""
-    if bg_color is None or all(c >= _NEAR_WHITE for c in bg_color):
+    bg_color 为 None 或视为白底（``_is_effectively_white``）→ 不填充（保持 slide 默认
+    白底、不画多余色块）。"""
+    if bg_color is None or _is_effectively_white(bg_color):
         return
     shape.fill.solid()
     shape.fill.fore_color.rgb = _rgb(bg_color)

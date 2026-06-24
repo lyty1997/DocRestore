@@ -28,6 +28,7 @@ from docrestore.output.exporters.pptx import (
     _EMU_PER_PT,
     PptxExporter,
     _ImageBlock,
+    _is_effectively_white,
     _parse_page,
     _positioned_font_pt,
     _resolve_image,
@@ -456,3 +457,21 @@ class TestPositionedFontPt:
         wide = _positioned_font_pt(h, ["A" * 50], self._WIDE, title=False)
         narrow = _positioned_font_pt(h, ["A" * 50], 100 * _EMU_PER_PT, title=False)
         assert narrow < wide
+
+
+class TestEffectivelyWhite:
+    """背景填充判别（§11.3）：浅且近中性视为白底不填、真彩色填。"""
+
+    def test_pure_white_is_white(self) -> None:
+        assert _is_effectively_white((255, 255, 255))
+
+    def test_light_neutral_below_240_is_white(self) -> None:
+        # 白平衡校正后的浅中性灰（<240 但浅且近中性）→ 视为白底（不填充）
+        assert _is_effectively_white((210, 224, 229))
+
+    def test_genuine_light_color_not_white(self) -> None:
+        # 浅但高饱和（真彩色浅蓝）→ 非白底（应填充）
+        assert not _is_effectively_white((200, 220, 255))
+
+    def test_dark_color_not_white(self) -> None:
+        assert not _is_effectively_white((20, 30, 80))

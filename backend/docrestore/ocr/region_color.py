@@ -43,8 +43,35 @@ _MAX_FG_FRAC = 0.45  # 前景占样本比例上限（更高=双色块 / 图）
 _MIN_CONTRAST = 60.0  # 前景背景 RGB 欧氏距离下限（0..441）
 _MIN_LUMA_DELTA = 28.0  # 前景背景亮度差下限（0..255）
 
+# 白平衡：白点取每通道高百分位（背景白），增益 = 255 / 白点；限幅 + 暗图守卫。
+_WB_PERCENTILE = 95.0  # 白点百分位（背景白占多数、是最亮大面积）
+_WB_MAX_GAIN = 4.0  # 增益上限（防暗图 / 低白点放大爆）
+_WB_MIN_WHITE = 100.0  # 白点最亮通道下限（更低=无亮背景 / 暗色主题→不校正）
+_WB_SAMPLE_TARGET = 20000  # 整页白点估计降采样目标点
+
 #: BT.601 亮度权重
 _LUMA_W = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+
+
+def estimate_white_balance(
+    img_rgb: NDArray[np.uint8],
+) -> tuple[float, float, float] | None:
+    """估每通道白平衡增益 ``gain_c = 255 / 白点_c``（白点=高百分位，即背景白）。
+
+    把页面背景白映射回真白，矫正相机白平衡偏色（如偏蓝 → 白底被采成蓝、误填蓝背景）。
+    无足够亮背景（暗色主题，白点最亮通道 < ``_WB_MIN_WHITE``）→ None（不强制白化）。
+    增益限幅 ``_WB_MAX_GAIN`` 防暗图放大爆。整页估一次、传给 ``sample_region_color``。
+    """
+    h, w = img_rgb.shape[:2]
+    step = max(1, int(np.sqrt(h * w / _WB_SAMPLE_TARGET)))
+    samp = img_rgb[::step, ::step].reshape(-1, 3).astype(np.float32)
+    if samp.shape[0] == 0:
+        return None
+    wp = np.percentile(samp, _WB_PERCENTILE, axis=0)
+    if float(wp.max()) < _WB_MIN_WHITE:
+        return None
+    gains = np.minimum(255.0 / np.maximum(wp, 1.0), _WB_MAX_GAIN)
+    return (float(gains[0]), float(gains[1]), float(gains[2]))
 
 
 def _luma(rgb: NDArray[np.float32]) -> float:
@@ -124,11 +151,15 @@ def _pick_foreground_bin(
     return int(nonzero[int(score.argmax())])
 
 
-def _classify(samp: NDArray[np.float32]) -> tuple[Rgb, Rgb] | None:
+def _classify(
+    samp: NDArray[np.float32],
+    white_balance: tuple[float, float, float] | None,
+) -> tuple[Rgb, Rgb] | None:
     """样本像素 → (前景色, 背景色)；任一守卫不过返回 ``None``（弃权退默认）。
 
     背景=最大量化桶（占多数，面积判别对暗色模式成立）；前景=最强对比次色。
     守卫：背景需占主导、前景不能过半（双色块）、前景背景对比 + 亮度差需足够。
+    守卫用**未校正**色（阈值按真机标定）；白平衡只施于最终输出色（矫正相机偏色）。
     """
     n = samp.shape[0]
     idx = _quantize(samp)
@@ -148,22 +179,29 @@ def _classify(samp: NDArray[np.float32]) -> tuple[Rgb, Rgb] | None:
         return None
     if abs(_luma(fg_rgb) - _luma(bg_rgb)) < _MIN_LUMA_DELTA:  # 亮度差不足
         return None
+    if white_balance is not None:  # 白平衡校正：背景白还原真白（相机偏色矫正）
+        gain = np.asarray(white_balance, dtype=np.float32)
+        fg_rgb = fg_rgb * gain
+        bg_rgb = bg_rgb * gain
     return (_to_rgb(fg_rgb), _to_rgb(bg_rgb))
 
 
 def sample_region_color(
-    img_rgb: NDArray[np.uint8], bbox: tuple[int, int, int, int],
+    img_rgb: NDArray[np.uint8],
+    bbox: tuple[int, int, int, int],
+    white_balance: tuple[float, float, float] | None = None,
 ) -> tuple[Rgb, Rgb] | None:
     """从源图区域采 ``(前景色, 背景色)``；拿不准返回 ``None``（fail-safe 退默认）。
 
     img_rgb：整页 RGB 数组 ``(H, W, 3) uint8``（调用方解码一次、全页区域共享）。
     bbox：``(x1, y1, x2, y2)`` 像素，落在 img_rgb 尺寸内（越界自动 clamp）。
-    返回 ``((fg_r, fg_g, fg_b), (bg_r, bg_g, bg_b))`` 或 ``None``。算法见 §11.1。
+    white_balance：每通道增益（``estimate_white_balance`` 整页估一次传入），校正相机
+    偏色（如偏蓝白底）；None=不校正。返回 ``((fg...), (bg...))`` 或 ``None``。
     """
     try:
         samp = _extract_samples(img_rgb, bbox)
         if samp is None:
             return None
-        return _classify(samp)
+        return _classify(samp, white_balance)
     except Exception:  # noqa: BLE001 — 采样 best-effort，任何异常退 None 不炸主流程
         return None
