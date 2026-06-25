@@ -198,3 +198,33 @@ exclude_images 同 key 空间），随 OCR 配置入 DB、resume 自动沿用：
 `apply_crop_boxes` 已删除（源码处留"勿复活"注释）。E2E 实证：软链 stage 源 + 手动框
 (900,300,2400,2000) → `.content_crop/DSC07963_crop.JPG` 精确 1500×1700、OCR 目录
 `DSC07963_crop_OCR`、NAS 原图完好。
+
+## 14. 扩展到代码 / PPT 模式（2026-06-25 用户确认）
+
+原 §3 范围「仅文档模式」放开。两模式分别处理（用户拍板）：
+
+### 14.1 代码模式：人工裁剪（手动框），不自动裁剪
+
+- 代码模式**坐标依赖强**（`code_assembly` 按 bbox 在原图坐标系重组行/列）+ 已有列裁剪
+  （`code_column_ocr`），自动 content_crop（文档正文列检测，未适配 IDE）误裁风险高 →
+  **代码模式不自动裁剪**（`skip_content_crop` 仍含 `code_cfg.enable`）。
+- 改为放开**手动框**：前端裁剪面板（`cropBoxes` 手动框，原 gated 在 `mode==='doc'`）扩到代码模式。
+  后端 `user_box` 分支本就**模式无关**（在 `skip_content_crop` 之前、无条件判定），零改动即生效。
+- 局限：手动裁剪后 OCR 在裁剪图上跑，代码模式源图锚点 overlay 仍按原图坐标 → 可能错位
+  （与文档/ PPT 的 processed-image 同类问题；代码模式源图视图未接 processed，留作后续）。
+
+### 14.2 PPT 模式：自动 content_crop，矫正后串联
+
+- PPT 移出 `skip_content_crop`（`skip = code_cfg.enable or is_pdf_rendered_dir`）。
+- 预处理由**互斥 `elif`** 改为**串联**：`if 手动框（独占）else { 矫正(若开) → content_crop(若开) }`。
+  矫正产 `.rectified/{stem}_after.jpg`，再 content_crop 产 `.content_crop/{stem}_after_crop.jpg`
+  （`crop_page` 用输入 stem=`{stem}_after`）。全程 fail-safe（矫正图无空白边 → content_crop 放行）。
+- **坐标系**：链末 OCR 图 = `_after_crop`，bbox/image_size 随之；`.ppt_layout.json` 自洽（导出 letterbox
+  用 image_size）。
+- **高亮 processed-image**：`_processed_source_variants` 加链末变体，探测序
+  `_after_crop`（矫正+裁剪）→ `_after`（仅矫正）→ `_crop`（仅裁剪），命中最深处理图对齐。
+
+### 14.3 验收
+
+- PPT+矫正任务：`.content_crop/{stem}_after_crop.jpg` 落盘，OCR 跑在其上；processed-image 返回它、
+  高亮对齐。代码模式：手动框生效（crop_boxes 透传），自动裁剪不触发。

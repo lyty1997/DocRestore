@@ -2658,3 +2658,97 @@ Phase-2b 关精修版面定位**真机验证通过**。
 - overlay 组件与 E3 逐字复用（已像素核对），E4 仅新增触发交互，无视觉改动。
 
 **状态**：实现 + 验证完成，**未提交**（待用户「提交」）。phase-2 下一步建议 #89 反向联动。
+
+## 2026-06-25 - Epic E Phase-2 E6：PPT 模式光标→bbox 高亮（#90）
+
+用户实测「光标在文档上原图不高亮」，定位根因：被测任务是 **PPT 模式（rectify=true）**，而
+E3/E4 是**纯文档模式特性**——PPT 只落 `.ppt_layout.json` 不落 `.layout.json`，且 bbox 在矫正图
+坐标系而源图栏显原图（§7 早标延后）。本次让高亮覆盖 PPT 模式（设计 §13）。
+
+**关键决策**：`.ppt_layout.json` 已含高亮全部所需（filename=原图名/marker 对齐、image_size=矫正图尺寸、
+regions[].bbox=矫正图坐标 + content），**零 pipeline 改动、现有 PPT 任务无需重跑**——让 API 回退读它。
+
+**改动**（复用 E1-E4 全链）：
+- 后端 `api/routes.py` `get_task_layout`：`.layout.json` 缺失时回退 `load_ppt_layout`，
+  `regions→blocks`(`content→text`)、`rectified=True`；新端点 `GET /tasks/{id}/rectified-image?name=&doc_dir=`
+  服务 `.rectified/{stem}_after{suffix}`（镜像 `get_source_image` 词法越界守卫，缺失 404）。
+- 后端 `schemas.py`：`LayoutPayload.rectified: bool = False`。
+- 前端 `schemas.ts`(`rectified` 入 zod)/`client.ts`(`getRectifiedImageUrl`)；
+  `SourceImageList` 在 `rectified` 时 img 显矫正图 URL（`data-page`/pageKey 仍原图名保三键对齐），
+  `onError` 一次性回退原图（未矫正页 bbox 本就原图坐标，回退即对）。
+
+**坐标系**：原图 1706×1279 → 矫正图 1205×809；bbox/image_size 同在矫正图系，源图栏改显矫正图即对齐。
+
+**验证**：后端 `test_layout_endpoint.py` 9 passed（+4：PPT 回退/rectified-image 200·404·400）、API 全目录
+253 passed 零回归；前端 217 passed（+5：getRectifiedImageUrl 3 + SourceImageList 矫正图 src 2）；
+tsc -b + `npm run lint` 0 error。**真机视觉**：现有 PPT 任务真实 `.ppt_layout.json` 全部 region bbox 按 %
+叠真实矫正图 `_after.jpg`，标题/正文/双图/footer 精准框住内容。
+
+**状态**：实现+验证完成，**未提交**（待用户「提交」）。现有 PPT 任务零重跑即可高亮。
+
+## 2026-06-25 - 修复文档模式光标高亮错位（content_crop 坐标系）+ 「处理图」机制通用化
+
+用户报「光标高亮框非常不准、没开精修」。真机实测（注入 device token 打开任务 d47b5c3e）定位：
+文档模式 + content_crop（正文裁剪，默认开），`.layout.json` image_size=[1418,1646]=裁剪图、
+原图 [2467,1646]——bbox 裁剪图坐标 vs 显示原图 → 左偏 ~20% + 拉宽 1.74×。根因通用
+（`pipeline.py:2047` 预处理后坐标系随处理图），#90 只解了 PPT。
+
+**修复**（设计 §15，决策=泛化「显处理图」而非重跑）：
+- 后端：`LayoutPayload.rectified`→`processed`；`get_task_layout` 按「探 .rectified/.content_crop
+  目录有文件」统一判 `processed`；`rectified-image` 端点→`processed-image`，逐 variant 探
+  `.rectified/{stem}_after` + `.content_crop/{stem}_crop`，均无→404。
+- 前端：`getRectifiedImageUrl`→`getProcessedImageUrl`（打 /processed-image）；`SourceImageList`
+  `rectified`→`processed`，processed 时 img 显处理图、onError 回退原图（逐页混合自洽）。
+- **现有任务零重跑**（裁剪图/矫正图已在盘）。
+
+**验证**：后端 test_layout_endpoint 11 passed（+content_crop layout/processed-image）、API 255 passed
+零回归；前端 217 passed、tsc+lint 0 error；**真机视觉**用用户实际任务真实裁剪图 `_crop`(1418×1646)+
+真实 bbox 叠加，标题/双表/各块精准框住（对比修复前原图上左偏拉宽）。
+
+**状态**：实现+验证完成，**未提交**。注：被测后端当时已停，真机 harness 验证用真实裁剪图+bbox；
+端到端活机验证需重启后端加载新代码（Vite 前端已热更新带新代码）。
+
+## 2026-06-25 - 图片/图表块高亮（image_ref 匹配）+ 高亮框改橙色
+
+用户报「插图图片不高亮、图表不高亮、换橙色」。
+
+**根因**：image/chart 区域 OCR 无文字（content=""），文字模糊匹配命中不了；光标落图片块时
+textContent 空，块检测直接返回 undefined。表格有 HTML 文字已可匹配。
+
+**修复**（设计 §16）：
+- 图片按 **image_ref** 精确匹配：后端 `LayoutBlock`/payload 加 `image_ref`，
+  `_write_doc_layout_sidecar` 用 `resolve_output_image_ref(ocr_stem, region.image_ref)` 算输出引用
+  `images/{stem}_N.ext`（与 markdown `<img src>` 一致，已验证）；前端 `extractImageRef` 取 `<img src>`
+  的 `images/xxx`，`previewBlockAtPointer`/`blockAtCursor` 无文字块时取图片引用，`computeBlockHighlight`
+  有 imageRef 走精确匹配。to_dict/from_dict + zod 向后兼容（旧 sidecar 无字段→空）。
+- 橙色：`.block-highlight-overlay` 改独立 `#f97316`（不动共享 `--color-primary`，避免波及按钮）。
+
+**验证**：后端 test_layout_sidecar 30 passed（+image_ref 3 测）+ resolve 值一致性验证；前端 222 passed
+（+image 5 测）、tsc+lint 0 error。
+
+**限制**：image_ref 是 sidecar 新字段 → **图片高亮需重跑任务**（现有 .layout.json 无此字段）；橙色即时生效
+（前端热更新）。
+
+**状态**：实现+单测完成，**未提交**。活机图片高亮验证待重跑任务 + 重启后端。
+
+## 2026-06-25 - content_crop 扩到代码（手动）/ PPT（自动串联）模式
+
+用户：让代码、PPT 模式也支持文档模式那种正文裁剪。决策（用户拍板）：代码=人工裁剪开关不自动；
+PPT=自动 content_crop 且矫正后串联。
+
+**实现**（设计 doc-content-crop.md §14）：
+- 后端 `skip_content_crop = code_cfg.enable or is_pdf_rendered_dir`（去掉 PPT）；代码模式坐标依赖强
+  + 已有列裁剪 + content_crop 不适配 IDE → 仍跳过自动裁剪（保留手动框）。
+- producer 预处理由互斥 `elif` 改**串联**：`if 手动框(独占) else { 矫正(若开) → content_crop(若开) }`。
+  PPT+矫正 → `.rectified/{stem}_after.jpg` 再裁 → `.content_crop/{stem}_after_crop.jpg`，各步 fail-safe。
+- 高亮 `_processed_source_variants` 加链末变体，探测序 `_after_crop`→`_after`→`_crop`（命中最深处理图对齐）。
+- 前端 TaskForm：手动裁剪面板/`cropBoxes` 的 `mode==='doc'` gating 放开到代码模式（`cropAllowed=doc||code`）；
+  后端 `user_box` 分支本就 mode 无关，零改动生效。
+
+**验证**：后端 layout 端点 12 passed（+串联 `_after_crop` 优先命中）、pipeline+api 534 passed 零回归；
+前端 222 passed、tsc+lint 0 error。
+
+**局限**：代码模式手动裁剪后源图锚点 overlay 仍按原图坐标可能错位（源图视图未接 processed，留后续）。
+producer 串联未单测（需 mock OCR 引擎）→ 靠设计 + 端点测 + 活机 PPT 跑验证。
+
+**状态**：实现+测试完成，**未提交**。活机验证（PPT 串联裁剪 + 代码手动裁剪 UI）待重启服务。

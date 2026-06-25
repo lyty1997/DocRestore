@@ -896,3 +896,58 @@ per-file lint/tsc hook 看不出（跨文件、运行期 DOM 断言），全量 
   既覆盖 null 运行期路径，又不写字面量。
 - 纯函数入参若既可能 null 又可能 undefined，签名直接放宽到 `Element | null | undefined`，
   调用侧（`querySelector` 返回 `Element|null`、`at(-1)` 返回 `Element|undefined`）都能直传，免去 `?? null` 转换。
+
+## 光标高亮在 PPT 任务上不亮：是「文档模式特性 + PPT 坐标系」而非缺陷（#90）
+
+现象：用户在 PPT 模式任务里把光标放文档上，右侧原图不出现 bbox 高亮框。
+
+根因（排查链）：
+- 该任务 `ppt.enable=true, rectify=true`（DB `tasks.ppt` 字段、`.rectified/` 目录、`*_after_OCR` 可佐证）。
+- E3/E4 高亮是**纯文档模式**：只读 `.layout.json`（`_write_doc_layout_sidecar` 仅在 `_finalize_single_doc`
+  调用），PPT 模式只落 `.ppt_layout.json` → `/layout` 404 → 前端 fail-safe 不高亮。
+- 即便有数据，PPT bbox 在**矫正图 `_after.jpg`** 坐标系，源图栏却显**原图**（透视矫正后长宽比已变）→ 不对齐。
+
+处理：#90 让 `/layout` 在 `.layout.json` 缺失时回退读 `.ppt_layout.json`（含 filename/image_size/regions），
+置 `rectified=true`；前端据此把源图栏改显矫正图 `_after.jpg`（坐标系对齐）。**现有 PPT 任务零重跑即可高亮**。
+
+排查教训：报「功能不工作」先确认**被测任务的模式/配置**（查 DB `tasks` 行 + output_dir 里落了哪种
+sidecar），别假设是代码 bbox bug——很多「不工作」是数据/模式不匹配（旧任务无 sidecar、PPT vs 文档）。
+
+## 前端 zod `.default()` 让 `z.infer` 类型字段变**必填**（输出类型）
+
+现象（#90）：`LayoutPayloadSchema` 加 `rectified: z.boolean().default(false)` 后，`type LayoutPayload =
+z.infer<...>` 的 `rectified` 是**必填** `boolean`（zod 的 output 类型含默认值后的字段），导致测试里
+手写的 `LayoutPayload` 字面量（缺 `rectified`）`tsc -b` 报 TS2741。per-file hook 的逐文件 tsc 看不出
+（错在**别的**测试文件引用该类型），全量 `npm run typecheck`(`tsc -b`) 才暴露。
+
+处理：给所有手写该类型的测试 fixture 补上新字段（`rectified: false`）。生产代码不受影响——它走
+`handleResponse`→zod 解析，`.default()` 在解析期补值，无需手写。
+
+## 光标高亮框「非常不准」：OCR 前预处理坐标系不匹配（通用，#90 只解了 PPT）
+
+现象：文档模式光标高亮框水平方向严重错位（左偏 + 拉宽），**没开 LLM 精修也错**（排除匹配问题）。
+
+根因（`pipeline.py:2047`）：OCR 前任一预处理——PPT 透视矫正 / content_crop 正文裁剪（**默认开**）/
+手动裁剪——后，`ocr_input` 是处理图，OCR 出的 `image_size`+`layout_regions.bbox` 在**处理图坐标系**，
+但 `page.image_path` 被改回原图（marker/源图按原名匹配）。Epic E sidecar 落的就是处理图坐标，而
+源图栏显示**原图** → bbox 与显示图坐标系不符。实测 content_crop：裁剪图 1418 宽、原图 2467 宽，
+标题框画在 3%–81% 而实际 ~23%–68%，左偏 ~20% + 拉宽 1.74×。
+
+排查关键证据：浏览器注入 device token（`~/.config/docrestore/device_token`，localStorage key
+`docrestore_api_token`）打开真实任务，hover 块后 `evaluate` 抓 overlay 的 `style.left/width` +
+`img.naturalWidth` 一比就实锤（naturalWidth=原图 2467 vs image_size=裁剪 1418）。
+
+处理（§15）：把 #90 的「显处理图」机制**通用化**——`rectified`→`processed`、`rectified-image`→
+`processed-image`（逐 variant 探 `.rectified/_after` + `.content_crop/_crop`）。`processed` 按
+**探处理图目录是否有文件**统一判定；源图栏对处理页改显处理图、`onError` 回退原图（未处理页 bbox
+本在原图系，逐页混合自洽）。**现有任务零重跑**（裁剪图/矫正图已在盘）。
+
+教训：**任何「OCR 在变换后的图上跑、却把坐标当原图用」都会错位**。新增预处理（去畸变/裁剪/旋转）
+时，要么把 bbox 变换回原图坐标，要么前端显示处理图——二选一，别让两个坐标系混着用。
+
+## curl localhost 返回 Privoxy 502：环境 http_proxy 拦截本地请求
+
+现象：`curl http://127.0.0.1:8000/...` 返回 `502 ... (Privoxy@localhost)`，但服务其实正常。
+根因：环境设了 `http_proxy`/`https_proxy` 指向 Privoxy，curl 默认走代理，代理转发不到本地端口。
+处理：本地 curl 加 `--noproxy '*'`（或 `NO_PROXY=127.0.0.1`）。Playwright/浏览器访问 localhost
+不受影响（自有网络栈）。

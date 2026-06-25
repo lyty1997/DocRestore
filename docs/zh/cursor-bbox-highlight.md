@@ -323,4 +323,177 @@ depth-1 一致），匹配面与 E3 完全相同 → 同一段在预览/编辑�
 - [x] overlay 渲染**复用 E3 已像素核对的 `BlockHighlightOverlay`**（本期零视觉改动），
   截图验证 hover 段落 → 原图叠框、移出清空。
 
+## 13. E6 PPT 模式高亮（#90，phase-2）
+
+> 状态：phase-2。用户实际在用 PPT 模式，发现光标在文档上但原图不高亮——根因是 E3/E4 为
+> **纯文档模式特性**，PPT 任务只落 `.ppt_layout.json` 不落 `.layout.json`，且 bbox 在**矫正图**
+> 坐标系而源图栏显示原图（§7 早已标注延后）。本节让高亮覆盖 PPT 模式。
+>
+> **后续通用化（§15）**：本节的 `rectified` 标志 / `rectified-image` 端点已**通用化**为
+> `processed` / `processed-image`，覆盖 PPT 矫正 + content_crop 裁剪两类预处理（下文 `rectified`
+> 读作 `processed`、`_after` 是其一个 variant）。
+
+### 13.1 关键发现：`.ppt_layout.json` 已含高亮所需，现有任务无需重跑
+
+实测 PPT 任务 sidecar `.ppt_layout.json`（`output/ppt_layout.py`）每页已有：
+- `filename` = **原图名**（与 `<!-- page: X -->` marker、源图基名同源 `page.image_path.name`）；
+- `image_size` = **矫正图**像素尺寸（如原图 1706×1279 → 矫正图 1205×809）；
+- `regions[].bbox` = **矫正图**坐标系像素、`regions[].content` = raw OCR 文字。
+
+即 `.ppt_layout.json` 与 E1 的 `.layout.json` 信息等价（仅键名 `regions/content` vs `blocks/text` +
+多了 `slide_size_emu`/`image_ref`/颜色）。**结论：不改 pipeline、不重跑**，让 API 层在 `.layout.json`
+缺失时回退读 `.ppt_layout.json` 转成 `LayoutPayload` 即可——现有 PPT 任务立即可高亮。
+
+### 13.2 坐标系对齐：源图栏改显矫正图（唯一理智方案）
+
+bbox 在矫正图坐标系，原图却因透视矫正长宽比已变（1706×1279→1205×809）。两条路：
+- **(A) 源图栏对 PPT 显示矫正图 `_after.jpg`**：bbox/image_size 与显示图同系，overlay 直接对齐。✅ 选此。
+- (B) 反算把矫正图 bbox 透视逆变换回原图：bbox 变成**四边形**（非轴对齐矩形），overlay 要画 polygon，
+  复杂且脆弱。❌ 否决。
+
+矫正 slide 是去畸变的正视图、与导出的 pptx 一致，展示价值更高。三键对齐保持不变：
+`cursorBlock.page`(marker=原图名) = `layout.filename`(原图名) = 源图 cell `data-page`(原图名)；
+**仅 `<img src>` 从原图换成矫正图**，pageKey/data-page 不动 → `computeBlockHighlight` 与 cell 命中零改。
+
+### 13.3 改动清单（复用 E1-E4 全链）
+
+- **后端 B1**（`api/routes.py` `get_task_layout`）：`load_doc_layout` 返回 None 时回退
+  `load_ppt_layout`，`regions→blocks`（`content→text`）、`rectified=True`。
+- **后端 B2**（`api/schemas.py`）：`LayoutPayload` 加 `rectified: bool = False`。
+- **后端 B3**（`api/routes.py`）：新端点 `GET /tasks/{id}/rectified-image?name=&doc_dir=`，
+  原图名 → `{output_dir}/{doc_dir}/.rectified/{stem}_after.jpg`，镜像 `get_source_image` 的越界守卫
+  （词法 `is_relative_to` 不跟随 symlink + `is_file` 确认）；缺失 → 404（前端 `onError` 回退原图）。
+- **前端 F1**（`schemas.ts`/`client.ts`）：`rectified` 入 zod；加 `getRectifiedImageUrl(taskId, name, docDir?)`（带 token）。
+- **前端 F2**（`DocCodePreview`→`SourceImagePanel`→`SourceImageList`）：`layout.rectified` 时给源图
+  `<img src>` 用矫正图 URL（`data-page`/pageKey 仍原图名），`onError` 回退原图。overlay 不变。
+
+### 13.4 验收（#90）✅ 落地
+
+- [x] `/layout` 对 PPT 任务回退 `.ppt_layout.json` → `rectified=true` + blocks（`content→text`）。
+- [x] `rectified-image` 端点：原图名 → `.rectified/{stem}_after{suffix}`，缺失 → 404、穿越 → 400。
+- [x] 前端 PPT 任务源图栏显矫正图（`onError` 回退原图）、光标块 → 矫正图叠框对齐。
+- [x] 文档模式回归：`.layout.json` 在 → `rectified=false`、仍显原图（不回归）。
+- 测试：`tests/api/test_layout_endpoint.py`（+4：PPT 回退 / rectified-image 200·404·400）；
+  前端 `client.test.ts`（+3 `getRectifiedImageUrl`）+ `SourceImageList.test.tsx`（+2 矫正图 src）。
+- 真机视觉：用现有 PPT 任务真实 `.ppt_layout.json` 全部 region bbox 按 % 叠真实矫正图 `_after.jpg`，
+  标题/正文/双图/footer 各区**精准框住内容**，坐标系对齐确证。
+- **现有 PPT 任务零重跑即可高亮**（API 回退读已落的 `.ppt_layout.json`，无 pipeline 改动）。
+
+## 14. MinerU 勘察结论与借鉴边界（mineru.net「版面图」效果）
+
+用户希望达到 mineru.net 在线提取器的「彩色版面图 + 联动」效果，勘察了本地 MinerU 全量克隆
+（`ref/MinerU`，5-agent workflow + 综合官亲验关键文件）。
+
+### 14.1 结论：联动前端未开源，只有服务端出图 + 数据契约
+
+| 维度 | ref/MinerU 里有没有 | 证据 |
+|---|---|---|
+| 独立 JS/TS 前端工程 | **零** | 全仓无 `package.json`/`*.vue/*.tsx/*.jsx` |
+| 浏览器内 bbox 叠框 / 双向联动 | **零** | grep `scrollIntoView`/`data-block-id`/`data-bbox` 零命中 |
+| 服务端画框出图（静态，非交互） | **有** | `mineru/utils/draw_bbox.py` reportlab `canvas.rect` 烧进 `_layout.pdf` |
+| bbox 数据契约 | **有且完备** | `content_list.json`：0-1000 归一 bbox + `page_idx` + `type` + `index`(阅读序) |
+
+唯一「前端」是 Gradio WebUI（`mineru/cli/gradio_app.py`），**左右两栏完全独立**（左 = 静态 `_layout.pdf`
+经 `gradio_pdf.PDF` 展示，右 = markdown/json 文本），**无 id 映射、无滚动同步、无 hover/click 联动**。
+**mineru.net 那个精致联动 viewer = SaaS 专有，不开源**（`README_zh-CN.md:66`）。
+
+### 14.2 借鉴边界（借契约/思路，不抄代码）
+
+- **能借（增量小改）**：① category 着色思路（`draw_bbox.py` 的 BlockType→色映射）；
+  ② 阅读序号（block 的 `index` 字段）。→ 落为 **E8 版面全览叠加**（见下方 issue）。
+- **不必借**：0-1000 归一化坐标——我们 `BlockHighlightOverlay` 用 `payload.image_size` 作 % 分母
+  已解决 decode race + 文档/PPT 两套坐标系，归一化对我们**零实际收益**（还会与 PPT 的 EMU 导出抢
+  bbox），**不单开 issue**。
+- **借不了**：MinerU 的**稳定块 ID 双向映射**——前提是「块身份从 OCR 到输出不变」，而我们 dedup +
+  LLM 精修打断了块身份链（#83 架构反转已证伪），故照搬会崩。我们的「页级模糊匹配」是自身约束下的
+  正解，**明确放弃稳定 ID**。反向联动（#89）MinerU 开源部分也没有，复用 `blockMatch` 对称自建。
+
+### 14.3 衍生 issue
+
+- **E8（版面全览叠加）**：源图叠**全部**版面块的彩色分类框 + 阅读序角标（仿 mineru 版面图）；
+  sidecar 加 `index`，前端加 `LayoutOverlay` + `label→色` 映射 + toggle。复用现有 overlay 换算。
+- **#89（反向联动）**：点原图块 → 定位 markdown，复用 `blockMatch` 对称反查（MinerU 无现成参考）。
+
+## 15. content_crop 高亮错位修复 + 「处理图」机制通用化
+
+> 用户报「光标在文档上高亮框非常不准，且没开精修」。真机实测（注入 device token 打开任务）
+> 定位：该任务**文档模式 + content_crop（正文自动裁剪，默认开）**。`.layout.json`
+> `image_size=[1418,1646]`=裁剪图，原图 `DSC04641.JPG=[2467,1646]`——bbox 在裁剪图坐标系，
+> 源图栏却显原图 → 标题框画在 3%–81% 而正文实际 ~23%–68%，**左偏 ~20% + 横向拉宽 1.74×**。
+
+### 15.1 根因：预处理坐标系不匹配是**通用** bug，#90 只解了 PPT
+
+`pipeline.py:2047`：OCR 前任一预处理（PPT 矫正 / content_crop 裁剪 / 手动裁剪）后，`ocr_input`
+是处理图，OCR 出的 `image_size`+`layout_regions.bbox` 在**处理图坐标系**，但 `page.image_path`
+被改回原图（marker/源图按原名匹配）。#90 仅对 PPT 让源图栏显矫正图；content_crop / 手动裁剪
+同病未解。content_crop 是**纯水平裁剪**（保全高、裁左右空白边），裁剪图已落 `.content_crop/{stem}_crop`。
+
+### 15.2 方案：把 #90「显处理图」机制通用化（零重跑）
+
+决策（用户选）：泛化而非后端平移 bbox（后者需重跑现有任务）。`.content_crop/{stem}_crop` 已在盘上，
+**现有任务零重跑**即对齐：
+
+- `rectified` 标志 → **`processed`**（bbox 在处理图坐标系，须显处理图）；按**探处理图目录**
+  （`.rectified` / `.content_crop` 有文件）统一判定，比「PPT 恒 true」更准（全回退原图的页 → false）。
+- `rectified-image` 端点 → **`processed-image`**：逐 variant 探
+  `.rectified/{stem}_after{suffix}`（PPT）、`.content_crop/{stem}_crop{suffix}`（裁剪），命中即返回；
+  均无 → 404（前端 `onError` 回退原图，未处理页 bbox 本在原图系，回退即对——**逐页混合自洽**）。
+- 前端 `getProcessedImageUrl` / `SourceImageList processed`：`processed` 时 img 显处理图
+  （`data-page`/pageKey 仍原图名保三键对齐），`onError` 一次性回退原图。
+
+### 15.3 坐标系自洽（逐页混合）
+
+| 页情况 | sidecar bbox/image_size | processed-image | 显示 → 对齐 |
+|---|---|---|---|
+| 裁剪成功 | 裁剪图坐标 | `.content_crop/_crop` 命中 | 裁剪图 ✅ |
+| PPT 矫正 | 矫正图坐标 | `.rectified/_after` 命中 | 矫正图 ✅ |
+| 未处理（检测跳过/回退） | 原图坐标 | 404 | onError→原图 ✅ |
+
+### 15.4 验收
+
+- [x] 后端 `test_layout_endpoint.py`（11 passed，+content_crop layout `processed=true` + processed-image
+  探 `_crop`）；API 全目录 255 passed 零回归。
+- [x] 前端 217 passed（client `getProcessedImageUrl` 3 + SourceImageList processed src 2 改名）；
+  tsc -b + `npm run lint` 0 error。
+- [x] 真机视觉：用**用户实际任务**的真实裁剪图 `.content_crop/DSC04641_crop.JPG`（1418×1646）+
+  `.layout.json` 真实 bbox 按 % 叠加，标题/双表/各标题块**精准框住**（对比修复前原图上左偏拉宽）。
+- 代价：「原图」栏对裁剪页显示去掉左右空白边的裁剪图（内容一致），与 PPT(#90) 同口径。
+
+## 16. 图片/图表块高亮（按 image_ref 匹配）+ 橙色高亮框
+
+> 用户报「插图图片不高亮、图表不高亮」。根因：image/chart 区域 OCR **无文字**
+> （`content=""`），文字模糊匹配天然命中不了；且光标落在图片块时 `textContent` 为空，
+> 块检测直接返回 undefined。表格（table）有 HTML 文字，已可文字匹配。
+
+### 16.1 方案：图片/图表按 `image_ref` 精确匹配
+
+image/chart 区域捕获时已按阅读序认领 `<img src="images/N.jpg">`
+（`paddle_ocr._build_layout_regions`，`_IMAGE_REGION_LABELS={image,chart}`）。让 sidecar 带上
+**最终输出引用** `image_ref`，与 markdown `<img src>` 对齐后按引用匹配：
+
+- **后端**：`LayoutBlock`/`LayoutBlockPayload` 加 `image_ref`；`_write_doc_layout_sidecar` 用
+  `resolve_output_image_ref(ocr_stem, region.image_ref)` 算输出引用（`ocr_stem` =
+  `page.output_dir.name` 去 `_OCR`，裁剪/矫正时是处理图 stem，如 `DSC04643_crop`）→
+  `images/{stem}_N.ext`，**与 markdown `<img src="images/DSC04643_crop_0.jpg">` 一致**（已验证）。
+  to_dict/from_dict 带 image_ref，旧 sidecar 无此字段 → 默认空（向后兼容）。PPT 回退用
+  `region.image_ref`（ppt sidecar 本就有）。
+- **前端**：`CursorBlock` 加 `imageRef`；`extractImageRef(src)` 取 `<img src>` 的 `images/xxx` 尾段
+  （复用 asset URL → `images/` 提取）；`previewBlockAtPointer`/`blockAtCursor`（编辑器遍历 image 节点）
+  在**块无文字**时取图片引用；`computeBlockHighlight` 有 `imageRef` → 按 `block.image_ref` 精确匹配，
+  否则文字模糊匹配。
+- **限制**：image_ref 是 sidecar **新字段**，现有任务的 `.layout.json` 无此字段 → 图片高亮**需重跑任务**
+  （不像 content_crop 零重跑——裁剪图已在盘，但 image_ref 须重新落 sidecar）。
+
+### 16.2 橙色高亮框
+
+`.block-highlight-overlay` 原用主题 `--color-primary`（与按钮/进度条共享，改色会波及）→ 改为**独立橙色**
+（`#f97316` 边框 + 半透明填充 + 橙色外发光），不动共享变量。
+
+### 16.3 验收
+
+- [x] 后端 `test_layout_sidecar`（+image_ref from_region / round-trip / 向后兼容 3 测）；
+  `resolve_output_image_ref` 值与 markdown `<img src>` 一致性已验证。
+- [x] 前端 222 passed（+`extractImageRef` 2 + previewBlockAtPointer 图片块 1 + computeBlockHighlight
+  imageRef 命中/失配 2）；tsc + lint 0 error。
+- [ ] 真机：橙色即时可见（前端热更新）；图片高亮须**重跑任务**生成带 image_ref 的 sidecar 后验证。
 
