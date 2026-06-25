@@ -210,8 +210,15 @@ exclude_images 同 key 空间），随 OCR 配置入 DB、resume 自动沿用：
   **代码模式不自动裁剪**（`skip_content_crop` 仍含 `code_cfg.enable`）。
 - 改为放开**手动框**：前端裁剪面板（`cropBoxes` 手动框，原 gated 在 `mode==='doc'`）扩到代码模式。
   后端 `user_box` 分支本就**模式无关**（在 `skip_content_crop` 之前、无条件判定），零改动即生效。
-- 局限：手动裁剪后 OCR 在裁剪图上跑，代码模式源图锚点 overlay 仍按原图坐标 → 可能错位
-  （与文档/ PPT 的 processed-image 同类问题；代码模式源图视图未接 processed，留作后续）。
+- **澄清（经核实非 bug）**：曾担心「手动裁剪后代码模式源图锚点 overlay 按原图坐标错位」，逐行核对
+  否定——代码模式源图**不画任何像素 bbox 叠加层**（`BlockHighlightOverlay` 仅在 `highlight` prop
+  存在时渲染，文档/PPT 专属；`CodeViewer` 调 `SourceImageList` 不传 `highlight`/`processed`）；唯一的
+  `code-page-anchor` 是画在**代码正文列**里的隐形页边界 span（`top: lineIndex*rowH`），不叠在图上。
+  源图显原图、同步靠 `pageKey`=原图名（手动裁剪后 `page.image_path` 还原原图名，pageKey 不变）→ 页级
+  同步不受裁剪影响，**无可见错位**。裁剪只改 OCR 输入。
+- **决策**：代码模式源图**保持显原图**（用户拍板），需完整 IDE 截图上下文（侧栏/终端）定位代码出处，
+  优于显裁剪图。后端 `/processed-image` 已 mode 无关、手动裁剪 `_crop` 天然可被发现，若日后代码模式
+  新增源图 bbox 高亮，前端一行 wiring 即接上，非坐标平移难题。
 
 ### 14.2 PPT 模式：自动 content_crop，矫正后串联
 

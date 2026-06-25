@@ -2748,7 +2748,10 @@ PPT=自动 content_crop 且矫正后串联。
 **验证**：后端 layout 端点 12 passed（+串联 `_after_crop` 优先命中）、pipeline+api 534 passed 零回归；
 前端 222 passed、tsc+lint 0 error。
 
-**局限**：代码模式手动裁剪后源图锚点 overlay 仍按原图坐标可能错位（源图视图未接 processed，留后续）。
+**澄清（经核实非 bug，2026-06-25）**：曾标「代码模式手动裁剪后源图锚点 overlay 按原图坐标可能错位」，
+逐行核对否定——代码模式源图不画任何 bbox 叠加层（`BlockHighlightOverlay` 仅文档/PPT 传 `highlight` 时渲染），
+唯一 `code-page-anchor` 画在代码正文列、不叠图上；源图显原图、同步靠 pageKey=原图名（裁剪后 `image_path`
+还原），页级同步不受裁剪影响 → 无可见错位。决策：代码模式源图保持显原图（需完整 IDE 上下文，用户拍板）。
 producer 串联未单测（需 mock OCR 引擎）→ 靠设计 + 端点测 + 活机 PPT 跑验证。
 
 **状态**：实现+测试完成，**未提交**。活机验证（PPT 串联裁剪 + 代码手动裁剪 UI）待重启服务。
