@@ -70,6 +70,7 @@ from docrestore.llm.prompts import (
 from docrestore.processing.segmenter import StreamSegmentExtractor
 from docrestore.models import (
     Gap,
+    LayoutRegion,
     MergedDocument,
     PageOCR,
     PipelineResult,
@@ -1120,13 +1121,13 @@ class Pipeline:
             default_ocr=self._config.ocr,
         )
 
-        # content_crop 仅文档模式生效；PDF 渲染页无屏摄侧栏 UI（据 sentinel 判定），
-        # 自动裁剪无收益只有误裁风险，一并跳过（Epic A D8）。
+        # 自动 content_crop：文档 + PPT 模式生效（PPT 矫正后串联裁剪，§14.2）。
+        # 代码模式坐标依赖强 + 已有列裁剪 + 文档正文列检测不适配 IDE → 跳过自动裁剪
+        # （仍可手动框）。PDF 渲染页无屏摄侧栏 UI → 跳过（Epic A D8）。
         from docrestore.pipeline.render import is_pdf_rendered_dir
 
         skip_content_crop = (
             code_cfg.enable
-            or ppt_cfg.enable
             or is_pdf_rendered_dir(image_dir)
         )
 
@@ -1502,6 +1503,7 @@ class Pipeline:
             layout_block_from_region,
             write_doc_layout,
         )
+        from docrestore.output.ppt_layout import resolve_output_image_ref
 
         guard = PIIGuard(pii_cfg) if pii_cfg.enable else None
 
@@ -1511,13 +1513,26 @@ class Pipeline:
                 return text
             return guard.redact_for_cloud(text, entity_lexicon)
 
+        def _image_ref(page: PageOCR, region: LayoutRegion) -> str:
+            """图片 / 图表区域：OCR 相对引用 → 最终输出引用，对齐 markdown <img src>。
+
+            命名 stem 用 OCR 目录名去 ``_OCR``（与 renderer 同源；裁剪/矫正时是处理图
+            stem，如 ``DSC04643_crop``）。非图片区域 / 无引用 / 无 OCR 目录 → 空。
+            """
+            if not region.image_ref or page.output_dir is None:
+                return ""
+            stem = page.output_dir.name.removesuffix("_OCR")
+            return resolve_output_image_ref(stem, region.image_ref)
+
         layout_pages = [
             (
                 page.image_path.name,
                 page.image_size,
                 [
                     layout_block_from_region(
-                        region, text=_redact(region.content),
+                        region,
+                        text=_redact(region.content),
+                        image_ref=_image_ref(page, region),
                     )
                     for region in page.layout_regions
                 ],
@@ -2010,6 +2025,7 @@ class Pipeline:
                     else overrides.crop_boxes.get(img)
                 )
                 if user_box is not None:
+                    # 手动框：独占（用户显式选定，不再叠自动处理）。
                     from docrestore.processing.content_crop import (
                         crop_page_manual,
                     )
@@ -2019,25 +2035,28 @@ class Pipeline:
                         save_debug=cc.save_debug,
                         debug_dir=cc.debug_dir,
                     )
-                elif ppt is not None and ppt.enable and ppt.rectify:
-                    from docrestore.processing.slide_rectify import (
-                        rectify_page,
-                    )
-                    ocr_input = await rectify_page(
-                        img, output_dir,
-                        save_debug=ppt.rectify_save_debug,
-                        debug_dir=ppt.rectify_debug_dir,
-                        top_extend_ratio=ppt.rectify_top_extend_ratio,
-                    )
-                elif content_crop is not None and content_crop.enable:
-                    from docrestore.processing.content_crop import (
-                        crop_page,
-                    )
-                    ocr_input = await crop_page(
-                        img, output_dir,
-                        save_debug=content_crop.save_debug,
-                        debug_dir=content_crop.debug_dir,
-                    )
+                else:
+                    # 自动预处理串联（§14.2）：PPT 透视矫正（先）→ content_crop 正文
+                    # 裁剪（后，可裁矫正图）。各步 fail-safe 失败/无效回退上一步图。
+                    if ppt is not None and ppt.enable and ppt.rectify:
+                        from docrestore.processing.slide_rectify import (
+                            rectify_page,
+                        )
+                        ocr_input = await rectify_page(
+                            ocr_input, output_dir,
+                            save_debug=ppt.rectify_save_debug,
+                            debug_dir=ppt.rectify_debug_dir,
+                            top_extend_ratio=ppt.rectify_top_extend_ratio,
+                        )
+                    if content_crop is not None and content_crop.enable:
+                        from docrestore.processing.content_crop import (
+                            crop_page,
+                        )
+                        ocr_input = await crop_page(
+                            ocr_input, output_dir,
+                            save_debug=content_crop.save_debug,
+                            debug_dir=content_crop.debug_dir,
+                        )
                 with profiler.stage("ocr.single", stem=img.stem):
                     if gpu_lock is not None:
                         async with gpu_lock:

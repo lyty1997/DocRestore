@@ -66,6 +66,42 @@ def test_layout_block_from_region_carries_redacted_text() -> None:
     assert block.text == "脱敏后"
 
 
+def test_layout_block_from_region_carries_image_ref() -> None:
+    """图片区域 → sidecar 块：image_ref 由调用方传入（已解析为输出引用）。"""
+    region = LayoutRegion((1, 2, 3, 4), "image", "")
+    block = layout_block_from_region(
+        region, text="", image_ref="images/DSC_0.jpg",
+    )
+    assert block.label == "image"
+    assert block.text == ""
+    assert block.image_ref == "images/DSC_0.jpg"
+
+
+def test_round_trip_preserves_image_ref() -> None:
+    """to_dict → from_dict 保真 image_ref（图片块按引用匹配的真相源）。"""
+    layout = DocLayout(pages=[LayoutPage(
+        filename="p.jpg", image_size=(800, 600),
+        blocks=[LayoutBlock((0, 0, 10, 10), "image", "", "images/p_0.jpg")],
+    )])
+    restored = from_dict(to_dict(layout))
+    assert restored is not None
+    assert restored.pages[0].blocks[0].image_ref == "images/p_0.jpg"
+
+
+def test_from_dict_image_ref_backward_compat() -> None:
+    """旧 sidecar 块无 image_ref 字段 → 默认空（不报错、图片块退化不命中）。"""
+    data = {
+        "version": 1,
+        "pages": [{
+            "filename": "p.jpg", "image_size": [800, 600],
+            "blocks": [{"bbox": [0, 0, 10, 10], "label": "text", "text": "x"}],
+        }],
+    }
+    layout = from_dict(data)
+    assert layout is not None
+    assert layout.pages[0].blocks[0].image_ref == ""
+
+
 def test_build_doc_layout_none_when_no_blocks() -> None:
     """所有页都无块（非 VL 引擎）→ None，调用方不落盘。"""
     pages: list[tuple[str, tuple[int, int], list[LayoutBlock]]] = [

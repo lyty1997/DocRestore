@@ -33,6 +33,11 @@ from docrestore.output.layout_sidecar import (
     LayoutPage,
     write_doc_layout,
 )
+from docrestore.output.ppt_layout import (
+    PptLayoutRegion,
+    build_ppt_layout,
+    write_ppt_layout,
+)
 from docrestore.pipeline.task_manager import Task, TaskStatus
 
 
@@ -84,6 +89,8 @@ async def test_returns_payload_when_sidecar_present(
     resp = await api_client.get("/api/v1/tasks/t-layout/layout")
     assert resp.status_code == 200
     data = resp.json()
+    # 无预处理目录 → bbox 原图坐标 → processed=False（前端显原图）
+    assert data["processed"] is False
     assert len(data["pages"]) == 1
     page = data["pages"][0]
     assert page["filename"] == "IMG_0001.jpg"
@@ -152,3 +159,156 @@ async def test_doc_dir_traversal_rejected(
         "/api/v1/tasks/t-guard/layout", params={"doc_dir": "../out_guard"},
     )
     assert resp.status_code == 404
+
+
+# ── §13/§15：PPT 回退 + 处理图端点（PPT 矫正 / content_crop 裁剪）────────
+
+
+def _jpg_bytes() -> bytes:
+    """最小占位 jpg（端点只 FileResponse，不校验像素）。"""
+    return b"\xff\xd8\xff\xd9"
+
+
+@pytest.mark.asyncio
+async def test_ppt_fallback_returns_processed_layout(
+    api_client: AsyncClient, tmp_path: Path,
+) -> None:
+    """无 .layout.json 但有 .ppt_layout.json → 回退、content→text；有 .rectified
+    处理图 → processed=True（前端改显处理图）。"""
+    out = tmp_path / "out_ppt"
+    out.mkdir()
+    ppt = build_ppt_layout([
+        ("IMG_0001.jpg", (1205, 809), [
+            PptLayoutRegion((311, 79, 909, 131), "paragraph_title", "标题块"),
+            PptLayoutRegion((100, 200, 500, 400), "text", "正文块"),
+        ]),
+    ])
+    assert ppt is not None
+    write_ppt_layout(out, ppt)
+    # 矫正图存在 → processed=True（探处理图目录有文件）
+    rect_dir = out / ".rectified"
+    rect_dir.mkdir()
+    (rect_dir / "IMG_0001_after.jpg").write_bytes(_jpg_bytes())
+    _inject_task("t-ppt", out)
+
+    resp = await api_client.get("/api/v1/tasks/t-ppt/layout")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["processed"] is True
+    page = data["pages"][0]
+    assert page["filename"] == "IMG_0001.jpg"
+    assert page["image_size"] == [1205, 809]
+    # regions[].content 映射成 blocks[].text
+    assert page["blocks"][0]["text"] == "标题块"
+    assert page["blocks"][0]["bbox"] == [311, 79, 909, 131]
+    assert page["blocks"][1]["text"] == "正文块"
+
+
+@pytest.mark.asyncio
+async def test_content_crop_doc_layout_marks_processed(
+    api_client: AsyncClient, tmp_path: Path,
+) -> None:
+    """文档模式有 .layout.json + .content_crop 裁剪图 → processed=True（§15）。"""
+    out = tmp_path / "out_cc"
+    out.mkdir()
+    write_doc_layout(out, _sample_layout())
+    cc_dir = out / ".content_crop"
+    cc_dir.mkdir()
+    (cc_dir / "IMG_0001_crop.jpg").write_bytes(_jpg_bytes())
+    _inject_task("t-cc", out)
+
+    resp = await api_client.get("/api/v1/tasks/t-cc/layout")
+    assert resp.status_code == 200
+    assert resp.json()["processed"] is True
+
+
+@pytest.mark.asyncio
+async def test_processed_image_served_rectified(
+    api_client: AsyncClient, tmp_path: Path,
+) -> None:
+    """原图名 → .rectified/{stem}_after{suffix}（PPT 矫正）→ 200。"""
+    out = tmp_path / "out_rect"
+    rect_dir = out / ".rectified"
+    rect_dir.mkdir(parents=True)
+    (rect_dir / "IMG_0001_after.jpg").write_bytes(_jpg_bytes())
+    _inject_task("t-rect", out)
+
+    resp = await api_client.get(
+        "/api/v1/tasks/t-rect/processed-image",
+        params={"name": "IMG_0001.jpg"},
+    )
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_processed_image_served_content_crop(
+    api_client: AsyncClient, tmp_path: Path,
+) -> None:
+    """原图名 → .content_crop/{stem}_crop{suffix}（文档裁剪）→ 200（§15）。"""
+    out = tmp_path / "out_cc_img"
+    cc_dir = out / ".content_crop"
+    cc_dir.mkdir(parents=True)
+    (cc_dir / "IMG_0001_crop.jpg").write_bytes(_jpg_bytes())
+    _inject_task("t-cc-img", out)
+
+    resp = await api_client.get(
+        "/api/v1/tasks/t-cc-img/processed-image",
+        params={"name": "IMG_0001.jpg"},
+    )
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_processed_image_prefers_chained_after_crop(
+    api_client: AsyncClient, tmp_path: Path,
+) -> None:
+    """PPT 矫正+裁剪串联：同时有 _after 与 _after_crop → 优先返回链末 _after_crop
+    （bbox 在裁剪后坐标系，§14.2）。"""
+    out = tmp_path / "out_chain"
+    (out / ".rectified").mkdir(parents=True)
+    (out / ".rectified" / "IMG_0001_after.jpg").write_bytes(_jpg_bytes())
+    cc = out / ".content_crop"
+    cc.mkdir(parents=True)
+    (cc / "IMG_0001_after_crop.jpg").write_bytes(_jpg_bytes() + b"\x00")
+    _inject_task("t-chain", out)
+
+    resp = await api_client.get(
+        "/api/v1/tasks/t-chain/processed-image",
+        params={"name": "IMG_0001.jpg"},
+    )
+    assert resp.status_code == 200
+    # 命中链末 _after_crop（内容比 _after 多 1 字节）而非仅矫正图
+    assert len(resp.content) == len(_jpg_bytes()) + 1
+
+
+@pytest.mark.asyncio
+async def test_processed_image_404_when_missing(
+    api_client: AsyncClient, tmp_path: Path,
+) -> None:
+    """该页无任何处理图（矫正/裁剪都没）→ 404（前端 onError 回退原图）。"""
+    out = tmp_path / "out_proc_miss"
+    (out / ".content_crop").mkdir(parents=True)
+    _inject_task("t-proc-miss", out)
+
+    resp = await api_client.get(
+        "/api/v1/tasks/t-proc-miss/processed-image",
+        params={"name": "NOPE.jpg"},
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_processed_image_rejects_traversal(
+    api_client: AsyncClient, tmp_path: Path,
+) -> None:
+    """name 含路径分隔/穿越 → 400（不越界到 output_dir 之外）。"""
+    out = tmp_path / "out_proc_guard"
+    out.mkdir()
+    _inject_task("t-proc-guard", out)
+
+    for bad in ("../secret.jpg", "sub/IMG.jpg"):
+        resp = await api_client.get(
+            "/api/v1/tasks/t-proc-guard/processed-image",
+            params={"name": bad},
+        )
+        assert resp.status_code == 400

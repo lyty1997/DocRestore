@@ -397,11 +397,14 @@ class SourceImagesResponse(BaseModel):
 
 
 class LayoutBlockPayload(BaseModel):
-    """版面块：原图像素 bbox + 类型 + raw OCR 文字（前端模糊匹配光标块，Epic E）。"""
+    """版面块：bbox + 类型 + raw 文字 / 图片引用（前端匹配光标块，Epic E）。"""
 
-    bbox: tuple[int, int, int, int]  # (x0, y0, x1, y1) 原图像素
+    bbox: tuple[int, int, int, int]  # (x0, y0, x1, y1) 像素
     label: str
     text: str
+    #: 图片 / 图表块的输出引用 ``images/{stem}_N.ext``（对齐 markdown <img src>），
+    #: 供前端按引用匹配光标所在图片块；文字块为空。
+    image_ref: str = ""
 
 
 class LayoutPagePayload(BaseModel):
@@ -413,9 +416,16 @@ class LayoutPagePayload(BaseModel):
 
 
 class LayoutPayload(BaseModel):
-    """任务版面高亮载荷（Epic E）：各页块 bbox，供编辑器光标↔原图高亮。"""
+    """任务版面高亮载荷（Epic E）：各页块 bbox，供编辑器光标↔原图高亮。
+
+    ``processed``：bbox/image_size 是否处于**处理图**坐标系——OCR 前做过预处理
+    （PPT 透视矫正 `_after` / 文档 content_crop 正文裁剪 `_crop` / 手动裁剪），坐标空间
+    与原图不符（§13/§15）。为真时前端源图栏须改显对应处理图才对齐（逐页尝试，
+    无处理图的页 onError 回退原图）；无预处理时为假（bbox=原图坐标，显原图）。
+    """
 
     pages: list[LayoutPagePayload]
+    processed: bool = False
 
 
 class UploadSessionResponse(BaseModel):

@@ -39,11 +39,14 @@ _LAYOUT_VERSION = 1
 
 @dataclass(frozen=True)
 class LayoutBlock:
-    """版面块：原图像素 bbox + 类型 + raw OCR 文字（高亮模糊匹配用）。"""
+    """版面块：原图像素 bbox + 类型 + raw OCR 文字 / 图片引用（高亮匹配用）。"""
 
     bbox: tuple[int, int, int, int]  # (x1, y1, x2, y2) 像素（落在 image_size 内）
     label: str  # paragraph_title/text/table/image/chart...
     text: str  # raw OCR 文字（已脱敏；图片块可空）
+    #: 图片 / 图表块的最终输出引用 ``images/{stem}_N.ext``（与 markdown <img src>
+    #: 一致），供前端按引用匹配光标所在图片块；文字块为空。
+    image_ref: str = ""
 
 
 @dataclass(frozen=True)
@@ -66,13 +69,18 @@ class DocLayout:
 # ── 构造：OCR 层 LayoutRegion → sidecar ───────────────────────
 
 
-def layout_block_from_region(region: LayoutRegion, *, text: str) -> LayoutBlock:
+def layout_block_from_region(
+    region: LayoutRegion, *, text: str, image_ref: str = "",
+) -> LayoutBlock:
     """把 OCR 层 ``LayoutRegion`` 转成 sidecar 块。
 
     ``text`` 由调用方传入（已过 PII 出云闸口脱敏，与 ``document.md`` 同口径）；
-    图片 / 图表块 ``content`` 本就为空 → ``text`` 空，前端模糊匹配自然不命中。
+    图片 / 图表块 ``content`` 本就为空 → 改由 ``image_ref``（最终输出引用，调用方解析）
+    匹配，前端按光标所在图片块的 ``<img src>`` 引用命中。
     """
-    return LayoutBlock(bbox=region.bbox, label=region.label, text=text)
+    return LayoutBlock(
+        bbox=region.bbox, label=region.label, text=text, image_ref=image_ref,
+    )
 
 
 def build_doc_layout(
@@ -112,6 +120,7 @@ def to_dict(layout: DocLayout) -> dict[str, object]:
                         "bbox": list(block.bbox),
                         "label": block.label,
                         "text": block.text,
+                        "image_ref": block.image_ref,
                     }
                     for block in page.blocks
                 ],
@@ -153,9 +162,13 @@ def _block_from_dict(raw: object) -> LayoutBlock | None:
     bbox = _as_int_quad(raw.get("bbox"))
     label = raw.get("label")
     text = raw.get("text", "")
+    # image_ref 向后兼容：旧 sidecar 无此字段 → 默认空（图片块退化为不命中）。
+    image_ref = raw.get("image_ref", "")
     if bbox is None or not isinstance(label, str) or not isinstance(text, str):
         return None
-    return LayoutBlock(bbox=bbox, label=label, text=text)
+    if not isinstance(image_ref, str):
+        image_ref = ""
+    return LayoutBlock(bbox=bbox, label=label, text=text, image_ref=image_ref)
 
 
 def _page_from_dict(raw: object) -> LayoutPage | None:

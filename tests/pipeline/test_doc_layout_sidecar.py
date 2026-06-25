@@ -120,6 +120,38 @@ async def test_overlapping_pages_keep_blocks_independent(
     assert [b.text for b in layout.pages[1].blocks] == ["重复段落", "乙独有"]
 
 
+async def test_sidecar_image_block_carries_resolved_image_ref(
+    tmp_path: Path,
+) -> None:
+    """图片块：sidecar ``image_ref`` = ``resolve(ocr_stem, raw)``，对齐 markdown
+    ``<img src>``。ocr_stem 取 ``output_dir.name`` 去 ``_OCR``（裁剪时为处理图 stem，
+    如 ``DSC04643_crop`` → ``images/DSC04643_crop_0.jpg``）。"""
+    out = tmp_path / "out"
+    out.mkdir()
+    # 模拟 content_crop：OCR 跑在 DSC04643_crop 上 → output_dir=DSC04643_crop_OCR；
+    # 图片区域 raw image_ref = OCR 相对 images/0.jpg（_build_layout_regions 认领的）。
+    page = _make_page(
+        out, "DSC04643_crop", (1418, 1646),
+        [
+            LayoutRegion((14, 921, 1379, 1585), "image", "",
+                         image_ref="images/0.jpg"),
+        ],
+    )
+
+    pipeline = Pipeline(_cfg())
+    await pipeline._write_doc_layout_sidecar(
+        [page], out, PIIConfig(enable=False), None,
+    )
+
+    layout = load_doc_layout(out)
+    assert layout is not None
+    block = layout.pages[0].blocks[0]
+    assert block.label == "image"
+    assert block.text == ""
+    # 与 markdown <img src="images/DSC04643_crop_0.jpg"> 一致 → 前端按引用命中
+    assert block.image_ref == "images/DSC04643_crop_0.jpg"
+
+
 async def test_no_sidecar_when_no_layout_regions(tmp_path: Path) -> None:
     """非 VL 引擎（无版面区域）→ 不落 sidecar，前端无数据不高亮。"""
     out = tmp_path / "out"
