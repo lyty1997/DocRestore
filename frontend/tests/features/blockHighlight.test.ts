@@ -7,19 +7,38 @@ import {
 } from "../../src/features/task/blockHighlight";
 
 const LAYOUT: LayoutPayload = {
+  processed: false,
   pages: [
     {
       filename: "IMG_0001.jpg",
       image_size: [3024, 4032],
       blocks: [
-        { bbox: [120, 88, 2900, 240], label: "paragraph_title", text: "第一章" },
-        { bbox: [120, 260, 2900, 980], label: "text", text: "本文研究OCR还原" },
+        {
+          bbox: [120, 88, 2900, 240],
+          label: "paragraph_title",
+          text: "第一章",
+          image_ref: "",
+        },
+        {
+          bbox: [120, 260, 2900, 980],
+          label: "text",
+          text: "本文研究OCR还原",
+          image_ref: "",
+        },
+        {
+          bbox: [300, 1100, 2700, 2000],
+          label: "image",
+          text: "",
+          image_ref: "images/IMG_0001_0.jpg",
+        },
       ],
     },
     {
       filename: "IMG_0002.jpg",
       image_size: [3024, 4032],
-      blocks: [{ bbox: [0, 0, 100, 50], label: "text", text: "第二页正文" }],
+      blocks: [
+        { bbox: [0, 0, 100, 50], label: "text", text: "第二页正文", image_ref: "" },
+      ],
     },
   ],
 };
@@ -59,6 +78,29 @@ describe("computeBlockHighlight", () => {
 
   it("该页内无相近块 → undefined", () => {
     const cursor: CursorBlock = { page: "IMG_0001.jpg", text: "毫不相干的内容" };
+    expect(computeBlockHighlight(LAYOUT, cursor)).toBeUndefined();
+  });
+
+  it("图片块按 imageRef 精确匹配（无文字，模糊匹配命中不了）", () => {
+    const cursor: CursorBlock = {
+      page: "IMG_0001.jpg",
+      text: "",
+      imageRef: "images/IMG_0001_0.jpg",
+    };
+    const hit = computeBlockHighlight(LAYOUT, cursor);
+    expect(hit).toEqual({
+      pageKey: "IMG_0001.jpg",
+      bbox: [300, 1100, 2700, 2000],
+      imageSize: [3024, 4032],
+    });
+  });
+
+  it("imageRef 无对应版面图片块 → undefined", () => {
+    const cursor: CursorBlock = {
+      page: "IMG_0001.jpg",
+      text: "",
+      imageRef: "images/NOPE_9.jpg",
+    };
     expect(computeBlockHighlight(LAYOUT, cursor)).toBeUndefined();
   });
 });

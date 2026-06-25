@@ -17,13 +17,18 @@ interface SourceImagePanelProps {
   readonly images: readonly string[];
   /** 光标块 bbox 高亮（Epic E）；仅文档编辑模式传入，缺省不高亮。 */
   readonly highlight?: SourceImageHighlight | undefined;
+  /** 处理图高亮：true 时源图栏改显处理图（PPT 矫正 / content_crop 裁剪，§13/§15）；
+   *  缺省显原图。 */
+  readonly processed?: boolean;
+  /** 多文档相对子目录，构造处理图 URL 用。 */
+  readonly docDir?: string | undefined;
 }
 
 export const SourceImagePanel = forwardRef<
   HTMLDivElement,
   SourceImagePanelProps
 >(function SourceImagePanel(
-  { taskId, images, highlight },
+  { taskId, images, highlight, processed = false, docDir },
   scrollRef,
 ): React.JSX.Element {
   const { t } = useTranslation();
@@ -38,6 +43,8 @@ export const SourceImagePanel = forwardRef<
         listClassName="source-images-list"
         imageClassName="source-image-item"
         highlight={highlight}
+        processed={processed}
+        docDir={docDir}
       />
     </div>
   );

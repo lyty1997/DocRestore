@@ -67,3 +67,34 @@ describe("SourceImageList bbox 高亮", () => {
     ).toHaveLength(0);
   });
 });
+
+function renderProcessed(processed: boolean): HTMLElement {
+  const { container } = render(
+    <LanguageProvider>
+      <SourceImageList
+        taskId="t1"
+        images={IMAGES}
+        listClassName="source-images-list"
+        imageClassName="source-image-item"
+        processed={processed}
+      />
+    </LanguageProvider>,
+  );
+  return container;
+}
+
+describe("SourceImageList 处理图（§13/§15）", () => {
+  it("processed=false → img 显原图 source-images 端点", () => {
+    const img = renderProcessed(false).querySelector("img");
+    expect(img?.getAttribute("src")).toContain(
+      "/tasks/t1/source-images/IMG_0001.jpg",
+    );
+  });
+
+  it("processed=true → img 显处理图 processed-image 端点（按 pageKey 取）", () => {
+    const src =
+      renderProcessed(true).querySelector("img")?.getAttribute("src") ?? "";
+    expect(src).toContain("/tasks/t1/processed-image");
+    expect(src).toContain("name=IMG_0001.jpg");
+  });
+});

@@ -1103,10 +1103,12 @@ body {
 .block-highlight-overlay {
   position: absolute;
   pointer-events: none;
-  border: 2px solid var(--color-primary-dark);
-  background: var(--color-primary-glow);
+  /* 醒目橙色，独立于主题 primary（避免改色波及按钮/进度条等共享变量）。 */
+  border: 2.5px solid #f97316;
+  background: rgb(249 115 22 / 0.22);
   border-radius: 3px;
-  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.5);
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.7),
+    0 0 8px rgb(249 115 22 / 0.6);
   transition: left 0.12s ease, top 0.12s ease,
     width 0.12s ease, height 0.12s ease;
 }

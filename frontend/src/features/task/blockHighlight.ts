@@ -9,12 +9,22 @@
 import type { LayoutPayload } from "../../api/schemas";
 import { matchBlock } from "./blockMatch";
 
-/** 编辑器光标所在顶层块（页 + 纯文本），供模糊匹配版面块。 */
+/** 编辑器光标所在顶层块（页 + 纯文本 / 图片引用），供匹配版面块。 */
 export interface CursorBlock {
   /** 光标所在页（最近前置 pageAnchor 的原图基名）。 */
   readonly page: string;
   /** 光标所在顶层块纯文本（已被精修改写，用于模糊匹配 raw OCR 文字）。 */
   readonly text: string;
+  /** 图片/图表块：`<img src>` 提取的 `images/xxx` 引用，按引用精确匹配版面图片块
+   *  （图片块无文字，模糊匹配命中不了）；非图片块为 undefined。 */
+  readonly imageRef?: string;
+}
+
+/** 从 `<img src>`（asset URL 或相对路径）提取 `images/xxx` 引用以匹配版面图片块。 */
+export function extractImageRef(src: string): string | undefined {
+  const path = src.split("?", 1)[0] ?? src;
+  const idx = path.lastIndexOf("images/");
+  return idx === -1 ? undefined : path.slice(idx);
 }
 
 /** 命中后用于在源图上画矩形的高亮（页 + 像素 bbox + 换算分母尺寸）。 */
@@ -40,7 +50,12 @@ export function computeBlockHighlight(
   if (layout === undefined || cursorBlock === undefined) return undefined;
   const page = layout.pages.find((p) => p.filename === cursorBlock.page);
   if (page === undefined) return undefined;
-  const matched = matchBlock(page.blocks, cursorBlock.text);
+  // 图片块按 image_ref 精确匹配（无文字，模糊匹配命中不了）；否则文字模糊匹配。
+  const ref = cursorBlock.imageRef;
+  const matched =
+    ref !== undefined && ref !== ""
+      ? page.blocks.find((b) => b.image_ref !== "" && b.image_ref === ref)
+      : matchBlock(page.blocks, cursorBlock.text);
   if (matched === undefined) return undefined;
   return {
     pageKey: cursorBlock.page,

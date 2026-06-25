@@ -12,7 +12,7 @@
  * 容器外 / 空块 / 无前置页 → undefined（与编辑器侧同样退化为不高亮）。
  */
 
-import type { CursorBlock } from "./blockHighlight";
+import { type CursorBlock, extractImageRef } from "./blockHighlight";
 
 /**
  * 命中元素向上取容器的直接子块；命中容器自身 / 不在容器内 → undefined。
@@ -68,9 +68,15 @@ export function previewBlockAtPointer(
   if (target === null || target === undefined) return undefined;
   const block = topLevelBlockOf(target, container);
   if (block === undefined) return undefined;
-  const text = block.textContent.trim();
-  if (text === "") return undefined;
   const page = nearestPrecedingPage(block, container);
   if (page === undefined) return undefined;
-  return { page, text };
+  const text = block.textContent.trim();
+  if (text !== "") return { page, text };
+  // 无文字块：可能是图片/图表块，按其 <img src> 引用匹配版面图片块。
+  const img = block.querySelector("img");
+  if (img !== null) {
+    const imageRef = extractImageRef(img.getAttribute("src") ?? "");
+    if (imageRef !== undefined) return { page, text: "", imageRef };
+  }
+  return undefined;
 }

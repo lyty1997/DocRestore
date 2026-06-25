@@ -243,6 +243,9 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
   const [cropBoxes, setCropBoxes] = useState<Record<string, CropBox>>({});
   /* 裁剪面板中删除（任务级排除）的图，相对 image_dir */
   const [cropExcluded, setCropExcluded] = useState<readonly string[]>([]);
+  /* 手动裁剪面板：文档（叠在自动裁剪上）+ 代码（纯手动，§14.1）模式可用；
+     PPT 走自动矫正+裁剪、不开手动面板。 */
+  const cropAllowed = mode === "doc" || mode === "code";
   /* 统一 LLM 精修开关：对所有模式生效（文档分段 / 代码 / PPT 按页）。
      默认开，保持文档/代码模式既有行为；关闭时所有模式只输出 OCR 清洗结果。 */
   const [refineEnabled, setRefineEnabled] = useState(true);
@@ -586,7 +589,7 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
     const codeNeedsPaddleBasic =
       mode === "code" && ocrModel.startsWith("paddle-ocr/");
     const excludeActive =
-      mode === "doc" && cropEnabled && cropExcluded.length > 0;
+      cropAllowed && cropEnabled && cropExcluded.length > 0;
     const hasOcrOverride =
       ocrModel !== DEFAULT_OCR_MODEL ||
       gpuId !== GPU_AUTO_VALUE ||
@@ -614,7 +617,7 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
       ocr,
       code,
       ppt,
-      mode === "doc" && cropEnabled ? cropBoxes : undefined,
+      cropAllowed && cropEnabled ? cropBoxes : undefined,
     );
   };
 
@@ -713,9 +716,10 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
         />
       </div>
 
-      {/* 文档模式正文裁剪：开关 + 拖拽微调面板（仅文档模式 + 已选源时显示）。
+      {/* 手动裁剪：开关 + 拖拽微调面板（文档 / 代码模式 + 已选源时显示，§14.1）。
+          文档模式叠在自动裁剪上微调；代码模式纯手动（自动裁剪不适配 IDE，已跳过）。
           与 LLM 精修 / 脱敏同款 section + toggle-switch，保证入口显眼一致。 */}
-      {mode === "doc" && imageDir.trim() !== "" && (
+      {cropAllowed && imageDir.trim() !== "" && (
         <div className="form-group pii-section">
           <div className="pii-header">
             <span className="pii-title">{t("crop.title")}</span>

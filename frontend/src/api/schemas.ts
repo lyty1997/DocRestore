@@ -368,6 +368,9 @@ export const LayoutBlockPayloadSchema = z.object({
   bbox: z.tuple([z.number(), z.number(), z.number(), z.number()]),
   label: z.string(),
   text: z.string(),
+  /** 图片/图表块输出引用 `images/{stem}_N.ext`（对齐 markdown <img src>），
+   *  供前端按引用匹配光标所在图片块；文字块为空。旧 sidecar 无此字段 → 默认空。 */
+  image_ref: z.string().default(""),
 });
 export type LayoutBlockPayload = z.infer<typeof LayoutBlockPayloadSchema>;
 
@@ -379,8 +382,12 @@ export const LayoutPagePayloadSchema = z.object({
 });
 export type LayoutPagePayload = z.infer<typeof LayoutPagePayloadSchema>;
 
-/** GET /tasks/{id}/layout 响应：各页块 bbox，供编辑器光标↔原图高亮（Epic E） */
+/** GET /tasks/{id}/layout 响应：各页块 bbox，供编辑器光标↔原图高亮（Epic E）。
+ *  processed=true：bbox/image_size 在**处理图**坐标系（OCR 前做过 PPT 矫正 `_after` /
+ *  content_crop 裁剪 `_crop`，§13/§15），前端须改显对应处理图才对齐（逐页尝试，无处理图
+ *  的页 onError 回退原图）；缺省 false（无预处理，bbox=原图坐标，显原图）。 */
 export const LayoutPayloadSchema = z.object({
   pages: z.array(LayoutPagePayloadSchema),
+  processed: z.boolean().default(false),
 });
 export type LayoutPayload = z.infer<typeof LayoutPayloadSchema>;

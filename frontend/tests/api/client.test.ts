@@ -5,7 +5,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { clearApiToken, saveApiToken } from "../../src/api/auth";
-import { getTaskLayout, getUploadFileUrl } from "../../src/api/client";
+import {
+  getProcessedImageUrl,
+  getTaskLayout,
+  getUploadFileUrl,
+} from "../../src/api/client";
 
 afterEach(() => {
   clearApiToken();
@@ -24,6 +28,30 @@ describe("getUploadFileUrl", () => {
     saveApiToken("tok123");
     expect(getUploadFileUrl("s1", "f1")).toBe(
       "/api/v1/uploads/s1/files/f1?token=tok123",
+    );
+  });
+});
+
+describe("getProcessedImageUrl", () => {
+  it("按原图名构造 processed-image URL（无 token、无 docDir）", () => {
+    clearApiToken();
+    const url = getProcessedImageUrl("t1", "IMG_0001.jpg");
+    expect(url).toContain("/api/v1/tasks/t1/processed-image?");
+    expect(url).toContain("name=IMG_0001.jpg");
+    expect(url).not.toContain("doc_dir");
+  });
+
+  it("带 docDir → 透传 doc_dir 查询参数", () => {
+    clearApiToken();
+    const url = getProcessedImageUrl("t1", "IMG_0001.jpg", "subA");
+    expect(url).toContain("name=IMG_0001.jpg");
+    expect(url).toContain("doc_dir=subA");
+  });
+
+  it("有 token → 附加 token 供 <img> 鉴权", () => {
+    saveApiToken("tok123");
+    expect(getProcessedImageUrl("t1", "IMG_0001.jpg")).toContain(
+      "token=tok123",
     );
   });
 });

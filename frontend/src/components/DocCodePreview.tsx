@@ -461,6 +461,8 @@ export function DocCodePreview({
           taskId={taskId}
           images={filteredImages}
           highlight={highlight}
+          processed={layout?.processed ?? false}
+          docDir={editDocDir}
         />
         {selectedDocFailed && failedDocStyle === "panel" && (
           <div className="doc-failed-panel">

@@ -9,6 +9,7 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { extractImageRef } from "../../src/features/task/blockHighlight";
 import { previewBlockAtPointer } from "../../src/features/task/previewBlockAtPointer";
 
 let container: HTMLDivElement | undefined;
@@ -111,5 +112,30 @@ describe("previewBlockAtPointer", () => {
       page: "IMG_0009.jpg",
       text: "包裹形态下的正文",
     });
+  });
+
+  it("图片块（无文字）→ 取 <img src> 的 images/xxx 引用", () => {
+    const el = mount(
+      anchor("IMG_0001.jpg") +
+        '<div style="text-align:center">' +
+        '<img src="/api/v1/tasks/t/assets/images/IMG_0001_0.jpg?token=x" /></div>',
+    );
+    expect(previewBlockAtPointer(el.querySelector("img"), el)).toEqual({
+      page: "IMG_0001.jpg",
+      text: "",
+      imageRef: "images/IMG_0001_0.jpg",
+    });
+  });
+});
+
+describe("extractImageRef", () => {
+  it("从 asset URL（带 token）提取 images/xxx 尾段", () => {
+    expect(
+      extractImageRef("/api/v1/tasks/t/assets/sub/images/A_0.jpg?token=x"),
+    ).toBe("images/A_0.jpg");
+  });
+
+  it("无 images/ 段 → undefined", () => {
+    expect(extractImageRef("/api/v1/tasks/t/assets/other.png")).toBeUndefined();
   });
 });

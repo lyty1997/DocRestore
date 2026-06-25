@@ -531,6 +531,21 @@ export function getSourceImageUrl(taskId: string, filename: string): string {
   );
 }
 
+/** 构建 OCR 前**处理图** URL（PPT 矫正 ``_after`` / content_crop 裁剪 ``_crop``，按原图名
+ *  取，附 token；Epic E §13/§15）。处理图任务 bbox 在处理图坐标系，源图栏改显此 URL 才对齐；
+ *  该页无处理图时端点 404，调用方 <img onError> 回退原图（其 bbox 本在原图系）。 */
+export function getProcessedImageUrl(
+  taskId: string,
+  name: string,
+  docDir?: string,
+): string {
+  const params = new URLSearchParams({ name });
+  if (docDir !== undefined && docDir !== "") params.set("doc_dir", docDir);
+  return appendTokenToUrl(
+    `${API_BASE}/tasks/${taskId}/processed-image?${params.toString()}`,
+  );
+}
+
 /** 构建上传预览图 URL（附加 token 供 <img src> 在 token 模式下显示，#47） */
 export function getUploadFileUrl(sessionId: string, fileId: string): string {
   return appendTokenToUrl(`${API_BASE}/uploads/${sessionId}/files/${fileId}`);

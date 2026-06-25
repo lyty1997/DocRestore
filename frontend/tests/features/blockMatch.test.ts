@@ -7,7 +7,7 @@ import {
 } from "../../src/features/task/blockMatch";
 
 function block(text: string, label = "text"): LayoutBlockPayload {
-  return { bbox: [0, 0, 10, 10], label, text };
+  return { bbox: [0, 0, 10, 10], label, text, image_ref: "" };
 }
 
 describe("normalizeForMatch", () => {

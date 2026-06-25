@@ -31,6 +31,7 @@ import { Placeholder } from "@tiptap/extension-placeholder";
 import {
   Table, TableCell, TableHeader, TableRow,
 } from "@tiptap/extension-table";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import { StarterKit } from "@tiptap/starter-kit";
 import {
@@ -42,7 +43,7 @@ import {
 } from "react";
 
 import { getAssetUrl } from "../api/client";
-import type { CursorBlock } from "../features/task/blockHighlight";
+import { type CursorBlock, extractImageRef } from "../features/task/blockHighlight";
 import {
   editorAssetUrlsToImages,
   editorImagesToAssetUrls,
@@ -139,21 +140,41 @@ function pageAtCursor(editor: Editor): string | undefined {
 }
 
 
+/** 顶层块（含自身）里第一个 image 节点的 ``images/xxx`` 引用，无则 undefined。 */
+function firstImageRef(node: ProseMirrorNode): string | undefined {
+  let ref: string | undefined;
+  const take = (n: ProseMirrorNode): boolean => {
+    if (ref !== undefined) return false;
+    if (n.type.name === "image") {
+      const src: unknown = n.attrs.src;
+      if (typeof src === "string") ref = extractImageRef(src);
+    }
+    return ref === undefined;
+  };
+  if (!take(node)) return ref;
+  node.descendants((child) => take(child));
+  return ref;
+}
+
 /**
- * 光标所在顶层块（页 + 纯文本），供 Epic E 高亮匹配。
+ * 光标所在顶层块（页 + 纯文本 / 图片引用），供 Epic E 高亮匹配。
  *
  * 页沿用 ``pageAtCursor``（最近前置 pageAnchor）；文本取光标所在**顶层块节点**
  * （depth 1，doc 的直接子节点）的 ``textContent``——段落/标题即该段，表格/列表即
- * 整块，配合外层 §8 归一化前缀匹配足够。无页标记 / 空块 → undefined（外层不高亮）。
+ * 整块，配合外层 §8 归一化前缀匹配足够。无文字块（图片/图表）→ 取块内 image 节点
+ * 的 ``images/xxx`` 引用按引用匹配。无页标记 / 既无文字又无图 → undefined（外层不高亮）。
  */
 export function blockAtCursor(editor: Editor): CursorBlock | undefined {
   const page = pageAtCursor(editor);
   if (page === undefined) return undefined;
   const { $from } = editor.state.selection;
   if ($from.depth < 1) return undefined;
-  const text = $from.node(1).textContent.trim();
-  if (text === "") return undefined;
-  return { page, text };
+  const node = $from.node(1);
+  const text = node.textContent.trim();
+  if (text !== "") return { page, text };
+  const imageRef = firstImageRef(node);
+  if (imageRef !== undefined) return { page, text: "", imageRef };
+  return undefined;
 }
 
 
