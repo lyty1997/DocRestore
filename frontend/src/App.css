@@ -4248,19 +4248,6 @@ body {
   width: 100%;
 }
 
-.code-content-text .code-page-anchor {
-  /* 锚点改为绝对定位 overlay（top 由 JS 按 lineIndex*rowH 内联给出），
-     与窗口化的行解耦，始终存在于 DOM 供 useScrollSync 量测。 */
-  position: absolute;
-  left: 0;
-  height: 0;
-  margin: 0;
-  padding: 0;
-  overflow: hidden;
-  visibility: hidden;
-  pointer-events: none;
-}
-
 .code-content-loading,
 .code-content-error,
 .code-save-error {

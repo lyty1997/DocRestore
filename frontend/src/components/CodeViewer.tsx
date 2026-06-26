@@ -58,12 +58,6 @@ interface CodeSourceImage extends SourceImageListItem {
   readonly sourcePage: string;
 }
 
-interface CodePageAnchor {
-  readonly pageKey: string;
-  readonly sourcePage: string;
-  readonly lineIndex: number;
-}
-
 interface VisibleDiagnosticItem {
   readonly item: CodeDiagnosticItem;
   readonly lineIndex: number;
@@ -118,61 +112,6 @@ function resolveSourceImages(
     }
   }
   return out;
-}
-
-function buildCodePageAnchors(
-  entry: FilesIndexEntry,
-  imageMatches: readonly CodeSourceImage[],
-  content: string,
-): CodePageAnchor[] {
-  if (imageMatches.length === 0) return [];
-
-  const lineCount = Math.max(1, content.split("\n").length);
-  const pageKeyBySourcePage = new Map<string, CodeSourceImage>();
-  for (const match of imageMatches) {
-    pageKeyBySourcePage.set(match.sourcePage, match);
-  }
-
-  const firstLineNo = entry.line_no_range[0] ?? 1;
-  const anchors: CodePageAnchor[] = [];
-  const ranges = entry.source_page_ranges
-    .filter((range) => pageKeyBySourcePage.has(range.page))
-    .toSorted((a, b) => a.start_line - b.start_line);
-
-  if (ranges.length > 0) {
-    for (const range of ranges) {
-      const match = pageKeyBySourcePage.get(range.page);
-      if (match === undefined) continue;
-      anchors.push({
-        pageKey: match.pageKey,
-        sourcePage: range.page,
-        lineIndex: clampLineIndex(range.start_line - firstLineNo, lineCount),
-      });
-    }
-  } else {
-    for (const [idx, match] of imageMatches.entries()) {
-      anchors.push({
-        pageKey: match.pageKey,
-        sourcePage: match.sourcePage,
-        lineIndex: clampLineIndex(
-          Math.floor((idx * lineCount) / imageMatches.length),
-          lineCount,
-        ),
-      });
-    }
-  }
-
-  const seen = new Set<string>();
-  return anchors.filter((anchor) => {
-    const dedupeKey = `${anchor.pageKey}:${anchor.lineIndex.toString()}`;
-    if (seen.has(dedupeKey)) return false;
-    seen.add(dedupeKey);
-    return true;
-  });
-}
-
-function clampLineIndex(value: number, lineCount: number): number {
-  return Math.max(0, Math.min(value, lineCount - 1));
 }
 
 function splitEditorLines(content: string): string[] {
@@ -486,13 +425,6 @@ export function CodeViewer({
         ? []
         : resolveSourceImages(selectedEntry, allSourceImages),
     [allSourceImages, selectedEntry],
-  );
-  const codePageAnchors = useMemo(
-    () =>
-      selectedEntry === undefined
-        ? []
-        : buildCodePageAnchors(selectedEntry, selectedImages, content),
-    [content, selectedEntry, selectedImages],
   );
 
   // 代码版面 sidecar：拉一次建「path→(line_no→{page,bbox})」索引（404→无放大镜）。
@@ -1030,16 +962,6 @@ export function CodeViewer({
               >
                 {selectedEntry !== undefined && (
                   <div className="code-virtual-inner">
-                    {/* 锚点 overlay：所有 page 锚点绝对定位在 lineIndex*rowH，
-                        与窗口化的行解耦，保证 useScrollSync 始终量得到锚点。 */}
-                    {codePageAnchors.map((anchor) => (
-                      <span
-                        key={anchor.sourcePage}
-                        data-page={anchor.pageKey}
-                        className="code-page-anchor"
-                        style={{ top: `${(anchor.lineIndex * codeRowH).toString()}px` }}
-                      />
-                    ))}
                     <div
                       className="code-virtual-spacer"
                       style={{ height: `${codeTopSpacer.toString()}px` }}

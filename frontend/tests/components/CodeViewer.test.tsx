@@ -87,7 +87,7 @@ describe("CodeViewer", () => {
     cleanup();
   });
 
-  it("给代码正文和原图预览写入同名 data-page 锚点", async () => {
+  it("源图缩略图按来源页解析出正确原图（data-page 落在 .source-image-cell）", async () => {
     renderViewer([
       {
         path: "src/foo.cc",
@@ -109,21 +109,18 @@ describe("CodeViewer", () => {
       expect(document.querySelector(".code-content-text")).not.toBeNull();
     });
 
-    const codeAnchor = getRequiredElement(
-      '.code-content-text [data-page="page2.JPG"]',
-    );
+    // 底部缩略图条的源图单元（.source-image-cell）按 page_stem 反查出正确原图，
+    // data-page 落在单元上、原图为其内层 <img>。代码正文侧 data-page 锚点已随
+    // scroll-sync 撤除而移除（仅源图侧保留 data-page，见设计 §11.1 D 项）。
     const imageAnchor = getRequiredElement(
       '.code-source-thumbs-list [data-page="page2.JPG"]',
     );
-
-    expect(codeAnchor.className).toBe("code-page-anchor");
-    // data-page 锚点现落在源图单元（.source-image-cell）上，原图为其内层 <img>
     expect(imageAnchor.querySelector("img")?.getAttribute("alt")).toBe(
       "raw/page2.JPG",
     );
   });
 
-  it("旧 files-index 没有来源页行号范围时仍按来源页顺序生成锚点", async () => {
+  it("无来源页行号范围时仍按来源页渲染全部源图缩略图", async () => {
     renderViewer([
       {
         path: "src/foo.cc",
@@ -142,8 +139,11 @@ describe("CodeViewer", () => {
       expect(document.querySelector(".code-content-text")).not.toBeNull();
     });
 
+    // 缩略图由 source_pages 解析（不依赖 source_page_ranges）→ 两来源页两张缩略图。
     expect(
-      document.querySelectorAll(".code-content-text .code-page-anchor"),
+      document.querySelectorAll(
+        ".code-source-thumbs-list .source-image-cell",
+      ),
     ).toHaveLength(2);
   });
 
