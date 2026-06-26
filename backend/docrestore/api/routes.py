@@ -39,6 +39,9 @@ from docrestore.api.schemas import (
     ActionResponse,
     BrowseDirsResponse,
     CodeDiagnosticResponse,
+    CodeFileLayoutPayload,
+    CodeLayoutPayload,
+    CodeLineBoxPayload,
     CreateTaskRequest,
     CropBox,
     CropDetectItem,
@@ -1725,6 +1728,69 @@ async def get_task_layout(
     if payload is None:
         raise ApiBusinessError(
             APIErrorCode.LAYOUT_NOT_FOUND, 404, "版面数据不存在",
+        )
+    return payload
+
+
+@router.get(
+    "/tasks/{task_id}/code-layout",
+    response_model=CodeLayoutPayload,
+)
+async def get_task_code_layout(
+    task_id: str,
+    doc_dir: str = "",
+) -> CodeLayoutPayload:
+    """返回代码任务行级版面 ``.code_layout.json``（#93：悬停行↔原图局部放大）。
+
+    可选 ``doc_dir``（多文档相对子目录）；单文档留空读根 output_dir。代码模式无
+    content_crop / 无矫正 → bbox 恒原图坐标，故无 ``processed`` 字段。无 sidecar
+    （非 VL 引擎 / 老任务 / 文档或 PPT 模式）→ 404 优雅，前端视作「无放大数据」不弹错。
+    """
+    manager = _get_manager()
+    task = manager.get_task(task_id)
+    if task is None:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
+
+    def _load() -> CodeLayoutPayload | None:
+        from docrestore.output.code_layout_sidecar import load_code_layout
+
+        output_dir = Path(task.output_dir).resolve(strict=False)
+        # doc_dir 边界守卫：拒 .. / 绝对路径 / 越界（与 get_task_layout 同口径）
+        if doc_dir:
+            if ".." in Path(doc_dir).parts or Path(doc_dir).is_absolute():
+                return None
+            target_dir = (output_dir / doc_dir).resolve(strict=False)
+            if not target_dir.is_relative_to(output_dir):
+                return None
+        else:
+            target_dir = output_dir
+
+        code_layout = load_code_layout(target_dir)
+        if code_layout is None:
+            return None
+        return CodeLayoutPayload(
+            files=[
+                CodeFileLayoutPayload(
+                    path=file_layout.path,
+                    lines=[
+                        CodeLineBoxPayload(
+                            line_no=line.line_no,
+                            page=line.page,
+                            bbox=line.bbox,
+                        )
+                        for line in file_layout.lines
+                    ],
+                )
+                for file_layout in code_layout.files
+            ],
+        )
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        raise ApiBusinessError(
+            APIErrorCode.CODE_LAYOUT_NOT_FOUND, 404, "代码版面数据不存在",
         )
     return payload
 

@@ -428,6 +428,31 @@ class LayoutPayload(BaseModel):
     processed: bool = False
 
 
+class CodeLineBoxPayload(BaseModel):
+    """代码单行在原图的像素框（#93 悬停放大）：行号 + 来源页 + bbox。"""
+
+    line_no: int  # OCR 行号（与前端编辑器 data-line 同值）
+    page: str  # 来源页标识 ``{page_stem}.col{column_index}``
+    bbox: tuple[int, int, int, int]  # (x0, y0, x1, y1) 原图像素
+
+
+class CodeFileLayoutPayload(BaseModel):
+    """单个源文件的行级版面：path 对齐 files-index entry.path。"""
+
+    path: str
+    lines: list[CodeLineBoxPayload]
+
+
+class CodeLayoutPayload(BaseModel):
+    """代码任务行级版面载荷（#93）：各源文件逐行 bbox，供悬停行↔原图局部放大。
+
+    代码模式无 content_crop / 无矫正 → bbox 恒在原图坐标系，故无 ``processed`` 字段
+    （前端加载原图读 naturalWidth/Height 即可）。
+    """
+
+    files: list[CodeFileLayoutPayload]
+
+
 class UploadSessionResponse(BaseModel):
     """创建上传会话响应"""
 

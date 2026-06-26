@@ -1550,6 +1550,34 @@ class Pipeline:
                 exc_info=True,
             )
 
+    async def _write_code_layout_sidecar(
+        self,
+        sources: list[SourceFile],
+        output_dir: Path,
+    ) -> None:
+        """落代码版面 sidecar ``.code_layout.json``（#93 悬停行↔原图放大真相源）。
+
+        逐行取胜出页 bbox（``build_code_layout``，重叠区按 ``line_provenance``）；
+        只含 ``line_no + page + bbox``、无正文 → 无 PII 面、无需脱敏。无任何行
+        bbox（非 VL 引擎）→ ``build_code_layout`` 返回 None 不落盘，前端不放大。
+        落盘失败仅告警，不阻断主流程（放大镜是增强）。
+        """
+        from docrestore.output.code_layout_sidecar import (
+            build_code_layout,
+            write_code_layout,
+        )
+
+        layout = build_code_layout(sources)
+        if layout is None:
+            return
+        try:
+            await asyncio.to_thread(write_code_layout, output_dir, layout)
+        except OSError:
+            logger.warning(
+                "代码版面 sidecar 落盘失败（不阻断主流程，前端不放大）",
+                exc_info=True,
+            )
+
     async def _code_pipeline(  # noqa: C901
         self,
         page_queue: asyncio.Queue[PageOCR | None],
@@ -1879,6 +1907,8 @@ class Pipeline:
         render_result = await render_code_files(
             sources, output_dir, enable_diagnostics=True,
         )
+        # 落代码版面 sidecar（悬停行↔原图放大；失败仅告警不阻断）。
+        await self._write_code_layout_sidecar(sources, output_dir)
         if quality is not None:
             await detect_code_mode_quality(
                 quality,
