@@ -29,6 +29,8 @@ interface SourceImageListProps {
   readonly processed?: boolean;
   /** 多文档相对子目录，构造处理图 URL 用（单文档留空）。 */
   readonly docDir?: string | undefined;
+  /** 高亮某页缩略图（命中 pageKey 加 ``active`` 类描边）；缺省不高亮（#93 代码模式）。 */
+  readonly activePageKey?: string | undefined;
 }
 
 export const SourceImageList = forwardRef<
@@ -37,7 +39,7 @@ export const SourceImageList = forwardRef<
 >(function SourceImageList(
   {
     taskId, images, listClassName, imageClassName, empty, highlight,
-    processed = false, docDir,
+    processed = false, docDir, activePageKey,
   },
   scrollRef,
 ): React.JSX.Element {
@@ -58,7 +60,10 @@ export const SourceImageList = forwardRef<
           return (
             <div
               key={image.name}
-              className="source-image-cell"
+              className={
+                "source-image-cell" +
+                (activePageKey === image.pageKey ? " active" : "")
+              }
               data-page={image.pageKey}
             >
               <img

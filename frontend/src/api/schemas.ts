@@ -391,3 +391,26 @@ export const LayoutPayloadSchema = z.object({
   processed: z.boolean().default(false),
 });
 export type LayoutPayload = z.infer<typeof LayoutPayloadSchema>;
+
+/** 代码单行在原图的像素框 (x0,y0,x1,y1) + 来源页标识 + 行号（#93 悬停放大）。
+ *  page = `{stem}.col{idx}`，对齐 files-index 的 source_page_ranges。 */
+export const CodeLineBoxPayloadSchema = z.object({
+  line_no: z.number(),
+  page: z.string(),
+  bbox: z.tuple([z.number(), z.number(), z.number(), z.number()]),
+});
+export type CodeLineBoxPayload = z.infer<typeof CodeLineBoxPayloadSchema>;
+
+/** 单源文件行级版面：path 对齐 files-index entry.path */
+export const CodeFileLayoutPayloadSchema = z.object({
+  path: z.string(),
+  lines: z.array(CodeLineBoxPayloadSchema).default([]),
+});
+export type CodeFileLayoutPayload = z.infer<typeof CodeFileLayoutPayloadSchema>;
+
+/** GET /tasks/{id}/code-layout 响应：各源文件逐行 bbox，供悬停行↔原图局部放大（#93）。
+ *  代码模式无 content_crop / 无矫正 → bbox 恒原图坐标，故无 processed 字段。 */
+export const CodeLayoutPayloadSchema = z.object({
+  files: z.array(CodeFileLayoutPayloadSchema).default([]),
+});
+export type CodeLayoutPayload = z.infer<typeof CodeLayoutPayloadSchema>;

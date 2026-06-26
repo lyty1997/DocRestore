@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearApiToken, saveApiToken } from "../../src/api/auth";
 import {
   getProcessedImageUrl,
+  getTaskCodeLayout,
   getTaskLayout,
   getUploadFileUrl,
 } from "../../src/api/client";
@@ -96,5 +97,46 @@ describe("getTaskLayout", () => {
     await getTaskLayout("t1", "sub dir/a");
     const calledUrl = fetchMock.mock.calls[0]?.[0];
     expect(calledUrl).toContain("/tasks/t1/layout?doc_dir=sub%20dir%2Fa");
+  });
+});
+
+describe("getTaskCodeLayout", () => {
+  it("404（无 sidecar）→ undefined，不抛错、不弹错误", async () => {
+    const fetchMock = vi.fn(() => new Response("", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getTaskCodeLayout("t1")).resolves.toBeUndefined();
+  });
+
+  it("200 → zod 解析后的 CodeLayoutPayload（line_no/page/bbox 四元）", async () => {
+    const payload = {
+      files: [
+        {
+          path: "app/foo.py",
+          lines: [
+            { line_no: 1, page: "page0001.col0", bbox: [10, 20, 200, 40] },
+          ],
+        },
+      ],
+    };
+    const fetchMock = vi.fn(() => Response.json(payload, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getTaskCodeLayout("t1");
+    expect(result?.files[0]?.path).toBe("app/foo.py");
+    expect(result?.files[0]?.lines[0]?.line_no).toBe(1);
+    expect(result?.files[0]?.lines[0]?.page).toBe("page0001.col0");
+    expect(result?.files[0]?.lines[0]?.bbox).toEqual([10, 20, 200, 40]);
+  });
+
+  it("docDir 经 query 透传并 URL 编码", async () => {
+    const fetchMock = vi.fn(
+      (_url: string) => new Response("", { status: 404 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getTaskCodeLayout("t1", "sub dir/a");
+    const calledUrl = fetchMock.mock.calls[0]?.[0];
+    expect(calledUrl).toContain("/tasks/t1/code-layout?doc_dir=sub%20dir%2Fa");
   });
 });

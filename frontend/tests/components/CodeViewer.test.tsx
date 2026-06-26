@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -6,6 +6,7 @@ import {
   diagnoseCodeFileContent,
   getCodeFileContent,
   getFilesIndex,
+  getTaskCodeLayout,
   updateCodeFileContent,
 } from "../../src/api/client";
 import type { FilesIndex } from "../../src/api/schemas";
@@ -19,6 +20,8 @@ vi.mock("../../src/api/client", () => ({
   getSourceImageUrl: vi.fn((taskId: string, filename: string): string =>
     `/api/v1/tasks/${taskId}/source-images/${filename}`,
   ),
+  // #93：代码版面放大镜 sidecar；默认无（404→undefined），不影响既有断言。
+  getTaskCodeLayout: vi.fn(() => Promise.resolve()),
   updateCodeFileContent: vi.fn(),
 }));
 
@@ -26,6 +29,7 @@ const diagnoseCodeFileContentMock = vi.mocked(diagnoseCodeFileContent);
 const getFilesIndexMock = vi.mocked(getFilesIndex);
 const getCodeFileContentMock = vi.mocked(getCodeFileContent);
 const updateCodeFileContentMock = vi.mocked(updateCodeFileContent);
+const getTaskCodeLayoutMock = vi.mocked(getTaskCodeLayout);
 
 function renderViewer(index: FilesIndex, content?: string): void {
   getFilesIndexMock.mockResolvedValue(index);
@@ -109,7 +113,7 @@ describe("CodeViewer", () => {
       '.code-content-text [data-page="page2.JPG"]',
     );
     const imageAnchor = getRequiredElement(
-      '.code-source-images-list [data-page="page2.JPG"]',
+      '.code-source-thumbs-list [data-page="page2.JPG"]',
     );
 
     expect(codeAnchor.className).toBe("code-page-anchor");
@@ -543,5 +547,160 @@ describe("CodeViewer", () => {
       ...spacers.map((el) => Number.parseFloat(el.style.height) || 0),
     );
     expect(maxSpacer).toBeGreaterThan(1000);
+  });
+
+  it("编辑态移动光标 → 高亮当前行号并定位该行所属源图缩略图", async () => {
+    const user = userEvent.setup();
+    // sidecar：3 行 bbox 均属 page1（行号即 OCR line_no，与 data-line / gutter 同源）。
+    getTaskCodeLayoutMock.mockResolvedValue({
+      files: [
+        {
+          path: "src/foo.cc",
+          lines: [
+            { line_no: 1, page: "page1.col0", bbox: [0, 0, 10, 10] },
+            { line_no: 2, page: "page1.col0", bbox: [0, 10, 10, 20] },
+            { line_no: 3, page: "page1.col0", bbox: [0, 20, 10, 30] },
+          ],
+        },
+      ],
+    });
+    renderViewer(
+      [
+        {
+          path: "src/foo.cc",
+          filename: "foo.cc",
+          language: "cpp",
+          source_pages: ["page1.col0"],
+          source_page_ranges: [
+            { page: "page1.col0", start_line: 1, end_line: 3 },
+          ],
+          line_count: 3,
+          line_no_range: [1, 3],
+          flags: [],
+        },
+      ],
+      "a\nb\nc",
+    );
+
+    await screen.findByText("src/foo.cc");
+    await user.click(screen.getByRole("button", { name: "编辑" }));
+
+    const textarea = screen.getByLabelText<HTMLTextAreaElement>(
+      "编辑代码文件内容",
+    );
+    // 光标置于第 2 行（偏移 2 = "a\n" 之后），keyUp 上报活动行。
+    textarea.setSelectionRange(2, 2);
+    fireEvent.keyUp(textarea);
+
+    // gutter 当前行高亮落在行号 "2"；该行 bbox 属 page1 → 对应缩略图描边 active。
+    await waitFor(() => {
+      const current = document.querySelector(
+        ".code-editor-edit-gutter .code-line-number.current-line",
+      );
+      expect(current?.textContent).toBe("2");
+      expect(
+        document.querySelector(
+          ".code-source-thumbs-list .source-image-cell.active",
+        ),
+      ).not.toBeNull();
+    });
+
+    // 光标移到第 3 行（偏移 4 = "a\nb\n" 之后）→ 高亮跟随到 "3"。
+    textarea.setSelectionRange(4, 4);
+    fireEvent.keyUp(textarea);
+    await waitFor(() => {
+      expect(
+        document.querySelector(
+          ".code-editor-edit-gutter .code-line-number.current-line",
+        )?.textContent,
+      ).toBe("3");
+    });
+
+    // forward 多行拖选（0→4）：光标在焦点端 selectionEnd=4 → 跟随到末行 "3"。
+    textarea.setSelectionRange(0, 4, "forward");
+    fireEvent.keyUp(textarea);
+    await waitFor(() => {
+      expect(
+        document.querySelector(
+          ".code-editor-edit-gutter .code-line-number.current-line",
+        )?.textContent,
+      ).toBe("3");
+    });
+    // backward 拖选（0→4）：光标在 selectionStart=0 → 跟随到首行 "1"。
+    textarea.setSelectionRange(0, 4, "backward");
+    fireEvent.keyUp(textarea);
+    await waitFor(() => {
+      expect(
+        document.querySelector(
+          ".code-editor-edit-gutter .code-line-number.current-line",
+        )?.textContent,
+      ).toBe("1");
+    });
+  });
+
+  it("切换到编辑态清空只读悬停的活动行，首次落光标后才高亮（无幽灵当前行）", async () => {
+    const user = userEvent.setup();
+    getTaskCodeLayoutMock.mockResolvedValue({
+      files: [
+        {
+          path: "src/foo.cc",
+          lines: [
+            { line_no: 1, page: "page1.col0", bbox: [0, 0, 10, 10] },
+            { line_no: 2, page: "page1.col0", bbox: [0, 10, 10, 20] },
+            { line_no: 3, page: "page1.col0", bbox: [0, 20, 10, 30] },
+          ],
+        },
+      ],
+    });
+    renderViewer(
+      [
+        {
+          path: "src/foo.cc",
+          filename: "foo.cc",
+          language: "cpp",
+          source_pages: ["page1.col0"],
+          source_page_ranges: [
+            { page: "page1.col0", start_line: 1, end_line: 3 },
+          ],
+          line_count: 3,
+          line_no_range: [1, 3],
+          flags: [],
+        },
+      ],
+      "a\nb\nc",
+    );
+
+    await screen.findByText("src/foo.cc");
+    await waitFor(() => {
+      expect(document.querySelector(".code-content-text")).not.toBeNull();
+    });
+
+    // 只读态悬停第 2 行 → 设活动行=2。
+    fireEvent.mouseMove(getRequiredElement('.code-content-text [data-line="2"]'));
+    await user.click(screen.getByRole("button", { name: "编辑" }));
+
+    // 进编辑态后 reset 生效：尚无 current-line（不把悬停行当幽灵当前行）。
+    await waitFor(() => {
+      expect(document.querySelector(".code-editor-edit-gutter")).not.toBeNull();
+    });
+    expect(
+      document.querySelector(
+        ".code-editor-edit-gutter .code-line-number.current-line",
+      ),
+    ).toBeNull();
+
+    // 落光标到第 1 行 → 高亮才出现在 "1"。
+    const textarea = screen.getByLabelText<HTMLTextAreaElement>(
+      "编辑代码文件内容",
+    );
+    textarea.setSelectionRange(0, 0);
+    fireEvent.keyUp(textarea);
+    await waitFor(() => {
+      expect(
+        document.querySelector(
+          ".code-editor-edit-gutter .code-line-number.current-line",
+        )?.textContent,
+      ).toBe("1");
+    });
   });
 });

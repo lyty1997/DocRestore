@@ -29,6 +29,8 @@ import {
   CropFigureResponseSchema,
   LayoutPayloadSchema,
   type LayoutPayload,
+  CodeLayoutPayloadSchema,
+  type CodeLayoutPayload,
   type ActionResponse,
   type BrowseDirsResponse,
   type CreateTaskResponse,
@@ -522,6 +524,30 @@ export async function getTaskLayout(
     return undefined;
   }
   return handleResponse(response, LayoutPayloadSchema);
+}
+
+/**
+ * 获取代码任务行级版面载荷（#93：悬停行↔原图局部放大）。
+ *
+ * 无 sidecar（非 VL 引擎 / 老任务 / 文档或 PPT 模式）→ 后端 404 → 返回 undefined
+ * （前端不显示放大镜、不弹错误）；多文档可传 docDir 取对应子目录。
+ */
+export async function getTaskCodeLayout(
+  taskId: string,
+  docDir?: string,
+): Promise<CodeLayoutPayload | undefined> {
+  const query =
+    docDir !== undefined && docDir !== ""
+      ? `?doc_dir=${encodeURIComponent(docDir)}`
+      : "";
+  const response = await fetch(
+    `${API_BASE}/tasks/${taskId}/code-layout${query}`,
+    { headers: apiHeaders() },
+  );
+  if (response.status === 404) {
+    return undefined;
+  }
+  return handleResponse(response, CodeLayoutPayloadSchema);
 }
 
 /** 构建源图片 URL（附加 token 供 <img src> 直接使用） */

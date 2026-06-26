@@ -3878,7 +3878,8 @@ body {
 
 .code-viewer {
   display: grid;
-  grid-template-columns: 220px 1fr 220px;
+  grid-template-columns: 220px 1fr;
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: 1rem;
   height: 80vh;
 }
@@ -4298,6 +4299,14 @@ body {
   border-right-color: rgb(0 0 0 / 0.1);
 }
 
+/* 编辑态当前光标行（#93 增量）：橙色左条 + 微底色，与缩略图 .active 描边同色系，
+   直接标出「编辑光标在哪行」。仅施结构性高亮（背景 + 左条），不改 color/font-weight，
+   避免特异性压住诊断行号配色（.has-*-diagnostic 错误红/依赖黄会被同时命中的当前行覆盖）。 */
+.code-editor-edit-gutter .code-line-number.current-line {
+  background: rgb(249 115 22 / 0.16);
+  box-shadow: inset 2px 0 0 #f97316;
+}
+
 .code-editor-textarea {
   width: 100%;
   height: 100%;
@@ -4473,6 +4482,95 @@ body {
   font-size: 0.8rem;
 }
 
+/* ── #93 悬停放大镜（嵌入 IDE 编辑栏顶部）─────────────────────── */
+/* 放大镜条：.code-content（flex column）的首个内容块，header 之下、代码之上。 */
+.code-magnifier {
+  flex: 0 0 auto;
+  display: flex;
+  border-bottom: 1px solid var(--color-border);
+  background: #151922;
+}
+[data-theme="light"] .code-magnifier {
+  background: #f7f4ee;
+}
+/* 探测期（取自然尺寸）保住高度，避免空→图的塌陷闪烁。 */
+.code-magnifier:has(.code-magnifier-probe) {
+  min-height: min(15vh, 160px);
+}
+/* 空闲/未命中：紧凑提示行，首次悬停后才展开为放大视口。 */
+.code-magnifier-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 64px;
+  color: var(--color-text-secondary);
+  font-size: 0.8rem;
+}
+/* 复用 .figure-crop-viewport（纯 CSS 局部放大），仅改高度与外观。 */
+/* 高度：2026-06-26 用户反馈过高，由 min(24vh,260px) 收至 min(15vh,160px)。 */
+.figure-crop-viewport.code-magnifier-viewport {
+  flex: 1;
+  height: min(15vh, 160px);
+  border-radius: 0;
+  background: #0f131a;
+}
+.code-magnifier-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  user-select: none;
+}
+/* 探测图：不可见但需真实加载以取 naturalWidth/Height。 */
+.code-magnifier-probe {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+/* 当前行 focus 框：按 --crop-zoom 反向缩放，放大后描线仍细。 */
+.code-magnifier-viewport .block-highlight-overlay {
+  border-width: calc(2px / var(--crop-zoom, 1));
+  box-shadow: none;
+}
+
+/* ── #93 底部全宽源图缩略图条 ─────────────────────────────────── */
+.code-source-thumbs {
+  grid-column: 1 / -1;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface-alt);
+  padding: 0.4rem;
+  overflow: hidden;
+}
+.code-source-thumbs-list {
+  display: flex;
+  flex-direction: row;
+  gap: 0.5rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 0.25rem;
+}
+/* 横向条里每张图按高度收缩成缩略图（覆盖竖排时的 width:100%）。 */
+.code-source-thumbs-list .source-image-cell {
+  width: auto;
+  flex: 0 0 auto;
+}
+.code-source-thumb-item {
+  height: 84px;
+  width: auto;
+  border-radius: 4px;
+  cursor: pointer;
+  display: block;
+}
+/* 当前悬停行所属那张图：橙色描边定位（outline 不挤占布局）。 */
+.code-source-thumbs-list .source-image-cell.active {
+  outline: 3px solid #f97316;
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+
 .code-viewer-loading,
 .code-viewer-error,
 .code-viewer-empty {
@@ -4487,17 +4585,16 @@ body {
 @media (max-width: 980px) {
   .code-viewer {
     grid-template-columns: 1fr;
+    grid-template-rows: none;
     height: auto;
   }
 
   .code-file-list,
-  .code-content,
-  .code-source-images {
+  .code-content {
     max-height: 70vh;
   }
 
-  .code-content-text,
-  .code-source-images-list {
+  .code-content-text {
     max-height: 60vh;
   }
 }
