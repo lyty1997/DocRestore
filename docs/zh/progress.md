@@ -2825,5 +2825,9 @@ F2 加「同页不同行宽」用例（9 passed）；静态 harness 长行/短�
   **B** `useEffect([editing])` 清 `activeLine` 防跨态「幽灵当前行」（textarea 无 autofocus，`onFocus` 兜底失效）；
   **C** `.current-line` 改**纯结构高亮**（橙条+底色，删 `color/font-weight`）避免压住诊断行号错误红，
   截图验证「既诊断又当前=红字+橙条」并存。新增选区方向测 + 切态清空测；前端 vitest **241 passed**，
-  门禁 **EXIT=0**。**D**（基线 `data-page` 锚点死代码）属 #93 基线遗留、出本增量范围，单列后续。
-  **未提交**（待用户「提交」）。
+  门禁 **EXIT=0**。已提交 dev：`feat(core)` 4338bd9 + `feat(tui)` b50350f + `docs(core)` 96287b0。
+- **D 死代码清理（独立 `refactor(tui)`）**：grep 全仓确证代码路径无 `[data-page]`/`useScrollSync` 消费方
+  （消费方全在文档/PPT 路径）后，移除 `CodePageAnchor`/`buildCodePageAnchors`/`clampLineIndex`/`codePageAnchors`
+  useMemo + 只读 overlay span + `.code-content-text .code-page-anchor` CSS + stale 注释；两测改断言**存活**的
+  源图缩略图（`.source-image-cell` 的 `data-page`，不依赖 `source_page_ranges`），覆盖未丢。
+  前端 vitest 241 passed、门禁 EXIT=0。

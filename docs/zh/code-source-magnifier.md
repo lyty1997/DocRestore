@@ -281,6 +281,9 @@ F5 截图复核（编辑态移动光标→放大镜跟随 + 行号高亮 + 缩�
   （截图验证：行号既诊断又当前=红字 + 橙条并存）。
 - 新增测：选区 forward→末行 / backward→首行；切到编辑态清空悬停行（无幽灵）首落光标才点亮。
 
-**未修（出本增量范围）**：审查另报 **D**——`codePageAnchors` 的 `[data-page]` 锚点在 #93 基线
-（前序会话撤 `usePreviewScrollSync`）后已无消费方、注释 stale、两测断言惰性 DOM。属基线遗留减熵项，
-不在「编辑态光标跟随」范围，单列后续处理。
+**D 已清理（独立 `refactor(tui)` commit）**：审查另报 **D**——`codePageAnchors` 的 `[data-page]` 锚点在
+#93 基线（前序会话撤 `usePreviewScrollSync`）后已无消费方、注释 stale、两测断言惰性 DOM。经全仓 grep
+确证代码路径无 `[data-page]`/`useScrollSync` 消费方（消费方全在文档/PPT 路径）后，移除
+`CodePageAnchor`/`buildCodePageAnchors`/`clampLineIndex`/`codePageAnchors` useMemo + 只读 overlay span +
+`.code-content-text .code-page-anchor` CSS + stale 注释；两测改断言**存活**的源图缩略图（`.source-image-cell`
+的 `data-page` 由 SourceImageList 渲染、不依赖 `source_page_ranges`），覆盖未丢。
