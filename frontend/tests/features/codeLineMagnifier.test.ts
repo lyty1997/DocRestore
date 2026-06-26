@@ -56,7 +56,7 @@ describe("computeMagnifierRegion", () => {
     expect(computeMagnifierRegion(fi, 2)).toEqual({
       page: "pA",
       region: { x0: 0, y0: 0, x1: 10, y1: 60 },
-      focus: [0, 20, 10, 40], // 当前行本身
+      focus: [0, 20, 10, 40], // 整行带：x 取全页行宽 [0..10]，y 取当前行 [20..40]
     });
   });
 
@@ -69,8 +69,8 @@ describe("computeMagnifierRegion", () => {
     // 悬停短行 line2：region.x 仍取全页 [10..200]（非短行的 60），缩放不随行长变
     const target = computeMagnifierRegion(fi, 2);
     expect(target?.region).toEqual({ x0: 10, y0: 0, x1: 200, y1: 60 });
-    // focus 仍是短行真实框（描框标当前行实际宽度）
-    expect(target?.focus).toEqual([10, 20, 60, 40]);
+    // focus 横向铺满全页行宽 [10..200]（整行背景带，不取短行真实宽 60），纵向用短行真实 y
+    expect(target?.focus).toEqual([10, 20, 200, 40]);
   });
 
   it("首行边界：只并 line 与 line+1（无 line-1）", () => {

@@ -4516,10 +4516,14 @@ body {
   opacity: 0;
   pointer-events: none;
 }
-/* 当前行 focus 框：按 --crop-zoom 反向缩放，放大后描线仍细。 */
+/* 当前行高亮：整行背景染色带（不描边遮正文、横向恒宽 → 无随行长的动态缩放）；
+ * transition:none 让染色带随图平移一起贴住当前行，避免独立动画造成的缩放错位。 */
 .code-magnifier-viewport .block-highlight-overlay {
-  border-width: calc(2px / var(--crop-zoom, 1));
+  border: none;
+  border-radius: 0;
   box-shadow: none;
+  background: rgb(249 115 22 / 0.2);
+  transition: none;
 }
 
 /* ── #93 底部全宽源图缩略图条 ─────────────────────────────────── */

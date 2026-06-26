@@ -287,3 +287,21 @@ F5 截图复核（编辑态移动光标→放大镜跟随 + 行号高亮 + 缩�
 `CodePageAnchor`/`buildCodePageAnchors`/`clampLineIndex`/`codePageAnchors` useMemo + 只读 overlay span +
 `.code-content-text .code-page-anchor` CSS + stale 注释；两测改断言**存活**的源图缩略图（`.source-image-cell`
 的 `data-page` 由 SourceImageList 渲染、不依赖 `source_page_ranges`），覆盖未丢。
+
+### 11.2 当前行高亮改整行背景带（2026-06-26，用户反馈）
+
+用户反馈放大镜内的当前行 `BlockHighlightOverlay`：①**描边太粗挡住正文**（边框压在行 bbox 边沿、盖住
+首尾字符）；②**有动态缩放效果**（`focus` 取当前行**真实窄框**，行长不同→宽度跳变，叠加 overlay 自身
+`transition` 与图层 `transform` 两套动画异步 → 视觉像缩放）。决策：放大镜里改为**整行背景染色带**（不描边）。
+
+- **focus 横向铺满固定行宽**（`codeLineMagnifier.ts`）：`focus` 由「当前行真实 bbox」改为
+  `[ref.x0, line.y0, ref.x1, line.y1]`——x 取与 `region` 同一份 `pageXExtent`（当前页行宽并集），y 取
+  当前行（或就近回退行）真实纵带。同页内 left/width **恒定**，仅纵向跟随光标 → 行长不再驱动宽度跳变。
+- **CSS 改无边框半透明带**（`.code-magnifier-viewport .block-highlight-overlay` 覆盖）：`border:none` +
+  `border-radius:0` + `background: rgb(249 115 22 / .2)`（半透明，正文透出）+ `transition:none`。
+  `transition:none` 让染色带不再独立动画——它是 `figure-crop-zoom`（`transform 0.25s`）的子元素，按图层
+  坐标定位，随图平移**一体贴住**当前行，消除「overlay 0.12s vs 图层 0.25s」异步造成的缩放错位。
+  base `.block-highlight-overlay`（Epic E 文档光标高亮共用）**不动**，仅在放大镜作用域覆盖。
+- **测**：`computeMagnifierRegion` 短行用例的 `focus` 由 `[10,20,60,40]`（短行真实宽 60）改为
+  `[10,20,200,40]`（整行带，铺满全页行宽 200）；harness 旧/新并排截图核对（旧=橙描边贯穿
+  `clean(` 文字、右端切词；新=无边框全幅半透明带、`cleaned = clean(text)` 帯越透出可读、横幅到 viewport 端）。

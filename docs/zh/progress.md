@@ -2831,3 +2831,17 @@ F2 加「同页不同行宽」用例（9 passed）；静态 harness 长行/短�
   useMemo + 只读 overlay span + `.code-content-text .code-page-anchor` CSS + stale 注释；两测改断言**存活**的
   源图缩略图（`.source-image-cell` 的 `data-page`，不依赖 `source_page_ranges`），覆盖未丢。
   前端 vitest 241 passed、门禁 EXIT=0。
+
+**当前行高亮改整行背景带（2026-06-26，用户反馈，设计 §11.2）**：用户「高亮框不要边、只要整行背景
+染色，边框太粗挡住正文，且有动态缩放效果，整行染色更好避免动态缩放渲染」。两改：
+- **`focus` 横向铺满固定行宽**（`codeLineMagnifier.ts`）：由「当前行真实窄框」改 `[ref.x0, line.y0, ref.x1,
+  line.y1]`——x 复用 `region` 同份 `pageXExtent`（页行宽并集），同页内 left/width **恒定**、仅纵向跟随
+  → 行长不再驱动宽度跳变（动态缩放根因之一）。
+- **CSS 无边框半透明带**（`.code-magnifier-viewport .block-highlight-overlay` 覆盖）：`border:none` +
+  `border-radius:0` + `background: rgb(249 115 22 / .2)`（正文透出）+ `transition:none`（不再独立动画，
+  随 `figure-crop-zoom` 的 `transform` 一体平移贴住当前行，消「overlay 0.12s vs 图层 0.25s」异步错位）。
+  base `.block-highlight-overlay`（Epic E 文档高亮共用）不动，仅放大镜作用域覆盖。
+- **证据**：`codeLineMagnifier` 短行用例 `focus` 由 `[10,20,60,40]`→`[10,20,200,40]`（整行带）；前端
+  vitest **241 passed**、门禁 `check_quality.sh` **EXIT=0**（1588 passed/45 skipped）；harness 旧/新并排
+  Playwright 截图核对（旧=橙描边贯穿 `clean(`、右端切词；新=无边框全幅半透明带、`cleaned = clean(text)`
+  透出可读、横幅到 viewport 端）。harness 临时件已删。

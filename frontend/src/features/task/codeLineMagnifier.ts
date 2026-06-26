@@ -29,7 +29,8 @@ export type CodeLineIndex = Map<string, FileLineIndex>;
 export interface MagnifierTarget {
   readonly page: string;
   readonly region: RegionBBox;
-  /** 当前行（无 bbox 时为就近回退行）的原图 bbox，供在放大视图里描出当前行。 */
+  /** 当前行高亮带的原图 bbox：横向铺满固定行宽参考（整行背景染色、不随行长缩放），
+   *  纵向取当前行（无 bbox 时为就近回退行）真实 y；放大视图里整行染色标当前行（不描边遮正文）。 */
   readonly focus: LineBoxTuple;
 }
 
@@ -140,7 +141,11 @@ export function computeMagnifierRegion(
   const region: RegionBBox = {
     x0: ref.x0, y0: band.y0, x1: ref.x1, y1: band.y1,
   };
-  // 当前行描框：当前行有 bbox 用其本身，否则用就近回退行。
-  const focus = (fileIndex.get(lineNo) ?? anchor).bbox;
+  // 当前行高亮：横向铺满固定行宽参考（与 region 同宽 → 整行背景带，不随行长缩放、
+  // 不描边遮正文），纵向取当前行（或就近回退行）真实 y。
+  const focusLine = fileIndex.get(lineNo) ?? anchor;
+  const focus: LineBoxTuple = [
+    ref.x0, focusLine.bbox[1], ref.x1, focusLine.bbox[3],
+  ];
   return { page, region, focus };
 }
