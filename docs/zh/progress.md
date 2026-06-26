@@ -2755,3 +2755,75 @@ PPT=自动 content_crop 且矫正后串联。
 producer 串联未单测（需 mock OCR 引擎）→ 靠设计 + 端点测 + 活机 PPT 跑验证。
 
 **状态**：实现+测试完成，**未提交**。活机验证（PPT 串联裁剪 + 代码手动裁剪 UI）待重启服务。
+
+---
+
+## 2026-06-26 代码模式源图放大镜（#93，悬停行→原图局部放大 + 底部缩略图）
+
+**主题**：代码模式右侧源图整张缩在窄栏看不清 → 给一个跟随鼠标的「源图放大镜」：悬停某代码行 →
+在 IDE 编辑栏顶部放大显示**该行±1 行**对应的原图局部，整张源图退化为**界面最下方**缩略图条并标记
+当前行所属那张。设计 `docs/zh/code-source-magnifier.md`。
+
+**决策**：精确·行级坐标（后端导出已算好但被丢弃的 `CodeLine.bbox`）；悬停驱动（只读查看器无真光标）；
+放大镜嵌编辑栏顶部、缩略图条落界面最下方全宽（用户拍板）。
+
+**完成**（B1→F5 逐个有证据闭环）：
+- **B1** `output/code_layout_sidecar.py` 纯模块：`build_code_layout(sources)` 逐行取胜出页 bbox
+  （重叠区按 `line_provenance`），`.code_layout.json` 只含 `line_no+page+bbox`、无正文 → 零 PII 面、无需脱敏；
+  宽松反序列化（坏行/坏文件跳过）。15 单测。
+- **B2** `_code_pipeline` 在 `render_code_files` 后 `_write_code_layout_sidecar`（失败仅告警不阻断）。3 测。
+- **B3** `GET /tasks/{id}/code-layout` + `CodeLayoutPayload` + `CODE_LAYOUT_NOT_FOUND` 三语 i18n
+  （doc_dir 越界守卫，无 processed——代码模式 bbox 恒原图坐标）。端点测 5（命中/越界 404/无 sidecar 404）。
+- **F1** schema + `getTaskCodeLayout`(404→undefined) + 单测（含 3 新用例）。
+- **F2** `features/task/codeLineMagnifier.ts`：`buildLineIndex` + `computeMagnifierRegion`
+  （line±1 **同页** bbox 并集，跨页边界只并同页那侧；当前行无 bbox 就近回退；`focus`=当前行框）。8 单测。
+- **F3** CodeViewer 接线：拉 layout 建索引；代码容器 `onMouseMove` 取最近 `[data-line]`(=line_no) →
+  `hover{path,lineNo}`（绑 path 切档自动失效）→ `computeMagnifierRegion`；放大镜 `<CodeSourceMagnifier>`
+  复用 `CropZoomViewport`（自然尺寸探测 + 同图换行命令式 refit）+ `BlockHighlightOverlay` 描当前行；
+  底部 `SourceImageList`(新增 `activePageKey`) 当前页橙描边。撤右源图 aside + 去纵向 scroll-sync。
+- **F4** CSS：`.code-viewer` 由 `220px 1fr 220px` 改 `220px 1fr` + 行 `minmax(0,1fr) auto`，
+  缩略图 `grid-column:1/-1` 全宽底部；放大镜复用 `.figure-crop-viewport`(高度改 `min(24vh,260px)`)，
+  `:has(.code-magnifier-probe)` 探测期保高防塌陷，focus 框按 `--crop-zoom` 反缩放保细线。
+- **F5** 静态 harness（`devHarness/` + `harness.html` + public 喂图，8000 静态服务器经 Vite 代理命中）+
+  Playwright 截图核对：放大镜在编辑栏顶部显原图局部放大（文字清晰可读）、橙色 focus 框框住当前行、
+  底部缩略图当前页橙描边——**harness 临时件已删**。
+
+**复用件（零造轮子）**：`CropZoomViewport`+`fitRegion`（bbox→纯 CSS 放大）、Epic E `layout_sidecar`+
+`/layout`+`getTaskLayout` 模板、`SourceImageList`+`ImageLightbox`、`pageKeyBySourcePage`。
+
+**门禁**：`check_quality.sh` EXIT=0（mypy/ruff/typos 绿，前端 tsc+eslint 绿，后端 pytest 1588 passed/45 skipped）。
+
+**状态**：实现+测试+视觉验证完成，**未提交**。真机 E2E（真实代码模式 OCR 跑出 `.code_layout.json` 后悬停验证）
+需 GPU+vLLM 起任务，待用户需要时再跑（行级数据流已由 F2 单测 + 静态 harness 覆盖）。
+
+**优化（行宽恒定，2026-06-26）**：用户反馈「保持放大镜行宽，无需把文字动态全部铺开」。根因 `fitRegion`
+按**每行 region 宽度**铺满视口 78% → 行长不同则缩放系数不同、字号「呼吸」。修法：`computeMagnifierRegion`
+的 region **横向恒取当前页所有行的 x 并集**（`pageXExtent`，固定行宽参考），纵向才用 ±1 band → 宽 >> 高、
+`fitRegion` 宽度主导 → zoom 恒定，短行不铺开、字号稳定，只纵向跟随光标；`focus` 仍是当前行真实框。
+F2 加「同页不同行宽」用例（9 passed）；静态 harness 长行/短行双放大镜截图核对字号一致。门禁 EXIT=0。
+
+**增量（编辑态光标跟随 + 放大镜收高，2026-06-26）**：用户「编辑模式也加上跟随高亮，编辑光标在哪
+就高亮哪一行」+「放大镜区域太高，收小」。设计 §11。改动：
+- **统一活动行**：`hover{path,lineNo}` → `activeLine`，语义升为「来源：只读悬停 *或* 编辑光标」。
+  `<CodeSourceMagnifier>` 本就常驻渲染，原编辑态因无 mousemove 停在上次悬停行；现编辑态由
+  `handleEditorCaret` 驱动。两态 DOM 互斥（编辑无 `.code-content-text`、只读无 textarea）不串扰。
+- **光标行映射**：纯函数 `lineIndexAtOffset(text,offset)`（数 `selectionStart` 前换行，越界钳制）→
+  `displayLineNumber=line_no_range[0]+idx` 还原 OCR `line_no`（== sidecar 键 == 只读 `data-line`），
+  喂同一 `computeMagnifierRegion`，零新链路。textarea 挂 `onSelect/onKeyUp/onClick/onFocus`（React
+  `onSelect` 覆盖键鼠移动，余为跨浏览器与测试兜底；`activeLine` 按 `(path,lineNo)` 去重）。
+- **gutter 当前行高亮**：编辑行号槽当前行加 `current-line` 类（橙左条+微底色，与缩略图 `.active`
+  同色 #f97316），直接满足「高亮哪一行」字面诉求。
+- **放大镜收高**：`min(24vh,260px)` → `min(15vh,160px)`（viewport + 探测期 min-height 同步）。
+- **坑**：`activeLine?.path === selectedPath` **不收窄** `activeLine`（两者皆 undefined 时相等为真）→
+  全量 `tsc` 报 TS18048（逐文件 hook 的 tsc 漏报），改显式 `activeLine !== undefined &&` 前置守卫。
+- **证据**：`lineIndexAtOffset` 单测 5 例（空/首/中/尾/越界，合并 codeLineMagnifier 14 passed）；
+  CodeViewer 编辑光标测（置 `selectionStart`→keyUp→gutter `current-line` 行 2→3 + 缩略图 `.active`，
+  10 passed）；门禁 `check_quality.sh` **EXIT=0**（1588 passed/45 skipped + tsc/lint/mypy/ruff/typos 绿）；
+  静态 harness Playwright 截图核对放大条收窄 + gutter 橙高亮。
+- **对抗式审查 + 修复（设计 §11.1）**：4 视角 finder→逐条 verify，6 条全 low、无功能 bug，修 3 项——
+  **A** 多行选区按 `selectionDirection` 取焦点端（原只读 `selectionStart` 跟到选区顶端）；
+  **B** `useEffect([editing])` 清 `activeLine` 防跨态「幽灵当前行」（textarea 无 autofocus，`onFocus` 兜底失效）；
+  **C** `.current-line` 改**纯结构高亮**（橙条+底色，删 `color/font-weight`）避免压住诊断行号错误红，
+  截图验证「既诊断又当前=红字+橙条」并存。新增选区方向测 + 切态清空测；前端 vitest **241 passed**，
+  门禁 **EXIT=0**。**D**（基线 `data-page` 锚点死代码）属 #93 基线遗留、出本增量范围，单列后续。
+  **未提交**（待用户「提交」）。
