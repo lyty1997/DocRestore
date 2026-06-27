@@ -93,6 +93,7 @@ from docrestore.output.exporters import (
     ExportToolUnavailable,
     export_cache_path,
     export_content_hash,
+    export_to_cache,
     get_exporter,
 )
 from docrestore.pipeline.path_guard import (
@@ -297,7 +298,8 @@ def _ensure_export_product(doc_dir: Path, fmt: str) -> Path:
 
     try:
         exporter.ensure_available()
-        exporter.export(doc_md, doc_dir / "images", cache)
+        # 临时文件 + os.replace 原子落位，避免并发下载读到半成品（详见 export_to_cache）
+        export_to_cache(exporter, doc_md, doc_dir / "images", cache)
     except ExportToolUnavailable as exc:
         raise ApiBusinessError(
             APIErrorCode.EXPORT_TOOL_UNAVAILABLE, 503,

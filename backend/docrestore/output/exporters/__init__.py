@@ -26,8 +26,10 @@ from docrestore.output.exporters.base import (
     ExportError,
     ExportFailed,
     ExportToolUnavailable,
+    clear_export_caches,
     export_cache_path,
     export_content_hash,
+    export_to_cache,
 )
 from docrestore.output.exporters.docx import DocxExporter
 from docrestore.output.exporters.pdf import PdfExporter
@@ -59,7 +61,9 @@ __all__ = [
     "ExportError",
     "ExportFailed",
     "ExportToolUnavailable",
+    "clear_export_caches",
     "export_cache_path",
     "export_content_hash",
+    "export_to_cache",
     "get_exporter",
 ]

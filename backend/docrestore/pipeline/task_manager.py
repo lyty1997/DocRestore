@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 
 from docrestore.llm.credentials import refill_api_key_from_env
 from docrestore.models import PipelineResult, TaskProgress
+from docrestore.output.exporters import clear_export_caches
 from docrestore.output.renderer import ANCHORED_DOCUMENT_FILENAME
 from docrestore.pipeline.config import (
     CodeRestoreConfig,
@@ -1069,6 +1070,11 @@ class TaskManager:
         # output_dir 续跑时仍会 mkdir+写产物，删除时被 rmtree。retry 不复用故无需。
         if not output_dir_within_root(task.output_dir):
             return "输出目录越界（不在受信工作根下），拒绝续跑"
+
+        # #3：续跑复用 output_dir 前清空导出缓存（``.exports/``）。document.md 可能
+        # 字节不变而附属输入（图片 / .ppt_layout.json）已变，缓存键只哈希 md 会返回
+        # stale 产物；清空后下次下载按新产物重新导出。阻塞 FS 操作走 to_thread。
+        await asyncio.to_thread(clear_export_caches, Path(task.output_dir))
 
         # 同 retry_task：code 命中优先，互斥时不再推断 ppt。
         code = self._retry_code_config(task)
