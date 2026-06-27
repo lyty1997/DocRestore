@@ -1,5 +1,25 @@
 # 开发进度
 
+## 2026-06-26 20:47:00 CST - 536759e 之后改动全面 review
+
+按 code-review 口径审查 `536759e52622154ad70acac8aac7ffc0c2c84963..HEAD`：范围 39 commits / 118 files / 约 1.48 万行新增，重点看 Epic A/C/D/E、PII、导出缓存、代码源图放大镜与前端高亮链路。
+
+发现需修复问题：PII 结构保护把 markdown 链接 label 一并保护导致链接文字实体不脱敏，且 `$$...$$` display math 未完整保护；导出缓存仅以 `document.md` 为 key 且直接写目标 cache path，存在 stale export 与并发半成品 zip 风险；代码放大镜在代码精修改行数后仍按 OCR 原始行 bbox 映射，可能错行。另有既有问题被新功能继承：代码源图 stem 含点时 `sourcePage.indexOf('.')` 截断错误。
+
+验证：`bash scripts/check_quality.sh` 通过（mypy/ruff/typos/前端 tsc+eslint；pytest 1588 passed, 45 skipped；eslint 2 个既有 Fast Refresh warning）。
+
+## 2026-06-26 20:30:55 CST - Epic A-E issue 交付复核与收口
+
+复核 GitHub issue 与 `dev` 提交记录：
+
+- **Epic A**：#72/#75/#76 已关闭，PDF 输入后端+前端完整交付。
+- **Epic B**：当前 GitHub issue 树中未找到独立 Epic B；本轮无可审查/关闭对象。
+- **Epic C**：C1 #77 已关闭，前端公式渲染已交付。
+- **Epic D**：#73 与 D1-D5 #78-#82 已关闭，docx/pdf/xlsx/pptx 导出与后续 PPT 版面定位增强已交付。
+- **Epic E**：父 issue #74 仍保持打开，因为 E5 #89、E7 #91、E8 #92 仍是未完成 phase-2 范围；本次关闭已落地但未关的子 issue #83/#84/#85/#88/#90，并逐个补充提交与验证说明。
+
+结论：A/C/D 可视为完整交付；E 的已实现子集可交付，但 Epic E 不能整体关闭。未发现需要新开 bug 的阻断问题；#93 仍开放但属于代码模式源图放大镜，不在 Epic A-E 本轮范围内。
+
 ## 2026-06-24 - Epic E（光标 ↔ 原图 bbox 高亮，#74）E1/E2/E3 全部落地
 
 设计 `docs/zh/cursor-bbox-highlight.md`（用户已确认）。编辑器里光标所在段 → 右侧原图对应版面块
@@ -2845,3 +2865,40 @@ F2 加「同页不同行宽」用例（9 passed）；静态 harness 长行/短�
   vitest **241 passed**、门禁 `check_quality.sh` **EXIT=0**（1588 passed/45 skipped）；harness 旧/新并排
   Playwright 截图核对（旧=橙描边贯穿 `clean(`、右端切词；新=无边框全幅半透明带、`cleaned = clean(text)`
   透出可读、横幅到 viewport 端）。harness 临时件已删。
+
+---
+
+## 2026-06-26 23:10 CST — code review 6 条发现修复（PII / 导出 / 放大镜）
+
+**主题**：对用户提交的 6 条 review 发现逐条对抗式核验（6/6 成立，2 条下调/限定严重度），再实现修复。
+全程门禁 `check_quality.sh` **EXIT=0**（后端 pytest 1615 passed/45 skipped、mypy 91 文件无问题；前端
+vitest 247 passed、tsc+eslint 绿）。**未提交**（待用户「提交」）。
+
+**clear-bugfix（4 条，直接修）**：
+- **#1 PII 漏脱链接 label**（高）：`privacy/markup.py` 结构正则把整个 `[label](url)` 当保护段，label 里
+  人名/机构名既不进 NER 也不替换 → 随文上云泄露。修：图片仍整段保护、链接拆为只保护 `](目标)`、放出
+  label 进脱敏。单一真相源，redactor/ner 零改动。测 redactor +1、新建 `test_markup.py`（mask_structure +
+  split_protected）。
+- **#2 `$$...$$` display math 未保护**（中高）：正则只匹配行内 `$...$`，display math 被拆成两个 `$$`、
+  中间正文落自由段被替换 / 暴露给云端 NER。修：加 `\$\$.*?\$\$` 分支并**列在行内 `$...$` 之前**（DOTALL）。
+- **#4 导出写盘非原子**（中高）：`routes._ensure_export_product` check-then-act + exporter 直写最终路径，
+  并发下载可能把半成品打进 zip。修：新 `export_to_cache`（`tempfile.mkstemp` 同目录 + `os.replace` 原子落位），
+  4 个 exporter 零改动。测 `test_export_atomic.py`（探测半成品不可见 + 并发两写仍完整 + 无临时残留）。
+- **#6 含点 stem 解析错**（低）：`CodeViewer.tsx` `stemFromSourcePage` 用 `indexOf(".")` 把 `a.b.col0`
+  截成 `a` → 含点文件名源图反查失败、放大镜失效。修：改 `/\.col\d+$/` 剥尾。测 CodeViewer +1。
+
+**需拍板（用户已选）**：
+- **#3 导出缓存 key 只哈希 document.md → stale**（核验下调中低，crop-figure 反例不成立、窗口极窄）：
+  **选「重跑时清空缓存」**。`base.clear_export_caches(root)` 删子树所有 `.exports/`，在 `resume_task`
+  复用 output_dir 前调（`asyncio.to_thread`）。测 +2。
+- **#5 放大镜精修后错行**（仅 rewrite/repair 真改行数触发）：**选「行映射方案（全程可用）」**，设计 §12。
+  **实现取舍**：弃勘察设计的「穿透 refiner 逐 return + patch 重建 + compose」（12+5 项、compose 易写反），
+  改 `pipeline:1889` 单点 `difflib.SequenceMatcher` 对原文 vs 精修文求 `line_map`（`build_refined_line_map`），
+  refiner 零改动、无 compose、blast radius ~4+3。原则「不放大优于错放」：仅 `equal` 段精确映回原 OCR
+  `line_no`，改写/新增行 → `None` 不放大。三档零回归退化为 identity（守恒→空 / 旧 sidecar 缺键 / 映射空）。
+  落点：`SourceFile.refined_line_map` + sidecar `line_map`（非空才输出、宽松反序列化）+ 前端
+  `buildLineMaps`/`mapDisplayLineToRaw`/`resolveMagnifierTarget`。测后端 build_refined_line_map 7 +
+  序列化 5、前端映射 4。坑：zod `.default([])` 让 `line_map` infer 必填 → 3 处既有 fixture 补 `line_map: []`
+  （全项目 `tsc -b` 才报）；测试 null 用豁免注释具名常量 `NO_SRC`。
+
+**遗留**：本批未提交；#2 的 `\[...\]`/`\(...\)` 两种 LaTeX 定界符同源暴露未一并补（小步起见，待定）。

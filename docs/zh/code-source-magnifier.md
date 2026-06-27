@@ -305,3 +305,46 @@ F5 截图复核（编辑态移动光标→放大镜跟随 + 行号高亮 + 缩�
 - **测**：`computeMagnifierRegion` 短行用例的 `focus` 由 `[10,20,60,40]`（短行真实宽 60）改为
   `[10,20,200,40]`（整行带，铺满全页行宽 200）；harness 旧/新并排截图核对（旧=橙描边贯穿
   `clean(` 文字、右端切词；新=无边框全幅半透明带、`cleaned = clean(text)` 帯越透出可读、横幅到 viewport 端）。
+
+## 12. 精修改行后的行映射（#5，2026-06-26）
+
+**问题**：sidecar 的行级 bbox 按 **OCR 期** `line_no` 建键（`CodeLineBox.line_no`），前端按
+**精修后** 显示行号 `displayLineNumber = line_no_range[0] + lineIndex` 查表。默认 `refine` 模式行数严格
+守恒（`code_refine.py` 行数不等即回退原文）故二者对齐；但 **`rewrite` 模式**（允许改行数）或 **`repair`
+路径**（patch 增删行）真改变行数/行序时，显示行号与原 `line_no` 错位 → 放大镜框到**错误源图行**。
+
+**方案（行映射，用户拍板「全程可用」而非「降级关闭」）**：每个源文件携带 `line_map: list[int|None]`，
+下标 = 精修后正文行序（0-based，与磁盘 body / 前端 `splitEditorLines` 同序），值 = 该行对应的「原 OCR
+`line_no`」（= sidecar bbox 的键）；`None` = 被改写 / 新增行（无原图对应行）。
+
+**实现取舍：difflib 单点求映射，而非穿透 refiner 逐 return + patch 重建。** 设计勘察曾提出在
+`code_refine`/`code_repair` 各 return 处产出局部映射 + `compose` 组合（12+5 项改动），但评估后改为
+**在 `pipeline.py` 回写 `merged_text` 单点**用 `difflib.SequenceMatcher` 对「原文 vs 精修文」整体求映射
+（`build_refined_line_map`，`output/code_layout_sidecar.py`）——refiner 内部零改动、无 `compose`（消除其
+「方向写反静默错位」风险）、blast radius 从 12+5 降到 ~4+3。`difflib` 直接吃最终 pre/post 文本，repair 的
+多窗口改动自然落入 `replace`/`insert` 段，无需 patch 几何重建。
+
+**精度原则「不放大优于错放邻行」**（本放大镜既定约定）：仅 `equal` 段（与原文逐字相同的未改动行）精确
+映回其原 `line_no`；`replace`/`insert`（改写 / 新增行）一律置 `None` → 不放大。切行用 `str.split("\n")`
+与前端 `splitEditorLines` 同口径（含末尾空行），保证下标对齐。
+
+**三档零回归回退，全部退化为现有 identity**：①精修守恒（原文==精修文）→ `build_refined_line_map` 返回
+`[]`、sidecar 不落 `line_map` 键；②旧 sidecar 无 `line_map`（`_as_line_map` 缺键→`[]`、zod `.default([])`）；
+③映射为空 → 前端 `mapDisplayLineToRaw` 返回 `undefined`、`resolveMagnifierTarget` 用 `displayLineNumber`
+直查（与现状字节级一致）。映射命中 `None` → 不放大（复用 `computeMagnifierRegion` 返回 `undefined` 链路）。
+sidecar 版本号不升（纯可选增量字段，容损反序列化）。
+
+**落点**：B `SourceFile.refined_line_map` 字段 + `build_refined_line_map`（difflib）+ `pipeline.py:1889`
+回写处先捕原文再算映射挂 `src` + `CodeFileLayout.line_map` 序列化（非空才输出）/ `_as_line_map` 宽松反序列化；
+F `CodeFileLayoutPayloadSchema.line_map`（zod `z.number().nullable()` 数组）+ `buildLineMaps` /
+`mapDisplayLineToRaw`（纯函数）+ CodeViewer `resolveMagnifierTarget`（查 bbox 前翻译，函数声明容 `return
+undefined`）+ `codeLineMaps` 状态与 `codeLayoutIndex` 同源同生命周期。
+
+**坑**：zod `.default([])` 让 `line_map` 在 `z.infer` 输出类型里**必填** → 既有 3 处 `CodeLayoutPayload`
+字面量缺字段，**全项目 `tsc -b` 才报**（逐文件 hook 漏报），补 `line_map: []`。`line_map` 的 `null` 是
+sidecar 域值，测试里按 `unicorn/no-null` 约定用一个豁免注释的具名常量 `NO_SRC` 复用。
+
+**测**：`build_refined_line_map` 7 例（守恒→空 / 删 / 增 / 改写 / base 偏移 / 末尾换行口径 / 长度恒等）+
+sidecar `line_map` round-trip / 缺键→[] / 坏元素→None / 非 list→[] / build 透传；前端 `buildLineMaps` +
+`mapDisplayLineToRaw`（空→undefined identity / 命中数值 / 命中 null 不放大 / 越界→undefined）。门禁
+EXIT=0（后端 pytest 1615 passed、mypy 91 文件无问题；前端 vitest 247 passed、tsc+eslint 绿）。
