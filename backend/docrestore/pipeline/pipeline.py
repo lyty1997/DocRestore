@@ -1834,6 +1834,9 @@ class Pipeline:
             code_auditor = CodeConsistencyAuditor(
                 base_refiner_obj, redact=prompt_redact,
             )
+            # #5：精修可能改行数（rewrite/repair），放大镜需「精修后行→原 OCR line_no」
+            # 映射；在回写 merged_text 处按原文 vs 精修文 difflib 求映射挂到 src。
+            from docrestore.output.code_layout_sidecar import build_refined_line_map
             for i, src in enumerate(sources):
                 try:
                     diagnostics = pre_refine_diagnostics_by_path.get(
@@ -1886,7 +1889,13 @@ class Pipeline:
                         )
                     else:
                         result = await code_refiner.refine(src)
+                    # 先捕原文再覆盖：精修文已落 merged_text（即使下行映射计算异常也
+                    # 不丢精修结果）；再按原文 vs 精修文求行映射（守恒→空=identity）。
+                    original_text = src.merged_text
                     src.merged_text = result.refined_text
+                    src.refined_line_map = build_refined_line_map(
+                        original_text, src.merged_text, src.line_no_range[0],
+                    )
                     if result.flags:
                         src.flags = list({*src.flags, *result.flags})
                 except Exception:  # noqa: BLE001

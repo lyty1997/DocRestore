@@ -82,6 +82,11 @@ class SourceFile:
     flags: list[str] = field(default_factory=list)
     #: 行号 -> 贡献该行最终文本的来源页 stem（S3 可溯源；多页分歧时记胜出页）。
     line_provenance: dict[int, str] = field(default_factory=dict)
+    #: #5 行映射：按**精修后**正文行序（0-based）索引、值为该行对应的「原 OCR line_no」
+    #: （= sidecar bbox 的键），None = rewrite/repair 新增行（无原图对应行→不放大）。
+    #: 空 = 精修未改行数（identity，前端按 displayLineNumber 直接查表，零回归）。
+    #: 仅 LLM refine/repair 回写阶段填充（grouping/rescue 不填）。
+    refined_line_map: list[int | None] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

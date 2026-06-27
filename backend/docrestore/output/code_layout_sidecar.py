@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -58,6 +59,11 @@ class CodeFileLayout:
 
     path: str
     lines: list[CodeLineBox] = field(default_factory=list)
+    #: #5 行映射：按**精修后**正文行序（0-based）索引、值为该行对应的「原 OCR line_no」
+    #: （= ``lines`` 的 CodeLineBox.line_no 键），None = rewrite/repair 新增行→不放大。
+    #: 空 = 精修守恒（identity，前端按 displayLineNumber 直接查表）。与 ``lines``（按
+    #: line_no 排序）是两套坐标：``line_map`` 按显示行序，``lines`` 按 line_no。
+    line_map: list[int | None] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -105,7 +111,10 @@ def _file_layout_from_source(src: SourceFile) -> CodeFileLayout:
                 )
     lines = [box for box, _ in best.values()]
     lines.sort(key=lambda b: b.line_no)
-    return CodeFileLayout(path=src.path, lines=lines)
+    # line_map 在 LLM 精修回写处算好挂到 src（空=守恒/未精修，identity）。
+    return CodeFileLayout(
+        path=src.path, lines=lines, line_map=list(src.refined_line_map),
+    )
 
 
 def build_code_layout(sources: list[SourceFile]) -> CodeLayout | None:
@@ -120,27 +129,63 @@ def build_code_layout(sources: list[SourceFile]) -> CodeLayout | None:
     return CodeLayout(files=files)
 
 
+def build_refined_line_map(
+    original: str, refined: str, base_line_no: int,
+) -> list[int | None]:
+    """求「精修后行序 → 原 OCR line_no」映射（#5，供 pipeline 在精修回写处调用）。
+
+    用 ``difflib`` 对 ``original`` / ``refined`` 逐行对齐：仅 ``equal`` 段（未改动行，
+    与原文逐字相同）精确映回其原 OCR line_no（``base_line_no + 原行下标``）；
+    ``replace`` / ``insert``（被 LLM 改写 / 新增的行）一律置 None——按本放大镜既定的
+    「不放大优于错放邻行」原则，改过的行宁可不放大也不指向可能错位的源图行。
+
+    切行用 ``str.split("\\n")`` 与前端 ``splitEditorLines`` 同口径（含末尾空行），
+    使返回数组下标与前端 ``displayLineNumber - line_no_range[0]`` 严格对齐。
+    ``base_line_no`` = ``SourceFile.line_no_range[0]``（原文首行 OCR line_no）。
+
+    精修守恒（``original`` 与 ``refined`` 逐行相同）→ 返回 ``[]``（identity 信号，
+    sidecar 不落该字段、前端按 displayLineNumber 直接查表，零回归）。
+    """
+    old_lines = original.split("\n")
+    new_lines = refined.split("\n")
+    if old_lines == new_lines:
+        return []
+    line_map: list[int | None] = [None] * len(new_lines)
+    matcher = SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
+    for tag, i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag != "equal":
+            continue  # replace / insert / delete：改写或新增行 → 不放大（None）
+        for offset in range(j2 - j1):
+            line_map[j1 + offset] = base_line_no + i1 + offset
+    return line_map
+
+
 # ── 序列化 ────────────────────────────────────────────────────
+
+
+def _file_to_dict(file_layout: CodeFileLayout) -> dict[str, object]:
+    """单文件 → dict；``line_map`` 仅非空时输出（守恒/旧任务体积不变、纯可选增量）。"""
+    out: dict[str, object] = {
+        "path": file_layout.path,
+        "lines": [
+            {
+                "line_no": line.line_no,
+                "page": line.page,
+                "bbox": list(line.bbox),
+            }
+            for line in file_layout.lines
+        ],
+    }
+    if file_layout.line_map:
+        out["line_map"] = list(file_layout.line_map)
+    return out
 
 
 def to_dict(layout: CodeLayout) -> dict[str, object]:
     """``CodeLayout`` → JSON 可序列化 dict。"""
     return {
         "version": layout.version,
-        "files": [
-            {
-                "path": file_layout.path,
-                "lines": [
-                    {
-                        "line_no": line.line_no,
-                        "page": line.page,
-                        "bbox": list(line.bbox),
-                    }
-                    for line in file_layout.lines
-                ],
-            }
-            for file_layout in layout.files
-        ],
+        "files": [_file_to_dict(file_layout) for file_layout in layout.files],
     }
 
 
@@ -172,10 +217,24 @@ def _line_from_dict(raw: object) -> CodeLineBox | None:
     return CodeLineBox(line_no=raw_line_no, page=page, bbox=bbox)
 
 
+def _as_line_map(raw: object) -> list[int | None]:
+    """宽松解析 ``line_map``：非 list → []；逐元素 int（非 bool）或 None，其余置 None。
+
+    缺键 / 非法 → []（identity 回退）；坏元素就地置 None（不整文件失败、容损）。
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[int | None] = []
+    for v in raw:
+        out.append(v if isinstance(v, int) and not isinstance(v, bool) else None)
+    return out
+
+
 def _file_from_dict(raw: object) -> CodeFileLayout | None:
     """单文件 dict → ``CodeFileLayout``；path 非法返回 None（调用方跳过该文件）。
 
     坏行逐个跳过（不致整文件失败）；path / lines 容器非法才整文件弃。
+    ``line_map`` 缺键 / 非法 → []（向后兼容旧 sidecar、退化为 identity）。
     """
     if not isinstance(raw, dict):
         return None
@@ -188,7 +247,9 @@ def _file_from_dict(raw: object) -> CodeFileLayout | None:
         line = _line_from_dict(raw_line)
         if line is not None:
             lines.append(line)
-    return CodeFileLayout(path=path, lines=lines)
+    return CodeFileLayout(
+        path=path, lines=lines, line_map=_as_line_map(raw.get("line_map")),
+    )
 
 
 def from_dict(data: object) -> CodeLayout | None:
