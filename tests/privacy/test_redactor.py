@@ -376,6 +376,36 @@ class TestEntityReplacementStructureSafe:
         assert "$ alpha $" in out
         assert f"plain {cfg.person_name_placeholder} here" in out
 
+    def test_display_math_block_preserved(self) -> None:
+        """LaTeX 独立公式 `$$ ... $$` 整段受保护，段外同名正文仍被替。"""
+        cfg = PIIConfig(enable=True, redact_person_name=True)
+        redactor = PIIRedactor(cfg)
+        ent = "alpha"  # 中性占位串，避免写死数据集标识
+        md = f"$$ {ent} = x $$ plain {ent} here"
+        lexicon = EntityLexicon(person_names=(ent,), org_names=())
+        out, _ = redactor.apply_lexicon(md, lexicon)
+        # 公式整段原样（内部实体未被替换破坏公式）
+        assert f"$$ {ent} = x $$" in out
+        # 段外同名正文仍被替
+        assert f"plain {cfg.person_name_placeholder} here" in out
+
+    def test_link_label_replaced_url_target_preserved(self) -> None:
+        """markdown 链接：可见 label 里的实体被替，链接目标 (url) 原样保留。"""
+        cfg = PIIConfig(enable=True, redact_person_name=True)
+        redactor = PIIRedactor(cfg)
+        name = "林墨"  # 自构造 CJK 名，避免写死数据集标识
+        url = "https://example.com/p"
+        md = f"[{name}]({url}) met {name}"
+        lexicon = EntityLexicon(person_names=(name,), org_names=())
+        out, _ = redactor.apply_lexicon(md, lexicon)
+        ph = cfg.person_name_placeholder
+        # 链接目标受保护、原样保留
+        assert f"]({url})" in out
+        # label 内与正文内的同名实体都被替换（修复前 label 内会泄露）
+        assert name not in out
+        # 链接结构未损坏：label 位置为占位符，方括号与目标俱在
+        assert f"[{ph}]({url})" in out
+
     def test_html_tag_attr_preserved_cell_text_replaced(self) -> None:
         """HTML 标签（含属性）受保护，标签间单元格正文仍被替。"""
         cfg = PIIConfig(enable=True, redact_person_name=True)
