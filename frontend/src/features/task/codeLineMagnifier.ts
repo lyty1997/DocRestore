@@ -25,6 +25,12 @@ export type FileLineIndex = Map<number, LineBox>;
 /** 全任务行索引：path → 单文件行索引。 */
 export type CodeLineIndex = Map<string, FileLineIndex>;
 
+/** 单文件行映射（#5）：精修后行序(0-based) → 原 OCR line_no，null = 改写/新增行→不放大。 */
+export type FileLineMap = readonly (number | null)[];
+
+/** 全任务行映射：path → 单文件行映射（空 = 守恒/旧 sidecar，identity）。 */
+export type CodeLineMaps = Map<string, FileLineMap>;
+
 /** 放大目标：源图页标识 + 放大区域（原图像素，喂 CropZoomViewport）。 */
 export interface MagnifierTarget {
   readonly page: string;
@@ -66,6 +72,31 @@ export function buildLineIndex(payload: CodeLayoutPayload): CodeLineIndex {
     index.set(file.path, fileIndex);
   }
   return index;
+}
+
+/** 从载荷建「path → 行映射」（#5）。空映射(守恒/旧 sidecar)即 identity，调用方直接查表。 */
+export function buildLineMaps(payload: CodeLayoutPayload): CodeLineMaps {
+  const maps: CodeLineMaps = new Map();
+  for (const file of payload.files) {
+    maps.set(file.path, file.line_map);
+  }
+  return maps;
+}
+
+/**
+ * 显示行序(0-based) → 原 OCR line_no，供放大镜查 bbox 前翻译精修后行号（#5）。
+ *
+ * - ``undefined``：无映射（守恒 / 旧 sidecar / 越界）→ 调用方走 identity（用 displayLineNumber 原值）；
+ * - ``null``：该行被 rewrite/repair 改写或新增、无原图对应行 → 不放大（优于错放邻行）；
+ * - ``number``：该行对应的原 OCR line_no（喂 {@link computeMagnifierRegion}）。
+ */
+export function mapDisplayLineToRaw(
+  lineMap: FileLineMap | undefined,
+  displayIndex: number,
+): number | null | undefined {
+  if (lineMap === undefined || lineMap.length === 0) return undefined;
+  if (displayIndex < 0 || displayIndex >= lineMap.length) return undefined;
+  return lineMap[displayIndex];
 }
 
 /** 多个 bbox 的外接并集 → RegionBBox（CropZoomViewport 的 region 形态）。 */

@@ -401,10 +401,14 @@ export const CodeLineBoxPayloadSchema = z.object({
 });
 export type CodeLineBoxPayload = z.infer<typeof CodeLineBoxPayloadSchema>;
 
-/** 单源文件行级版面：path 对齐 files-index entry.path */
+/** 单源文件行级版面：path 对齐 files-index entry.path。
+ *  line_map（#5）：按精修后正文行序（0-based）索引、值为该行对应的原 OCR line_no
+ *  （= CodeLineBox.line_no 键），null = rewrite/repair 新增行→不放大；
+ *  空数组 = 精修守恒（identity，前端按 displayLineNumber 直接查表，零回归）。 */
 export const CodeFileLayoutPayloadSchema = z.object({
   path: z.string(),
   lines: z.array(CodeLineBoxPayloadSchema).default([]),
+  line_map: z.array(z.number().nullable()).default([]),
 });
 export type CodeFileLayoutPayload = z.infer<typeof CodeFileLayoutPayloadSchema>;
 

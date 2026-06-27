@@ -34,9 +34,15 @@ import type {
 } from "../api/schemas";
 import {
   buildLineIndex,
+  buildLineMaps,
   type CodeLineIndex,
+  type CodeLineMaps,
   computeMagnifierRegion,
+  type FileLineIndex,
+  type FileLineMap,
   lineIndexAtOffset,
+  type MagnifierTarget,
+  mapDisplayLineToRaw,
 } from "../features/task/codeLineMagnifier";
 import { tokenizeCodeLine } from "../features/task/codeSyntax";
 import { computeLineWindow } from "../features/task/lineWindow";
@@ -65,10 +71,14 @@ interface VisibleDiagnosticItem {
   readonly key: string;
 }
 
-/** 把 "page06835.col0" 拆为 page_stem="page06835" */
+/**
+ * 把 source_page 键拆出 page_stem：剥掉结尾的 `.col{N}`（column_index 恒为整数）。
+ * "page06835.col0" → "page06835"；含点 stem 也正确："a.b.col0" → "a.b"。
+ * 旧实现按第一个点切（indexOf(".")）会把 "a.b.col0" 误截成 "a"，导致含点文件名
+ * 的源图反查不到（源图列表/放大镜对该页失效）。无 `.colN` 后缀时原样返回。
+ */
 function stemFromSourcePage(sourcePage: string): string {
-  const dotIdx = sourcePage.indexOf(".");
-  return dotIdx > 0 ? sourcePage.slice(0, dotIdx) : sourcePage;
+  return sourcePage.replace(/\.col\d+$/, "");
 }
 
 function basename(path: string): string {
@@ -125,6 +135,22 @@ function firstDisplayLine(entry: FilesIndexEntry | undefined): number {
 
 function displayLineNumber(entry: FilesIndexEntry, lineIndex: number): number {
   return firstDisplayLine(entry) + lineIndex;
+}
+
+/**
+ * 活动行 → 放大目标（#5 行映射翻译）：把显示行号经 line_map 翻成原 OCR line_no 再查 bbox。
+ * 无映射（精修守恒 / 旧 sidecar）→ identity 用显示行号；命中 null（rewrite/repair 改写或
+ * 新增行）→ undefined 不放大（优于错放邻行）。抽成函数声明以便单测 + 容许 return undefined。
+ */
+function resolveMagnifierTarget(
+  fileLineIndex: FileLineIndex | undefined,
+  fileLineMap: FileLineMap | undefined,
+  displayLineNo: number,
+  firstLineNo: number,
+): MagnifierTarget | undefined {
+  const mapped = mapDisplayLineToRaw(fileLineMap, displayLineNo - firstLineNo);
+  if (mapped === null) return undefined;
+  return computeMagnifierRegion(fileLineIndex, mapped ?? displayLineNo);
 }
 
 function isCompileFailingLine(
@@ -310,6 +336,8 @@ export function CodeViewer({
   const [codeLayoutIndex, setCodeLayoutIndex] = useState<
     CodeLineIndex | undefined
   >();
+  // #5：path → 行映射（精修后行序 → 原 OCR line_no）；与 codeLayoutIndex 同源同生命周期。
+  const [codeLineMaps, setCodeLineMaps] = useState<CodeLineMaps | undefined>();
   const [activeLine, setActiveLine] = useState<
     { readonly path: string; readonly lineNo: number } | undefined
   >();
@@ -436,9 +464,15 @@ export function CodeViewer({
         setCodeLayoutIndex(
           payload === undefined ? undefined : buildLineIndex(payload),
         );
+        setCodeLineMaps(
+          payload === undefined ? undefined : buildLineMaps(payload),
+        );
       })
       .catch(() => {
-        if (!cancelled) setCodeLayoutIndex(undefined);
+        if (!cancelled) {
+          setCodeLayoutIndex(undefined);
+          setCodeLineMaps(undefined);
+        }
       });
     return () => {
       cancelled = true;
@@ -456,12 +490,19 @@ export function CodeViewer({
 
   // 活动行 → 放大目标（仅当活动行属当前文件，避免切档串行号）。
   const fileLineIndex = codeLayoutIndex?.get(selectedPath ?? "");
+  const fileLineMap = codeLineMaps?.get(selectedPath ?? "");
+  // #5：先经行映射把显示行翻成原 OCR line_no 再查 bbox（守恒/旧 sidecar 走 identity）。
   const magnifierTarget = useMemo(
     () =>
       activeLine === undefined || activeLine.path !== selectedPath
         ? undefined
-        : computeMagnifierRegion(fileLineIndex, activeLine.lineNo),
-    [activeLine, selectedPath, fileLineIndex],
+        : resolveMagnifierTarget(
+            fileLineIndex,
+            fileLineMap,
+            activeLine.lineNo,
+            firstDisplayLine(selectedEntry),
+          ),
+    [activeLine, selectedPath, selectedEntry, fileLineIndex, fileLineMap],
   );
   const magnifierImage =
     magnifierTarget === undefined

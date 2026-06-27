@@ -11,11 +11,14 @@ import { describe, expect, it } from "vitest";
 import type { CodeLayoutPayload } from "../../src/api/schemas";
 import {
   buildLineIndex,
+  buildLineMaps,
   computeMagnifierRegion,
   type FileLineIndex,
+  type FileLineMap,
   type LineBox,
   type LineBoxTuple,
   lineIndexAtOffset,
+  mapDisplayLineToRaw,
 } from "../../src/features/task/codeLineMagnifier";
 
 function box(page: string, bbox: LineBoxTuple): LineBox {
@@ -36,6 +39,7 @@ describe("buildLineIndex", () => {
           { line_no: 1, page: "q.col0", bbox: [9, 9, 9, 9] },
           { line_no: 2, page: "p.col0", bbox: [0, 10, 10, 20] },
         ],
+        line_map: [],
       }],
     };
     const index = buildLineIndex(payload);
@@ -166,5 +170,48 @@ describe("lineIndexAtOffset", () => {
   it("越界偏移按 [0, len] 钳制", () => {
     expect(lineIndexAtOffset(text, -5)).toBe(0);
     expect(lineIndexAtOffset(text, 999)).toBe(2);
+  });
+});
+
+// line_map 的 null 是 sidecar 域值（zod ``z.number().nullable()``，对应后端 int|None，
+// 语义=该行无原图对应行）。unicorn/no-null 默认禁 null 字面量，此处 null 语义明确，
+// 按代码库既有约定（mathNodes.ts）局部豁免一次，定义具名常量复用，避免散落字面量。
+// eslint-disable-next-line unicorn/no-null
+const NO_SRC = null;
+
+describe("buildLineMaps", () => {
+  it("建 path → line_map（保留 null 与空数组）", () => {
+    const payload: CodeLayoutPayload = {
+      files: [
+        { path: "a.py", lines: [], line_map: [10, NO_SRC, 12] },
+        { path: "b.py", lines: [], line_map: [] },
+      ],
+    };
+    const maps = buildLineMaps(payload);
+    expect(maps.get("a.py")).toEqual([10, NO_SRC, 12]);
+    expect(maps.get("b.py")).toEqual([]);
+  });
+});
+
+describe("mapDisplayLineToRaw", () => {
+  it("空 / undefined 映射 → undefined（identity 信号，调用方用显示行号直查）", () => {
+    expect(mapDisplayLineToRaw([], 0)).toBeUndefined();
+    expect(mapDisplayLineToRaw(undefined, 0)).toBeUndefined();
+  });
+
+  it("命中数值 → 原 OCR line_no", () => {
+    const lineMap: FileLineMap = [10, NO_SRC, 12];
+    expect(mapDisplayLineToRaw(lineMap, 0)).toBe(10);
+    expect(mapDisplayLineToRaw(lineMap, 2)).toBe(12);
+  });
+
+  it("命中 null（改写 / 新增行）→ null（不放大信号，优于错放）", () => {
+    expect(mapDisplayLineToRaw([10, NO_SRC, 12], 1)).toBeNull();
+  });
+
+  it("越界 → undefined（identity 回退，不误判为不放大）", () => {
+    const lineMap: FileLineMap = [10, 11];
+    expect(mapDisplayLineToRaw(lineMap, -1)).toBeUndefined();
+    expect(mapDisplayLineToRaw(lineMap, 2)).toBeUndefined();
   });
 });

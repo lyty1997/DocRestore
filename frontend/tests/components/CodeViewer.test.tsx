@@ -31,7 +31,11 @@ const getCodeFileContentMock = vi.mocked(getCodeFileContent);
 const updateCodeFileContentMock = vi.mocked(updateCodeFileContent);
 const getTaskCodeLayoutMock = vi.mocked(getTaskCodeLayout);
 
-function renderViewer(index: FilesIndex, content?: string): void {
+function renderViewer(
+  index: FilesIndex,
+  content?: string,
+  allSourceImages: string[] = ["raw/page1.JPG", "raw/page2.JPG"],
+): void {
   getFilesIndexMock.mockResolvedValue(index);
   getCodeFileContentMock.mockResolvedValue(
     content ??
@@ -63,7 +67,7 @@ function renderViewer(index: FilesIndex, content?: string): void {
     <LanguageProvider>
       <CodeViewer
         taskId="task-1"
-        allSourceImages={["raw/page1.JPG", "raw/page2.JPG"]}
+        allSourceImages={allSourceImages}
       />
     </LanguageProvider>,
   );
@@ -118,6 +122,39 @@ describe("CodeViewer", () => {
     expect(imageAnchor.querySelector("img")?.getAttribute("alt")).toBe(
       "raw/page2.JPG",
     );
+  });
+
+  it("含点 stem 的来源页仍解析出原图（剥尾 .colN，非按首个点切）", async () => {
+    renderViewer(
+      [
+        {
+          path: "src/foo.cc",
+          filename: "foo.cc",
+          language: "cpp",
+          source_pages: ["a.b.col0"],
+          source_page_ranges: [
+            { page: "a.b.col0", start_line: 1, end_line: 5 },
+          ],
+          line_count: 5,
+          line_no_range: [1, 5],
+          flags: [],
+        },
+      ],
+      undefined,
+      ["raw/a.b.JPG"],
+    );
+
+    await screen.findByText("src/foo.cc");
+    await waitFor(() => {
+      expect(document.querySelector(".code-content-text")).not.toBeNull();
+    });
+
+    // page key "a.b.col0" 的 stem 为 "a.b"（剥掉结尾 .col0），匹配含点原图 raw/a.b.JPG。
+    // 旧实现按 indexOf(".") 截成 "a" → 反查不到、该页源图缩略图缺失。断言从含点输入派生。
+    const cell = getRequiredElement(
+      '.code-source-thumbs-list [data-page="a.b.JPG"]',
+    );
+    expect(cell.querySelector("img")?.getAttribute("alt")).toBe("raw/a.b.JPG");
   });
 
   it("无来源页行号范围时仍按来源页渲染全部源图缩略图", async () => {
@@ -561,6 +598,7 @@ describe("CodeViewer", () => {
             { line_no: 2, page: "page1.col0", bbox: [0, 10, 10, 20] },
             { line_no: 3, page: "page1.col0", bbox: [0, 20, 10, 30] },
           ],
+          line_map: [],
         },
       ],
     });
@@ -649,6 +687,7 @@ describe("CodeViewer", () => {
             { line_no: 2, page: "page1.col0", bbox: [0, 10, 10, 20] },
             { line_no: 3, page: "page1.col0", bbox: [0, 20, 10, 30] },
           ],
+          line_map: [],
         },
       ],
     });
