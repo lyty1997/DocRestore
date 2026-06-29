@@ -176,6 +176,22 @@ def _auto_configure_llm(config: PipelineConfig) -> None:
 
 
 
+async def _cleanup_referenced_sessions(manager: TaskManager) -> None:
+    """shutdown 时清理上传会话；收集引用目录失败则跳过清理（保守防误删）。
+
+    ``collect_referenced_image_dirs`` 在 DB 查询失败时上抛（fail-safe）：此时
+    引用集合不可信，宁可残留 upload_dir 也不照删，避免误删仍被任务引用的源图。
+    """
+    try:
+        referenced = await manager.collect_referenced_image_dirs()
+    except Exception:
+        logger.exception(
+            "收集引用 upload_dir 失败，跳过 shutdown 清理以防误删",
+        )
+        return
+    cleanup_all_sessions(referenced)
+
+
 def create_app(  # noqa: C901
     config: PipelineConfig | None = None,
 ) -> FastAPI:
@@ -308,8 +324,7 @@ def create_app(  # noqa: C901
             await cleanup_task
         # 跳过仍被任务引用的 upload_dir：否则重启时把已持久化任务的源图擦掉，
         # resume/retry 对空目录跑、源图预览 404（与 TTL 清理同一引用跳过策略）。
-        referenced = await manager.collect_referenced_image_dirs()
-        cleanup_all_sessions(referenced)
+        await _cleanup_referenced_sessions(manager)
         await pipeline.shutdown()
         await db.close()
 
