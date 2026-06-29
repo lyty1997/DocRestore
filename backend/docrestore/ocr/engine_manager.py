@@ -483,8 +483,10 @@ class EngineManager:
         python_path = config.paddle_server_python
         if not python_path:
             logger.warning(
-                "未配置 paddle_server_python，跳过 ppocr-server 自动启动。"
-                "PaddleOCR 将以本地模式运行（worker 内加载模型）。"
+                "请求了 PaddleOCR-VL 但未配置 paddle_server_python：无法启动 "
+                "ppocr-server，将退回 worker 内本地推理，可能无 VL raw_text、"
+                "OCR 结果与请求的 VL 模式不符。如需 VL 请配置 "
+                "paddle_server_python。"
             )
             return
 
@@ -493,7 +495,9 @@ class EngineManager:
         )
         if not python_exists:
             logger.warning(
-                "ppocr_vlm python 不存在: %s，跳过 server 启动",
+                "请求了 PaddleOCR-VL 但 paddle_server_python 路径不存在: %s；"
+                "无法启动 ppocr-server，将退回 worker 内本地推理，OCR 结果与请求"
+                "的 VL 模式不符。请检查该路径配置。",
                 python_path,
             )
             return

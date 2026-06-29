@@ -199,9 +199,11 @@ exclude_images 同 key 空间），随 OCR 配置入 DB、resume 自动沿用：
 (900,300,2400,2000) → `.content_crop/DSC07963_crop.JPG` 精确 1500×1700、OCR 目录
 `DSC07963_crop_OCR`、NAS 原图完好。
 
-## 14. 扩展到代码 / PPT 模式（2026-06-25 用户确认）
+## 14. 扩展到代码 / PPT 模式（2026-06-25 用户确认；PPT 部分 2026-06-29 回退）
 
-原 §3 范围「仅文档模式」放开。两模式分别处理（用户拍板）：
+原 §3 范围「仅文档模式」一度放开到代码 / PPT，两模式分别处理（用户拍板）。
+**自动 content_crop 现行范围最终回到「仅文档模式」**：代码模式只放开手动框（§14.1，仍有效），
+PPT 自动裁剪（§14.2）已回退（屏摄幻灯误裁风险高），只保留透视矫正。
 
 ### 14.1 代码模式：人工裁剪（手动框），不自动裁剪
 
@@ -220,18 +222,21 @@ exclude_images 同 key 空间），随 OCR 配置入 DB、resume 自动沿用：
   优于显裁剪图。后端 `/processed-image` 已 mode 无关、手动裁剪 `_crop` 天然可被发现，若日后代码模式
   新增源图 bbox 高亮，前端一行 wiring 即接上，非坐标平移难题。
 
-### 14.2 PPT 模式：自动 content_crop，矫正后串联
+### 14.2 PPT 模式：~~自动 content_crop，矫正后串联~~ → 已回退（2026-06-29）
 
-- PPT 移出 `skip_content_crop`（`skip = code_cfg.enable or is_pdf_rendered_dir`）。
-- 预处理由**互斥 `elif`** 改为**串联**：`if 手动框（独占）else { 矫正(若开) → content_crop(若开) }`。
-  矫正产 `.rectified/{stem}_after.jpg`，再 content_crop 产 `.content_crop/{stem}_after_crop.jpg`
-  （`crop_page` 用输入 stem=`{stem}_after`）。全程 fail-safe（矫正图无空白边 → content_crop 放行）。
-- **坐标系**：链末 OCR 图 = `_after_crop`，bbox/image_size 随之；`.ppt_layout.json` 自洽（导出 letterbox
-  用 image_size）。
-- **高亮 processed-image**：`_processed_source_variants` 加链末变体，探测序
-  `_after_crop`（矫正+裁剪）→ `_after`（仅矫正）→ `_crop`（仅裁剪），命中最深处理图对齐。
+> **回退说明（2026-06-29 用户确认）**：原 §14.2「PPT 自动 content_crop、矫正后串联」已回退。
+> 屏摄幻灯无固定正文列，透视矫正后再自动裁剪易误伤图文版式（实测任务 121528c1：9 张矫正图里
+> 5 张被自动裁剪，部分裁掉了幻灯边缘图文）。**PPT 模式恢复为：只做透视矫正，不自动裁剪**（仍可手动框）。
+
+- PPT **重新纳入** `skip_content_crop`：`skip = code_cfg.enable or ppt_cfg.enable or is_pdf_rendered_dir`。
+- 预处理串联结构保留（`if 手动框（独占）else { 矫正(若开) → content_crop(若开) }`），但 PPT 任务
+  传入 `content_crop=None`，故只跑矫正、不跑自动裁剪；矫正产 `.rectified/{stem}_after.jpg` 即 OCR 输入。
+- **坐标系**：PPT 任务 OCR 图 = `_after`（仅矫正），bbox/image_size 随之；`.ppt_layout.json` 自洽。
+  自动裁剪链末 `_after_crop` 不再产生。
+- **高亮 processed-image**：`_processed_source_variants` 移除 `_after_crop` 变体，探测序
+  `_after`（PPT 矫正）→ `_crop`（文档/手动裁剪），二者互斥，命中即对齐。
 
 ### 14.3 验收
 
-- PPT+矫正任务：`.content_crop/{stem}_after_crop.jpg` 落盘，OCR 跑在其上；processed-image 返回它、
-  高亮对齐。代码模式：手动框生效（crop_boxes 透传），自动裁剪不触发。
+- PPT+矫正任务：`.rectified/{stem}_after.jpg` 落盘，OCR 跑在其上；`.content_crop/` 不再产出自动裁剪图；
+  processed-image 返回矫正图、高亮对齐。代码模式：手动框生效（crop_boxes 透传），自动裁剪不触发。

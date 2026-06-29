@@ -129,13 +129,15 @@ def _replace_entities(
 
     按长度降序处理，防"张三"先于"张三丰"匹配。异常高频实体告警（仍执行）。
     """
-    candidates = [
-        name
-        for name in sorted(
-            (n.strip() for n in names), key=len, reverse=True,
-        )
-        if _looks_like_name(name)
-    ]
+    stripped_names = sorted(
+        (n.strip() for n in names), key=len, reverse=True,
+    )
+    candidates = [name for name in stripped_names if _looks_like_name(name)]
+    dropped = sum(1 for n in stripped_names if n) - len(candidates)
+    if dropped > 0:
+        # 只记数量不记内容（候选即真实人名，日志禁输出敏感信息）：让"召回换
+        # 精度"净化丢弃的规模对运维可见，便于评估漏替（false-negative）风险。
+        logger.debug("实体词表净化丢弃 %d 个候选（仅计数，不记内容）", dropped)
     if not candidates:
         return text, 0
 

@@ -152,7 +152,11 @@ export function useTaskProgress(
             return "pending";
           }
         }
-      } catch {
+      } catch (error_: unknown) {
+        // 单次失败下一拍重试是合理降级；但不再完全静默——真实失败（网络/500/
+        // 鉴权）若持续，会把"拿不到终态"无差别当成"还在跑"导致无限轮询，
+        // 记录便于发现卡死。
+        console.error("REST 兜底确认终态失败", error_);
         return "pending";
       }
     },

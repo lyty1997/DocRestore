@@ -1329,6 +1329,10 @@ def _update_code_index_after_write(
 
     data: object = json.loads(index_path.read_text(encoding="utf-8"))
     if not isinstance(data, list):
+        logger.warning(
+            "files-index.json 形态异常（非 list），跳过行数刷新；文件已保存但"
+            "索引行数可能与内容不一致: %s", index_path,
+        )
         return
 
     rel_path = rel.as_posix()
@@ -1473,8 +1477,13 @@ async def get_task_quality_report(task_id: str) -> dict[str, object]:
                 reports.append(_json.loads(
                     p.read_text(encoding="utf-8"),
                 ))
-            except (OSError, _json.JSONDecodeError):
-                continue
+            except (OSError, _json.JSONDecodeError) as exc:
+                # 不静默跳过：扫到文件却解析失败时，返回的"无问题"实为数据缺失，
+                # 记 warning 避免把"报告损坏"伪装成"质量良好"误导用户。
+                logger.warning(
+                    "质量报告解析失败，跳过（'无问题'可能实为数据缺失）: %s: %s",
+                    p, exc,
+                )
 
         if not reports:
             return {"summary": {"total": 0}, "issues": []}
@@ -1578,16 +1587,15 @@ async def get_source_image(task_id: str, filename: str) -> FileResponse:
 def _processed_source_variants(task: Task) -> list[tuple[str, str]]:
     """该任务可能的处理图 ``(debug_dir, 文件名后缀标记)``，按优先级（矫正先于裁剪）。
 
-    OCR 前预处理把图喂 OCR、坐标随处理图（§13/§15）。按**处理最深**优先探测：
-    PPT 矫正后串联裁剪 ``_after_crop``（§14.2）→ 仅矫正 ``_after`` → 仅裁剪 ``_crop``，
-    命中链末才与 bbox 坐标系对齐。矫正目录取任务 ppt 配置（默认 ``.rectified``）；裁剪
-    目录走默认 ``.content_crop``。
+    OCR 前预处理把图喂 OCR、坐标随处理图（§13/§15）。PPT 矫正产 ``_after``、文档/手动
+    裁剪产 ``_crop``，二者互斥（PPT 不自动裁剪，2026-06-29 回退 §14.2 矫正后串联），命中
+    即与 bbox 坐标系对齐。矫正目录取任务 ppt 配置（默认 ``.rectified``）；裁剪目录走默认
+    ``.content_crop``。
     """
     rectify_dir = (
         task.ppt.rectify_debug_dir if task.ppt is not None else ".rectified"
     )
     return [
-        (".content_crop", "_after_crop"),
         (rectify_dir, "_after"),
         (".content_crop", "_crop"),
     ]

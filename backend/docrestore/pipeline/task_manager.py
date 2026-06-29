@@ -899,17 +899,27 @@ class TaskManager:
         # 清理文件（快速本地 IO，无需异步化）
         output_dir = Path(task.output_dir)
         if output_dir.exists():  # noqa: ASYNC240
-            shutil.rmtree(output_dir, ignore_errors=True)
+            try:
+                shutil.rmtree(output_dir)  # noqa: ASYNC240
+            except OSError as exc:
+                # 不再 ignore_errors 静默吞：删除失败要可见（残留目录需后续/
+                # 人工处理），但不阻断内存/DB 清理，避免任务半删卡死。
+                logger.warning(
+                    "删除任务产物目录失败（可能残留）: task=%s dir=%s: %s",
+                    task_id, output_dir, exc,
+                )
 
         # 从内存移除
         self._tasks.pop(task_id, None)
 
-        # 从 DB 移除
+        # 从 DB 移除：失败不能再报成功——否则内存/文件已删、DB 行残留，
+        # 重启水合后"幽灵任务"回来。把失败作为错误返回让调用方/用户感知。
         if self._db is not None:
             try:
                 await self._db.delete_task(task_id)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
                 logger.exception("从 DB 删除任务失败: %s", task_id)
+                return f"任务记录删除失败，可能在重启后重现: {exc}"
 
         return ""
 
@@ -938,11 +948,15 @@ class TaskManager:
                             status=status, page=page, page_size=200,
                         )
                     except Exception:
-                        logger.exception(
-                            "DB list_tasks 失败 status=%s page=%d",
+                        # 不能 break 返回"残缺集合"：少收一个被引用目录会让上传
+                        # 清理误删仍在用的 upload_dir（烂图事故）。上抛让调用方按
+                        # 保守策略跳过本轮清理（fail-safe 而非 fail-open）。
+                        logger.warning(
+                            "DB list_tasks 失败 status=%s page=%d，中止引用目录"
+                            "收集并上抛，调用方将跳过本轮清理",
                             status, page,
                         )
-                        break
+                        raise
                     dirs.update(
                         t.image_dir for t in result.tasks if t.image_dir
                     )

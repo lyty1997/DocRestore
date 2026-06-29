@@ -18,6 +18,7 @@ import Markdown from "react-markdown";
 import {
   getFilesIndex,
   getTaskLayout,
+  isNotFoundError,
   listSourceImages,
   updateResultMarkdown,
 } from "../api/client";
@@ -188,8 +189,13 @@ export function DocCodePreview({
       .then((idx) => {
         if (!cancelled) setCodeAvailable(idx.length > 0);
       })
-      .catch(() => {
+      .catch((error_: unknown) => {
         if (!cancelled) setCodeAvailable(false);
+        // 404 = 非代码模式（预期，不显示 toggle）；其它错误是真实失败，
+        // 不能静默吞成"无代码视图"——记录便于排查后端瞬时故障。
+        if (!isNotFoundError(error_)) {
+          console.error("探测代码模式产物失败", error_);
+        }
       });
     return () => {
       cancelled = true;

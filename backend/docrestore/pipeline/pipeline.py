@@ -1121,13 +1121,15 @@ class Pipeline:
             default_ocr=self._config.ocr,
         )
 
-        # 自动 content_crop：文档 + PPT 模式生效（PPT 矫正后串联裁剪，§14.2）。
-        # 代码模式坐标依赖强 + 已有列裁剪 + 文档正文列检测不适配 IDE → 跳过自动裁剪
-        # （仍可手动框）。PDF 渲染页无屏摄侧栏 UI → 跳过（Epic A D8）。
+        # 自动 content_crop：仅文档模式生效。其余模式一律跳过自动裁剪（仍可手动框）：
+        # 代码模式坐标依赖强 + 已有列裁剪 + 文档正文列检测不适配 IDE；PPT 屏摄幻灯无
+        # 固定正文列、透视矫正后再裁易误伤图文版式（2026-06-29 回退 §14.2 自动串联，
+        # 改回仅手动框）；PDF 渲染页无屏摄侧栏 UI（Epic A D8）。
         from docrestore.pipeline.render import is_pdf_rendered_dir
 
         skip_content_crop = (
             code_cfg.enable
+            or ppt_cfg.enable
             or is_pdf_rendered_dir(image_dir)
         )
 
@@ -1654,8 +1656,14 @@ class Pipeline:
                 from PIL import Image
                 with Image.open(page.image_path) as img:
                     image_size = img.size
-            except OSError:
-                # 用 bbox 兜底（max x2,y2）
+            except OSError as exc:
+                # 用 bbox 兜底（max x2,y2）；记 warning：兜底尺寸通常小于真实画幅
+                # （不含右/下留白），会让列检测/版面分析略偏，应可见而非静默。
+                logger.warning(
+                    "代码模式：打开原图失败，改用 bbox 兜底尺寸"
+                    "（版面可能略偏）: %s: %s",
+                    page.image_path.name, exc,
+                )
                 image_size = (
                     max((ln.bbox[2] for ln in text_lines), default=0),
                     max((ln.bbox[3] for ln in text_lines), default=0),
@@ -3811,6 +3819,10 @@ class Pipeline:
         merged_gaps: list[Gap] = []
         any_truncated = False
         for i, r in enumerate(results):
+            if isinstance(r, asyncio.CancelledError):
+                # 取消须透传（项目约定 CancelledError 一路传播），不能当普通
+                # "块失败"吞掉回退原文，否则破坏结构化取消 / 资源回收。
+                raise r
             if isinstance(r, BaseException):
                 logger.warning(
                     "整篇精修第 %d/%d 块失败，回退到原文: %s",

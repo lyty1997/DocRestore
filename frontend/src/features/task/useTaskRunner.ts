@@ -244,8 +244,11 @@ export function useTaskRunner(): UseTaskRunnerReturn {
           try {
             const resp = await getTask(tid);
             await handlePollResponse(resp, tid);
-          } catch {
-            // 轮询失败静默重试
+          } catch (error_: unknown) {
+            // 下一拍重试；但不再完全静默——记录，避免持久失败（token 过期/任务
+            // 被删/后端宕机）或 handlePollResponse 内的编程 bug 表现为"卡在
+            // processing"却无任何线索。
+            console.error("任务轮询失败", error_);
           }
         })();
       }, POLL_INTERVAL);

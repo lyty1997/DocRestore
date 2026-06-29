@@ -78,6 +78,7 @@ def test_sentinel_records_digest(tmp_path: Path) -> None:
     data = json.loads((out / ".render_done.json").read_text(encoding="utf-8"))
     assert data["rendered"] == 2
     assert data["source_pages"] == 2
+    assert data["expected_pages"] == 2  # 完整渲染：expected == rendered
     assert len(data["pdf_sha256"]) == 64
 
 
@@ -166,3 +167,47 @@ def test_corrupt_pdf_propagates(tmp_path: Path) -> None:
 
     with pytest.raises(pdfium.PdfiumError):
         render_pdf_to_dir(bad, out, cfg=PdfRenderConfig(), name_prefix="")
+
+
+def test_incomplete_render_not_cached_as_complete(tmp_path: Path) -> None:
+    """缺页的 sentinel（rendered < expected_pages）不算命中：重跑重试缺页。
+
+    防止"坏页被跳过 → sentinel 把残缺渲染永久标记为完成 → resume 不再补渲"。
+    """
+    pdf = tmp_path / "doc.pdf"
+    make_pdf(pdf, ["A", "B"])
+    out = tmp_path / "out"
+    cfg = PdfRenderConfig()
+
+    render_pdf_to_dir(pdf, out, cfg=cfg, name_prefix="d_")
+    # 篡改 sentinel 模拟"上次只成功渲染 1/2 页"，并删掉第 2 页 PNG
+    sentinel = out / ".render_done.json"
+    data = json.loads(sentinel.read_text(encoding="utf-8"))
+    data["rendered"] = 1
+    sentinel.write_text(json.dumps(data), encoding="utf-8")
+    (out / "d_page_0002.png").unlink()
+
+    count = render_pdf_to_dir(pdf, out, cfg=cfg, name_prefix="d_")
+
+    assert count == 2  # 不短路，重渲染补回缺页
+    assert (out / "d_page_0002.png").exists()
+
+
+def test_legacy_sentinel_without_expected_is_honored(tmp_path: Path) -> None:
+    """旧 sentinel 无 expected_pages 字段 → 向后兼容视为完成，不强制重渲。"""
+    pdf = tmp_path / "doc.pdf"
+    make_pdf(pdf, ["A", "B"])
+    out = tmp_path / "out"
+    cfg = PdfRenderConfig()
+
+    render_pdf_to_dir(pdf, out, cfg=cfg, name_prefix="d_")
+    sentinel = out / ".render_done.json"
+    data = json.loads(sentinel.read_text(encoding="utf-8"))
+    del data["expected_pages"]  # 模拟旧格式 sentinel
+    sentinel.write_text(json.dumps(data), encoding="utf-8")
+    (out / "d_page_0002.png").unlink()
+
+    count = render_pdf_to_dir(pdf, out, cfg=cfg, name_prefix="d_")
+
+    assert count == 2  # 命中缓存返回页数
+    assert not (out / "d_page_0002.png").exists()  # 未重渲（向后兼容短路）

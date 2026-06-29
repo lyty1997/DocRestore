@@ -951,3 +951,63 @@ z.infer<...>` 的 `rectified` 是**必填** `boolean`（zod 的 output 类型含
 根因：环境设了 `http_proxy`/`https_proxy` 指向 Privoxy，curl 默认走代理，代理转发不到本地端口。
 处理：本地 curl 加 `--noproxy '*'`（或 `NO_PROXY=127.0.0.1`）。Playwright/浏览器访问 localhost
 不受影响（自有网络栈）。
+
+## 错误处理：掩盖问题的兜底（landmine）批量整改（2026-06-29 审计）
+
+现象 / 背景：
+- 全量审计 343 个 `except` + 32 个 `suppress` + 55 个前端 `catch`，找出"掩盖问题的兜底"。
+- 总评：项目错误处理底子不错（多数有日志 / 用 `PipelineResult.error`/`flags`/`quality_report`
+  暴露失败 / PII 默认 fail-closed / 大量窄类型 except），地雷密度低。
+- **唯一成体系反模式 = 输出/渲染链路的"静默数据丢失"**：产出"看似完整其实缺东西"的产物，
+  只有服务端日志（或无日志），不进 `result.error`，用户无感。
+
+根因（4 个真地雷，已修）：
+- `output/renderer.py` `_copy_image`：源图缺失仍重写引用 → `document.md` 死图引用，零日志。
+- `pipeline/render/pdf.py`：单页渲染 `except Exception` 吞编程 bug；缺页被 sentinel 永久缓存
+  （`_read_sentinel` 只校 sha 不校 `rendered==expected_pages`）；调用方丢弃返回值缺页不进 error。
+- `llm/base.py` `refine`/`final_refine`：`content or ""` 把模型空响应当成"成功精修成空文档"，
+  小段还写进缓存污染 resume。
+- `persistence/database.py` `_migrate_add_column`：`suppress(Exception)` 裹裸 ALTER，吞磁盘满/锁/语法错。
+
+处理策略（**新代码必须遵守的四条**）：
+1. **静默处补日志**：宽/窄 except 后若 `pass`/`continue`/`return 默认值`，至少 `logger.warning`
+   （或 debug，视严重度），让失败可见。完全静默 = 缺陷，哪怕是窄类型。
+2. **收窄 except 类型**：只兜可预期的运行/IO 异常（`OSError`/`ValueError`/库自有异常），别用宽
+   `except Exception` 顺手吞掉 `KeyError`/`AttributeError`/`TypeError` 等编程 bug——它们应崩出来。
+   构造对象（pydantic 等）尽量移出 try，避免校验 bug 被当成"读取失败"。
+3. **丢弃的数据要透出**：被跳过/丢失的项收集进 `skipped`/`missing` 计数，透到 `result`/日志
+   （范式见 `output/code_renderer.py` 的 `logger + skipped[]`）；产物层截断要在产物里留可见标记
+   （如 xlsx 截断行）。
+4. **区分"预期不适用"与"真实失败"**：前端 `catch` 用 `isNotFoundError`（`ApiError.httpStatus===404`）
+   把 404（任务未完成/非代码模式）与 500/网络/解析错误分开——404 静默、其它 `console.error`，
+   不能把请求失败伪装成"正常空态"或"无限处理中"。
+5. **取消必须透传**：`suppress`/`except` 不要包含 `asyncio.CancelledError`；`gather(return_exceptions=True)`
+   的结果若是 `CancelledError` 要 `raise` 而非当普通失败回退（项目约定"CancelledError 一路传播"）。
+6. **安全边界 fail-closed 优先 / 至少可见**：出云 PII 闸口在云端 provider 无策略时记 warning
+   （生产路径恒装策略，命中即接线 bug）；删除/清理失败不报成功（DB 删除失败返回错误，避免重启幽灵任务）；
+   引用集合收集失败上抛让清理跳过本轮（fail-safe），不返回残缺集合误删在用目录。
+
+提交：分支 `bugfix/error-handling-hardening`，A/B/C/D 四组 commit；门禁全绿。
+
+遗留（建 issue 跟踪，未在本批改代码逻辑）：
+- **#95** `privacy/redactor.py` `_looks_like_name` 把含撇号/连字符的西文人名（O'Brien 等）整条丢弃，
+  §A `split_protected` 落地后该过滤比结构所需更宽 → 一类真实人名漏脱出云。本批仅加"丢弃计数"
+  可观测；收窄标点集需配 PII 召回测试，单独排期。
+- **#96** `ocr/engine_manager.py` VL 缺 server python 退本地、`pipeline/render/pdf.py` 缺页：已记 warning
+  但未透到任务 `result.error`/前端；如需用户侧可见需引擎状态/任务级透传，单独排期。
+
+## PPT 模式不应自动裁剪（§14.2 已回退）
+
+现象：
+- 用户反馈"PPT 模式任务（如 121528c1）自动裁掉了几张幻灯图，记得 PPT 没有前置裁剪"。
+
+根因：
+- 2026-06-25 §14.2 曾有意把文档模式的正文自动裁剪（content_crop）扩到 PPT（透视矫正后串联裁剪），
+  PPT 从 `skip_content_crop` 移出。屏摄幻灯无固定正文列，矫正后再自动裁会误伤图文版式。
+
+处理策略（2026-06-29 回退）：
+- PPT 重新纳入 `skip_content_crop`（`skip = code_cfg.enable or ppt_cfg.enable or is_pdf_rendered_dir`），
+  PPT 只做透视矫正、**不自动裁剪**；需要裁剪走手动框（任务级 `crop_boxes`，独占、模式无关）。
+- `_processed_source_variants` 移除链末 `_after_crop` 变体（PPT 不再产）。
+- 回归测试 `tests/pipeline/test_ppt_content_crop_skip.py` 锁定：PPT 不产 `.content_crop`，文档模式同图作对照。
+- 历史任务（如 121528c1）已落盘的 `.content_crop/*_after_crop.*` 是回退前产物，重跑该任务即不再裁剪。

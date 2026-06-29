@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -66,6 +67,25 @@ async def test_insert_and_get_task(db: TaskDatabase) -> None:
 async def test_get_nonexistent_task(db: TaskDatabase) -> None:
     """查询不存在的任务返回 None。"""
     assert await db.get_task("nonexist") is None
+
+
+async def test_migrate_add_column_idempotent_but_surfaces_real_error(
+    db: TaskDatabase,
+) -> None:
+    """加列幂等（"列已存在"静默跳过），但真实失败必须上抛而非 suppress 吞掉。
+
+    旧版 ``with suppress(Exception)`` 会把磁盘满/库锁/语法错一并静默吞掉，
+    导致列没建成、下游报莫名其妙的 "no such column"。收窄后：duplicate 放行、
+    其余 OperationalError 冒泡。
+    """
+    # 列已存在（initialize 时 CREATE TABLE 已含）→ 重复加同名列不抛
+    await db._migrate_add_column("tasks", "llm", "TEXT")  # noqa: SLF001
+
+    # 真实失败（对不存在的表加列）→ sqlite3.OperationalError 必须冒泡
+    with pytest.raises(sqlite3.OperationalError):
+        await db._migrate_add_column(  # noqa: SLF001
+            "table_does_not_exist", "c", "TEXT",
+        )
 
 
 async def test_update_status(db: TaskDatabase) -> None:

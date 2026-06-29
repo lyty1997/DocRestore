@@ -7,10 +7,13 @@
 from __future__ import annotations
 
 import difflib
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -246,6 +249,12 @@ def create_code_context_provider(
         return None
     path = Path(root).expanduser()
     if not path.exists() or not path.is_dir():
+        # 配了非空 root 但路径不存在/非目录，几乎一定是 typo：与"未配置"区分，
+        # 记 warning，否则 repair 静默失去参考上下文、修复质量下降而用户不知。
+        logger.warning(
+            "代码参考源码根无效（路径不存在或非目录），不启用参考上下文: %s",
+            root,
+        )
         return None
     return LocalCodeContextProvider(path)
 

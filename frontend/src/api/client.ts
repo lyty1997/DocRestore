@@ -165,6 +165,12 @@ export class ApiError extends Error {
   }
 }
 
+/** 是否 404（资源不存在）。用于区分"预期的未就绪/不适用"与真实失败，
+ * 避免把 500/网络/解析错误一并当成 404 静默吞掉。 */
+export function isNotFoundError(error: unknown): boolean {
+  return error instanceof ApiError && error.httpStatus === 404;
+}
+
 /** HTTP 状态码 → 客户端诊断 hint i18n key（不含主错误，只是补充提示）。 */
 function hintKeyForStatus(status: number): string | undefined {
   if (status === 413) return "errors.http.413";

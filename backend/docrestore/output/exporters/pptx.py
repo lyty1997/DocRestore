@@ -341,12 +341,16 @@ def _add_image_block(
     from pptx.util import Emu  # noqa: PLC0415
 
     path = _resolve_image(doc_dir, src)
-    if path is None or max_h <= 0:
+    if path is None:
+        logger.warning("PPT 导出跳过无法解析/缺失的图片: %s", src)
+        return 0
+    if max_h <= 0:
         return 0
     try:
         with Image.open(path) as img:
             px_w, px_h = img.size
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        logger.warning("PPT 导出跳过损坏/不可读图片: %s: %s", path, exc)
         return 0
     if px_w <= 0 or px_h <= 0:
         return 0
@@ -510,11 +514,13 @@ def _add_positioned_image(
 
     path = _resolve_image(doc_dir, image_ref)
     if path is None:
+        logger.warning("PPT 定位图无法解析/缺失，已跳过: %s", image_ref)
         return False
     try:
         with Image.open(path) as img:
             px_w, px_h = img.size
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        logger.warning("PPT 定位图损坏/不可读，已跳过: %s: %s", path, exc)
         return False
     if px_w <= 0 or px_h <= 0:
         return False

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import logging
 import os
 import shutil
 import signal
@@ -37,6 +38,8 @@ try:
     import resource as _resource
 except ImportError:  # pragma: no cover - 非 POSIX 平台
     _resource = None  # type: ignore[assignment]
+
+logger = logging.getLogger(__name__)
 
 #: 导出产物缓存目录名（落在每个 doc_dir 下，不进 asset 白名单、不裸打进 zip）
 EXPORT_CACHE_DIRNAME = ".exports"
@@ -155,14 +158,29 @@ def clear_export_caches(root: Path) -> int:
     只哈希 ``document.md``（见 :func:`export_content_hash`），命中即返回 stale 产物。
     续跑前清空缓存即关闭该窗口（#3），下次下载按新产物重新导出。
 
-    防御性吞 ``OSError``（目录在遍历途中消失等），逐目录 ``ignore_errors`` 删除。
+    逐目录删除：良性 race（``FileNotFoundError``，遍历途中消失）静默；其它
+    ``OSError``（如权限）记 warning——清理半途而废会让 #3 stale 窗口重新打开、
+    用户下次下载拿到旧产物，不能静默 no-op。``removed`` 只计真正删成功的目录。
     """
     removed = 0
-    with contextlib.suppress(OSError):
-        for cache_dir in root.rglob(EXPORT_CACHE_DIRNAME):
-            if cache_dir.is_dir():
-                shutil.rmtree(cache_dir, ignore_errors=True)
-                removed += 1
+    try:
+        cache_dirs = list(root.rglob(EXPORT_CACHE_DIRNAME))
+    except OSError as exc:
+        logger.warning("遍历导出缓存目录失败: %s: %s", root, exc)
+        return removed
+    for cache_dir in cache_dirs:
+        if not cache_dir.is_dir():
+            continue
+        try:
+            shutil.rmtree(cache_dir)
+            removed += 1
+        except FileNotFoundError:
+            pass  # 遍历途中消失，良性 race
+        except OSError as exc:
+            logger.warning(
+                "清理导出缓存失败（stale 窗口可能未关闭）: %s: %s",
+                cache_dir, exc,
+            )
     return removed
 
 
