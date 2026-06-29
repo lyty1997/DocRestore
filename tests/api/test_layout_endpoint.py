@@ -259,29 +259,6 @@ async def test_processed_image_served_content_crop(
 
 
 @pytest.mark.asyncio
-async def test_processed_image_prefers_chained_after_crop(
-    api_client: AsyncClient, tmp_path: Path,
-) -> None:
-    """PPT 矫正+裁剪串联：同时有 _after 与 _after_crop → 优先返回链末 _after_crop
-    （bbox 在裁剪后坐标系，§14.2）。"""
-    out = tmp_path / "out_chain"
-    (out / ".rectified").mkdir(parents=True)
-    (out / ".rectified" / "IMG_0001_after.jpg").write_bytes(_jpg_bytes())
-    cc = out / ".content_crop"
-    cc.mkdir(parents=True)
-    (cc / "IMG_0001_after_crop.jpg").write_bytes(_jpg_bytes() + b"\x00")
-    _inject_task("t-chain", out)
-
-    resp = await api_client.get(
-        "/api/v1/tasks/t-chain/processed-image",
-        params={"name": "IMG_0001.jpg"},
-    )
-    assert resp.status_code == 200
-    # 命中链末 _after_crop（内容比 _after 多 1 字节）而非仅矫正图
-    assert len(resp.content) == len(_jpg_bytes()) + 1
-
-
-@pytest.mark.asyncio
 async def test_processed_image_404_when_missing(
     api_client: AsyncClient, tmp_path: Path,
 ) -> None:

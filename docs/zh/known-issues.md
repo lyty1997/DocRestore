@@ -995,3 +995,19 @@ z.infer<...>` 的 `rectified` 是**必填** `boolean`（zod 的 output 类型含
   可观测；收窄标点集需配 PII 召回测试，单独排期。
 - **#96** `ocr/engine_manager.py` VL 缺 server python 退本地、`pipeline/render/pdf.py` 缺页：已记 warning
   但未透到任务 `result.error`/前端；如需用户侧可见需引擎状态/任务级透传，单独排期。
+
+## PPT 模式不应自动裁剪（§14.2 已回退）
+
+现象：
+- 用户反馈"PPT 模式任务（如 121528c1）自动裁掉了几张幻灯图，记得 PPT 没有前置裁剪"。
+
+根因：
+- 2026-06-25 §14.2 曾有意把文档模式的正文自动裁剪（content_crop）扩到 PPT（透视矫正后串联裁剪），
+  PPT 从 `skip_content_crop` 移出。屏摄幻灯无固定正文列，矫正后再自动裁会误伤图文版式。
+
+处理策略（2026-06-29 回退）：
+- PPT 重新纳入 `skip_content_crop`（`skip = code_cfg.enable or ppt_cfg.enable or is_pdf_rendered_dir`），
+  PPT 只做透视矫正、**不自动裁剪**；需要裁剪走手动框（任务级 `crop_boxes`，独占、模式无关）。
+- `_processed_source_variants` 移除链末 `_after_crop` 变体（PPT 不再产）。
+- 回归测试 `tests/pipeline/test_ppt_content_crop_skip.py` 锁定：PPT 不产 `.content_crop`，文档模式同图作对照。
+- 历史任务（如 121528c1）已落盘的 `.content_crop/*_after_crop.*` 是回退前产物，重跑该任务即不再裁剪。

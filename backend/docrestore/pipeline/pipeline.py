@@ -1121,13 +1121,15 @@ class Pipeline:
             default_ocr=self._config.ocr,
         )
 
-        # 自动 content_crop：文档 + PPT 模式生效（PPT 矫正后串联裁剪，§14.2）。
-        # 代码模式坐标依赖强 + 已有列裁剪 + 文档正文列检测不适配 IDE → 跳过自动裁剪
-        # （仍可手动框）。PDF 渲染页无屏摄侧栏 UI → 跳过（Epic A D8）。
+        # 自动 content_crop：仅文档模式生效。其余模式一律跳过自动裁剪（仍可手动框）：
+        # 代码模式坐标依赖强 + 已有列裁剪 + 文档正文列检测不适配 IDE；PPT 屏摄幻灯无
+        # 固定正文列、透视矫正后再裁易误伤图文版式（2026-06-29 回退 §14.2 自动串联，
+        # 改回仅手动框）；PDF 渲染页无屏摄侧栏 UI（Epic A D8）。
         from docrestore.pipeline.render import is_pdf_rendered_dir
 
         skip_content_crop = (
             code_cfg.enable
+            or ppt_cfg.enable
             or is_pdf_rendered_dir(image_dir)
         )
 

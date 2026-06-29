@@ -1587,16 +1587,15 @@ async def get_source_image(task_id: str, filename: str) -> FileResponse:
 def _processed_source_variants(task: Task) -> list[tuple[str, str]]:
     """该任务可能的处理图 ``(debug_dir, 文件名后缀标记)``，按优先级（矫正先于裁剪）。
 
-    OCR 前预处理把图喂 OCR、坐标随处理图（§13/§15）。按**处理最深**优先探测：
-    PPT 矫正后串联裁剪 ``_after_crop``（§14.2）→ 仅矫正 ``_after`` → 仅裁剪 ``_crop``，
-    命中链末才与 bbox 坐标系对齐。矫正目录取任务 ppt 配置（默认 ``.rectified``）；裁剪
-    目录走默认 ``.content_crop``。
+    OCR 前预处理把图喂 OCR、坐标随处理图（§13/§15）。PPT 矫正产 ``_after``、文档/手动
+    裁剪产 ``_crop``，二者互斥（PPT 不自动裁剪，2026-06-29 回退 §14.2 矫正后串联），命中
+    即与 bbox 坐标系对齐。矫正目录取任务 ppt 配置（默认 ``.rectified``）；裁剪目录走默认
+    ``.content_crop``。
     """
     rectify_dir = (
         task.ppt.rectify_debug_dir if task.ppt is not None else ".rectified"
     )
     return [
-        (".content_crop", "_after_crop"),
         (rectify_dir, "_after"),
         (".content_crop", "_crop"),
     ]

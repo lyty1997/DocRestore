@@ -1,5 +1,26 @@
 # 开发进度
 
+## 2026-06-29 - 回退 PPT 模式自动 content_crop（§14.2）
+
+主题：用户问"任务 121528c1 的 PPT 模式怎么自动裁剪了几张图？记得 PPT 没前置裁剪"。
+
+排查结论：**非 bug，是 2026-06-25 §14.2 有意加的功能**——用户当时拍板把文档模式的正文
+自动裁剪扩到 PPT（矫正后串联）。用户记忆停在改动前。任务 121528c1（PPT+矫正）9 张图里
+5 张被自动裁（`.content_crop/*_after_crop.jpg`、OCR 目录 `*_after_crop_OCR`），4 张只矫正。
+
+决策（用户确认）：**回退**。屏摄幻灯无固定正文列、矫正后再自动裁易误伤图文版式 →
+PPT 恢复为「只做透视矫正、不自动裁剪」（手动框仍可用）。
+
+完成（分支 `bugfix/error-handling-hardening`）：
+- 后端 `pipeline.py`：PPT 重新纳入 `skip_content_crop`
+  （`skip = code_cfg.enable or ppt_cfg.enable or is_pdf_rendered_dir`）。
+- `routes.py` `_processed_source_variants`：移除已不可能产生的链末 `_after_crop` 变体，探测序
+  收敛为 `_after`（PPT 矫正）→ `_crop`（文档/手动裁剪）。
+- 测试：删 `test_layout_endpoint.py::test_processed_image_prefers_chained_after_crop`（场景已不存在）；
+  新增 `tests/pipeline/test_ppt_content_crop_skip.py`（PPT 不产 `.content_crop` + 文档模式同图对照证非空转）。
+- 文档：`doc-content-crop.md §14`/§14.2/§14.3 标注回退；`known-issues.md` 记录。
+- 门禁：相关 70 测全绿（layout/content_crop/pdf_ingest/ppt_refine/ppt_layout/process_tree/新测）。
+
 ## 2026-06-29 18:33:14 CST - 错误处理审计：掩盖问题的兜底（landmine）批量整改
 
 主题：用户问"开发过程中是否加了很多兜底把问题掩盖住了？要优雅的错误处理不是埋雷"。
