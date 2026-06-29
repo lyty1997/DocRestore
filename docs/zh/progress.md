@@ -1,5 +1,33 @@
 # 开发进度
 
+## 2026-06-29 18:33:14 CST - 错误处理审计：掩盖问题的兜底（landmine）批量整改
+
+主题：用户问"开发过程中是否加了很多兜底把问题掩盖住了？要优雅的错误处理不是埋雷"。
+对 343 个 `except` + 32 个 `suppress` + 55 个前端 `catch` 做多 agent 审计 + 对抗式核验。
+
+总评：**不算埋雷成性**——只有 4 个真地雷 + ~23 borderline，地雷密度对 33k LOC 很低；
+项目错误处理底子不错（多有日志 / 用 `result.error`·`flags`·`quality_report` 暴露 / PII fail-closed）。
+唯一成体系反模式 = **输出/渲染链路的"静默数据丢失"**（看似完整实缺、只服务端日志、不进 error、用户无感）。
+
+完成（分支 `bugfix/error-handling-hardening`，4 组 commit）：
+- **A 组（4 地雷 + 9 测试）** `9acd469`：renderer 死图引用记 warning；pdf 缺页不写完成态
+  （新增 `expected_pages`，重跑重试）+ 收窄 except；llm `refine`/`final_refine` 空响应当失败回退；
+  database ALTER 收窄到 `OperationalError` 判 duplicate。
+- **B 组（medium 后端 + 3 测试）** `c86bfeb`：egress_gate 云端无策略记 warning（fail-open 可见）；
+  engine_manager VL 退本地告警说明质量降级；task_manager 收集失败上抛触发清理 fail-safe（防误删）、
+  删除失败不报成功（防幽灵任务）。
+- **C 组（前端 5 处）** `3800aef`：新增 `isNotFoundError`，TaskDetail/DocCodePreview/useTaskProgress/
+  useTaskRunner/SidebarTaskList 区分 404 与真错误，不再把失败伪装成正常空态/无限处理中。
+- **D 组（low 16 文件）** `bb7f5e1`：~20 处静默丢弃补 warning/debug 计数 + 收窄 except；
+  ocr/base & pipeline final_refine 取消透传（不吞 CancelledError）。
+
+验证：`bash scripts/check_quality.sh` **EXIT=0**（mypy --strict / ruff / typos / 前端 tsc+eslint；
+pytest 1624 passed, 45 skipped；前端 vitest 247 passed；eslint 仅 2 个既有 Fast Refresh warning）。
+文档：`docs/zh/known-issues.md` 新增"错误处理 landmine 批量整改"含 6 条新代码必守原则。
+
+遗留（已建 issue 跟踪）：**#95** redactor `_looks_like_name` 撇号人名漏脱需配 PII 召回测试再收窄过滤
+（本批仅加丢弃计数）；**#96** engine_manager VL 退本地 / pdf 缺页已记 warning 但未透到任务 `result.error`/前端。
+
 ## 2026-06-26 20:47:00 CST - 536759e 之后改动全面 review
 
 按 code-review 口径审查 `536759e52622154ad70acac8aac7ffc0c2c84963..HEAD`：范围 39 commits / 118 files / 约 1.48 万行新增，重点看 Epic A/C/D/E、PII、导出缓存、代码源图放大镜与前端高亮链路。
