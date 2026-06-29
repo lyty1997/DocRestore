@@ -116,3 +116,55 @@ class TestCloudTruncationDetection:
         result = await refiner.final_refine("# 原始文档")
 
         assert result.truncated is False
+
+
+class TestEmptyResponseTreatedAsFailure:
+    """模型空响应不应被当成"成功精修成空文档"（#地雷修复）"""
+
+    @pytest.mark.asyncio
+    @patch("docrestore.llm.base.litellm.acompletion")
+    async def test_empty_content_nonempty_input_marks_failure(
+        self, mock_acompletion: AsyncMock
+    ) -> None:
+        """非空输入但模型返回空内容（finish_reason=stop）→ 复用 truncated 通道回退。"""
+        mock_acompletion.return_value = _make_response("", "stop")
+        refiner = CloudLLMRefiner(_make_config())
+        result = await refiner.refine("# 原文有实际内容", _make_context())
+
+        assert result.truncated is True
+
+    @pytest.mark.asyncio
+    @patch("docrestore.llm.base.litellm.acompletion")
+    async def test_whitespace_only_content_marks_failure(
+        self, mock_acompletion: AsyncMock
+    ) -> None:
+        """纯空白响应同样视为空响应失败。"""
+        mock_acompletion.return_value = _make_response("   \n  ", "stop")
+        refiner = CloudLLMRefiner(_make_config())
+        result = await refiner.refine("# 原文有实际内容", _make_context())
+
+        assert result.truncated is True
+
+    @pytest.mark.asyncio
+    @patch("docrestore.llm.base.litellm.acompletion")
+    async def test_empty_input_empty_output_not_failure(
+        self, mock_acompletion: AsyncMock
+    ) -> None:
+        """输入本就为空 → 空输出是合法结果，不得误判为失败。"""
+        mock_acompletion.return_value = _make_response("", "stop")
+        refiner = CloudLLMRefiner(_make_config())
+        result = await refiner.refine("   ", _make_context())
+
+        assert result.truncated is False
+
+    @pytest.mark.asyncio
+    @patch("docrestore.llm.base.litellm.acompletion")
+    async def test_final_refine_empty_content_marks_failure(
+        self, mock_acompletion: AsyncMock
+    ) -> None:
+        """final_refine 对非空输入返回空内容也按失败回退原文。"""
+        mock_acompletion.return_value = _make_response("", "stop")
+        refiner = CloudLLMRefiner(_make_config())
+        result = await refiner.final_refine("# 原始文档有内容")
+
+        assert result.truncated is True

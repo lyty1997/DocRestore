@@ -101,7 +101,16 @@ def _read_sentinel(out_dir: Path, expected_digest: str) -> int | None:
     if not isinstance(data, dict) or data.get("pdf_sha256") != expected_digest:
         return None
     rendered = data.get("rendered")
-    return rendered if isinstance(rendered, int) else None
+    if not isinstance(rendered, int):
+        return None
+    # 仅当上次渲染完整才算幂等命中：expected_pages 记录上次预期页数
+    # （min(源页数, 上限)）。若 rendered < expected_pages 说明上次有坏页被跳过，
+    # 不复用此缓存——下次重跑重试缺页，避免缺页被 sentinel 永久固化。旧 sentinel
+    # 无该字段时视为完成（向后兼容）。
+    expected = data.get("expected_pages")
+    if isinstance(expected, int) and rendered < expected:
+        return None
+    return rendered
 
 
 def _write_sentinel(
@@ -110,15 +119,21 @@ def _write_sentinel(
     *,
     source_pages: int,
     rendered: int,
+    expected_pages: int,
     width: int,
     cfg: PdfRenderConfig,
     name_prefix: str,
 ) -> None:
-    """落渲染完成 sentinel，记录幂等校验与排障所需信息。"""
+    """落渲染完成 sentinel，记录幂等校验与排障所需信息。
+
+    ``expected_pages`` 为本次预期渲染页数（min(源页数, 上限)）；幂等命中判定靠
+    它与 ``rendered`` 是否相等，缺页时不被复用。
+    """
     payload = {
         "pdf_sha256": digest,
         "source_pages": source_pages,
         "rendered": rendered,
+        "expected_pages": expected_pages,
         "dpi": cfg.dpi,
         "max_long_side": cfg.max_long_side,
         "width": width,
@@ -186,16 +201,25 @@ def render_pdf_to_dir(
                 dst = out_dir / f"{name_prefix}page_{i + 1:0{width}d}.png"
                 image.save(dst)
                 rendered += 1
-            except Exception:
+            except (pdfium.PdfiumError, OSError, ValueError):
+                # 只吞渲染/图像 IO 异常（坏页、不可保存）：坏页跳过而非炸整篇。
+                # AttributeError/TypeError 等编程 bug 不在此列，照常向上抛由调用方
+                # 记为整篇失败，避免被当成"坏页"长期掩盖。
                 logger.warning(
                     "PDF 第 %d 页渲染失败，跳过: %s",
                     i + 1, pdf_path.name, exc_info=True,
                 )
+        if rendered < limit:
+            logger.warning(
+                "PDF 渲染不完整：%d/%d 页成功，其余坏页已跳过；本次不计为完成态，"
+                "重跑将重试缺页: %s",
+                rendered, limit, pdf_path.name,
+            )
     finally:
         doc.close()
 
     _write_sentinel(
         out_dir, digest, source_pages=source_pages, rendered=rendered,
-        width=width, cfg=cfg, name_prefix=name_prefix,
+        expected_pages=limit, width=width, cfg=cfg, name_prefix=name_prefix,
     )
     return rendered

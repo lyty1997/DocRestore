@@ -331,13 +331,23 @@ class BaseLLMRefiner:
             raise RuntimeError(msg)
         choice = response.choices[0]
         content: str = choice.message.content or ""
-        truncated = getattr(choice, "finish_reason", None) == "length"
+        finish_reason = getattr(choice, "finish_reason", None)
+        truncated = finish_reason == "length"
 
         if truncated:
             logger.warning(
                 "LLM 输出因 token 上限被截断（model=%s, finish_reason=length）",
                 self._config.model,
             )
+        elif raw_markdown.strip() and not content.strip():
+            # 输入非空但模型返回空内容（内容过滤/安全拒答/provider 抖动）：这是一次
+            # 失败，而非"成功精修成空文档"。复用 truncated 通道让上层回退原文且不写
+            # 缓存，避免空结果静默替换正文、污染 resume 缓存。
+            logger.warning(
+                "LLM 返回空内容（model=%s, finish_reason=%s），按失败回退原文",
+                self._config.model, finish_reason,
+            )
+            truncated = True
 
         cleaned_md, gaps = parse_gaps(content)
         return RefinedResult(markdown=cleaned_md, gaps=gaps, truncated=truncated)
@@ -399,7 +409,8 @@ class BaseLLMRefiner:
             raise RuntimeError(msg)
         choice = response.choices[0]
         content: str = choice.message.content or ""
-        truncated = getattr(choice, "finish_reason", None) == "length"
+        finish_reason = getattr(choice, "finish_reason", None)
+        truncated = finish_reason == "length"
 
         if truncated:
             logger.warning(
@@ -407,6 +418,14 @@ class BaseLLMRefiner:
                 "（model=%s, finish_reason=length）",
                 self._config.model,
             )
+        elif markdown.strip() and not content.strip():
+            # 输入非空但整篇精修返回空内容：按失败处理，复用 truncated 通道让上层
+            # 回退原 doc，避免整篇文档被静默清空。
+            logger.warning(
+                "LLM 整篇精修返回空内容（model=%s, finish_reason=%s），回退原文",
+                self._config.model, finish_reason,
+            )
+            truncated = True
 
         cleaned_md, gaps = parse_gaps(content)
         return RefinedResult(markdown=cleaned_md, gaps=gaps, truncated=truncated)

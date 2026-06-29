@@ -19,8 +19,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 from collections.abc import Sequence
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -181,12 +181,22 @@ class TaskDatabase:
         column: str,
         col_type: str,
     ) -> None:
-        """安全地为已有表添加新列（列已存在时静默跳过）。"""
+        """安全地为已有表添加新列（列已存在时跳过，其余失败上抛）。
+
+        SQLite 的 ALTER TABLE 不支持 IF NOT EXISTS，靠捕获 "duplicate column
+        name" 这一预期错误实现幂等；磁盘满/库锁/语法错等真实失败必须暴露，
+        不能像旧版 suppress(Exception) 那样连真故障一起静默吞掉。
+        """
         db = self._get_db()
-        with suppress(Exception):
+        try:
             await db.execute(
                 f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"  # noqa: S608
             )
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                logger.error("迁移加列失败 %s.%s: %s", table, column, exc)
+                raise
+            logger.debug("列已存在，跳过迁移 %s.%s", table, column)
 
     async def close(self) -> None:
         """关闭数据库连接。"""
