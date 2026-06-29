@@ -80,8 +80,12 @@ def _detect_conda_python(env_name: str) -> str:
         )
         if result.returncode == 0:
             return result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+        logger.debug(
+            "conda 探测 python 失败（env=%s 名错/损坏？）rc=%d: %s",
+            env_name, result.returncode, result.stderr.strip(),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        logger.debug("conda 探测 python 异常 env=%s: %s", env_name, exc)
     return ""
 
 

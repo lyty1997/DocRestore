@@ -485,7 +485,8 @@ class TaskDatabase:
         旧版本曾把含明文 ``api_key`` 的 ``LLMConfig`` 整体序列化入库，旧记录及
         其备份/快照长期留存凭据。启动时一次性把 key 字段从 JSON 中移除（与新写
         入的 ``exclude={"api_key"}`` 格式一致）。幂等：已无 key 的行不重写；JSON
-        损坏的行跳过（交由 ``_row_to_task`` 的容错分支处理）。
+        损坏的行跳过并记 warning（``_row_to_task`` 无 try/except 容错分支，旧说法
+        有误；若损坏原文残留 ``api_key`` 子串则单独告警，提示可能仍留明文凭据）。
         """
         db = self._get_db()
         cursor = await db.execute(
@@ -494,11 +495,20 @@ class TaskDatabase:
         )
         rows = await cursor.fetchall()
         scrubbed = 0
+        skipped = 0
         for row in rows:
             try:
                 data = json.loads(row[1])
             except (TypeError, ValueError):
-                continue  # 损坏 JSON 行跳过，不阻断启动
+                # 损坏 JSON 不阻断启动，但不再静默：若原文残留 api_key 子串，
+                # 该行明文凭据未被清洗，必须让运维可见。
+                skipped += 1
+                if isinstance(row[1], str) and "api_key" in row[1]:
+                    logger.warning(
+                        "scrub: tasks.llm JSON 损坏无法清洗，疑似残留明文 "
+                        "api_key task_id=%s", row[0],
+                    )
+                continue
             if not isinstance(data, dict) or not data.get("api_key"):
                 continue  # 已干净 / 非对象，无需重写
             data.pop("api_key", None)
@@ -510,6 +520,10 @@ class TaskDatabase:
         if scrubbed:
             logger.info("已清洗 %d 条历史任务的明文 api_key（#37）", scrubbed)
             await db.commit()
+        if skipped:
+            logger.warning(
+                "scrub: %d 行 tasks.llm JSON 损坏被跳过未清洗", skipped,
+            )
 
     @staticmethod
     def _row_to_task(row: aiosqlite.Row) -> TaskRow:

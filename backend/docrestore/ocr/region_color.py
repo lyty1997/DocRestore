@@ -22,10 +22,13 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
+
+logger = logging.getLogger(__name__)
 
 #: RGB 三元组（0..255）
 Rgb: TypeAlias = tuple[int, int, int]
@@ -204,4 +207,7 @@ def sample_region_color(
             return None
         return _classify(samp, white_balance)
     except Exception:  # noqa: BLE001 — 采样 best-effort，任何异常退 None 不炸主流程
+        # 退 None 不炸主流程，但记 debug：否则采样/分类里的编程 bug（numpy 维度
+        # 错等）会无声把全部区域配色退化、完全不可观测。
+        logger.debug("区域配色采样失败 bbox=%s，退默认", bbox, exc_info=True)
         return None

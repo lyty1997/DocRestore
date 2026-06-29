@@ -1236,7 +1236,13 @@ def _collect_additional_tool_diagnostics(
 
     try:
         text = target.file_path.read_text(encoding="utf-8")
-    except OSError:
+    except OSError as exc:
+        # 读自家刚写入的临时诊断文件失败属异常环境信号：返回基线诊断（少补充
+        # 错误行），但记 debug 让真实 FS 问题（磁盘满/权限/被清）可见。
+        logger.debug(
+            "读取诊断目标文件失败，跳过补充收集: %s: %s",
+            target.file_path, exc,
+        )
         return classified
 
     original_lines = _split_preserving_lines(text)

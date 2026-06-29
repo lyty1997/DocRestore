@@ -401,21 +401,31 @@ class PaddleOCREngine(WorkerBackedOCREngine):
         if not isinstance(raw, list) or not raw:
             return []
         out: list[TextLine] = []
+        skipped = 0
         for item in raw:
             if not isinstance(item, dict):
+                skipped += 1
                 continue
             bbox = item.get("bbox")
             if not isinstance(bbox, list) or len(bbox) < 4:
+                skipped += 1
                 continue
             try:
                 x1, y1, x2, y2 = (int(v) for v in bbox[:4])
             except (TypeError, ValueError):
+                skipped += 1
                 continue
             out.append(TextLine(
                 bbox=(x1, y1, x2, y2),
                 text=str(item.get("text", "")),
                 score=float(item.get("score", 0.0) or 0.0),
             ))
+        if skipped:
+            # 缺页有硬校验抛错，缺行原本静默：记 debug 让 worker 输出退化可见。
+            logger.debug(
+                "basic pipeline text_lines 跳过 %d 个非法行（代码模式行映射"
+                "可能缺行）", skipped,
+            )
         return out
 
     # ── 侧栏检测与裁剪重跑 ──────────────────────────────

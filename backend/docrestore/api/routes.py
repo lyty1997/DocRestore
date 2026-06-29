@@ -1329,6 +1329,10 @@ def _update_code_index_after_write(
 
     data: object = json.loads(index_path.read_text(encoding="utf-8"))
     if not isinstance(data, list):
+        logger.warning(
+            "files-index.json 形态异常（非 list），跳过行数刷新；文件已保存但"
+            "索引行数可能与内容不一致: %s", index_path,
+        )
         return
 
     rel_path = rel.as_posix()
@@ -1473,8 +1477,13 @@ async def get_task_quality_report(task_id: str) -> dict[str, object]:
                 reports.append(_json.loads(
                     p.read_text(encoding="utf-8"),
                 ))
-            except (OSError, _json.JSONDecodeError):
-                continue
+            except (OSError, _json.JSONDecodeError) as exc:
+                # 不静默跳过：扫到文件却解析失败时，返回的"无问题"实为数据缺失，
+                # 记 warning 避免把"报告损坏"伪装成"质量良好"误导用户。
+                logger.warning(
+                    "质量报告解析失败，跳过（'无问题'可能实为数据缺失）: %s: %s",
+                    p, exc,
+                )
 
         if not reports:
             return {"summary": {"total": 0}, "issues": []}

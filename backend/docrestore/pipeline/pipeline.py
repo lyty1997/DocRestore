@@ -1654,8 +1654,14 @@ class Pipeline:
                 from PIL import Image
                 with Image.open(page.image_path) as img:
                     image_size = img.size
-            except OSError:
-                # 用 bbox 兜底（max x2,y2）
+            except OSError as exc:
+                # 用 bbox 兜底（max x2,y2）；记 warning：兜底尺寸通常小于真实画幅
+                # （不含右/下留白），会让列检测/版面分析略偏，应可见而非静默。
+                logger.warning(
+                    "代码模式：打开原图失败，改用 bbox 兜底尺寸"
+                    "（版面可能略偏）: %s: %s",
+                    page.image_path.name, exc,
+                )
                 image_size = (
                     max((ln.bbox[2] for ln in text_lines), default=0),
                     max((ln.bbox[3] for ln in text_lines), default=0),
@@ -3811,6 +3817,10 @@ class Pipeline:
         merged_gaps: list[Gap] = []
         any_truncated = False
         for i, r in enumerate(results):
+            if isinstance(r, asyncio.CancelledError):
+                # 取消须透传（项目约定 CancelledError 一路传播），不能当普通
+                # "块失败"吞掉回退原文，否则破坏结构化取消 / 资源回收。
+                raise r
             if isinstance(r, BaseException):
                 logger.warning(
                     "整篇精修第 %d/%d 块失败，回退到原文: %s",

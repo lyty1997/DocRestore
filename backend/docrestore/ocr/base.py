@@ -72,7 +72,12 @@ async def _drain_stream_to_logger(
     except asyncio.CancelledError:
         raise
     except Exception:
-        logger.debug("%s drain 异常", log_prefix, exc_info=True)
+        # drain 退出 = 64KB pipe buffer 防护失效，worker 下次写 stderr 可能阻塞
+        # 到上层超时；这是会引发卡死的健康事件，须 warning 可见而非 debug 淹没。
+        logger.warning(
+            "%s drain 协程异常退出（pipe 防护失效，worker 可能卡死）",
+            log_prefix, exc_info=True,
+        )
 
 
 class OCREngine(Protocol):
@@ -527,6 +532,7 @@ class WorkerBackedOCREngine(ABC):
         if lines_path.exists():
             async with aiofiles.open(lines_path, encoding="utf-8") as f:
                 content = await f.read()
+            skipped_lines = 0
             for line in content.splitlines():
                 if not line.strip():
                     continue
@@ -541,7 +547,13 @@ class WorkerBackedOCREngine(ABC):
                             score=float(item.get("score", 0.0) or 0.0),
                         ))
                 except (json.JSONDecodeError, TypeError, ValueError):
+                    skipped_lines += 1
                     continue
+            if skipped_lines:
+                logger.warning(
+                    "缓存 text_lines.jsonl %d 行损坏已跳过（代码模式行映射可能"
+                    "缺行）: %s", skipped_lines, lines_path,
+                )
 
         return PageOCR(
             image_path=image_path,
@@ -672,9 +684,11 @@ class WorkerBackedOCREngine(ABC):
         task 把 EOF 前的残留读完（给它 1s 窗口），再把最近行拼起来当错误信息。
         """
         if self._stderr_drain_task is not None:
-            with contextlib.suppress(
-                asyncio.CancelledError, TimeoutError, Exception,
-            ):
+            # 不吞 CancelledError：取消须透传给上层结构化取消/资源回收，与本类
+            # _send_command/_read_command_response 的取消处理一致，避免把取消悄悄
+            # 转写成下面的 RuntimeError。这里只 best-effort 等 drain 收尾
+            # （TimeoutError 是 Exception 子类，由 Exception 覆盖）。
+            with contextlib.suppress(Exception):
                 await asyncio.wait_for(
                     self._stderr_drain_task, timeout=1.0,
                 )
