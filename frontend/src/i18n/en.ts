@@ -370,6 +370,12 @@ export const en: Record<TranslationKey, string> = {
   "progress.pptPage": "PPT mode: refining page {current}/{total}",
   "progress.pptPagePlain": "PPT mode: processing page {current}/{total}",
   "progress.pptRender": "PPT mode: assembling document...",
+  "progress.codeLayout": "Code mode: analyzing layout {current}/{total}",
+  "progress.codeGroup": "Code mode: grouped into {count} source file(s)",
+  "progress.codeRefine": "Code mode: LLM refine {current}/{total}",
+  "progress.codeRepairWindow":
+    "Code mode: repairing file {current}/{total} (window {window}/{windows})",
+  "progress.codeRender": "Code mode: wrote {count} file(s)",
   // ── API business errors ──
   "errors.api.mode_conflict":
     "Mode conflict: Document / Code / PPT are mutually exclusive",

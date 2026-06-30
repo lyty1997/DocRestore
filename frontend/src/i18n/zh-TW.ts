@@ -361,6 +361,12 @@ export const zhTW: Record<TranslationKey, string> = {
   "progress.pptPage": "PPT 模式：精修第 {current}/{total} 頁",
   "progress.pptPagePlain": "PPT 模式：處理第 {current}/{total} 頁",
   "progress.pptRender": "PPT 模式：組裝文件...",
+  "progress.codeLayout": "程式碼模式：分析版面 {current}/{total}",
+  "progress.codeGroup": "程式碼模式：歸類得到 {count} 個原始檔",
+  "progress.codeRefine": "程式碼模式：LLM 精修 {current}/{total}",
+  "progress.codeRepairWindow":
+    "程式碼模式：修復第 {current}/{total} 個檔案（視窗 {window}/{windows}）",
+  "progress.codeRender": "程式碼模式：寫出 {count} 個檔案",
   // ── API 業務錯誤 ──
   "errors.api.mode_conflict": "模式衝突：文件 / 程式碼 / PPT 三選一互斥",
   "errors.api.llm_api_base_rejected":

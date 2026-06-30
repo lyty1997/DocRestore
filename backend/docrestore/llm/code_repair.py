@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -55,6 +56,35 @@ _SYMBOL_RE = re.compile(
     r"^\s*(?:class|def|function|func|struct|enum|interface|type|impl|"
     r"namespace)\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
+
+#: repair 窗口循环硬上限（#94）。病态 OCR 大文件会产生大量 syntax_dirty 失败行 →
+#: 大量窗口，每窗口一次 ~30s LLM 调用 + 一次 g++ 重诊断，串行不收敛会把任务卡死。
+#: 超限只处理前 N 个窗口（已按 start_line 升序，保持 line_offset 重映射不变量，
+#: 不按严重度重排——重排会破坏 _shift_range 偏移模型），其余窗口范围作为 unresolved
+#: 透出，绝不静默丢弃。
+_MAX_REPAIR_WINDOWS = 12
+#: 连续「无改善」窗口早停阈值（#94）。无改善 = 未落 patch（无 patch / reject_scope /
+#: reject_truncation / reject_diagnostic_worse 任一）。从第 1 个窗口起计、每落一个
+#: patch 清零；病态文件（LLM 反复给不出可用 patch）约 3 个窗口（~90s）即放弃、回退
+#: 已修部分。从 1 起计而非「首个 patch 之后」是关键：#94 零落 patch 文件后者永不触发。
+_MAX_REPAIR_NO_IMPROVEMENT = 3
+#: 正文超此字符数视为超大病态文件，直接跳过 scoped repair（连 N 窗口都不值得发），
+#: 回退原文 + warning + flag，失败行作为 unresolved 透出。比 pipeline 层 clean 大文件
+#: 行阈值（_CODE_REPAIR_LARGE_FILE_LINE_THRESHOLD=400）宽，只拦真正的巨型文件。
+_MAX_REPAIR_CHARS = 60_000
+#: audit patch 应用循环防御上限。audit 仅一次 LLM 调用（max_tokens=4096，patch 数天然
+#: 受限），但每个 patch 仍跑一次 g++ 重诊断；防御性封顶避免极端响应拖慢，非 #94 卡死源。
+_MAX_AUDIT_PATCHES = 24
+
+
+def is_oversized_for_repair(text: str) -> bool:
+    """正文是否超过 scoped repair 字符上限（#94 熔断闸口，repair 与 audit 共用）。
+
+    repair 与 audit 用同一闸口：超大文件 repair 熔断回退原文后，audit 也必须跳过，
+    否则会在「本应回退原文」的巨型文件上仍发 1 次 LLM + 跑全量 g++，甚至改写它，
+    与熔断承诺不一致（#94 review 缺口）。
+    """
+    return len(text) > _MAX_REPAIR_CHARS
 
 
 @dataclass(frozen=True)
@@ -183,8 +213,34 @@ class DiagnosticCodeRepairer:
         *,
         related_sources: list[SourceFile] | None = None,
         context_provider: CodeContextProvider | None = None,
+        progress_cb: Callable[[int, int], None] | None = None,
     ) -> CodeRefineResult:
-        """按诊断窗口修复 SourceFile；失败或恶化时回退原文。"""
+        """按诊断窗口修复 SourceFile；失败或恶化时回退原文。
+
+        三重收敛兜底（#94）防止病态 OCR 大文件把任务卡死：
+        1. 超大文件熔断：正文超 ``_MAX_REPAIR_CHARS`` 直接跳过、回退原文。
+        2. 窗口预算上限 ``_MAX_REPAIR_WINDOWS``：超限只处理前 N 个窗口（保持升序）。
+        3. 连续无改善早停 ``_MAX_REPAIR_NO_IMPROVEMENT``：LLM 反复给不出可用 patch
+           即放弃、回退已修部分。
+        被跳过/早停的窗口范围一律收进 unresolved 透出（不埋雷，让缺修复可见）。
+        ``progress_cb(window_index, window_total)`` 每窗口上报，避免前端长时间静止。
+        """
+        # 超大病态文件熔断：连 N 窗口都不值得发，直接回退原文 + warning，失败行透出。
+        if is_oversized_for_repair(source.merged_text):
+            logger.warning(
+                "CodeRepair 跳过超大文件 (path=%s, chars=%d > %d)，回退原文",
+                source.path, len(source.merged_text), _MAX_REPAIR_CHARS,
+            )
+            return CodeRefineResult(
+                refined_text=source.merged_text,
+                unresolved=_failing_line_unresolved(
+                    diagnostics, "code.repair.skipped_oversized",
+                ),
+                flags=[
+                    f"code.repair.skipped_oversized={len(source.merged_text)}",
+                ],
+            )
+
         # build_repair_contexts 内含参考源码树的 rglob/read_text 等阻塞 IO，
         # 放到线程里跑，避免阻塞事件循环（B7 C12）。
         contexts = await asyncio.to_thread(
@@ -202,6 +258,19 @@ class DiagnosticCodeRepairer:
                 flags=["code.repair.no_windows"],
             )
 
+        # 窗口预算：超限只处理前 N 个（已按 start_line 升序，保持 line_offset 不变量）；
+        # 被丢弃窗口的范围收进 budget_unresolved 透出，绝不静默吞（#94 不埋雷）。
+        total_windows = len(contexts)
+        windows = contexts[:_MAX_REPAIR_WINDOWS]
+        budget_flags: list[str] = []
+        budget_unresolved: list[CodeUnresolved] = list(
+            _skipped_window_unresolved(contexts[_MAX_REPAIR_WINDOWS:]),
+        )
+        if total_windows > _MAX_REPAIR_WINDOWS:
+            budget_flags.append(
+                f"code.repair.window_cap={total_windows - _MAX_REPAIR_WINDOWS}",
+            )
+
         original = source.merged_text
         current = original
         attempts: list[CodeRepairAttempt] = []
@@ -213,58 +282,97 @@ class DiagnosticCodeRepairer:
         # 保证有间隔），故前一个 patch 只平移后续窗口的行号、不改其文本内容；
         # patch/edit_range 都是原文行号，按偏移平移到 current 坐标系再应用（B7 C2）。
         line_offset = 0
-        for context in contexts:
+        # 连续无改善计数（落 patch 清零），到阈值早停；记录早停位置以透出剩余窗口。
+        no_improvement = 0
+        stopped_at: int | None = None
+        for index, context in enumerate(windows):
+            if progress_cb is not None:
+                progress_cb(index + 1, len(windows))
             attempt = await self._repair_one_window(current, source, context)
             attempts.append(attempt)
-            if attempt.patch is None or any(
-                flag.startswith("code.repair.reject") for flag in attempt.flags
-            ):
-                continue
-            if _is_truncating_patch(attempt.patch):
-                attempts[-1] = _with_flag(
-                    attempt, "code.repair.reject_truncation",
-                )
-                continue
-            patched = apply_scoped_patch(
-                current,
-                _shift_range(context.edit_range, line_offset),
-                _shift_patch(attempt.patch, line_offset),
+            applied = await self._try_apply_window(
+                attempt, context, current, line_offset, source, siblings,
+                original_score, attempts,
             )
-            if patched is None:
-                attempts[-1] = _with_flag(attempt, "code.repair.reject_scope")
-                continue
-            post = await asyncio.to_thread(
-                diagnose_text,
-                path=source.path,
-                language=source.language,
-                text=patched,
-                sibling_files=siblings,
-                runner=self._diagnostic_runner,
-            )
-            if _diagnostic_score([post]) > original_score:
-                attempts[-1] = _with_flag(
-                    attempt, "code.repair.reject_diagnostic_worse",
-                )
-                continue
-            line_offset += _patch_line_delta(attempt.patch)
-            current = patched
+            if applied is not None:
+                current, line_offset = applied
+                no_improvement = 0
+            else:
+                no_improvement += 1
+                if no_improvement >= _MAX_REPAIR_NO_IMPROVEMENT:
+                    stopped_at = index
+                    break
+
+        if stopped_at is not None:
+            remaining = windows[stopped_at + 1:]
+            budget_flags.append(f"code.repair.early_stop={stopped_at + 1}")
+            budget_unresolved.extend(_skipped_window_unresolved(remaining))
 
         if current == original:
             return CodeRefineResult(
                 refined_text=original,
-                unresolved=_collect_unresolved(attempts),
-                flags=_collect_flags(attempts) or ["code.repair.no_change"],
+                unresolved=[*_collect_unresolved(attempts), *budget_unresolved],
+                flags=[
+                    *_collect_flags(attempts), *budget_flags,
+                ] or ["code.repair.no_change"],
             )
 
         return CodeRefineResult(
             refined_text=current,
-            unresolved=_collect_unresolved(attempts),
+            unresolved=[*_collect_unresolved(attempts), *budget_unresolved],
             flags=[
-                f"code.repair.windows={len(contexts)}",
+                f"code.repair.windows={total_windows}",
                 f"code.repair.applied={sum(1 for a in attempts if a.patch)}",
                 *_collect_flags(attempts),
+                *budget_flags,
             ],
         )
+
+    async def _try_apply_window(
+        self,
+        attempt: CodeRepairAttempt,
+        context: CodeRepairContext,
+        current: str,
+        line_offset: int,
+        source: SourceFile,
+        siblings: list[tuple[str, str]],
+        original_score: int,
+        attempts: list[CodeRepairAttempt],
+    ) -> tuple[str, int] | None:
+        """尝试落一个窗口的 patch；接受返回 ``(new_text, new_offset)``，否则 None。
+
+        拒绝时就地把对应 reject flag 写回 ``attempts[-1]``（与早停/无改善计数一致：
+        任何未落 patch 都算一次无改善）。
+        """
+        if attempt.patch is None or any(
+            flag.startswith("code.repair.reject") for flag in attempt.flags
+        ):
+            return None
+        if _is_truncating_patch(attempt.patch):
+            attempts[-1] = _with_flag(attempt, "code.repair.reject_truncation")
+            return None
+        patched = apply_scoped_patch(
+            current,
+            _shift_range(context.edit_range, line_offset),
+            _shift_patch(attempt.patch, line_offset),
+        )
+        if patched is None:
+            attempts[-1] = _with_flag(attempt, "code.repair.reject_scope")
+            return None
+        post = await asyncio.to_thread(
+            diagnose_text,
+            path=source.path,
+            language=source.language,
+            text=patched,
+            sibling_files=siblings,
+            runner=self._diagnostic_runner,
+        )
+        if _diagnostic_score([post]) > original_score:
+            attempts[-1] = _with_flag(
+                attempt, "code.repair.reject_diagnostic_worse",
+            )
+            return None
+        return patched, line_offset + _patch_line_delta(attempt.patch)
 
     async def _repair_one_window(
         self,
@@ -314,6 +422,18 @@ class CodeConsistencyAuditor:
         context_provider: CodeContextProvider | None = None,
     ) -> CodeRefineResult:
         """审计全文件一致性，只应用授权范围内的 scoped patches。"""
+        # 超大文件与 repair 用同一熔断闸口：repair 已回退原文，audit 若不一并跳过会在
+        # 该巨型文件上仍发 1 次 LLM + 跑全量 g++、甚至改写它（#94 review 缺口）。
+        if is_oversized_for_repair(source.merged_text):
+            logger.warning(
+                "CodeConsistencyAudit 跳过超大文件 (path=%s, chars=%d > %d)",
+                source.path, len(source.merged_text), _MAX_REPAIR_CHARS,
+            )
+            return CodeRefineResult(
+                refined_text=source.merged_text,
+                unresolved=list(previous_result.unresolved),
+                flags=["code.audit.skipped_oversized"],
+            )
         # build_consistency_audit_context 同样含参考源码树阻塞 IO，放到线程里。
         context = await asyncio.to_thread(
             build_consistency_audit_context,
@@ -349,46 +469,27 @@ class CodeConsistencyAuditor:
         # 多个 audit patch 顺序应用同样会移动后续 patch 的行号；按 start_line 升序
         # 处理并按累计偏移平移到 current 坐标系（B7 C2/C3）。
         line_offset = 0
-        for audit_patch in sorted(
+        # 防御性封顶：每个 patch 都跑一次 g++ 重诊断，极端响应下封顶处理数（#94）；
+        # 按 start_line 升序后取前 N 个（保持偏移模型），超限计 flag 透出。
+        ordered_patches = sorted(
             attempt.patches, key=lambda ap: ap.patch.start_line,
-        ):
-            edit_range = _range_authorizing_patch(
-                audit_patch.patch, context.editable_ranges,
+        )
+        if len(ordered_patches) > _MAX_AUDIT_PATCHES:
+            attempt = _with_audit_flag(
+                attempt,
+                f"code.audit.patch_cap={len(ordered_patches) - _MAX_AUDIT_PATCHES}",
             )
-            if edit_range is None:
-                attempt = _with_audit_flag(
-                    attempt, "code.audit.reject_readonly_patch",
-                )
-                continue
-            if _is_truncating_patch(audit_patch.patch):
-                attempt = _with_audit_flag(
-                    attempt, "code.audit.reject_truncation",
-                )
-                continue
-            patched = apply_scoped_patch(
-                current,
-                _shift_range(edit_range, line_offset),
-                _shift_patch(audit_patch.patch, line_offset),
+            ordered_patches = ordered_patches[:_MAX_AUDIT_PATCHES]
+        for audit_patch in ordered_patches:
+            outcome = await self._try_apply_audit_patch(
+                audit_patch, context.editable_ranges, current, line_offset,
+                baseline_score, source, siblings,
             )
-            if patched is None:
-                attempt = _with_audit_flag(attempt, "code.audit.reject_scope")
-                continue
-            post = await asyncio.to_thread(
-                diagnose_text,
-                path=source.path,
-                language=source.language,
-                text=patched,
-                sibling_files=siblings,
-                runner=self._diagnostic_runner,
-            )
-            if _diagnostic_score([post]) > baseline_score:
-                attempt = _with_audit_flag(
-                    attempt, "code.audit.reject_diagnostic_worse",
-                )
-                continue
-            line_offset += _patch_line_delta(audit_patch.patch)
-            current = patched
-            applied += 1
+            if isinstance(outcome, str):
+                attempt = _with_audit_flag(attempt, outcome)
+            else:
+                current, line_offset = outcome
+                applied += 1
 
         flags = [
             f"code.audit.patches={applied}",
@@ -406,6 +507,45 @@ class CodeConsistencyAuditor:
             unresolved=[*previous_result.unresolved, *attempt.unresolved],
             flags=flags,
         )
+
+    async def _try_apply_audit_patch(
+        self,
+        audit_patch: AuditPatch,
+        editable_ranges: list[CodeEditRange],
+        current: str,
+        line_offset: int,
+        baseline_score: int,
+        source: SourceFile,
+        siblings: list[tuple[str, str]],
+    ) -> tuple[str, int] | str:
+        """尝试落一个 audit patch：成功返回新文本与偏移，否则返回拒绝 flag。
+
+        返回 ``(new_text, new_offset)`` 或 ``code.audit.reject_*`` flag 字符串；
+        越权/截断/越界/恶化四类拒绝从 ``audit`` 抽出（控制复杂度），语义不变。
+        """
+        edit_range = _range_authorizing_patch(audit_patch.patch, editable_ranges)
+        if edit_range is None:
+            return "code.audit.reject_readonly_patch"
+        if _is_truncating_patch(audit_patch.patch):
+            return "code.audit.reject_truncation"
+        patched = apply_scoped_patch(
+            current,
+            _shift_range(edit_range, line_offset),
+            _shift_patch(audit_patch.patch, line_offset),
+        )
+        if patched is None:
+            return "code.audit.reject_scope"
+        post = await asyncio.to_thread(
+            diagnose_text,
+            path=source.path,
+            language=source.language,
+            text=patched,
+            sibling_files=siblings,
+            runner=self._diagnostic_runner,
+        )
+        if _diagnostic_score([post]) > baseline_score:
+            return "code.audit.reject_diagnostic_worse"
+        return patched, line_offset + _patch_line_delta(audit_patch.patch)
 
     async def _run_audit(
         self,
@@ -1087,3 +1227,41 @@ def _collect_unresolved(
     for attempt in attempts:
         out.extend(attempt.unresolved)
     return out
+
+
+def _skipped_window_unresolved(
+    contexts: list[CodeRepairContext],
+) -> list[CodeUnresolved]:
+    """被 repair 预算跳过 / 早停的窗口范围 → unresolved（#94 不埋雷：让缺修复可见）。"""
+    return [
+        CodeUnresolved(
+            line=context.edit_range.start_line,
+            context="",
+            note=(
+                f"code.repair.skipped: 第 {context.edit_range.start_line}-"
+                f"{context.edit_range.end_line} 行因 repair 预算未修复，请人工核对"
+            ),
+        )
+        for context in contexts
+    ]
+
+
+def _failing_line_unresolved(
+    diagnostics: list[CodeDiagnostic], tag: str,
+) -> list[CodeUnresolved]:
+    """超大文件熔断时把全部 syntax_dirty 失败行 → unresolved（截前 50 条防刷屏）。"""
+    failing = sorted({
+        line
+        for diagnostic in diagnostics
+        if diagnostic.status == "syntax_dirty"
+        for line in diagnostic.failing_lines
+        if line > 0
+    })
+    return [
+        CodeUnresolved(
+            line=line,
+            context="",
+            note=f"{tag}: 文件过大跳过 repair，请人工核对此行",
+        )
+        for line in failing[:50]
+    ]

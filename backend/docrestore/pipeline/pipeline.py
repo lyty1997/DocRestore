@@ -286,6 +286,31 @@ def _has_syntax_dirty_diagnostic(
     )
 
 
+def _make_repair_progress(
+    report_fn: ReportFn, file_index: int, file_total: int,
+) -> Callable[[int, int], None]:
+    """构造 repair 逐窗口进度回调（#94）。
+
+    病态大文件的 scoped repair 单文件要跑十几个窗口、每个 ~30s，原先只在整文件
+    修完才上报一次，前端长时间停在「归类得到 N 个源文件」。此回调让每个窗口都推
+    一帧（文件级 current/total 不变，message 带窗口进度），避免看起来卡死。
+    """
+    def _cb(window: int, windows: int) -> None:
+        report_fn(
+            "code_refine", file_index + 1, file_total,
+            f"代码修复 第 {file_index + 1}/{file_total} 个文件"
+            f"（窗口 {window}/{windows}）",
+            message_key="progress.codeRepairWindow",
+            message_params={
+                "current": str(file_index + 1),
+                "total": str(file_total),
+                "window": str(window),
+                "windows": str(windows),
+            },
+        )
+    return _cb
+
+
 def _augment_metas_with_code_context(
     metas: list[IDEMeta],
     context_provider: CodeContextProvider,
@@ -1638,7 +1663,7 @@ class Pipeline:
             "code_layout", 0, len(pages_ref),
             "代码模式：分析 IDE 布局",
             message_key="progress.codeLayout",
-            message_params={"total": str(len(pages_ref))},
+            message_params={"current": "0", "total": str(len(pages_ref))},
         )
         all_pcs: list[PageColumn] = []
         ledgers: dict[tuple[str, int], LineLedger] = {}
@@ -1856,6 +1881,9 @@ class Pipeline:
                             diagnostics,
                             related_sources=sources,
                             context_provider=context_provider,
+                            progress_cb=_make_repair_progress(
+                                report_fn, i, len(sources),
+                            ),
                         )
                         audit_source = replace(
                             src,
