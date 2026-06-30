@@ -1112,3 +1112,55 @@ repair 与 audit 超大熔断 / progress_cb 逐窗上报，6 例）；既有 21 
 红线/取舍：仍是"召回换精度"——若 NER 误把缩写词判为人名才会过脱敏，但词表只含 NER 正向判定项，
 且安全边界（人名出云 false-negative）优先收窄。高危结构化 PII（手机/邮箱/证件/卡）走 `redact_structured_pii`
 本不受此影响。
+
+## 访问日志泄露明文 API Token + 前端缺 token 引导（token-leak-and-onboarding）
+
+背景：用户反馈后端访问日志出现形如
+`"GET /api/v1/tasks/<id>/source-images/x.JPG?token=<明文> HTTP/1.1" 200` 的行——
+明文 API Token 被写进日志；同时自部署用户不清楚「缺 token 时去哪拿、怎么填」。
+
+### 一、访问日志泄露明文 token
+
+根因：`<img src>` / `<a href>` / WebSocket 这些浏览器无法设置 `Authorization` Header 的场景，
+鉴权走 `?token=<token>` query param（`auth.require_auth` 的备选通道，前端 `appendTokenToUrl` 拼接）。
+而 `start.sh` 仅 `--log-level info` 启动 uvicorn，**未配 log filter**，uvicorn 原样打印请求行
+（含 query string），token 即配对密钥被明文落两类日志（等同泄露）：HTTP 走 `uvicorn.access`
+（`'%s - "%s %s HTTP/%s" %d'`，URL 在 args[2]），**WebSocket 握手走 `uvicorn.error`**
+（`'%s - "WebSocket %s" [accepted]'`，URL 在 args[1]）——后者最初被漏掉，由对抗式审计补出。
+
+修复（脱敏 filter，不动鉴权链路）：新增 `backend/docrestore/api/log_redaction.py`，在
+`uvicorn.access` **与 `uvicorn.error`** 两个 logger 上各挂 `AccessLogTokenRedactor`
+（`logging.Filter`），在 record 进 formatter 前**遍历 `args` 所有字符串项**逐一把
+`token`/`api_token`/`access_token` 值正则替换成 `<redacted>`（保留参数名便于排错）。
+`create_app` 早期幂等 `install_access_log_redaction()`（uvicorn 已先 configure_logging 配好两 logger）。
+query param 鉴权本身照常解析，零行为变化。
+
+坑点：① WS 握手日志走 `uvicorn.error` 而非 `uvicorn.access`，URL 在 args[1] 不是 args[2]——
+故 filter 不能写死下标，须遍历 args（顺带消除 uvicorn 改 record 结构后静默失效的隐患，
+新增 `AccessFormatter` 集成测试锁定契约）。② 前置 `[?&]` 锚点确保只动 query 参数、不误伤自由文本
+里的 "token=" 子串；filter 恒返回 True（只改写不丢弃）；args 为空时退回扫 msg 兜底。
+③ 已知限制（低危）：只识别字面 key 拼写，百分号编码 key（如 `%74oken=`）不脱敏——正常前端恒发
+字面 `?token=`，构造此类请求只泄露攻击者自己已持有的 token。
+
+### 二、前端缺 token 引导
+
+根因：服务默认自动生成 device token 落地 `~/.config/docrestore/device_token`（0600），
+`start.sh` 不回显 token 值（安全），用户不知从何获取；前端 401 只弹通用「缺少或无效的 API Token」，
+无获取指引；且 insecure 无鉴权模式下也无从判断是否真需要 token。
+
+修复：
+- 后端新增**免鉴权** `GET /api/v1/auth/info`（挂 health_router），返回
+  `{auth_required, token_source}`（**绝不含 token 值**）。`auth.py` 记录 `_TOKEN_SOURCE`
+  （env / device_file / insecure / unknown）+ `is_auth_required()` / `current_token_source()` getter。
+  device_file 分支启动日志补「`cat <路径>` 获取 + 填前端」操作指引（只打印路径不打印值）。
+- 前端 `useAuthStatus` 拉 `/auth/info` + 读本地 token 派生 `needsToken`（服务要求 token 且本地无 token）；
+  `MissingTokenBanner` 顶部横幅提示去设置（insecure 不弹，避免误报）；`TokenSettings` 按 `token_source`
+  定制「如何获取 Token」步骤（device_file → `cat ~/.config/docrestore/device_token`；env → 向部署者索取）；
+  `errors.api.unauthorized` 文案改为可操作（指向「API Token 设置」）。三语 i18n 同步。
+
+红线：`/auth/info` 与启动日志**只暴露 token 来源/路径、绝不暴露 token 值**；`needsToken` 仅在
+`auth_required===true` 且本地无 token 时为真，`/auth/info` 拉取失败（authRequired=undefined）不弹横幅。
+
+测试：后端 `test_log_redaction.py`（脱敏 + 幂等安装）+ `test_auth.py` 扩（source 解析 + `/auth/info`
+免鉴权可读且不含 token 值）；前端 `MissingTokenBanner` / `TokenSettings`（按来源定制指引）/ `useAuthStatus`
+（needsToken 派生 4 路）/ `getAuthInfo`（zod 校验）。

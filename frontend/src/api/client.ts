@@ -31,6 +31,8 @@ import {
   type LayoutPayload,
   CodeLayoutPayloadSchema,
   type CodeLayoutPayload,
+  AuthInfoResponseSchema,
+  type AuthInfoResponse,
   type ActionResponse,
   type BrowseDirsResponse,
   type CreateTaskResponse,
@@ -260,6 +262,13 @@ export async function createTask(
     body: JSON.stringify(body),
   });
   return handleResponse(response, CreateTaskResponseSchema);
+}
+
+/** 公共鉴权信息（免鉴权可读）：是否需要 token + token 来源，供前端提示用户。
+ *  不带 Authorization（端点本就免鉴权；前端拿到 token 前也需能读它）。 */
+export async function getAuthInfo(): Promise<AuthInfoResponse> {
+  const response = await fetch(`${API_BASE}/auth/info`);
+  return handleResponse(response, AuthInfoResponseSchema);
 }
 
 /** 裁剪预览取图 URL（带认证 token）：从 image_dir 按相对名取一张图 */

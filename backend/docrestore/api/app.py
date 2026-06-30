@@ -39,6 +39,7 @@ from docrestore.api.errors import (
     ApiBusinessError,
     api_business_error_handler,
 )
+from docrestore.api.log_redaction import install_access_log_redaction
 from docrestore.api.routes import (
     health_router,
     router,
@@ -207,6 +208,10 @@ def create_app(  # noqa: C901
     """
     if config is None:
         config = PipelineConfig()
+
+    # 访问日志脱敏：抹掉请求行 query string 里的明文 token（?token=...）。须在 app
+    # 早期安装；uvicorn 已先 configure_logging 配好 uvicorn.access logger（幂等）。
+    install_access_log_redaction()
 
     _auto_configure_paddle(config)
     _auto_configure_deepseek(config)

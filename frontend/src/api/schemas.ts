@@ -429,3 +429,13 @@ export const CodeLayoutPayloadSchema = z.object({
   files: z.array(CodeFileLayoutPayloadSchema).default([]),
 });
 export type CodeLayoutPayload = z.infer<typeof CodeLayoutPayloadSchema>;
+
+/** GET /auth/info 响应：是否需要 token + token 来源（**绝不含 token 值**）。
+ *  前端据此判断是否提示用户设置 token，并按 token_source 给出获取指引。
+ *  token_source 与后端 auth.TokenSource 一一对应。 */
+export const AuthInfoResponseSchema = z.object({
+  auth_required: z.boolean(),
+  token_source: z.enum(["env", "device_file", "insecure", "unknown"]),
+});
+export type AuthInfoResponse = z.infer<typeof AuthInfoResponseSchema>;
+export type TokenSource = AuthInfoResponse["token_source"];

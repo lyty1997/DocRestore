@@ -577,3 +577,19 @@ class GPUListResponse(BaseModel):
 
     gpus: list[GPUInfoResponse]
     recommended: str | None = None
+
+
+# ── 公共鉴权信息（无鉴权可读，不含 token 值） ─────────────────
+
+
+class AuthInfoResponse(BaseModel):
+    """GET /auth/info 响应：是否需要 token 及 token 来源（**绝不返回 token 值**）。
+
+    前端据此判断是否提示用户设置 token，并按 ``token_source`` 给出
+    「在部署机器上如何获取 token」的指引。免鉴权可读（前端拿到 token 前需先读它）。
+    """
+
+    #: True = 服务要求 token 鉴权；False = insecure 无鉴权模式（前端无需设 token）
+    auth_required: bool
+    #: token 来源：env（环境变量）/ device_file（自动生成落地）/ insecure / unknown
+    token_source: Literal["env", "device_file", "insecure", "unknown"]

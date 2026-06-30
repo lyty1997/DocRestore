@@ -298,6 +298,26 @@ export const en: Record<TranslationKey, string> = {
   "tokenSettings.hintSuffix": ". Leave empty if not configured.",
   "tokenSettings.placeholder": "Paste API Token",
   "tokenSettings.ariaLabel": "API Token Settings",
+  "tokenSettings.howToTitle": "How to get your token",
+  "tokenSettings.howToDeviceStep1":
+    "On the machine running the backend, open a terminal",
+  "tokenSettings.howToDeviceStep2":
+    "Run this command to read the auto-generated token: ",
+  "tokenSettings.howToDeviceStep3":
+    "Copy the token and paste it into the field below, then save",
+  "tokenSettings.howToDeviceNote":
+    "The backend generates this token on first start and stores it in the " +
+    "file above; it stays the same across restarts.",
+  "tokenSettings.howToEnvStep1": "The token is set by the deployer via the ",
+  "tokenSettings.howToEnvStep1Suffix": " environment variable",
+  "tokenSettings.howToEnvStep2":
+    "Ask whoever deployed the service for the token, or check the startup " +
+    "config, then paste it below and save",
+  "tokenSettings.insecureNote":
+    "This service runs in local insecure mode; no token is required.",
+  // ── Missing-token top banner ──
+  "tokenBanner.message": "No API token set — set one to access the backend",
+  "tokenBanner.action": "Set token",
 
   // ── File uploader ──
   "fileUploader.selectFiles": "Select Files",
@@ -389,7 +409,9 @@ export const en: Record<TranslationKey, string> = {
     "output_dir rejected by security policy: must be under the server's " +
     "trusted work root (defaults to the system temp dir, configurable via " +
     "DOCRESTORE_WORK_ROOT) to prevent deleting arbitrary directories",
-  "errors.api.unauthorized": "Missing or invalid API Token",
+  "errors.api.unauthorized":
+    "Missing or invalid API Token — set it in the sidebar under " +
+    "\"API Token Settings\"",
   "errors.api.service_not_initialized": "Service not initialized",
   "errors.api.engine_manager_not_initialized": "OCR engine manager not initialized",
   "errors.api.task_not_found": "Task not found",

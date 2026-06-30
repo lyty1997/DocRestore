@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { clearApiToken, saveApiToken } from "../../src/api/auth";
 import {
+  getAuthInfo,
   getProcessedImageUrl,
   getTaskCodeLayout,
   getTaskLayout,
@@ -138,5 +139,40 @@ describe("getTaskCodeLayout", () => {
     await getTaskCodeLayout("t1", "sub dir/a");
     const calledUrl = fetchMock.mock.calls[0]?.[0];
     expect(calledUrl).toContain("/tasks/t1/code-layout?doc_dir=sub%20dir%2Fa");
+  });
+});
+
+describe("getAuthInfo", () => {
+  it("200 → zod 解析后的 { auth_required, token_source }", async () => {
+    const payload = { auth_required: true, token_source: "device_file" };
+    const fetchMock = vi.fn(
+      (_url: string) => Response.json(payload, { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getAuthInfo();
+    expect(result.auth_required).toBe(true);
+    expect(result.token_source).toBe("device_file");
+    // 打到免鉴权公共端点
+    const calledUrl = fetchMock.mock.calls[0]?.[0];
+    expect(calledUrl).toBe("/api/v1/auth/info");
+  });
+
+  it("insecure 模式 → auth_required=false", async () => {
+    const payload = { auth_required: false, token_source: "insecure" };
+    const fetchMock = vi.fn(() => Response.json(payload, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getAuthInfo();
+    expect(result.auth_required).toBe(false);
+    expect(result.token_source).toBe("insecure");
+  });
+
+  it("非法 token_source → zod 拒绝（运行时校验生效）", async () => {
+    const payload = { auth_required: true, token_source: "bogus" };
+    const fetchMock = vi.fn(() => Response.json(payload, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getAuthInfo()).rejects.toThrow();
   });
 });

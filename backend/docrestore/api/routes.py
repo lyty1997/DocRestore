@@ -33,10 +33,15 @@ from starlette.websockets import WebSocketDisconnect
 from docrestore.api.errors import APIErrorCode, ApiBusinessError
 from docrestore.api.url_guard import validate_outbound_api_base
 
-from docrestore.api.auth import require_auth_ws
+from docrestore.api.auth import (
+    current_token_source,
+    is_auth_required,
+    require_auth_ws,
+)
 
 from docrestore.api.schemas import (
     ActionResponse,
+    AuthInfoResponse,
     BrowseDirsResponse,
     CodeDiagnosticResponse,
     CodeFileLayoutPayload,
@@ -129,6 +134,21 @@ async def healthz() -> dict[str, str]:
     避免反复打鉴权端点刷 401 噪声，并被 fail-closed 401 误判成「后端未响应」。
     """
     return {"status": "ok"}
+
+
+@health_router.get("/auth/info", include_in_schema=False)
+async def auth_info() -> AuthInfoResponse:
+    """无鉴权：返回是否需要 API Token 及 token 来源（**绝不返回 token 值**）。
+
+    前端拿到 token 前需先读它，故挂在免鉴权 health_router 上。用途：
+    - ``auth_required=False``（insecure）→ 前端不提示设 token，避免误报；
+    - 需要 token 时按 ``token_source`` 给「在部署机器上如何获取 token」的指引
+      （device_file → cat 配置文件；env → 向部署者索取/查环境变量）。
+    """
+    return AuthInfoResponse(
+        auth_required=is_auth_required(),
+        token_source=current_token_source(),
+    )
 
 
 # 由 app.py 在 lifespan 中注入
