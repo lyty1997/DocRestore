@@ -181,6 +181,12 @@ export const zhCN = {
   "progress.pptPage": "PPT 模式：精修第 {current}/{total} 页",
   "progress.pptPagePlain": "PPT 模式：处理第 {current}/{total} 页",
   "progress.pptRender": "PPT 模式：组装文档...",
+  "progress.codeLayout": "代码模式：分析版面 {current}/{total}",
+  "progress.codeGroup": "代码模式：归类得到 {count} 个源文件",
+  "progress.codeRefine": "代码模式：LLM 精修 {current}/{total}",
+  "progress.codeRepairWindow":
+    "代码模式：修复第 {current}/{total} 个文件（窗口 {window}/{windows}）",
+  "progress.codeRender": "代码模式：写出 {count} 个文件",
 
   // ── 任务结果 ──
   "taskResult.title": "处理结果",

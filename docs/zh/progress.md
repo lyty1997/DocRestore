@@ -1,5 +1,31 @@
 # 开发进度
 
+## 2026-06-30 - 修复 #94 代码模式 repair/audit 大病态文件不收敛卡死
+
+主题：用户指派"解掉 #94"——代码模式 `rewrite` 任务在真实大 C++ 文件上 repair 循环不收敛、
+任务卡死 12+ 分钟需手动 cancel。
+
+根因（先跑对抗式核验 workflow 确认，推翻 issue 原假设）：**非** repair↔audit 死循环，而是
+`DiagnosticCodeRepairer.repair` 的**单趟逐窗口循环窗口数无上限**——病态 OCR 大文件出几十个
+失败行窗口，每窗口一次 ~30s LLM + 一次 g++ 串行跑就是十几分钟；`_CODE_REPAIR_LARGE_FILE_LINE
+_THRESHOLD=400` 守卫是 syntax_dirty 之后的 elif，对大+脏文件失效。附带 4 个 code 进度 i18n 键
+从未进前端、UI 显示裸键，且进度只在整文件修完才报一次。
+
+完成（先 verify workflow 定位 → 实现 → review workflow 对抗式复核）：
+- `code_repair.py`：窗口预算上限 12（取前 N 保升序，不按严重度重排以守 `_shift_range` 不变量）+
+  连续无改善早停 3（从窗口 1 起计、落 patch 清零、`reject_diagnostic_worse` 同等计数）+ 超大文件
+  熔断 60000 字符（`is_oversized_for_repair`，repair/audit 共用，熔断后 audit 不再发 LLM/g++）+
+  audit patch 防御封顶 24；被跳过/早停/熔断范围全进 `flags`+`unresolved`（不埋雷）。
+- `pipeline.py`：`repair(progress_cb=...)` 逐窗口上报（新键 `progress.codeRepairWindow`）；
+  `codeLayout` 起始帧补 `current:"0"` 让一条 i18n 文案兼容两处调用。
+- 前端 i18n：补齐 codeLayout/codeGroup/codeRefine/codeRender + codeRepairWindow 到 zh-CN/en/zh-TW
+  （TS `TranslationKey` 强制三语对齐）。
+- 测试：`TestRepairConvergenceBounds` 6 例；门禁 tests/llm 159 passed、前端 247 passed + typecheck/lint 绿。
+- review 复核：0 blocker/major，1 needs_judgment（熔断只 gate repair 未 gate audit）→ 已在 audit 加
+  同闸口熔断闭合。
+
+遗留：无（#94 可关）。环境内 `pypdfium2`/DeepSeek-OCR python 未配，7 个无关用例预存失败（非本次回归）。
+
 ## 2026-06-29 - 回退 PPT 模式自动 content_crop（§14.2）
 
 主题：用户问"任务 121528c1 的 PPT 模式怎么自动裁剪了几张图？记得 PPT 没前置裁剪"。

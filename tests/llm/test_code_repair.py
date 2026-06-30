@@ -16,6 +16,9 @@ import pytest
 from docrestore.llm.base import BaseLLMRefiner
 from docrestore.llm.code_refine import CodeRefineResult, CodeUnresolved
 from docrestore.llm.code_repair import (
+    _MAX_REPAIR_CHARS,
+    _MAX_REPAIR_NO_IMPROVEMENT,
+    _MAX_REPAIR_WINDOWS,
     CodeEditRange,
     CodeConsistencyAuditor,
     DiagnosticCodeRepairer,
@@ -337,6 +340,149 @@ class TestDiagnosticCodeRepairer:
         ).repair(source, [_diag(5)])
         assert result.refined_text == source.merged_text
         assert "code.repair.reject_truncation" in result.flags
+
+
+def _no_patch(line: int, note: str = "unclear") -> SimpleNamespace:
+    """构造一个「无 patch」的 repair 响应（窗口不落 patch，算一次无改善）。"""
+    return _response(json.dumps({
+        "plan": "cannot decide",
+        "dependency_assessment": "weak",
+        "patch": None,
+        "unresolved": [{"line": line, "context": "x", "note": note}],
+    }))
+
+
+def _lines_source(failing: list[int], *, span: int = 2) -> SourceFile:
+    """构造行数足够、在 ``failing`` 各行附近留窗口的多窗口源（每行 ``vN = N``）。"""
+    last = max(failing) + span
+    text = "\n".join(f"v{i} = {i}" for i in range(1, last + 1))
+    return _source(text)
+
+
+class TestRepairConvergenceBounds:
+    """#94：repair 窗口循环收敛兜底（窗口预算 / 连续无改善早停 / 超大文件熔断）。"""
+
+    @pytest.mark.asyncio
+    async def test_early_stop_on_consecutive_no_improvement(self) -> None:
+        """连续 N 个窗口都不落 patch → 早停，只发 N 次 LLM 调用、回退原文。"""
+        failing = [1, 5, 9, 13, 17]  # 5 个不相邻窗口（radius=1 不合并）
+        source = _lines_source(failing)
+        base = BaseLLMRefiner(LLMConfig())
+        base._call_llm = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[_no_patch(line) for line in failing],
+        )
+        result = await DiagnosticCodeRepairer(base, window_radius=1).repair(
+            source, [_diag(line) for line in failing],
+        )
+        # 早停在第 _MAX_REPAIR_NO_IMPROVEMENT 个窗口：调用数恰为阈值、不跑满 5 个。
+        assert base._call_llm.call_count == _MAX_REPAIR_NO_IMPROVEMENT
+        assert result.refined_text == source.merged_text
+        assert any(
+            flag.startswith("code.repair.early_stop=") for flag in result.flags
+        )
+        # 未处理窗口的范围作为 unresolved 透出（不埋雷）。
+        assert any("repair 预算未修复" in u.note for u in result.unresolved)
+
+    @pytest.mark.asyncio
+    async def test_applied_patch_resets_no_improvement_counter(self) -> None:
+        """中间窗口落 patch 会清零计数 → 不触发早停、跑满所有窗口。"""
+        failing = [1, 5, 9, 13, 17]
+        source = _lines_source(failing)
+        apply_win = _response(json.dumps({
+            "plan": "fix",
+            "dependency_assessment": "local",
+            "patch": {
+                "start_line": 9, "end_line": 9,
+                "replacement_lines": ["v9 = 99"],
+            },
+            "unresolved": [],
+        }))
+        base = BaseLLMRefiner(LLMConfig())
+        # 模式 no, no, apply, no, no：计数 1,2,0,1,2，从不达 3。
+        base._call_llm = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[
+                _no_patch(1), _no_patch(5), apply_win,
+                _no_patch(13), _no_patch(17),
+            ],
+        )
+        result = await DiagnosticCodeRepairer(base, window_radius=1).repair(
+            source, [_diag(line) for line in failing],
+        )
+        assert base._call_llm.call_count == len(failing)
+        assert not any(
+            flag.startswith("code.repair.early_stop=") for flag in result.flags
+        )
+
+    @pytest.mark.asyncio
+    async def test_window_budget_caps_and_surfaces_skipped(self) -> None:
+        """窗口数超预算 → 计 window_cap flag、被丢弃窗口作为 unresolved 透出。"""
+        # 步长 4：radius=1 时相邻窗口间隔须 ≥4 才不合并（否则 14 行塌成 1 窗口）。
+        failing = list(range(1, 1 + 4 * (_MAX_REPAIR_WINDOWS + 2), 4))
+        assert len(failing) > _MAX_REPAIR_WINDOWS
+        source = _lines_source(failing)
+        base = BaseLLMRefiner(LLMConfig())
+        base._call_llm = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[_no_patch(line) for line in failing],
+        )
+        result = await DiagnosticCodeRepairer(base, window_radius=1).repair(
+            source, [_diag(line) for line in failing],
+        )
+        # 预算上限独立于早停：超出的窗口必被计 window_cap 并透出。
+        assert any(
+            flag.startswith("code.repair.window_cap=") for flag in result.flags
+        )
+        # 即便有十几个窗口，调用数也被早停/预算双重封顶，绝不爆炸。
+        assert base._call_llm.call_count <= _MAX_REPAIR_WINDOWS
+        assert any("repair 预算未修复" in u.note for u in result.unresolved)
+
+    @pytest.mark.asyncio
+    async def test_oversized_file_short_circuits_without_llm(self) -> None:
+        """正文超 _MAX_REPAIR_CHARS → 直接熔断，零 LLM 调用、回退原文、失败行透出。"""
+        big = "\n".join(["x = 1"] * (_MAX_REPAIR_CHARS // 5 + 100))
+        assert len(big) > _MAX_REPAIR_CHARS
+        source = _source(big)
+        base = _base(_no_patch(1).choices[0].message.content)
+        result = await DiagnosticCodeRepairer(base, window_radius=1).repair(
+            source, [_diag(1)],
+        )
+        base._call_llm.assert_not_called()  # type: ignore[attr-defined]
+        assert result.refined_text == source.merged_text
+        assert any(
+            flag.startswith("code.repair.skipped_oversized=")
+            for flag in result.flags
+        )
+        assert result.unresolved
+
+    @pytest.mark.asyncio
+    async def test_audit_skips_oversized_file(self) -> None:
+        """audit 与 repair 共用熔断闸口：超大文件零 LLM 调用、回退原文、计 flag。"""
+        big = "\n".join(["x = 1"] * (_MAX_REPAIR_CHARS // 5 + 100))
+        assert len(big) > _MAX_REPAIR_CHARS
+        source = _source(big)
+        base = _base(_no_patch(1).choices[0].message.content)
+        result = await CodeConsistencyAuditor(base).audit(
+            source, [_diag(1)],
+            previous_result=CodeRefineResult(refined_text=big),
+        )
+        base._call_llm.assert_not_called()  # type: ignore[attr-defined]
+        assert result.refined_text == big
+        assert "code.audit.skipped_oversized" in result.flags
+
+    @pytest.mark.asyncio
+    async def test_progress_cb_reports_each_window(self) -> None:
+        """progress_cb 每个处理过的窗口上报一次 (window_index, window_total)。"""
+        failing = [1, 5]  # 2 个窗口 < 早停阈值，全部处理
+        source = _lines_source(failing)
+        base = BaseLLMRefiner(LLMConfig())
+        base._call_llm = AsyncMock(  # type: ignore[method-assign]
+            side_effect=[_no_patch(line) for line in failing],
+        )
+        seen: list[tuple[int, int]] = []
+        await DiagnosticCodeRepairer(base, window_radius=1).repair(
+            source, [_diag(line) for line in failing],
+            progress_cb=lambda w, total: seen.append((w, total)),
+        )
+        assert seen == [(1, 2), (2, 2)]
 
 
 class TestConsistencyAudit:

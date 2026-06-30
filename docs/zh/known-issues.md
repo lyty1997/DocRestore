@@ -1011,3 +1011,39 @@ z.infer<...>` 的 `rectified` 是**必填** `boolean`（zod 的 output 类型含
 - `_processed_source_variants` 移除链末 `_after_crop` 变体（PPT 不再产）。
 - 回归测试 `tests/pipeline/test_ppt_content_crop_skip.py` 锁定：PPT 不产 `.content_crop`，文档模式同图作对照。
 - 历史任务（如 121528c1）已落盘的 `.content_crop/*_after_crop.*` 是回退前产物，重跑该任务即不再裁剪。
+
+## 代码模式 repair/audit 在大病态文件上不收敛卡死（#94）
+
+现象：
+- 代码模式 `rewrite` 任务在真实大 C++ 文件上长时间卡死（实测 12+ 分钟无进展、需手动 cancel）。
+  `llm_timing.log` 显示对**同一文件**反复发 ~30s LLM 调用、`input_chars` 恒定，但始终不前进。
+- `enable_refine=false` 或 `refine` 模式（行数守恒）不受影响。
+
+根因（对抗式核验确认，非 issue 原假设的 repair↔audit 死循环）：
+- `DiagnosticCodeRepairer.repair` 是**单趟**逐窗口循环（`for context in contexts`），每个窗口
+  无条件发一次 ~30s LLM 调用 + 一次 g++ 重诊断，**窗口数无任何上限**。
+- 病态 OCR 大文件产生大量 `syntax_dirty` 失败行 → `_merge_line_windows` 出十几~几十个窗口，
+  串行跑就是十几分钟。`input_chars` 恒定是因为每个窗口 prompt 的大头是全文件共享的
+  outline/diagnostics（一次算好、各窗口复用），局部行只占极小比例。
+- 既有 `_CODE_REPAIR_LARGE_FILE_LINE_THRESHOLD=400` 守卫是 syntax_dirty `if` 之后的 `elif`，
+  **对大+脏文件失效**（只挡 clean 大文件的 refine）。
+- 附带：进度只在整文件修完才上报一次，且 4 个 code 模式进度键（codeLayout/codeGroup/
+  codeRefine/codeRender）**从未进过前端 i18n**，UI 直接显示裸键字符串。
+
+修复（`backend/docrestore/llm/code_repair.py` + `pipeline.py` + 前端 i18n）：
+- **窗口预算上限** `_MAX_REPAIR_WINDOWS=12`：超限只处理前 N 个（已按 start_line 升序，
+  不按严重度重排——重排会破坏 `_shift_range` 偏移不变量），其余窗口范围作为 `unresolved` 透出。
+- **连续无改善早停** `_MAX_REPAIR_NO_IMPROVEMENT=3`：从第 1 个窗口起计、每落一个 patch 清零、
+  `reject_diagnostic_worse` 与无 patch 同等计数；零落 patch 的病态文件约 3 窗口（~90s）即放弃回退。
+- **超大文件熔断** `_MAX_REPAIR_CHARS=60000`：正文超限直接跳过、回退原文 + warning，失败行透出；
+  `repair` 与 `audit` 共用同一闸口（`is_oversized_for_repair`），熔断后 audit 也不再发 LLM/跑 g++。
+- **audit 防御封顶** `_MAX_AUDIT_PATCHES=24`（每 patch 一次 g++ 重诊断，封顶极端响应）。
+- **逐窗口进度上报**：`repair(progress_cb=...)` → 新键 `progress.codeRepairWindow`，前端不再长时间停在
+  「归类得到 N 个源文件」；同时补齐 4 个缺失 code 进度键到 zh-CN/en/zh-TW（TS 类型强制三语对齐）。
+- 不埋雷：所有被跳过/早停/熔断的范围都进 `flags` + `unresolved`，让“哪段没修”可见。
+
+测试：`tests/llm/test_code_repair.py::TestRepairConvergenceBounds`（早停 / 落 patch 清零 / 窗口预算 /
+repair 与 audit 超大熔断 / progress_cb 逐窗上报，6 例）；既有 21 例无回归。
+
+坑点：`radius=1` 时相邻窗口间隔须 ≥4 才不合并（`start <= 上一窗口 end+1` 即并），构造多窗口测试
+用步长 4；步长 3 会塌成一个窗口导致预算上限测不到。
