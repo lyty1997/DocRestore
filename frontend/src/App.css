@@ -3764,7 +3764,9 @@ body {
   font-size: 0.8rem;
   color: var(--color-primary);
   user-select: all;
-  word-break: break-all;
+  /* 命令需整体复制，禁止断词；过长时横向滚动而非折断 */
+  white-space: nowrap;
+  overflow-x: auto;
 }
 
 .token-howto-note {
