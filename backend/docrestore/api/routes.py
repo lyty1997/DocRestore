@@ -988,6 +988,7 @@ async def get_result(
         markdown=task.result.markdown,
         doc_title=task.result.doc_title,
         doc_dir=task.result.doc_dir,
+        warnings=list(task.result.warnings),
     )
 
 
@@ -1022,6 +1023,7 @@ async def get_results(
             doc_title=r.doc_title,
             doc_dir=r.doc_dir,
             error=r.error,
+            warnings=list(r.warnings),
         )
         for r in task.results
     ]
@@ -2267,6 +2269,7 @@ async def get_ocr_status(request: Request) -> OCRStatusResponse:
         current_gpu_name=em.current_gpu_name,
         is_ready=em.is_ready,
         is_switching=em.is_switching,
+        degraded_reason=em.degraded_reason,
     )
 
 

@@ -286,6 +286,9 @@ class TaskResultResponse(BaseModel):
     doc_title: str = ""
     doc_dir: str = ""
     error: str = ""
+    #: 软降级警告（#96，非致命）：VL 退本地推理 / PDF 缺页 / 段截断等。error
+    #: 为空但 warnings 非空 = 文档可用但有降级，前端显示软提示而非失败态。
+    warnings: list[str] = Field(default_factory=list)
 
 
 class TaskResultsResponse(BaseModel):
@@ -526,6 +529,9 @@ class OCRStatusResponse(BaseModel):
     current_gpu_name: str = ""  # 人类可读型号，便于 UI 区分同机多卡
     is_ready: bool
     is_switching: bool
+    #: 降级原因码（#96，空=未降级）：请求 VL 但退回本地推理时为
+    #: vl_no_server_python / vl_server_python_missing，前端徽章据此提示。
+    degraded_reason: str = ""
 
 
 # ── 本地 NER 可用性 ───────────────────────────────────────

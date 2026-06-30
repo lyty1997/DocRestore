@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import tempfile
 import traceback
@@ -234,6 +235,7 @@ class TaskManager:
                         doc_title=r.doc_title or "",
                         doc_dir=r.doc_dir or "",
                         error=r.error or "",
+                        warnings=list(r.warnings),
                     ))
                 self._tasks[task.task_id] = task
                 loaded += 1
@@ -610,7 +612,10 @@ class TaskManager:
             return
         try:
             rows = [
-                (str(r.output_path), r.doc_title, r.doc_dir, r.error)
+                (
+                    str(r.output_path), r.doc_title, r.doc_dir, r.error,
+                    json.dumps(r.warnings, ensure_ascii=False),
+                )
                 for r in results
             ]
             # 单事务原子写：状态 + 结果一次 commit，避免两次独立 commit 之间崩溃

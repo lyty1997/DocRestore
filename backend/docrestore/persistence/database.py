@@ -21,7 +21,7 @@ import json
 import logging
 import sqlite3
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -71,7 +71,8 @@ CREATE TABLE IF NOT EXISTS task_results (
     output_path TEXT NOT NULL,
     doc_title   TEXT NOT NULL DEFAULT '',
     doc_dir     TEXT NOT NULL DEFAULT '',
-    error       TEXT NOT NULL DEFAULT ''
+    error       TEXT NOT NULL DEFAULT '',
+    warnings    TEXT NOT NULL DEFAULT '[]'
 )"""
 
 _CREATE_RESULTS_IDX = (
@@ -108,6 +109,8 @@ class ResultRow:
     doc_title: str
     doc_dir: str
     error: str
+    #: 软降级警告（#96，非致命）；末尾 + 默认空列表，兼容旧行/旧测试。
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -131,6 +134,26 @@ class TaskListResult:
     total: int
     page: int
     page_size: int
+
+
+def _parse_warnings_json(raw: object) -> list[str]:
+    """把 DB warnings 列的 JSON 数组字符串解析为 ``list[str]``（#96）。
+
+    旧行 NULL / 脏数据不应炸读取路径：只吞 JSON 解码这一可预期异常并记 warning
+    （不静默、不宽吞编程 bug），非 list 或非字符串元素一律归一化。
+    """
+    if not isinstance(raw, str) or not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning(
+            "task_results.warnings JSON 解析失败，按空处理: %r", raw[:80],
+        )
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed]
 
 
 class TaskDatabase:
@@ -165,6 +188,10 @@ class TaskDatabase:
             await self._migrate_add_column("tasks", col, "TEXT")
         await self._migrate_add_column(
             "task_results", "error", "TEXT NOT NULL DEFAULT ''",
+        )
+        # #96：每文档软降级（VL 退本地 / PDF 缺页等）留痕，JSON 数组字符串。
+        await self._migrate_add_column(
+            "task_results", "warnings", "TEXT NOT NULL DEFAULT '[]'",
         )
 
         await self._db.commit()
@@ -276,7 +303,9 @@ class TaskDatabase:
         self,
         task_id: str,
         results: Sequence[
-            tuple[str, str, str] | tuple[str, str, str, str]
+            tuple[str, str, str]
+            | tuple[str, str, str, str]
+            | tuple[str, str, str, str, str]
         ],
     ) -> None:
         """批量插入任务结果。
@@ -291,8 +320,9 @@ class TaskDatabase:
             await db.executemany(
                 """\
                 INSERT INTO task_results
-                    (task_id, output_path, doc_title, doc_dir, error)
-                VALUES (?, ?, ?, ?, ?)""",
+                    (task_id, output_path, doc_title, doc_dir, error,
+                     warnings)
+                VALUES (?, ?, ?, ?, ?, ?)""",
                 [(task_id, *r) for r in normalized],
             )
             await db.commit()
@@ -300,18 +330,31 @@ class TaskDatabase:
     @staticmethod
     def _normalize_results(
         results: Sequence[
-            tuple[str, str, str] | tuple[str, str, str, str]
+            tuple[str, str, str]
+            | tuple[str, str, str, str]
+            | tuple[str, str, str, str, str]
         ],
-    ) -> list[tuple[str, str, str, str]]:
-        """把结果行规整成四元组（兼容旧三元组，缺省 error 视为空串）。"""
-        normalized: list[tuple[str, str, str, str]] = []
+    ) -> list[tuple[str, str, str, str, str]]:
+        """把结果行规整成五元组（兼容旧三/四元组）。
+
+        第 5 元为 warnings 的 JSON 数组字符串（#96），缺省视为 ``'[]'``；
+        缺省 error 视为空串。
+        """
+        normalized: list[tuple[str, str, str, str, str]] = []
         for row in results:
             if len(row) == 3:
                 output_path, doc_title, doc_dir = row
-                normalized.append((output_path, doc_title, doc_dir, ""))
-            else:
+                normalized.append((output_path, doc_title, doc_dir, "", "[]"))
+            elif len(row) == 4:
                 output_path, doc_title, doc_dir, error = row
-                normalized.append((output_path, doc_title, doc_dir, error))
+                normalized.append(
+                    (output_path, doc_title, doc_dir, error, "[]"),
+                )
+            else:
+                output_path, doc_title, doc_dir, error, warnings = row
+                normalized.append(
+                    (output_path, doc_title, doc_dir, error, warnings),
+                )
         return normalized
 
     async def complete_task_with_results(
@@ -319,7 +362,9 @@ class TaskDatabase:
         task_id: str,
         status: str,
         results: Sequence[
-            tuple[str, str, str] | tuple[str, str, str, str]
+            tuple[str, str, str]
+            | tuple[str, str, str, str]
+            | tuple[str, str, str, str, str]
         ],
         error: str | None = None,
     ) -> None:
@@ -342,8 +387,9 @@ class TaskDatabase:
                 await db.executemany(
                     """\
                     INSERT INTO task_results
-                        (task_id, output_path, doc_title, doc_dir, error)
-                    VALUES (?, ?, ?, ?, ?)""",
+                        (task_id, output_path, doc_title, doc_dir, error,
+                         warnings)
+                    VALUES (?, ?, ?, ?, ?, ?)""",
                     [(task_id, *r) for r in normalized],
                 )
             await db.commit()
@@ -381,7 +427,7 @@ class TaskDatabase:
         db = self._get_db()
         cursor = await db.execute(
             """\
-            SELECT task_id, output_path, doc_title, doc_dir, error
+            SELECT task_id, output_path, doc_title, doc_dir, error, warnings
             FROM task_results WHERE task_id=?
             ORDER BY id""",
             (task_id,),
@@ -394,6 +440,7 @@ class TaskDatabase:
                 doc_title=r[2],
                 doc_dir=r[3],
                 error=r[4] or "",
+                warnings=_parse_warnings_json(r[5]),
             )
             for r in rows
         ]

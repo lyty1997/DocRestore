@@ -152,6 +152,36 @@ async def test_insert_and_get_result_errors(db: TaskDatabase) -> None:
     assert results[1].error == "OCR 超时"
 
 
+async def test_result_warnings_roundtrip_and_back_compat(
+    db: TaskDatabase,
+) -> None:
+    """软降级 warnings 应持久化往返（#96），旧三/四元组缺省为空列表。"""
+    await db.insert_task(
+        task_id="t002warn",
+        status="completed",
+        image_dir="/img",
+        output_dir="/out",
+    )
+    await db.insert_results("t002warn", [
+        # 五元组：携带 warnings JSON 数组
+        (
+            "/out/document.md", "降级文档", "",
+            "", '["VL 退回本地推理", "源 PDF 渲染缺失 2 页"]',
+        ),
+        # 四元组（旧调用方，无 warnings）→ 默认空列表
+        ("/out/ok/document.md", "正常文档", "ok", ""),
+        # 三元组（更旧）→ 默认空列表
+        ("/out/old/document.md", "老文档", "old"),
+    ])
+
+    results = await db.get_results("t002warn")
+    assert len(results) == 3
+    assert results[0].warnings == ["VL 退回本地推理", "源 PDF 渲染缺失 2 页"]
+    assert results[0].error == ""  # 软降级不占用 error（任务仍 completed）
+    assert results[1].warnings == []
+    assert results[2].warnings == []
+
+
 async def test_delete_task_cascades_results(db: TaskDatabase) -> None:
     """删除任务应级联删除结果。"""
     await db.insert_task(

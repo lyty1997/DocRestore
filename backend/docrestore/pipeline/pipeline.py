@@ -311,6 +311,25 @@ def _make_repair_progress(
     return _cb
 
 
+def _apply_pdf_missing_warnings(
+    results: list[PipelineResult], missing_by_doc: dict[str, int],
+) -> None:
+    """把 PDF 缺页数挂到对应文档结果的 warnings（#96，按 doc_dir 匹配，就地改）。
+
+    单 PDF 落根=doc_dir ""、多 PDF=stem；坏页跳过后文档不完整但仍可用（任务仍
+    COMPLETED，不翻 error），软降级 warning 让用户知道"缺了几页"。
+    """
+    if not missing_by_doc:
+        return
+    for r in results:
+        missing = missing_by_doc.get(r.doc_dir)
+        if missing:
+            r.warnings = [
+                *r.warnings,
+                f"源 PDF 渲染缺失 {missing} 页（坏页已跳过），文档不完整",
+            ]
+
+
 def _augment_metas_with_code_context(
     metas: list[IDEMeta],
     context_provider: CodeContextProvider,
@@ -706,7 +725,9 @@ class Pipeline:
         if self._refiner is None and self._config.llm.model:
             self._refiner = self._create_refiner(self._config.llm)
 
-    async def _expand_pdfs(self, image_dir: Path) -> list[PipelineResult]:
+    async def _expand_pdfs(
+        self, image_dir: Path,
+    ) -> tuple[list[PipelineResult], dict[str, int]]:
         """摄取入口 PDF 展开（Epic A）：image_dir 根层 *.pdf 逐页渲染成 PNG。
 
         - 单 PDF → 渲染到 image_dir 根（命中 process_many 快路）；
@@ -717,18 +738,21 @@ class Pipeline:
         转占位失败结果返回，交 process_tree 合入 results（复用部分失败聚合）。
         """
         if not self._config.pdf.enable:
-            return []
+            return [], {}
 
         from docrestore.pipeline.render import render_pdf_to_dir, safe_pdf_stem
 
         pdfs = await asyncio.to_thread(_scan_pdfs, image_dir)
         if not pdfs:
-            return []
+            return [], {}
 
         cfg = self._config.pdf
         single = len(pdfs) == 1
         used: set[str] = set()
         failures: list[PipelineResult] = []
+        # #96：部分缺页（rendered<expected，坏页跳过但非整篇失败）→ 缺页数按 doc_dir
+        # 回传（单 PDF=根 ""、多 PDF=stem），由 process_tree 挂到对应结果 warnings。
+        missing_by_doc: dict[str, int] = {}
         for pdf in pdfs:
             base = safe_pdf_stem(pdf.name)
             stem, suffix = base, 2
@@ -736,8 +760,9 @@ class Pipeline:
                 stem, suffix = f"{base}_{suffix}", suffix + 1
             used.add(stem)
             out_dir = image_dir if single else image_dir / stem
+            doc_key = "" if single else stem
             try:
-                await asyncio.to_thread(
+                render = await asyncio.to_thread(
                     render_pdf_to_dir,
                     pdf,
                     out_dir,
@@ -753,11 +778,15 @@ class Pipeline:
                     PipelineResult(
                         output_path=out_dir / "document.md",
                         markdown="",
-                        doc_dir="" if single else stem,
+                        doc_dir=doc_key,
                         error=f"{type(exc).__name__}: {str(exc)[:200]}",
                     ),
                 )
-        return failures
+                continue
+            missing = render.expected - render.rendered
+            if missing > 0:
+                missing_by_doc[doc_key] = missing
+        return failures, missing_by_doc
 
     async def process_tree(
         self,
@@ -788,7 +817,7 @@ class Pipeline:
                 # Epic A：PDF 输入 → 逐页 PNG 展开（摄取入口，未持 gpu_lock）。
                 # 单 PDF 落根命中 process_many 快路，多 PDF 分子目录走多文档分支；
                 # 坏 PDF 转占位失败结果，合入返回供 TaskManager 聚合。
-                pdf_failures = await self._expand_pdfs(image_dir)
+                pdf_failures, pdf_missing = await self._expand_pdfs(image_dir)
 
                 leaf_dirs = await asyncio.to_thread(
                     find_image_dirs, image_dir,
@@ -820,6 +849,7 @@ class Pipeline:
                         llm, gpu_lock, pii, ocr, code=code, ppt=ppt,
                         overrides=overrides,
                     )
+                    _apply_pdf_missing_warnings([result], pdf_missing)
                     return [result, *pdf_failures]
 
                 # 多子目录：warmup cold start + 并发剩余（详见 _process_subdirs）
@@ -827,6 +857,7 @@ class Pipeline:
                     leaf_dirs, image_dir, output_dir, on_progress,
                     llm, gpu_lock, pii, ocr, code, ppt, overrides,
                 )
+                _apply_pdf_missing_warnings(results, pdf_missing)
                 return [*results, *pdf_failures]
 
     async def _process_subdirs(
@@ -1118,6 +1149,9 @@ class Pipeline:
 
         page_queue: asyncio.Queue[PageOCR | None] = asyncio.Queue()
         pages_ref: list[PageOCR] = []
+        # #96：本任务 ensure() 时刻捕获的引擎降级原因（生产者同步写入）。绝不读共享
+        # live 标志——并发混模式任务会互改全局 degraded_reason，造成误报/漏报。
+        degraded_sink: list[str] = []
         pii_cfg = pii or self._config.pii
 
         # 质量报告收集：每阶段的异常信号汇总到 .quality_report.json
@@ -1162,6 +1196,7 @@ class Pipeline:
             self._ocr_producer(
                 images, output_dir, gpu_lock, page_queue,
                 pages_ref, controller, _report, ocr_effective, pii_cfg,
+                degraded_sink=degraded_sink,
                 quality=quality, ppt=ppt_cfg,
                 content_crop=(
                     None if skip_content_crop else self._config.content_crop
@@ -1217,6 +1252,14 @@ class Pipeline:
                 output_dir / ".quality_report.json",
                 exc_info=True,
             )
+        # #96：VL 退本地推理降级，所有模式（doc/ppt/code）统一在此挂任务级 warning，让
+        # "请求 VL 实际跑本地"在文档结果侧也可见。原因码由生产者在本任务 ensure() 时刻
+        # 同步捕获（degraded_sink），不读共享 live 标志，避免并发任务互相污染。
+        # 无降级时返回空列表，extend 为 no-op（不加分支）。
+        captured_reason = degraded_sink[0] if degraded_sink else ""
+        result.warnings = [
+            *result.warnings, *self._engine_degraded_warnings(captured_reason),
+        ]
         return result
 
     @staticmethod
@@ -2070,6 +2113,7 @@ class Pipeline:
         report_fn: ReportFn,
         ocr: OCRConfig | None,
         pii_cfg: PIIConfig,
+        degraded_sink: list[str] | None = None,
         quality: QualityReport | None = None,
         ppt: PowerPointRestoreConfig | None = None,
         content_crop: ContentCropConfig | None = None,
@@ -2079,11 +2123,18 @@ class Pipeline:
 
         异常路径也必须发哨兵（finally），避免 _stream_process 永远阻塞在
         `await queue.get()`。
+
+        ``degraded_sink`` 非空时在本任务 ensure() 返回后**同步**写入引擎降级原因码
+        （#96）：ensure 已由 ``_switch_lock`` 序列化、读写间无 await，不被并发任务的
+        ensure 抢改——避免读共享 live 标志的误报/漏报。
         """
         profiler = current_profiler()
         total = len(images)
         try:
             engine = await self._resolve_ocr_engine(ocr, report_fn)
+            # 紧跟 ensure() 同步捕获本任务降级原因（下一行不得插入 await）。
+            if degraded_sink is not None and self._engine_manager is not None:
+                degraded_sink.append(self._engine_manager.degraded_reason)
             cleaner = OCRCleaner()
             guard = (
                 PIIGuard(pii_cfg) if pii_cfg.enable else None
@@ -3893,6 +3944,24 @@ class Pipeline:
             images=doc.images,
             gaps=doc.gaps + merged_gaps,
         ), any_truncated
+
+    @staticmethod
+    def _engine_degraded_warnings(reason: str) -> list[str]:
+        """引擎降级原因码（#96）转任务级 warning（空原因返回空列表）。
+
+        ``reason`` 由生产者在本任务 ensure() 时刻同步捕获并透传（**不**读共享 live
+        标志），避免并发混模式任务互改引擎全局 degraded_reason 造成误报/漏报。warning
+        是服务端中文文案（与既有 _collect_warnings 同口径，前端直接渲染、不走 i18n
+        key）；/ocr/status 另透 degraded_reason 码供前端徽章本地化，两条通道各司其职。
+        """
+        if not reason:
+            return []
+        if reason in ("vl_no_server_python", "vl_server_python_missing"):
+            return [
+                "请求了 PaddleOCR-VL 但退回了本地推理（paddle_server_python "
+                "未配置或路径无效），OCR 结果与 VL 模式不符"
+            ]
+        return [f"OCR 引擎降级：{reason}"]
 
     @staticmethod
     def _collect_warnings(

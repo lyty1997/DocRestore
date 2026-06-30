@@ -35,7 +35,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from PIL import Image
 
@@ -157,18 +157,26 @@ def _to_rgb_bounded(image: Image.Image, max_long_side: int) -> Image.Image:
     return rgb
 
 
+class PdfRenderResult(NamedTuple):
+    """单 PDF 渲染结果（#96）：``expected - rendered`` 即坏页跳过的缺页数。"""
+
+    rendered: int
+    expected: int
+
+
 def render_pdf_to_dir(
     pdf_path: Path,
     out_dir: Path,
     *,
     cfg: PdfRenderConfig,
     name_prefix: str = "",
-) -> int:
-    """把单个 PDF 逐页渲染成 RGB PNG 落 ``out_dir``，返回成功渲染页数。
+) -> PdfRenderResult:
+    """把单个 PDF 逐页渲染成 RGB PNG 落 ``out_dir``，返回成功/预期页数（#96）。
 
     幂等（sentinel 命中跳过）+ 坏页鲁棒（单页失败跳过）+ 超长截断 + 超大降采样。
     加密 / 损坏 PDF 的 ``PdfDocument`` 构造异常**不在此捕获**，由调用方转
     ``PipelineResult.error``（单 PDF 失败不影响同任务其他 PDF）。
+    ``rendered < expected`` = 部分缺页，调用方据此挂软降级 warning。
     """
     import pypdfium2 as pdfium
 
@@ -180,7 +188,9 @@ def render_pdf_to_dir(
         logger.info(
             "PDF 渲染幂等命中，跳过: %s (%d 页)", pdf_path.name, cached,
         )
-        return cached
+        # 命中即上次渲染完整（_read_sentinel 仅在 rendered==expected 时命中），
+        # 故 expected == rendered，无缺页。
+        return PdfRenderResult(cached, cached)
 
     doc = pdfium.PdfDocument(str(pdf_path))
     rendered = 0
@@ -222,4 +232,4 @@ def render_pdf_to_dir(
         out_dir, digest, source_pages=source_pages, rendered=rendered,
         expected_pages=limit, width=width, cfg=cfg, name_prefix=name_prefix,
     )
-    return rendered
+    return PdfRenderResult(rendered, limit)

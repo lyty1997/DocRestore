@@ -84,6 +84,8 @@ export const zhCN = {
   "taskForm.engineWarming": "引擎加载中...",
   "taskForm.engineReady": "已就绪",
   "taskForm.engineError": "加载失败",
+  "taskForm.engineDegraded":
+    "已请求 PaddleOCR-VL 但将退回本地推理（paddle_server_python 未配置或路径无效），OCR 结果与 VL 模式不符，请检查配置",
   "taskForm.gpuAuto": "自动选择（推荐）",
   "taskForm.gpuAutoWithHint": "自动（{hint}）",
   "taskForm.llmConfigExpanded": "▾ LLM 精修配置",

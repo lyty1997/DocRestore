@@ -479,6 +479,17 @@ export function DocCodePreview({
             </p>
           </div>
         )}
+        {/* #96：非致命软降级（VL 退本地 / PDF 缺页 / 段截断），文档可用但有降级 */}
+        {!selectedDocFailed && selectedDoc.warnings.length > 0 && (
+          <div className="doc-warning-banner" role="alert">
+            <span className="doc-warning-icon" aria-hidden="true">⚠</span>
+            <ul className="doc-warning-list">
+              {selectedDoc.warnings.map((w) => (
+                <li key={w}>{w}</li>
+              ))}
+            </ul>
+          </div>
+        )}
         {!selectedDocFailed && editMode && (
           <div className="markdown-editor">
             <MarkdownWysiwygEditor
