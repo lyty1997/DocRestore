@@ -1047,3 +1047,42 @@ repair 与 audit 超大熔断 / progress_cb 逐窗上报，6 例）；既有 21 
 
 坑点：`radius=1` 时相邻窗口间隔须 ≥4 才不合并（`start <= 上一窗口 end+1` 即并），构造多窗口测试
 用步长 4；步长 3 会塌成一个窗口导致预算上限测不到。
+
+## VL 退本地 / PDF 缺页 降级未透到任务侧（#96）
+
+背景：错误处理审计（#96）的两处 medium——已从「静默」改「记 warning」，但失败信号仍只在服务端
+日志、未到任务 `result` / 前端，用户侧不可见。
+
+根因（调查确认）：项目本有 `PipelineResult.warnings`「流程警告」字段，且已被段截断/缺口填补复用，
+但**端到端断头**——从不写 DB、不进 `TaskResultResponse`、前端无渲染（write-only 死字段）；
+`/ocr/status` 是前端唯一在轮询的引擎通道，但 VL 退本地后仍报 `pipeline=vl`，降级不可见。
+
+修复（复用 `warnings` 通道 + `/ocr/status`，不改「降级不失败」）：
+- **warnings 端到端接通**：`task_results` 加 `warnings` 列（`_migrate_add_column` 幂等迁移，
+  JSON 数组）+ `ResultRow`/`_normalize_results`(五元组兼容三/四) + 两条 INSERT + `get_results`
+  (`_parse_warnings_json` 防御解析) + `task_manager` 持久化/水合 + `TaskResultResponse.warnings`
+  + `/result`·`/results` + 前端 `TaskResultResponseSchema.warnings`(zod default) + `DocCodePreview`
+  琥珀色软横幅（区别 error 红色失败态）。**副作用**：既有静默的段截断/缺口 warning 现在也可见（不埋雷）。
+- **案 1 VL 退本地**（引擎全局 + 任务级双通道）：`EngineManager._degraded_reason`
+  （两 fallback 置 `vl_no_server_python`/`vl_server_python_missing`，起 server 顶部 + `_shutdown_current`
+  清）→ `degraded_reason` property → `OCRStatusResponse` + `/ocr/status` → 前端徽章提示（建任务前
+  即可见、可先修配置）；任务侧由生产者在**本任务 `ensure()` 时刻同步捕获**原因码到 `degraded_sink`
+  （`_switch_lock` 已序列化、读写间无 await），经 `_engine_degraded_warnings(reason)` 在 `_stream_pipeline`
+  末追加到任务 `warnings`（doc/ppt/code 统一一处）。**绝不在结果汇总处读引擎全局 live 标志**——
+  review 抓到：并发混模式任务会互改全局 `degraded_reason`，导致 code 任务误报 VL 降级（false positive）
+  或 VL 任务的降级被并发任务 `_shutdown_current` 清掉而漏报（false negative，恰好打回 #96 要治的静默降级）。
+- **案 2 PDF 缺页**（按文档）：`render_pdf_to_dir` 返回 `PdfRenderResult(rendered, expected)`；
+  `_expand_pdfs` 回传缺页 map（按 `doc_dir`：单 PDF=""、多 PDF=stem）；`process_tree` 用
+  `_apply_pdf_missing_warnings` 注入到对应成功结果（坏页跳过仍出可用页、任务仍 COMPLETED）。
+
+红线：降级**只进 `warnings`、绝不进 `error`**（`error` 非空会被 `task_manager` 翻成 FAILED）。
+缓存命中即「上次渲染完整」（`_read_sentinel` 仅 `rendered==expected` 命中）→ 缓存路径 expected==rendered。
+
+测试：DB warnings 往返 + 三/四/五元组兼容；EngineManager 两 fallback 置 degraded_reason；
+`_apply_pdf_missing_warnings` 按 doc_dir 匹配 + `_engine_degraded_warnings`；/ocr/status 透 degraded_reason；
+`render_pdf_to_dir` 返回 rendered/expected（截断不算缺页）。门禁后端 689 passed、前端 247 passed。
+
+坑点：`render_pdf_to_dir` 返回类型从 `int` 改 `PdfRenderResult` NamedTuple，调用方/测试断言须改
+`.rendered`（否则 `PdfRenderResult==int` 永假）；`/ocr/status` 测试 mock 须补 `degraded_reason` 字符串
+（否则 MagicMock 属性触发 pydantic 校验失败）；前端无运行 dev server / 截图脚本，UI 验证靠 tsc +
+数据流测试（软横幅 / 徽章为简单条件渲染）。

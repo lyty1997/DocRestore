@@ -3321,6 +3321,39 @@ body {
   line-height: 1.4;
 }
 
+/* #96：非致命软降级提示——复用主题 warning 变量（琥珀），区别 doc-failed 红色失败态 */
+.ocr-engine-degraded {
+  margin: 0.35rem 0 0;
+  font-size: 0.78rem;
+  color: var(--color-warning-dark);
+  line-height: 1.4;
+}
+
+.doc-warning-banner {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  margin: 0 0 0.75rem;
+  padding: 0.6rem 0.85rem;
+  background: var(--color-warning-bg);
+  border: 1px solid var(--color-warning);
+  border-radius: 6px;
+  color: var(--color-text);
+  font-size: 0.85rem;
+}
+
+.doc-warning-icon {
+  flex-shrink: 0;
+  color: var(--color-warning);
+  line-height: 1.4;
+}
+
+.doc-warning-list {
+  margin: 0;
+  padding-left: 1.1rem;
+  line-height: 1.5;
+}
+
 /* ── 本地 NER 一键配置（开 PII 后人名/机构名脱敏依赖本地模型）── */
 .ner-ready {
   margin: 0 0 0.6rem;

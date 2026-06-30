@@ -58,6 +58,12 @@ export const TaskResultResponseSchema = z.object({
    * 后端老版本无此字段时默认为空字符串。
    */
   error: z.string().default(""),
+  /**
+   * 软降级警告（#96，非致命）：VL 退本地推理 / PDF 缺页 / 段截断等。
+   * error 为空但 warnings 非空 = 文档可用但有降级，前端显示软提示而非失败态。
+   * 旧后端缺字段时 default 回退为空数组。
+   */
+  warnings: z.array(z.string()).default([]),
 });
 export type TaskResultResponse = z.infer<typeof TaskResultResponseSchema>;
 
@@ -202,6 +208,11 @@ export const OcrStatusResponseSchema = z.object({
   current_gpu_name: z.string().default(""),
   is_ready: z.boolean(),
   is_switching: z.boolean(),
+  /**
+   * 降级原因码（#96，空=未降级）：请求 VL 但退回本地推理时为
+   * vl_no_server_python / vl_server_python_missing。旧后端缺字段时回退为 ""。
+   */
+  degraded_reason: z.string().default(""),
 });
 export type OcrStatusResponse = z.infer<typeof OcrStatusResponseSchema>;
 

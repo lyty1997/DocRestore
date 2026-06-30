@@ -1,5 +1,33 @@
 # 开发进度
 
+## 2026-06-30 - 修复 #96 VL 退本地 / PDF 缺页 降级透到任务侧
+
+主题：用户指派"继续推进 #96"——两处降级（VL 缺 server python 退本地、PDF 部分缺页）已记 warning
+但只在服务端日志，用户侧不可见。
+
+设计（先调查 workflow 映射现有管线 → 出方案经用户确认两项推荐：全部 warning 都显示 + VL 双通道）：
+复用本就存在但端到端断头的 `PipelineResult.warnings` 通道 + 前端已轮询的 `/ocr/status`，不改"降级不失败"。
+
+完成（分支 `bugfix/degradation-visibility-96`）：
+- **warnings 端到端**：`task_results.warnings` 列(_migrate_add_column)+ResultRow+_normalize_results 五元组
+  (兼容三/四)+两 INSERT+get_results(_parse_warnings_json 防御)+task_manager 持久化/水合+
+  TaskResultResponse+/result·/results+前端 schema(zod default)+DocCodePreview 琥珀软横幅。
+  副作用：既有静默的段截断/缺口 warning 现在也可见（不埋雷）。
+- **案 1 VL 退本地**：EngineManager._degraded_reason(两 fallback 置位/起 server 顶部+shutdown 清)→
+  /ocr/status degraded_reason→TaskForm 徽章提示；任务侧由生产者在本任务 ensure() 时刻**同步捕获**
+  原因码(degraded_sink)→_engine_degraded_warnings(reason) 追加到 warnings（doc/ppt/code 统一）。
+  **review 抓到并发缺陷**：原在结果汇总处读引擎全局 live 标志，混模式并发任务会互相污染（code 误报 /
+  VL 降级被并发任务清掉漏报）→ 改 per-task 同步捕获修复。
+- **案 2 PDF 缺页**：render_pdf_to_dir 返 PdfRenderResult(rendered,expected)；_expand_pdfs 回传缺页
+  map(按 doc_dir)；process_tree 经 _apply_pdf_missing_warnings 注入对应成功结果。
+- 红线：降级只进 warnings 不进 error（error 会翻 FAILED）。
+- 测试：DB 往返/三四五元组兼容、EngineManager 两 fallback、_apply_pdf_missing_warnings+
+  _engine_degraded_warnings、/ocr/status degraded_reason、PdfRenderResult；门禁后端 689 passed、前端 247 passed。
+- review workflow 对抗式复核（见结论）。
+
+遗留：UI 软横幅 / 徽章无运行 dev server 截图（环境无 dev server / 截图脚本），靠 tsc + 数据流测试验证。
+环境内 pypdfium2/DeepSeek-OCR python 未配，相关用例预存失败（非本次回归）。
+
 ## 2026-06-30 - 修复 #94 代码模式 repair/audit 大病态文件不收敛卡死
 
 主题：用户指派"解掉 #94"——代码模式 `rewrite` 任务在真实大 C++ 文件上 repair 循环不收敛、

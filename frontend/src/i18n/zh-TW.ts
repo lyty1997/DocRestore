@@ -88,6 +88,8 @@ export const zhTW: Record<TranslationKey, string> = {
   "taskForm.engineWarming": "引擎載入中...",
   "taskForm.engineReady": "已就緒",
   "taskForm.engineError": "載入失敗",
+  "taskForm.engineDegraded":
+    "已請求 PaddleOCR-VL 但將退回本地推理（paddle_server_python 未設定或路徑無效），OCR 結果與 VL 模式不符，請檢查設定",
   "taskForm.gpuAuto": "自動選擇（推薦）",
   "taskForm.gpuAutoWithHint": "自動（{hint}）",
   "taskForm.llmConfigExpanded": "▾ LLM 精修設定",

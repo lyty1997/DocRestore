@@ -284,6 +284,9 @@ class EngineManager:
         # （vl 需要 ppocr-server / basic 直接本地推理，行为完全不同；且
         # basic 输出 text_lines 给 AGE-8 代码模式，vl 不输出）
         self._current_pipeline: str = ""
+        # #96：请求 VL 但退回本地推理时的降级原因码（空=未降级）。透到
+        # /ocr/status + 任务 warnings，让"我请求 VL 却悄悄跑本地"对用户可见。
+        self._degraded_reason: str = ""
         self._ppocr_server_proc: asyncio.subprocess.Process | None = None
         # ppocr-server 的 stdout/stderr drain task（防 pipe buffer 写满）
         self._ppocr_drain_tasks: list[asyncio.Task[None]] = []
@@ -313,6 +316,15 @@ class EngineManager:
     def is_switching(self) -> bool:
         """是否正在切换引擎（switch_lock 被持有）。"""
         return self._switch_lock.locked()
+
+    @property
+    def degraded_reason(self) -> str:
+        """当前引擎降级原因码（#96，空=未降级）。
+
+        目前仅"请求 VL 但退回本地推理"会置位（``vl_no_server_python`` /
+        ``vl_server_python_missing``），供 /ocr/status 与任务 warnings 透出。
+        """
+        return self._degraded_reason
 
     @property
     def engine(self) -> OCREngine | None:
@@ -473,6 +485,7 @@ class EngineManager:
                 self._current_gpu = ""
                 self._current_gpu_name = ""
                 self._current_pipeline = ""
+                self._degraded_reason = ""  # 切换/关停清降级（#96）
 
     async def _start_ppocr_server(
         self,
@@ -480,6 +493,9 @@ class EngineManager:
         on_progress: ProgressFn | None = None,
     ) -> None:
         """自动启动 ppocr genai_server 子进程。"""
+        # 每次实际尝试从干净状态重新评估降级（#96）：成功路径保持空，
+        # 两个 fallback 分支置位，让 degraded_reason 反映"最近一次 VL 尝试"。
+        self._degraded_reason = ""
         python_path = config.paddle_server_python
         if not python_path:
             logger.warning(
@@ -488,6 +504,7 @@ class EngineManager:
                 "OCR 结果与请求的 VL 模式不符。如需 VL 请配置 "
                 "paddle_server_python。"
             )
+            self._degraded_reason = "vl_no_server_python"
             return
 
         python_exists = await asyncio.to_thread(
@@ -500,6 +517,7 @@ class EngineManager:
                 "的 VL 模式不符。请检查该路径配置。",
                 python_path,
             )
+            self._degraded_reason = "vl_server_python_missing"
             return
 
         port = config.paddle_server_port

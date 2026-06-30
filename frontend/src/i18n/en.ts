@@ -92,6 +92,8 @@ export const en: Record<TranslationKey, string> = {
   "taskForm.engineWarming": "Loading...",
   "taskForm.engineReady": "Ready",
   "taskForm.engineError": "Load Failed",
+  "taskForm.engineDegraded":
+    "PaddleOCR-VL was requested but will fall back to local inference (paddle_server_python unset or invalid); OCR results won't match VL mode — please check the config",
   "taskForm.gpuAuto": "Auto (recommended)",
   "taskForm.gpuAutoWithHint": "Auto ({hint})",
   "taskForm.llmConfigExpanded": "▾ LLM Refinement Settings",

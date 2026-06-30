@@ -201,6 +201,8 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
   const [gpus, setGpus] = useState<readonly GpuInfo[]>([]);
   const [recommendedGpu, setRecommendedGpu] = useState<string | undefined>();
   const [engineStatus, setEngineStatus] = useState<EngineStatus>("idle");
+  // #96：引擎降级原因码（空=未降级）。请求 VL 但退回本地推理时提示用户先修配置。
+  const [degradedReason, setDegradedReason] = useState("");
   const pollRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
   const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const selectedWarmupTargetRef = useRef<OcrWarmupTarget>({
@@ -412,6 +414,7 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
       retryUntilSuccess(async (isCancelled) => {
         const s = await getOcrStatus();
         if (isCancelled()) return;
+        setDegradedReason(s.degraded_reason);  // #96：透出 VL 退本地等降级
         /* gpuId=""（自动）时，只要模型匹配就认为是已就绪 */
         const gpuMatches = gpuId === GPU_AUTO_VALUE || s.current_gpu === gpuId;
         if (s.current_model === ocrModel && gpuMatches) {
@@ -465,6 +468,7 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
           }
           try {
             const s = await getOcrStatus();
+            setDegradedReason(s.degraded_reason);  // #96
             const gpuMatches =
               targetGpu === GPU_AUTO_VALUE || s.current_gpu === targetGpu;
             if (
@@ -851,6 +855,11 @@ export function TaskForm({ onSubmit, disabled }: TaskFormProps): React.JSX.Eleme
         <p className="ocr-engine-hint">
           {isOcrEngineValue(ocrModel) ? t(OCR_ENGINE_KEYS[ocrModel].desc) : ""}
         </p>
+        {degradedReason !== "" && (
+          <p className="ocr-engine-degraded" role="alert">
+            ⚠ {t("taskForm.engineDegraded")}
+          </p>
+        )}
       </div>
 
       {/* 统一 LLM 精修开关：对文档 / 代码 / PPT 三模式均生效 */}
