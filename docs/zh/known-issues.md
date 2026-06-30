@@ -990,11 +990,10 @@ z.infer<...>` 的 `rectified` 是**必填** `boolean`（zod 的 output 类型含
 提交：分支 `bugfix/error-handling-hardening`，A/B/C/D 四组 commit；门禁全绿。
 
 遗留（建 issue 跟踪，未在本批改代码逻辑）：
-- **#95** `privacy/redactor.py` `_looks_like_name` 把含撇号/连字符的西文人名（O'Brien 等）整条丢弃，
-  §A `split_protected` 落地后该过滤比结构所需更宽 → 一类真实人名漏脱出云。本批仅加"丢弃计数"
-  可观测；收窄标点集需配 PII 召回测试，单独排期。
-- **#96** `ocr/engine_manager.py` VL 缺 server python 退本地、`pipeline/render/pdf.py` 缺页：已记 warning
-  但未透到任务 `result.error`/前端；如需用户侧可见需引擎状态/任务级透传，单独排期。
+- ~~**#95** `privacy/redactor.py` `_looks_like_name` 把含撇号/连字符的西文人名（O'Brien 等）整条丢弃~~
+  → **已修（2026-06-30）**：收窄 `_MARKUP_CHARS` 剔除撇号/双引号，配 PII 召回/精度测试。详见
+  「PII 含撇号/连字符西文人名漏脱出云（#95）」段。
+- ~~**#96** VL 退本地 / PDF 缺页 降级未透到任务侧~~ → **已修**，详见「VL 退本地 / PDF 缺页 降级未透到任务侧（#96）」段。
 
 ## PPT 模式不应自动裁剪（§14.2 已回退）
 
@@ -1086,3 +1085,30 @@ repair 与 audit 超大熔断 / progress_cb 逐窗上报，6 例）；既有 21 
 `.rendered`（否则 `PdfRenderResult==int` 永假）；`/ocr/status` 测试 mock 须补 `degraded_reason` 字符串
 （否则 MagicMock 属性触发 pydantic 校验失败）；前端无运行 dev server / 截图脚本，UI 验证靠 tsc +
 数据流测试（软横幅 / 徽章为简单条件渲染）。
+
+## PII 含撇号/连字符西文人名漏脱出云（#95）
+
+背景：错误处理审计（2026-06-29）发现的 PII 召回缺陷，该批仅补"丢弃计数"可观测、过滤逻辑未改，单独立项。
+
+根因（调查确认）：`privacy/redactor.py` 的 `_looks_like_name`（词表净化第二道闸）用 `_MARKUP_CHARS`
+判定候选是否"像名字"，**该集含半角撇号 `'` 与双引号 `"`**。spaCy NER 会把 `O'Brien` / `d'Angelo`
+正向判定为 PERSON 并以 `ent.text` 原样（含撇号）进 `EntityLexicon`；到替换层 `_looks_like_name`
+因撇号命中 `_MARKUP_CHARS` 把整条候选丢弃 → **不脱敏、直接进送云文本**。问题在于把"markup 结构
+字符"与"人名内合法标点"混为一谈：§A `split_protected` 落地后撇号已落自由文本、`_sub_in_free` 走词边界
+本可安全替换，B2 这条丢弃比结构所需更宽，确定性放走一类真实西文人名出云，且漏替对用户不可见。
+
+修复（收窄结构字符集，不改三重防护架构）：
+- `_MARKUP_CHARS` 由 `/\<>${};'"()[]|=`` 收窄为 `/\<>${};()[]|=``——剔除 `'` 与 `"`（人名内合法标点），
+  保留真结构字符。含撇号/连字符人名（`O'Brien`/`d'Angelo`/`Jean-Paul`）现进 `_sub_in_free`，纯 ASCII 走
+  词边界精确替换（`(?<![0-9A-Za-z])…(?![0-9A-Za-z])`，不吃词内子串）。
+- overredaction 防护不退化：`;'>kcat` 这类碎片仍因 `;`/`>` 被丢弃；`\mu`（含 `\`）、`L)-aspartate`（含 `)`）、
+  文件名（扩展名规则）、整句（长度）、数字串（字母占比）均不受影响。
+
+测试（`tests/privacy/test_redactor.py`）：`_looks_like_name` 放行 `O'Brien`/`d'Angelo`/`Jean-Paul`/`Smith & Co`、
+仍丢弃 `;>cell`/`a<b`/`L)-aspartate`/`\mu`；端到端 `apply_lexicon` 断言含撇号人名/带 `&` 机构名在出云文本
+被脱敏、缩写词（`don't`，不在词表）不被误替、`;'>kcat` 碎片仍不替。断言全部从入参派生（无写死数据集标识）。
+门禁：privacy 115 passed。
+
+红线/取舍：仍是"召回换精度"——若 NER 误把缩写词判为人名才会过脱敏，但词表只含 NER 正向判定项，
+且安全边界（人名出云 false-negative）优先收窄。高危结构化 PII（手机/邮箱/证件/卡）走 `redact_structured_pii`
+本不受此影响。

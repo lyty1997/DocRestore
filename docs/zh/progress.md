@@ -1,5 +1,15 @@
 # 开发进度
 
+## 2026-06-30 - 修复 #95 PII 含撇号/连字符西文人名漏脱出云
+
+- **主题**：错误处理审计遗留的 PII 召回缺陷——`_looks_like_name` 把含撇号的西文人名（`O'Brien`/`d'Angelo`）整条丢弃 → 不脱敏直接出云。
+- **根因**：词表净化用的 `_MARKUP_CHARS` 含半角撇号 `'`/双引号 `"`，把"人名内合法标点"误当"markup 结构字符"。spaCy NER 正向判定的含撇号人名进 lexicon 后被这道闸否决整条放走（§A `split_protected` 落地后本可由词边界安全替换）。
+- **完成**：
+  - `redactor.py` 收窄 `_MARKUP_CHARS`（剔除 `'` `"`，保留真结构字符）；含撇号/连字符人名进 `_sub_in_free` 词边界精确替换。
+  - `tests/privacy/test_redactor.py` 补 #95 召回/精度测试：放行 `O'Brien`/`d'Angelo`/`Jean-Paul`/`Smith & Co`；回归断言 `;'>kcat`/`\mu`/`L)-aspartate` 仍丢弃、缩写词不被误替；端到端 `apply_lexicon` 断言出云文本被脱敏。privacy 115 passed。
+  - 文档：`pii-entity-overredaction-fix.md` §3-B2 收窄说明；`known-issues.md` 标 #95 已修 + 独立解决段。
+- **遗留**：无（#95 闭环）。分支 `bugfix/pii-apostrophe-name-95`。
+
 ## 2026-06-30 - 修复 #96 VL 退本地 / PDF 缺页 降级透到任务侧
 
 主题：用户指派"继续推进 #96"——两处降级（VL 缺 server python 退本地、PDF 部分缺页）已记 warning
