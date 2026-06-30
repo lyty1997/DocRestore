@@ -32,7 +32,9 @@ import docrestore.api.auth as auth_module
 from docrestore.api.auth import (
     configure_auth,
     configure_auth_from_env,
+    current_token_source,
     enforce_bind_safety,
+    is_auth_required,
     require_auth,
 )
 from docrestore.api.errors import ApiBusinessError, api_business_error_handler
@@ -80,9 +82,11 @@ def _restore_auth_globals() -> Iterator[None]:
     """
     saved_token = auth_module._API_TOKEN
     saved_insecure = auth_module._INSECURE_MODE
+    saved_source = auth_module._TOKEN_SOURCE
     yield
     auth_module._API_TOKEN = saved_token
     auth_module._INSECURE_MODE = saved_insecure
+    auth_module._TOKEN_SOURCE = saved_source
 
 
 @pytest.fixture
@@ -201,6 +205,52 @@ class TestHealthz:
         assert resp.json() == {"status": "ok"}
 
 
+class TestAuthInfo:
+    """GET /auth/info：免鉴权暴露「是否需要 token + token 来源」，绝不含 token 值。"""
+
+    @pytest.fixture
+    async def info_client(self) -> AsyncIterator[AsyncClient]:
+        """挂 health_router 的最小客户端（与 /healthz 同 router，免鉴权）。"""
+        app = FastAPI()
+        app.add_exception_handler(
+            ApiBusinessError, api_business_error_handler,  # type: ignore[arg-type]
+        )
+        app.include_router(health_router, prefix="/api/v1")
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport, base_url="http://test",
+        ) as ac:
+            yield ac
+
+    @pytest.mark.asyncio
+    async def test_open_without_token_and_hides_value(
+        self, info_client: AsyncClient,
+    ) -> None:
+        """配置了 token 也免鉴权可读；响应体绝不含 token 明文。"""
+        secret = "device-secret-xyz-123"  # noqa: S105 — 测试用假 token
+        configure_auth(secret, source="device_file")
+        resp = await info_client.get("/api/v1/auth/info")  # 不带 token
+        assert resp.status_code == 200
+        body = resp.json()
+        expected_source = "device_file"
+        assert body["auth_required"] is True
+        assert body["token_source"] == expected_source
+        assert secret not in resp.text  # 不泄露 token 值
+
+    @pytest.mark.asyncio
+    async def test_insecure_mode_reports_not_required(
+        self, info_client: AsyncClient,
+    ) -> None:
+        """insecure 无鉴权模式：auth_required=False（前端据此不提示设 token）。"""
+        configure_auth("")
+        resp = await info_client.get("/api/v1/auth/info")
+        assert resp.status_code == 200
+        body = resp.json()
+        expected_source = "insecure"
+        assert body["auth_required"] is False
+        assert body["token_source"] == expected_source
+
+
 class TestErrorSanitization:
     """错误信息脱敏验证。"""
 
@@ -248,6 +298,7 @@ class TestTokenResolution:
         configure_auth_from_env()
         assert auth_module._API_TOKEN == explicit
         assert auth_module._INSECURE_MODE is False
+        assert current_token_source() == "env"
 
     def test_insecure_opt_in_disables_auth(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -257,6 +308,8 @@ class TestTokenResolution:
         configure_auth_from_env()
         assert auth_module._API_TOKEN == ""
         assert auth_module._INSECURE_MODE is True
+        assert current_token_source() == "insecure"
+        assert is_auth_required() is False
 
     def test_default_generates_persistent_token(self, tmp_path: Path) -> None:
         """默认（无 token、无 insecure）→ 自动生成并落地 device token。"""
@@ -264,6 +317,7 @@ class TestTokenResolution:
         generated = auth_module._API_TOKEN
         assert generated  # 非空，fail-closed
         assert auth_module._INSECURE_MODE is False
+        assert current_token_source() == "device_file"
 
         token_file = tmp_path / "docrestore" / "device_token"
         assert token_file.is_file()

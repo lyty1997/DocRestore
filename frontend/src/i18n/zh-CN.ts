@@ -307,6 +307,21 @@ export const zhCN = {
   "tokenSettings.hintSuffix": "。未设置时留空即可。",
   "tokenSettings.placeholder": "粘贴 API Token",
   "tokenSettings.ariaLabel": "API Token 设置",
+  "tokenSettings.howToTitle": "如何获取 Token？",
+  "tokenSettings.howToDeviceStep1": "在运行后端服务的电脑上打开终端",
+  "tokenSettings.howToDeviceStep2": "运行命令查看自动生成的 token：",
+  "tokenSettings.howToDeviceStep3": "复制输出的 token，粘贴到下方输入框并保存",
+  "tokenSettings.howToDeviceNote":
+    "首次启动后端时会自动生成该 token 并保存在上述文件，重启后保持不变。",
+  "tokenSettings.howToEnvStep1": "Token 由部署者通过环境变量 ",
+  "tokenSettings.howToEnvStep1Suffix": " 设置",
+  "tokenSettings.howToEnvStep2":
+    "向部署该服务的人索取该 token，或查看启动配置，复制后粘贴到下方保存",
+  "tokenSettings.insecureNote":
+    "当前服务运行在本机无鉴权模式，无需设置 Token。",
+  // ── 缺少 Token 顶部横幅 ──
+  "tokenBanner.message": "未设置 API Token，无法访问后端服务",
+  "tokenBanner.action": "去设置",
 
   // ── 文件上传 ──
   "fileUploader.selectFiles": "选择文件",
@@ -374,7 +389,8 @@ export const zhCN = {
     "输出目录（output_dir）被安全策略拒绝：必须落在服务端受信工作根之下" +
     "（默认系统临时目录，可由 DOCRESTORE_WORK_ROOT 配置），" +
     "以防误删工作根外的任意目录",
-  "errors.api.unauthorized": "缺少或无效的 API Token",
+  "errors.api.unauthorized":
+    "缺少或无效的 API Token，请在侧边栏「API Token 设置」中配置",
   "errors.api.service_not_initialized": "服务未初始化",
   "errors.api.engine_manager_not_initialized": "OCR 引擎管理器未初始化",
   "errors.api.task_not_found": "任务不存在",

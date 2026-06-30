@@ -34,6 +34,7 @@ import os
 import secrets
 import stat
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Depends, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -56,9 +57,17 @@ _LOOPBACK_HOSTS = frozenset(
     {"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"},
 )
 
+# token 来源（供 GET /auth/info 给前端定制"如何获取 token"指引，绝不含 token 值）：
+# - env：来自 DOCRESTORE_API_TOKEN 环境变量（部署者设定，前端向其索取）
+# - device_file：默认自动生成并落地的 device token（前端 cat 配置文件获取）
+# - insecure：无鉴权模式（前端无需设置 token）
+# - unknown：直接经 configure_auth 注入（多为测试），按 env 同等对待
+TokenSource = Literal["env", "device_file", "insecure", "unknown"]
+
 # ── 模块级状态 ──────────────────────────────────────────────
 _API_TOKEN: str = ""
 _INSECURE_MODE: bool = False  # 显式无鉴权（DOCRESTORE_ALLOW_INSECURE）
+_TOKEN_SOURCE: TokenSource = "unknown"  # noqa: S105 — 来源枚举非密钥
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
@@ -86,6 +95,14 @@ def _config_dir() -> Path:
     return base / "docrestore"
 
 
+def device_token_path() -> Path:
+    """device token 持久化文件完整路径（``<配置目录>/device_token``）。
+
+    供启动日志提示用户「在哪读取 token」；不读取内容、不暴露 token 值。
+    """
+    return _config_dir() / _DEVICE_TOKEN_FILENAME
+
+
 def _read_device_token(token_path: Path) -> str:
     """读取持久化 device token，读不到 / 为空一律返回空串。"""
     try:
@@ -100,7 +117,7 @@ def _load_or_create_device_token() -> str:
     落地失败时回退内存临时 token（重启后配对失效，打 warning），保证服务仍
     fail-closed（始终有 token 强制校验）。
     """
-    token_path = _config_dir() / _DEVICE_TOKEN_FILENAME
+    token_path = device_token_path()
     existing = _read_device_token(token_path)
     if existing:
         return existing
@@ -135,15 +152,18 @@ def _load_or_create_device_token() -> str:
         return token
 
 
-def configure_auth(token: str) -> None:
+def configure_auth(token: str, *, source: TokenSource = "unknown") -> None:
     """底层 setter：直接设置全局 token（空字符串 = 无鉴权模式）。
 
     供测试与 :func:`configure_auth_from_env` 复用；生产启动应走
-    :func:`configure_auth_from_env`。
+    :func:`configure_auth_from_env`。``source`` 标记 token 来源（仅供
+    ``GET /auth/info`` 给前端定制"如何获取 token"指引；token 为空时恒记
+    为 ``insecure``）。
     """
-    global _API_TOKEN, _INSECURE_MODE  # noqa: PLW0603
+    global _API_TOKEN, _INSECURE_MODE, _TOKEN_SOURCE  # noqa: PLW0603
     _API_TOKEN = token.strip()
     _INSECURE_MODE = not _API_TOKEN
+    _TOKEN_SOURCE = source if _API_TOKEN else "insecure"
     if _API_TOKEN:
         logger.info("API 认证已启用（静态 Bearer token）")
     else:
@@ -158,21 +178,25 @@ def configure_auth_from_env() -> None:
     """
     explicit = os.environ.get(_ENV_API_TOKEN, "").strip()
     if explicit:
-        configure_auth(explicit)
+        configure_auth(explicit, source="env")
         return
 
     if _is_truthy(os.environ.get(_ENV_ALLOW_INSECURE)):
-        configure_auth("")
+        configure_auth("", source="insecure")
         logger.warning(
             "%s 已开启：API 无鉴权运行，bind 守卫仅允许绑定环回地址",
             _ENV_ALLOW_INSECURE,
         )
         return
 
-    configure_auth(_load_or_create_device_token())
+    configure_auth(_load_or_create_device_token(), source="device_file")
+    # 操作者友好：在服务端日志直说「如何拿到 token」（只打印路径与命令，绝不打印
+    # token 值），让自部署用户无需翻源码就能在前端「Token 设置」完成配对。
     logger.info(
-        "未设 %s：已自动生成 device token 并强制校验（手机配对用此 token）",
-        _ENV_API_TOKEN,
+        "未设 %s：已启用 device token 鉴权（手机/前端配对用此 token）。获取方式："
+        "本机运行 `cat %s` 查看 token 填入前端「Token 设置」；"
+        "或设 %s=<自定义token> 后重启改用自定义 token。",
+        _ENV_API_TOKEN, device_token_path(), _ENV_API_TOKEN,
     )
 
 
@@ -275,3 +299,15 @@ async def require_auth_ws(
 def _constant_time_equal(a: str, b: str) -> bool:
     """防时序攻击的字符串比较。"""
     return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
+# ── 公共鉴权信息（供 GET /auth/info；绝不暴露 token 值） ──────────
+
+def is_auth_required() -> bool:
+    """当前是否要求 token 鉴权（False = insecure 无鉴权模式，前端无需设 token）。"""
+    return bool(_API_TOKEN)
+
+
+def current_token_source() -> TokenSource:
+    """当前 token 来源枚举（不含 token 值），供前端定制「如何获取 token」指引。"""
+    return _TOKEN_SOURCE

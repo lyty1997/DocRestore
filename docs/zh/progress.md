@@ -1,5 +1,16 @@
 # 开发进度
 
+## 2026-06-30 - 收口访问日志明文 token 泄露 + 前端缺 token 引导
+
+- **主题**：用户反馈两点——① 后端访问日志出现 `?token=<明文>` 明文 token（`<img>`/`<a>`/WS 走 query param 鉴权，uvicorn 默认 access formatter 原样打印请求行）；② 自部署用户不清楚缺 token 时去哪获取、怎么填。
+- **完成**（分支 `bugfix/token-leak-and-onboarding`）：
+  - **日志脱敏**：新增 `api/log_redaction.py`（`AccessLogTokenRedactor` 挂 `uvicorn.access` **+ `uvicorn.error`**，遍历 record.args 所有字符串项把请求行 query string 里的 token/api_token/access_token 值替换成 `<redacted>`），`create_app` 幂等安装。鉴权链路零改动。**对抗式审计抓出 HIGH 漏点**：WS 握手日志走 `uvicorn.error`、URL 在 args[1]（非 access 的 args[2]），最初只挂 access 会漏脱——改为遍历 args + 双 logger 修复，并补 `AccessFormatter` 集成测试锁定契约。
+  - **缺 token 引导**：免鉴权 `GET /auth/info` 返回 `{auth_required, token_source}`（**不含 token 值**）；`auth.py` 记 token 来源 + getter + device_file 启动日志补「`cat <路径>` 获取」操作指引。前端 `useAuthStatus` 派生 `needsToken`、`MissingTokenBanner` 顶部横幅、`TokenSettings` 按来源定制「如何获取 Token」步骤、`errors.api.unauthorized` 文案可操作化；三语 i18n 同步。
+  - **测试**：后端 `test_log_redaction.py` + `test_auth.py` 扩（source 解析 + `/auth/info` 免鉴权可读不含 token 值）；前端 `MissingTokenBanner`/`TokenSettings`/`useAuthStatus`/`getAuthInfo`。门禁 EXIT=0（后端 1657 passed / 前端 typecheck+lint 0 error）。
+  - **文档**：`known-issues.md` 新增专段（根因/修复/红线/测试）。
+- **红线**：`/auth/info` 与日志只暴露 token 来源/路径、绝不暴露 token 值；横幅仅在服务明确要求 token 且本地无 token 时弹（insecure / 拉取失败不弹，避免误报）。
+- **遗留**：无。
+
 ## 2026-06-30 - 修复 #95 PII 含撇号/连字符西文人名漏脱出云
 
 - **主题**：错误处理审计遗留的 PII 召回缺陷——`_looks_like_name` 把含撇号的西文人名（`O'Brien`/`d'Angelo`）整条丢弃 → 不脱敏直接出云。

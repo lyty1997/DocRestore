@@ -290,6 +290,21 @@ export const zhTW: Record<TranslationKey, string> = {
   "tokenSettings.hintSuffix": "。未設定時留空即可。",
   "tokenSettings.placeholder": "貼上 API Token",
   "tokenSettings.ariaLabel": "API Token 設定",
+  "tokenSettings.howToTitle": "如何取得 Token？",
+  "tokenSettings.howToDeviceStep1": "在執行後端服務的電腦上開啟終端機",
+  "tokenSettings.howToDeviceStep2": "執行指令查看自動產生的 token：",
+  "tokenSettings.howToDeviceStep3": "複製輸出的 token，貼到下方輸入框並儲存",
+  "tokenSettings.howToDeviceNote":
+    "首次啟動後端時會自動產生該 token 並儲存於上述檔案，重啟後保持不變。",
+  "tokenSettings.howToEnvStep1": "Token 由部署者透過環境變數 ",
+  "tokenSettings.howToEnvStep1Suffix": " 設定",
+  "tokenSettings.howToEnvStep2":
+    "向部署該服務的人索取該 token，或查看啟動設定，複製後貼到下方儲存",
+  "tokenSettings.insecureNote":
+    "目前服務執行在本機無鑑權模式，無需設定 Token。",
+  // ── 缺少 Token 頂部橫幅 ──
+  "tokenBanner.message": "未設定 API Token，無法存取後端服務",
+  "tokenBanner.action": "前往設定",
 
   // ── 檔案上傳 ──
   "fileUploader.selectFiles": "選擇檔案",
@@ -378,7 +393,8 @@ export const zhTW: Record<TranslationKey, string> = {
     "輸出目錄（output_dir）被安全策略拒絕：必須落在伺服端受信工作根之下" +
     "（預設系統暫存目錄，可由 DOCRESTORE_WORK_ROOT 設定），" +
     "以防誤刪工作根外的任意目錄",
-  "errors.api.unauthorized": "缺少或無效的 API Token",
+  "errors.api.unauthorized":
+    "缺少或無效的 API Token，請在側邊欄「API Token 設定」中設定",
   "errors.api.service_not_initialized": "服務未初始化",
   "errors.api.engine_manager_not_initialized": "OCR 引擎管理器未初始化",
   "errors.api.task_not_found": "任務不存在",

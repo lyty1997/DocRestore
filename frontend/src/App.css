@@ -3730,6 +3730,99 @@ body {
   border-color: var(--color-error);
 }
 
+/* ── Token 获取指引（TokenSettings 内） ── */
+.token-howto {
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+}
+
+.token-howto-title {
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 0.5rem;
+}
+
+.token-howto-steps {
+  margin: 0;
+  padding-left: 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.token-howto-cmd {
+  display: block;
+  margin-top: 0.3rem;
+  background: var(--color-bg);
+  padding: 0.4rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  color: var(--color-primary);
+  user-select: all;
+  word-break: break-all;
+}
+
+.token-howto-note {
+  margin: 0.6rem 0 0;
+  font-size: 0.8rem;
+  opacity: 0.85;
+}
+
+.token-insecure-note {
+  background: var(--color-success-bg);
+  border: 1px solid var(--color-success);
+  border-radius: 6px;
+  padding: 0.6rem 0.9rem;
+  margin-bottom: 1rem;
+  font-size: 0.85rem;
+  color: var(--color-text);
+}
+
+/* ── 缺少 Token 顶部横幅（App 主内容区顶部） ── */
+.missing-token-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: var(--color-warning-bg);
+  border: 1px solid var(--color-warning);
+  border-radius: 8px;
+  padding: 0.7rem 1rem;
+  margin: 0 0 1rem;
+  color: var(--color-text);
+  font-size: 0.9rem;
+}
+
+.missing-token-banner-icon {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.missing-token-banner-msg {
+  flex: 1;
+}
+
+.missing-token-banner-btn {
+  background: var(--color-warning-dark);
+  color: var(--color-on-primary);
+  border: none;
+  border-radius: 5px;
+  padding: 0.4rem 0.9rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: opacity 0.15s;
+}
+
+.missing-token-banner-btn:hover {
+  opacity: 0.88;
+}
+
 .token-input-row {
   display: flex;
   gap: 0.5rem;
