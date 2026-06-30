@@ -327,14 +327,24 @@ class TestLooksLikeName:
         assert _looks_like_name("张三") is True
         assert _looks_like_name("Acme Inc") is True
 
+    def test_apostrophe_hyphen_western_names_pass(self) -> None:
+        """#95：含撇号/连字符的西文人名内合法标点不再导致整条丢弃。"""
+        assert _looks_like_name("O'Brien") is True
+        assert _looks_like_name("d'Angelo") is True
+        assert _looks_like_name("Jean-Paul") is True
+        # 带 & / 编号的机构名（& 非结构字符，字母占比 ≥ 0.5）
+        assert _looks_like_name("Smith & Co") is True
+
     def test_file_name_rejected(self) -> None:
         assert _looks_like_name("photo_1.jpg") is False
         assert _looks_like_name("a.PNG") is False
 
     def test_markup_fragment_rejected(self) -> None:
+        # #95 收窄后真结构字符（; > < ) \ 等）仍丢弃，overredaction 防护不退化。
         assert _looks_like_name("a<b") is False
-        assert _looks_like_name(";'>cell") is False
+        assert _looks_like_name(";>cell") is False  # ; 与 > 仍是结构字符
         assert _looks_like_name("L)-aspartate") is False
+        assert _looks_like_name(r"\mu") is False
 
     def test_digit_heavy_rejected(self) -> None:
         # 字母占比 < 0.5（数字/标点为主）
@@ -450,3 +460,71 @@ class TestEntityReplacementStructureSafe:
         assert 'src="images/photo_501_94_after_1.jpg"' in out
         # LaTeX 原样
         assert "$ \\mu $" in out
+
+
+class TestApostropheNameRedaction95:
+    """#95：含撇号/连字符的西文人名经词表替换后从出云文本中被脱敏。
+
+    根因——`_looks_like_name` 旧 `_MARKUP_CHARS` 含半角 `'`/`"`，把 NER 正向判定的
+    `O'Brien` 整条丢弃、不脱敏直接出云。收窄结构字符集后，这类人名落自由文本由
+    `_sub_in_free` 词边界安全替换。断言全部从入参派生（无写死数据集标识）。
+    """
+
+    def test_apostrophe_person_names_redacted_out_of_cloud_text(self) -> None:
+        """含撇号西文人名在出云文本中被脱敏（验收主项）。"""
+        cfg = PIIConfig(enable=True, redact_person_name=True)
+        redactor = PIIRedactor(cfg)
+        names = ("O'Brien", "d'Angelo")
+        text = f"{names[0]} met {names[1]} at noon."
+        lexicon = EntityLexicon(person_names=names, org_names=())
+
+        out, records = redactor.apply_lexicon(text, lexicon)
+
+        for name in names:
+            assert name not in out  # 不再泄漏出云
+        assert cfg.person_name_placeholder in out
+        assert sum(r.count for r in records) == len(names)
+
+    def test_hyphenated_name_redacted_via_replace(self) -> None:
+        """连字符西文人名走 _replace_entities 词边界精确替换（不吃词内子串）。"""
+        name = "Jean-Paul"
+        out, count = _replace_entities(f"{name} arrived", [name], "[P]")
+
+        assert count == 1
+        assert name not in out
+        assert "[P] arrived" in out
+
+    def test_org_name_with_ampersand_redacted(self) -> None:
+        """带 & 的机构名（& 非结构字符）经词表替换被脱敏。"""
+        cfg = PIIConfig(enable=True, redact_org_name=True)
+        redactor = PIIRedactor(cfg)
+        org = "Smith & Co"
+        lexicon = EntityLexicon(person_names=(), org_names=(org,))
+
+        out, _ = redactor.apply_lexicon(f"works at {org} today", lexicon)
+
+        assert org not in out
+        assert cfg.org_name_placeholder in out
+
+    def test_contraction_not_overredacted_when_not_in_lexicon(self) -> None:
+        """回归：收窄撇号不影响未被 NER 命中的缩写词——词表不含即不动。"""
+        out, count = _replace_entities(
+            "I don't know O'Brien", ["O'Brien"], "[P]",
+        )
+
+        assert count == 1
+        assert "don't" in out  # 缩写不在词表，原样保留
+        assert "O'Brien" not in out
+
+    def test_structural_fragment_with_apostrophe_still_dropped(self) -> None:
+        """回归：撇号叠加真结构字符的碎片仍被丢弃（结构防护不退化）。"""
+        cfg = PIIConfig(enable=True, redact_org_name=True)
+        redactor = PIIRedactor(cfg)
+        # `;'>kcat` 含 ; 与 > 真结构字符 → 仍丢弃，不替换、不破坏文本。
+        fragment = ";'>kcat"
+        lexicon = EntityLexicon(person_names=(), org_names=(fragment,))
+
+        out, records = redactor.apply_lexicon(f"x {fragment} y", lexicon)
+
+        assert out == f"x {fragment} y"  # 未替换
+        assert records == []

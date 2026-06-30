@@ -40,9 +40,12 @@ _MIN_ENTITY_LEN = 2  # 短于此（单字"的"/"人"、单符号）一律跳过
 _HIGH_FREQ_WARN = 50  # 单实体替换次数超此 → 疑似误检，告警（仍执行）
 _MAX_ENTITY_LEN = 64  # 实体长度超此 → 疑似把整句当实体，**丢弃**（误检净化）
 
-#: markup/结构字符：实体名含任一即非"名字"（如 `;'>kcat` / `U<` / `L)-aspartate`），
-#: 用于词表净化把结构碎片挡在替换之外（详见 pii-entity-overredaction-fix.md §3-B2）。
-_MARKUP_CHARS = frozenset("/\\<>${};'\"()[]|=`")
+#: 真结构字符：实体名含任一即非"名字"（如 `;>kcat` / `U<` / `L)-aspartate`），用于词表
+#: 净化把结构碎片挡在替换之外（详见 pii-entity-overredaction-fix.md §3-B2）。
+#: 撇号 `'` 与双引号 `"` 是西文人名内合法标点（`O'Brien` / `d'Angelo`），故**不**列入——
+#: 否则含撇号真实人名被整条丢弃、确定性放走出云（#95）。它们落自由文本，已由
+#: :func:`split_protected` 结构保护 + :func:`_sub_in_free` ASCII 词边界安全替换。
+_MARKUP_CHARS = frozenset("/\\<>${};()[]|=`")
 
 #: 以常见文件扩展名收尾的候选（如 `xxx.jpg`）一律丢弃——图片标识符不是人名/机构名。
 _FILE_EXT_RE = re.compile(
