@@ -114,12 +114,27 @@ function unionBBox(boxes: readonly LineBoxTuple[]): RegionBBox {
   return { x0, y0, x1, y1 };
 }
 
+interface XExtent {
+  readonly x0: number;
+  readonly x1: number;
+}
+
+// 某文件某页的 x 并集恒定，但 computeMagnifierRegion 每次悬停都会调用 pageXExtent，
+// 若每次都 O(行数) 全扫，大文件悬停热路径白费。按 fileIndex 弱引用缓存「page → x 并集」：
+// fileIndex 在版面载入时建一次、身份稳定（不原地改），GC 掉即缓存自动释放，无泄漏。
+const pageXExtentCache = new WeakMap<FileLineIndex, Map<string, XExtent>>();
+
 /** 当前页所有行的 x 并集 → 固定「行宽参考」。横向恒用它而非逐行 bbox 宽度，
- *  使放大缩放不随行长变化（短行不被铺开拉大、字号稳定），只纵向跟随光标。 */
-function pageXExtent(
-  fileIndex: FileLineIndex,
-  page: string,
-): { readonly x0: number; readonly x1: number } {
+ *  使放大缩放不随行长变化（短行不被铺开拉大、字号稳定），只纵向跟随光标。
+ *  结果按 fileIndex+page 缓存，避免每次悬停重扫全文件。 */
+function pageXExtent(fileIndex: FileLineIndex, page: string): XExtent {
+  let byPage = pageXExtentCache.get(fileIndex);
+  if (byPage === undefined) {
+    byPage = new Map();
+    pageXExtentCache.set(fileIndex, byPage);
+  }
+  const cached = byPage.get(page);
+  if (cached !== undefined) return cached;
   let x0 = Number.POSITIVE_INFINITY;
   let x1 = Number.NEGATIVE_INFINITY;
   for (const box of fileIndex.values()) {
@@ -127,7 +142,9 @@ function pageXExtent(
     x0 = Math.min(x0, box.bbox[0]);
     x1 = Math.max(x1, box.bbox[2]);
   }
-  return { x0, x1 };
+  const ext: XExtent = { x0, x1 };
+  byPage.set(page, ext);
+  return ext;
 }
 
 /** 当前行无 bbox 时，向上下交替扫描最近有 bbox 的行（先下后上，稳定）。 */

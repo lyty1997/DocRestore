@@ -25,6 +25,20 @@ export function normalizeForMatch(text: string): string {
     .slice(0, PREFIX_LEN);
 }
 
+// 候选块的 normalizeForMatch(block.text) 恒定，但 matchBlock 每次光标落点都会
+// 对全候选集调用它。按 block 对象弱引用缓存归一化结果，避免每次移动重算；block
+// 来自版面载入时解析的稳定对象，GC 掉即缓存自动释放（未命中退化为原开销，不影响正确性）。
+const normalizedBlockCache = new WeakMap<LayoutBlockPayload, string>();
+
+/** 取候选块归一化文字（带 WeakMap 缓存，见上）。 */
+function normalizedCandidate(block: LayoutBlockPayload): string {
+  const cached = normalizedBlockCache.get(block);
+  if (cached !== undefined) return cached;
+  const normalized = normalizeForMatch(block.text);
+  normalizedBlockCache.set(block, normalized);
+  return normalized;
+}
+
 /** 最长公共子串长度（O(n·m) 滚动数组；归一化后串 ≤ PREFIX_LEN，开销可忽略）。 */
 function longestCommonSubstring(a: string, b: string): number {
   const n = a.length;
@@ -71,7 +85,7 @@ export function matchBlock(
   let best: LayoutBlockPayload | undefined;
   let bestScore = 0;
   for (const block of blocks) {
-    const candidate = normalizeForMatch(block.text);
+    const candidate = normalizedCandidate(block);
     if (candidate === "") continue;
     const score = overlapScore(target, candidate);
     if (score > bestScore) {

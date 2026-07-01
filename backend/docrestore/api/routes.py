@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import io
+import ipaddress
 import json
 import logging
 import zipfile
@@ -138,8 +139,26 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _is_loopback_client(request: Request) -> bool:
+    """请求是否来自本机回环（127.0.0.0/8 / ::1，含 IPv4-mapped）。
+
+    ``request.client`` 缺失或地址不可解析 → 保守判为**非**本机（不暴露路径）。
+    """
+    client = request.client
+    if client is None:
+        return False
+    try:
+        host = ipaddress.ip_address(client.host)
+    except ValueError:
+        return False
+    mapped = getattr(host, "ipv4_mapped", None)
+    if mapped is not None:  # ::ffff:127.0.0.1 → 归一成 IPv4 再判回环
+        host = mapped
+    return host.is_loopback
+
+
 @health_router.get("/auth/info", include_in_schema=False)
-async def auth_info() -> AuthInfoResponse:
+async def auth_info(request: Request) -> AuthInfoResponse:
     """无鉴权：返回是否需要 API Token 及 token 来源（**绝不返回 token 值**）。
 
     前端拿到 token 前需先读它，故挂在免鉴权 health_router 上。用途：
@@ -147,19 +166,19 @@ async def auth_info() -> AuthInfoResponse:
     - 需要 token 时按 ``token_source`` 给「在部署机器上如何获取 token」的指引
       （device_file → cat 配置文件；env → 向部署者索取/查环境变量）。
 
-    ``token_file``：仅 device_file / unknown 来源回传 device token 文件的**真实路径**
-    （遵循 XDG_CONFIG_HOME / 平台约定），供前端显示精确 ``cat <path>``，取代前端硬编码
-    的默认路径（设了 XDG 或非 Linux 平台会指错文件）。**只暴露路径、绝不含 token 值**。
+    ``token_file``：device token 文件的**真实路径**（遵循 XDG / 平台约定），
+    供前端显示精确 ``cat <path>``，取代硬编码默认路径（XDG 或非 Linux 会指错）。
+    该路径含部署机 OS 用户名/目录布局，属内部信息，故**仅当来源确为 device_file
+    且请求来自本机回环**才回传（本机操作者才需 cat 该文件）；远程/LAN 客户端拿
+    ``None``，token 由部署者带外下发、不应看到路径。``unknown`` 来源（注入式，
+    token 非取自该文件）一律不回传。**只暴露路径、绝不含 token 值**。
     """
     source = current_token_source()
+    expose_path = source == "device_file" and _is_loopback_client(request)
     return AuthInfoResponse(
         auth_required=is_auth_required(),
         token_source=source,
-        token_file=(
-            str(device_token_path())
-            if source in ("device_file", "unknown")
-            else None
-        ),
+        token_file=str(device_token_path()) if expose_path else None,
     )
 
 
@@ -1663,13 +1682,13 @@ def _find_processed_image(
 ) -> Path | None:
     """逐 variant 目录按原图名找处理图（``{stem}{tag}{suffix}``），越界/缺失跳过。
 
-    词法 ``is_relative_to`` 不跟随 symlink 守卫，再 ``is_file`` 跟随确认存在。
+    ``doc_dir`` 穿越守卫复用 ``_resolve_doc_dir_target`` 单点实现（拒 ``..``/绝对 +
+    resolve 后 ``is_relative_to``，不跟随 symlink），避免此处再抄一份而与之漂移；
+    命中候选再 ``is_file`` 跟随确认存在。非法 ``doc_dir`` → None（调用方 404）。
     """
     output_dir = Path(output_dir_str).resolve(strict=False)
-    target_dir = (
-        (output_dir / doc_dir).resolve(strict=False) if doc_dir else output_dir
-    )
-    if not target_dir.is_relative_to(output_dir):
+    target_dir = _resolve_doc_dir_target(output_dir, doc_dir)
+    if target_dir is None:
         return None
     original = Path(name)
     for dirname, tag in variants:
@@ -1881,14 +1900,10 @@ async def get_processed_image(
             APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
         )
 
-    # name 必须是单层原图基名（无目录分隔/穿越）；doc_dir 可多层但禁穿越/绝对。
+    # name 必须是单层原图基名（无目录分隔/穿越）→ 400。doc_dir 的穿越/绝对守卫下沉到
+    # _find_processed_image → _resolve_doc_dir_target（非法 doc_dir → 无匹配 → 404，
+    # 与 /layout、/code-layout 同口径），不在此重复一份词法校验。
     if not name or ".." in name or "/" in name or "\\" in name:
-        raise ApiBusinessError(
-            APIErrorCode.INVALID_FILENAME, 400, "非法文件名",
-        )
-    if doc_dir and (
-        ".." in Path(doc_dir).parts or Path(doc_dir).is_absolute()
-    ):
         raise ApiBusinessError(
             APIErrorCode.INVALID_FILENAME, 400, "非法文件名",
         )

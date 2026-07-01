@@ -11,6 +11,7 @@ import {
   LanguageContext,
   STORAGE_KEY,
   getInitialLanguage,
+  interpolate,
   lookupTranslation,
   type Language,
   type TranslationFn,
@@ -36,13 +37,9 @@ export function LanguageProvider({
 
   const t: TranslationFn = useCallback(
     (key, params) => {
-      let text = lookupTranslation(language, key);
-      if (params !== undefined) {
-        for (const [k, v] of Object.entries(params)) {
-          text = text.replaceAll(`{${k}}`, String(v));
-        }
-      }
-      return text;
+      const text = lookupTranslation(language, key);
+      // 插值逻辑（含 $ 转义防护）抽到 config.interpolate，便于单测锁定回归。
+      return params === undefined ? text : interpolate(text, params);
     },
     [language],
   );

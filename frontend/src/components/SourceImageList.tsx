@@ -75,7 +75,9 @@ export const SourceImageList = forwardRef<
                 alt={image.name}
                 title={image.name}
                 className={imageClassName}
-                onClick={() => { setLightboxSrc(displaySrc); }}
+                // lightbox 恒开原图：全屏无 bbox 叠框，原图更清晰，且避开处理图
+                // 404 时闭包仍抓着失效 displaySrc 导致点开裂图。
+                onClick={() => { setLightboxSrc(src); }}
                 onError={
                   displaySrc === src
                     ? undefined

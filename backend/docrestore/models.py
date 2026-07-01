@@ -172,6 +172,12 @@ class PipelineWarning:
     code: str
     params: dict[str, str | int] = field(default_factory=dict)
 
+    def __hash__(self) -> int:
+        """显式哈希：默认 frozen hash 会算 ``params`` dict → ``TypeError``；改用
+        ``(code, sorted items)``，与 ``__eq__`` 一致，令实例可入 set / 作 dict key。
+        """
+        return hash((self.code, tuple(sorted(self.params.items()))))
+
     def to_dict(self) -> dict[str, object]:
         """→ JSON 可序列化 dict（DB 落盘 / API 载荷统一形态）。"""
         return {"code": self.code, "params": dict(self.params)}
