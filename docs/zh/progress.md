@@ -1,5 +1,20 @@
 # 开发进度
 
+## 2026-07-01 - 收口 ultracode 代码审查发现的多处缺陷
+
+- **主题**：对 `main...HEAD`（101 文件）跑 workflow 版多 agent 代码审查（xhigh），合并去重后逐条修复所有通过验证的发现（1 条 style 被判 refuted 不改）。分支 `bugfix/ultracode-review-fixes`，commit `93ca8d0`。
+- **正确性缺陷**：
+  - **docx 导出静默损坏**：`docx.py` 第二趟 pandoc 补 `-t docx`。原实现靠扩展名推断，`export_to_cache` 传 `.docx.tmp` 原子写临时路径时 pandoc 判成 HTML、exit 0 不报错，下游把 HTML 冒充 `.docx`（Word 打不开）。
+  - **code layout 放大镜端到端断头 + 裁剪坐标错位**：`CodeFileLayoutPayload` 补 `line_map`（#5 精修行映射本已算好却被 API drop）+ `CodeLayoutPayload` 补 `processed`（代码模式现支持手动裁剪，行 bbox 落裁剪图坐标系）；路由复用文档侧 `_has_processed_files`，前端 `CodeSourceMagnifier` processed 时改显处理图（404 回退原图，回退态绑 preferredSrc 免 stale）。
+  - **PDF 单页隔离退化**：`pdf.py` 逐页 except 加宽 `RuntimeError`（pdfium 绑定层对坏页抛的非 PdfiumError 通用异常不再冲出丢整份 PDF）；`AttributeError`/`MemoryError` 仍上抛。
+  - **前端小修**：DocCodePreview 警告 key 带 index（重复警告不折叠）；SourceImageList/CodeSourceMagnifier `<img>` key 绑 displaySrc，处理图 404 回退不再 stale 致裂图。
+- **后端降级警告 i18n 重构（#96 收尾）**：硬编码中文 warning 改结构化 `PipelineWarning(code, params)`，前端 `taskDetail.warnings.*` 三语本地化；DB 向后兼容旧任务裸中文串（`legacy` 包裹不丢失，`legacy: "{text}"` 模板统一走 t()）。贯穿 models/pipeline/database/task_manager/schemas/routes + 前端 schema/DocCodePreview/三语 locale + 测试。
+- **token 上手引导**：`/auth/info` 增 `token_file` 回传真实设备令牌路径（遵循 XDG/平台约定，仅路径无值），取代前端硬编码 `~/.config/docrestore/device_token`（设 XDG 或 macOS/Windows 会指错文件）。
+- **复用/效率**：抽 `output/sidecar_common.py`（`as_int_pair/quad` + JSON 读写）三 sidecar 去重；`routes._resolve_doc_dir_target` 路径穿越守卫单点化；`client.ts fetchOptionalLayout`；前端 `bboxRect.ts`；schemas 复用 `auth.TokenSource`；`_write_doc_layout_sidecar` PII 脱敏电池整体 offload 线程（不再阻塞事件循环）；log_redaction 零分配快路径。
+- **规范**：清理测试/文档中硬编码 `DSC*` 数据集标识（仅本 PR 新增处，历史日志不动）。
+- **门禁**：`check_quality.sh` EXIT=0（mypy --strict / ruff / typos / tsc / eslint / pytest 1659 passed）+ 前端 vitest 262 passed。
+- **遗留**：docx `-t docx` 修复无单测（需 pandoc，靠审查 verify agent 复现佐证）；审查的 Sweep/Synthesize 两步因会话额度中断，未覆盖 finder 未触达文件（覆盖不完整）。
+
 ## 2026-06-30 - 收口访问日志明文 token 泄露 + 前端缺 token 引导
 
 - **主题**：用户反馈两点——① 后端访问日志出现 `?token=<明文>` 明文 token（`<img>`/`<a>`/WS 走 query param 鉴权，uvicorn 默认 access formatter 原样打印请求行）；② 自部署用户不清楚缺 token 时去哪获取、怎么填。
