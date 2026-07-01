@@ -17,6 +17,9 @@ interface TokenSettingsProps {
   readonly authRequired?: boolean | undefined;
   /** token 来源（来自 /auth/info），用于定制"如何获取"指引；缺省按 device_file。 */
   readonly tokenSource?: TokenSource | undefined;
+  /** device token 文件真实路径（来自 /auth/info，仅 device_file/unknown 提供）；
+   *  用于显示精确 cat 命令，缺省回退默认路径。 */
+  readonly tokenFile?: string | undefined;
 }
 
 /** 遮蔽 token 显示：保留前 4 位和后 4 位 */
@@ -28,7 +31,7 @@ function maskToken(token: string): string {
 }
 
 export function TokenSettings(
-  { onClose, authRequired, tokenSource }: TokenSettingsProps,
+  { onClose, authRequired, tokenSource, tokenFile }: TokenSettingsProps,
 ): React.JSX.Element {
   const { t } = useTranslation();
   const [current, setCurrent] = useState(loadApiToken);
@@ -37,6 +40,10 @@ export function TokenSettings(
 
   // 默认按 device_file（后端默认就是自动生成的 device token）给指引。
   const effectiveSource: TokenSource = tokenSource ?? "device_file";
+  // device token 读取命令：优先用后端回传的真实路径（遵循 XDG / 平台约定，解决
+  // 硬编码 ~/.config 在设了 XDG 或非 Linux 平台指错文件），缺省回退默认路径。
+  // 整条一个字符串不断行，避免复制出错。
+  const deviceTokenCmd = `cat ${tokenFile ?? "~/.config/docrestore/device_token"}`;
   const showInsecureNote = authRequired === false;
   // 未保存且需要鉴权时才展示"如何获取"，引导用户先拿到 token 再粘贴。
   const showHowTo = !showInsecureNote && !hasSaved;
@@ -101,9 +108,7 @@ export function TokenSettings(
                 <li>{t("tokenSettings.howToDeviceStep1")}</li>
                 <li>
                   {t("tokenSettings.howToDeviceStep2")}
-                  <code className="token-howto-cmd">
-                    cat ~/.config/docrestore/device_token
-                  </code>
+                  <code className="token-howto-cmd">{deviceTokenCmd}</code>
                 </li>
                 <li>{t("tokenSettings.howToDeviceStep3")}</li>
               </ol>

@@ -20,6 +20,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from docrestore.api.auth import TokenSource
+
 
 class LLMConfigRequest(BaseModel):
     """LLM 配置（请求级覆盖）"""
@@ -273,6 +275,18 @@ class TaskResponse(BaseModel):
     mode: str = "doc"
 
 
+class WarningPayload(BaseModel):
+    """软降级警告载荷（#96）：i18n code + 参数，前端按 code 本地化渲染。
+
+    与 :class:`docrestore.models.PipelineWarning` 同构（后端不再回传硬编码中文文案）。
+    ``params`` 值仅 str/int，作前端 i18n 插值。旧任务的裸中文串在持久层还原为
+    ``code="legacy"`` + ``params={"text": 原串}``，前端 legacy 直接显示 text。
+    """
+
+    code: str
+    params: dict[str, str | int] = Field(default_factory=dict)
+
+
 class TaskResultResponse(BaseModel):
     """任务结果响应（单篇文档）
 
@@ -286,9 +300,9 @@ class TaskResultResponse(BaseModel):
     doc_title: str = ""
     doc_dir: str = ""
     error: str = ""
-    #: 软降级警告（#96，非致命）：VL 退本地推理 / PDF 缺页 / 段截断等。error
-    #: 为空但 warnings 非空 = 文档可用但有降级，前端显示软提示而非失败态。
-    warnings: list[str] = Field(default_factory=list)
+    #: 软降级警告（#96，非致命，结构化 code+params）：VL 退本地推理 / PDF 缺页 /
+    #: 段截断等。error 为空但 warnings 非空 = 文档可用但有降级，前端显示软提示。
+    warnings: list[WarningPayload] = Field(default_factory=list)
 
 
 class TaskResultsResponse(BaseModel):
@@ -444,16 +458,25 @@ class CodeFileLayoutPayload(BaseModel):
 
     path: str
     lines: list[CodeLineBoxPayload]
+    #: #5 行映射：按**精修后**正文行序（0-based）索引、值为该行对应的原 OCR
+    #: line_no（= ``lines`` 的 CodeLineBox.line_no 键），None = rewrite/repair 新增行
+    #: → 前端不放大。空 = 精修守恒（identity，前端按 displayLineNumber 直接查表）。
+    #: 缺省 ``[]`` 兼容旧 sidecar / 无精修任务。前端放大镜依赖此字段做行号换算，
+    #: 缺则 rewrite/repair 移位文件悬停会放大错行（sidecar 已算好、务必透传）。
+    line_map: list[int | None] = []  # noqa: RUF012 — pydantic 字段默认，非可变类属性
 
 
 class CodeLayoutPayload(BaseModel):
     """代码任务行级版面载荷（#93）：各源文件逐行 bbox，供悬停行↔原图局部放大。
 
-    代码模式无 content_crop / 无矫正 → bbox 恒在原图坐标系，故无 ``processed`` 字段
-    （前端加载原图读 naturalWidth/Height 即可）。
+    ``processed``：与 ``LayoutPayload.processed`` 同义——代码模式现也支持**手动裁剪**
+    （§14.1），裁剪图落 ``.content_crop/{stem}_crop`` 后 OCR 在其上跑，行 bbox 遂在
+    **裁剪图坐标系**。为真时前端放大镜须改显对应处理图才对齐（逐页 onError 回退：
+    未裁剪页 bbox 本在原图系，回退原图即对）。无任何裁剪时为假（bbox=原图坐标）。
     """
 
     files: list[CodeFileLayoutPayload]
+    processed: bool = False
 
 
 class UploadSessionResponse(BaseModel):
@@ -591,5 +614,9 @@ class AuthInfoResponse(BaseModel):
 
     #: True = 服务要求 token 鉴权；False = insecure 无鉴权模式（前端无需设 token）
     auth_required: bool
-    #: token 来源：env（环境变量）/ device_file（自动生成落地）/ insecure / unknown
-    token_source: Literal["env", "device_file", "insecure", "unknown"]
+    #: token 来源：env（环境变量）/ device_file（自动生成落地）/ insecure / unknown。
+    #: 复用 auth.TokenSource 单一真相源，避免枚举分支两处漂移。
+    token_source: TokenSource
+    #: device token 文件真实路径（仅 device_file / unknown 来源提供，遵循 XDG /
+    #: 平台约定）；供前端显示精确 ``cat <path>``。env/insecure → None。只路径无值。
+    token_file: str | None = None

@@ -519,50 +519,54 @@ export async function listSourceImages(
 }
 
 /**
- * 获取任务版面高亮载荷（Epic E：编辑器光标↔原图 bbox 高亮）。
+ * 拉取可选的版面 sidecar 载荷（layout / code-layout 共用）。
  *
- * 无 sidecar（非 VL 引擎 / 老任务 / 文档模式未产出版面）→ 后端 404 →
- * 返回 undefined（前端不高亮、不弹错误）；多文档可传 docDir 取对应子目录。
+ * 无 sidecar（非 VL 引擎 / 老任务 / 模式不产出版面）→ 后端 404 → 返回 undefined
+ * （前端不高亮/不放大、不弹错误）；多文档可传 docDir 取对应子目录。``endpoint`` 为
+ * 端点段（``layout`` / ``code-layout``）。两端点「空数据」语义在此单点维护。
  */
-export async function getTaskLayout(
+async function fetchOptionalLayout<T>(
   taskId: string,
+  endpoint: string,
+  schema: { parse: (data: unknown) => T },
   docDir?: string,
-): Promise<LayoutPayload | undefined> {
-  const query =
-    docDir !== undefined && docDir !== ""
-      ? `?doc_dir=${encodeURIComponent(docDir)}`
-      : "";
-  const response = await fetch(`${API_BASE}/tasks/${taskId}/layout${query}`, {
-    headers: apiHeaders(),
-  });
-  if (response.status === 404) {
-    return undefined;
-  }
-  return handleResponse(response, LayoutPayloadSchema);
-}
-
-/**
- * 获取代码任务行级版面载荷（#93：悬停行↔原图局部放大）。
- *
- * 无 sidecar（非 VL 引擎 / 老任务 / 文档或 PPT 模式）→ 后端 404 → 返回 undefined
- * （前端不显示放大镜、不弹错误）；多文档可传 docDir 取对应子目录。
- */
-export async function getTaskCodeLayout(
-  taskId: string,
-  docDir?: string,
-): Promise<CodeLayoutPayload | undefined> {
+): Promise<T | undefined> {
   const query =
     docDir !== undefined && docDir !== ""
       ? `?doc_dir=${encodeURIComponent(docDir)}`
       : "";
   const response = await fetch(
-    `${API_BASE}/tasks/${taskId}/code-layout${query}`,
+    `${API_BASE}/tasks/${taskId}/${endpoint}${query}`,
     { headers: apiHeaders() },
   );
   if (response.status === 404) {
     return undefined;
   }
-  return handleResponse(response, CodeLayoutPayloadSchema);
+  return handleResponse(response, schema);
+}
+
+/**
+ * 获取任务版面高亮载荷（Epic E：编辑器光标↔原图 bbox 高亮）。
+ * 无 sidecar → 404 → undefined（前端不高亮、不弹错误）；多文档可传 docDir。
+ */
+export function getTaskLayout(
+  taskId: string,
+  docDir?: string,
+): Promise<LayoutPayload | undefined> {
+  return fetchOptionalLayout(taskId, "layout", LayoutPayloadSchema, docDir);
+}
+
+/**
+ * 获取代码任务行级版面载荷（#93：悬停行↔原图局部放大）。
+ * 无 sidecar → 404 → undefined（前端不显示放大镜、不弹错误）；多文档可传 docDir。
+ */
+export function getTaskCodeLayout(
+  taskId: string,
+  docDir?: string,
+): Promise<CodeLayoutPayload | undefined> {
+  return fetchOptionalLayout(
+    taskId, "code-layout", CodeLayoutPayloadSchema, docDir,
+  );
 }
 
 /** 构建源图片 URL（附加 token 供 <img src> 直接使用） */

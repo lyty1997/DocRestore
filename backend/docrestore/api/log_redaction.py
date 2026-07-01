@@ -80,7 +80,8 @@ class AccessLogTokenRedactor(logging.Filter):
         if isinstance(args, tuple) and args:
             new_args: list[object] | None = None
             for i, item in enumerate(args):
-                # 仅扫含 "token=" 的字符串项（跳过 client_addr/method/状态码等），省开销
+                # 仅对含 "token=" 的字符串项脱敏（跳过 client_addr/method 等）。
+                # 直接 .lower() 后判子串：大小写不敏感，覆盖非常规大小写的 query。
                 if isinstance(item, str) and "token=" in item.lower():
                     redacted = redact_token_in_text(item)
                     if redacted != item:

@@ -8,6 +8,7 @@
 import { useRef } from "react";
 
 import type { CropBox } from "../api/schemas";
+import { bboxToPercentRect } from "../features/task/bboxRect";
 
 type DragMode = "move" | "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
 
@@ -120,10 +121,9 @@ export function CropEditor({
     }
   };
 
-  const left = (box.x0 / naturalWidth) * 100;
-  const top = (box.y0 / naturalHeight) * 100;
-  const width = ((box.x1 - box.x0) / naturalWidth) * 100;
-  const height = ((box.y1 - box.y0) / naturalHeight) * 100;
+  const { left, top, width, height } = bboxToPercentRect(
+    [box.x0, box.y0, box.x1, box.y1], naturalWidth, naturalHeight,
+  );
 
   // 框外压暗：上 / 下 / 左 / 右四块精确遮罩（不能用 9999px box-shadow——溢出
   // 图区且无法裁剪：裁剪会切掉贴边手柄，多编辑器同屏时压暗还会层层叠加致全黑）

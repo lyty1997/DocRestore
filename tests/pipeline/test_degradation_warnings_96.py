@@ -40,7 +40,8 @@ def test_apply_pdf_missing_warnings_matches_by_doc_dir() -> None:
 
     assert results[0].warnings == []
     assert len(results[1].warnings) == 1
-    assert "3" in results[1].warnings[0]
+    assert results[1].warnings[0].code == "pdf_pages_missing"
+    assert results[1].warnings[0].params["count"] == 3  # 从输入 {"a": 3} 派生
     assert results[1].error == ""  # 仍 COMPLETED，不翻失败
     assert results[2].warnings == []
 
@@ -52,7 +53,8 @@ def test_apply_pdf_missing_warnings_single_pdf_root_key() -> None:
     _apply_pdf_missing_warnings(results, {"": 2})
 
     assert len(results[0].warnings) == 1
-    assert "2" in results[0].warnings[0]
+    assert results[0].warnings[0].code == "pdf_pages_missing"
+    assert results[0].warnings[0].params["count"] == 2  # 从输入 {"": 2} 派生
 
 
 def test_apply_pdf_missing_warnings_empty_map_is_noop() -> None:
@@ -76,7 +78,7 @@ def test_engine_degraded_warnings_maps_captured_reason() -> None:
     for code in ("vl_no_server_python", "vl_server_python_missing"):
         out = Pipeline._engine_degraded_warnings(code)
         assert len(out) == 1
-        assert "VL" in out[0]
+        assert out[0].code == "vl_fell_back_to_local"
 
     # 未知码也透出、不静默
     assert Pipeline._engine_degraded_warnings("something_else") != []

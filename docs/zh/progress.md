@@ -1,5 +1,38 @@
 # 开发进度
 
+## 2026-07-01 - 补跑 ultracode 审查 Sweep/Synthesize 并收口 10 处发现
+
+- **背景**：上一批（commit `93ca8d0`）的多 agent 审查在 Sweep（补漏）/Synthesize（合并去重）两步撞会话额度中断，覆盖对 finder 未触达文件不完整。本次重跑该缺失段（含针对性指令：系统覆盖 finder 漏掉的边界/测试/i18n 文件 + 复审 `93ca8d0` 自身是否引入回归）。10 finder → 23 候选 → 逐点对抗式 verify → 保留 12 条、驳回 4 条。**关键结论：多数确证缺陷是 `93ca8d0` 自己引入的回归**——正是这段补漏审查的价值所在。
+- **确证并修复（CONFIRMED）**：
+  - **放大预览裂图**：`SourceImageList` lightbox onClick 改传原图 `src`（原传 `displaySrc` 处理图 URL，404 回退只改 `<img>.src` 不改闭包 → 点开全屏裂图；全屏无 bbox 叠框本就该用原图）。
+  - **i18n 插值被 `$` 吃字**：`t()` 用 `String.prototype.replaceAll(pattern, 字符串)` 会把值里 `$&`/`$'`/`` $` ``/`$<name>` 当替换模式解释（OCR 文件名含 `$` 序列时降级警告文案 garble）。抽 `config.interpolate` 改**函数式替换**（按字面插入）一处根治全项目 `t()` 插值 + 补 `tests/i18n/interpolate.test.ts` 锁定。
+  - **log_redaction「零分配快路径」写反**：`"token=" in item or "token=" in item.lower()` 对无 token 的公共日志行第一个 `in` 恒 False → 仍走 `.lower()`、还多一次 `in`（脱敏仍正确、但注释误导且略慢）。退回 `"token=" in item.lower()`。
+  - **`/auth/info` 给 `unknown` 来源发错 token 路径**：`unknown`（注入式，token 非取自设备文件）不再回传 `token_file`（原前端引导 `cat` 到空/过期文件）。
+- **安全 + 正确性修复（PLAUSIBLE）**：
+  - **`/auth/info` 免鉴权泄露 device_token 绝对路径**（含 OS 用户名/home 布局）：新增 `_is_loopback_client`，**仅来源确为 device_file 且请求来自本机回环**才回传路径；远程/LAN 客户端拿 `None`（token 本由部署者带外下发）。补 2 个测试（远程客户端 + unknown 来源均 → None）。
+  - **pdf 逐页 except 顺带吞编程 bug**：`RecursionError`/`NotImplementedError` 是 `RuntimeError` 子类，先 `isinstance` 判定上抛再吞坏页，名实相符。
+  - **frozen dataclass + 可变 dict 的 hash 陷阱**：`PipelineWarning` 显式 `__hash__`（`(code, sorted items)`），避免默认 hash 触碰 `params` dict 令 `set()`/dict key 当场 `TypeError`。
+  - **路径穿越守卫第三份拷贝漂移**：`_find_processed_image` 改调 `_resolve_doc_dir_target` 单点守卫，`get_processed_image` 去掉重复内联 doc_dir 校验（非法 doc_dir 由 400 改 404，与 `/layout`、`/code-layout` 同口径；`name` → 400 守卫保留，受测试固定）。
+  - **两处悬停热路径推测性优化**：`codeLineMagnifier.pageXExtent`（WeakMap 按 fileIndex 缓存 per-page x 并集）+ `blockMatch.normalizedCandidate`（WeakMap 缓存候选块归一化）——均按对象弱引用缓存、GC 自动释放、行为不变。
+- **决策**：⑧ 采「loopback 门控」（用户拍板，优于移除/接受）；清理 ⑨（两套 404 回退 hook 强抽公共件）判过度工程**跳过**，仅做 ⑩⑪ 性能（用户拍板）。
+- **门禁**：`check_quality.sh` EXIT=0（mypy --strict 93 文件 / ruff / typos / tsc -b / eslint 0 error / pytest **1661** passed）+ 前端 vitest **270** passed。
+- **遗留**：无（补漏批次闭环）。分支 `bugfix/ultracode-review-fixes`（本批未 push）。
+
+## 2026-07-01 - 收口 ultracode 代码审查发现的多处缺陷
+
+- **主题**：对 `main...HEAD`（101 文件）跑 workflow 版多 agent 代码审查（xhigh），合并去重后逐条修复所有通过验证的发现（1 条 style 被判 refuted 不改）。分支 `bugfix/ultracode-review-fixes`，commit `93ca8d0`。
+- **正确性缺陷**：
+  - **docx 导出静默损坏**：`docx.py` 第二趟 pandoc 补 `-t docx`。原实现靠扩展名推断，`export_to_cache` 传 `.docx.tmp` 原子写临时路径时 pandoc 判成 HTML、exit 0 不报错，下游把 HTML 冒充 `.docx`（Word 打不开）。
+  - **code layout 放大镜端到端断头 + 裁剪坐标错位**：`CodeFileLayoutPayload` 补 `line_map`（#5 精修行映射本已算好却被 API drop）+ `CodeLayoutPayload` 补 `processed`（代码模式现支持手动裁剪，行 bbox 落裁剪图坐标系）；路由复用文档侧 `_has_processed_files`，前端 `CodeSourceMagnifier` processed 时改显处理图（404 回退原图，回退态绑 preferredSrc 免 stale）。
+  - **PDF 单页隔离退化**：`pdf.py` 逐页 except 加宽 `RuntimeError`（pdfium 绑定层对坏页抛的非 PdfiumError 通用异常不再冲出丢整份 PDF）；`AttributeError`/`MemoryError` 仍上抛。
+  - **前端小修**：DocCodePreview 警告 key 带 index（重复警告不折叠）；SourceImageList/CodeSourceMagnifier `<img>` key 绑 displaySrc，处理图 404 回退不再 stale 致裂图。
+- **后端降级警告 i18n 重构（#96 收尾）**：硬编码中文 warning 改结构化 `PipelineWarning(code, params)`，前端 `taskDetail.warnings.*` 三语本地化；DB 向后兼容旧任务裸中文串（`legacy` 包裹不丢失，`legacy: "{text}"` 模板统一走 t()）。贯穿 models/pipeline/database/task_manager/schemas/routes + 前端 schema/DocCodePreview/三语 locale + 测试。
+- **token 上手引导**：`/auth/info` 增 `token_file` 回传真实设备令牌路径（遵循 XDG/平台约定，仅路径无值），取代前端硬编码 `~/.config/docrestore/device_token`（设 XDG 或 macOS/Windows 会指错文件）。
+- **复用/效率**：抽 `output/sidecar_common.py`（`as_int_pair/quad` + JSON 读写）三 sidecar 去重；`routes._resolve_doc_dir_target` 路径穿越守卫单点化；`client.ts fetchOptionalLayout`；前端 `bboxRect.ts`；schemas 复用 `auth.TokenSource`；`_write_doc_layout_sidecar` PII 脱敏电池整体 offload 线程（不再阻塞事件循环）；log_redaction 零分配快路径。
+- **规范**：清理测试/文档中硬编码 `DSC*` 数据集标识（仅本 PR 新增处，历史日志不动）。
+- **门禁**：`check_quality.sh` EXIT=0（mypy --strict / ruff / typos / tsc / eslint / pytest 1659 passed）+ 前端 vitest 262 passed。
+- **遗留**：docx `-t docx` 修复无单测（需 pandoc，靠审查 verify agent 复现佐证）；审查的 Sweep/Synthesize 两步因会话额度中断，未覆盖 finder 未触达文件（覆盖不完整）。
+
 ## 2026-06-30 - 收口访问日志明文 token 泄露 + 前端缺 token 引导
 
 - **主题**：用户反馈两点——① 后端访问日志出现 `?token=<明文>` 明文 token（`<img>`/`<a>`/WS 走 query param 鉴权，uvicorn 默认 access formatter 原样打印请求行）；② 自部署用户不清楚缺 token 时去哪获取、怎么填。

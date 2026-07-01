@@ -211,10 +211,17 @@ def render_pdf_to_dir(
                 dst = out_dir / f"{name_prefix}page_{i + 1:0{width}d}.png"
                 image.save(dst)
                 rendered += 1
-            except (pdfium.PdfiumError, OSError, ValueError):
+            except (pdfium.PdfiumError, OSError, ValueError, RuntimeError) as exc:
+                # RecursionError/NotImplementedError 是 RuntimeError 子类、属编程 bug，
+                # 先判子类上抛，勿被当"坏页"吞掉长期掩盖（否则真 bug 伪装成坏页跳过）。
+                if isinstance(exc, (RecursionError, NotImplementedError)):
+                    raise
                 # 只吞渲染/图像 IO 异常（坏页、不可保存）：坏页跳过而非炸整篇。
-                # AttributeError/TypeError 等编程 bug 不在此列，照常向上抛由调用方
-                # 记为整篇失败，避免被当成"坏页"长期掩盖。
+                # RuntimeError 覆盖 pdfium 绑定层对个别坏页抛的非 PdfiumError 通用异常
+                # （否则单坏页会漏出、被调用方当整篇失败，丢掉其余好页）。
+                # AttributeError/TypeError/NameError 等编程 bug、以及 MemoryError 等
+                # 系统级异常不在此列，照常向上抛（前者避免被当"坏页"长期掩盖，后者
+                # 进程状态已不可信、不宜逐页吞）。
                 logger.warning(
                     "PDF 第 %d 页渲染失败，跳过: %s",
                     i + 1, pdf_path.name, exc_info=True,

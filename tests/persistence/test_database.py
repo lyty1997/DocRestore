@@ -24,6 +24,7 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
+from docrestore.models import PipelineWarning
 from docrestore.persistence.database import TaskDatabase
 from docrestore.pipeline.config import LLMConfig
 
@@ -155,7 +156,8 @@ async def test_insert_and_get_result_errors(db: TaskDatabase) -> None:
 async def test_result_warnings_roundtrip_and_back_compat(
     db: TaskDatabase,
 ) -> None:
-    """软降级 warnings 应持久化往返（#96），旧三/四元组缺省为空列表。"""
+    """软降级 warnings 应持久化往返（#96）：新式结构化 code+params 原样往返、旧任务
+    裸中文串向后兼容包成 legacy、旧三/四元组缺省为空列表。"""
     await db.insert_task(
         task_id="t002warn",
         status="completed",
@@ -163,10 +165,17 @@ async def test_result_warnings_roundtrip_and_back_compat(
         output_dir="/out",
     )
     await db.insert_results("t002warn", [
-        # 五元组：携带 warnings JSON 数组
+        # 五元组：新式结构化 warnings（code+params）JSON
         (
             "/out/document.md", "降级文档", "",
-            "", '["VL 退回本地推理", "源 PDF 渲染缺失 2 页"]',
+            "",
+            '[{"code": "vl_fell_back_to_local", "params": {}}, '
+            '{"code": "pdf_pages_missing", "params": {"count": 2}}]',
+        ),
+        # 五元组：旧任务遗留的裸中文串 → 向后兼容包成 legacy（不丢失）
+        (
+            "/out/legacy/document.md", "旧文档", "legacy",
+            "", '["旧任务中文警告"]',
         ),
         # 四元组（旧调用方，无 warnings）→ 默认空列表
         ("/out/ok/document.md", "正常文档", "ok", ""),
@@ -175,11 +184,19 @@ async def test_result_warnings_roundtrip_and_back_compat(
     ])
 
     results = await db.get_results("t002warn")
-    assert len(results) == 3
-    assert results[0].warnings == ["VL 退回本地推理", "源 PDF 渲染缺失 2 页"]
+    assert len(results) == 4
+    # 新式结构化 warnings 原样往返（code+params）
+    assert results[0].warnings == [
+        PipelineWarning("vl_fell_back_to_local"),
+        PipelineWarning("pdf_pages_missing", {"count": 2}),
+    ]
     assert results[0].error == ""  # 软降级不占用 error（任务仍 completed）
-    assert results[1].warnings == []
+    # 旧任务裸中文串 → legacy 包裹，原串保留在 params["text"]
+    assert results[1].warnings == [
+        PipelineWarning("legacy", {"text": "旧任务中文警告"}),
+    ]
     assert results[2].warnings == []
+    assert results[3].warnings == []
 
 
 async def test_delete_task_cascades_results(db: TaskDatabase) -> None:

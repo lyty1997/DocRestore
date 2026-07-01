@@ -27,6 +27,7 @@ from pathlib import Path
 
 import aiosqlite
 
+from docrestore.models import PipelineWarning
 from docrestore.pipeline.config import (
     CodeRestoreConfig,
     LLMConfig,
@@ -109,8 +110,8 @@ class ResultRow:
     doc_title: str
     doc_dir: str
     error: str
-    #: 软降级警告（#96，非致命）；末尾 + 默认空列表，兼容旧行/旧测试。
-    warnings: list[str] = field(default_factory=list)
+    #: 软降级警告（#96，结构化 code+params）；末尾 + 默认空，兼容旧行/旧测试。
+    warnings: list[PipelineWarning] = field(default_factory=list)
 
 
 @dataclass
@@ -136,11 +137,13 @@ class TaskListResult:
     page_size: int
 
 
-def _parse_warnings_json(raw: object) -> list[str]:
-    """把 DB warnings 列的 JSON 数组字符串解析为 ``list[str]``（#96）。
+def _parse_warnings_json(raw: object) -> list[PipelineWarning]:
+    """把 DB warnings 列的 JSON 数组字符串解析为 ``list[PipelineWarning]``（#96）。
 
     旧行 NULL / 脏数据不应炸读取路径：只吞 JSON 解码这一可预期异常并记 warning
-    （不静默、不宽吞编程 bug），非 list 或非字符串元素一律归一化。
+    （不静默、不宽吞编程 bug），非 list 一律归一化空。逐元素经
+    ``PipelineWarning.from_json_item`` 还原（新式 ``{code,params}`` / 旧任务裸中文串
+    → legacy 包裹），旧任务警告不丢失、前端仍可显示。
     """
     if not isinstance(raw, str) or not raw:
         return []
@@ -153,7 +156,7 @@ def _parse_warnings_json(raw: object) -> list[str]:
         return []
     if not isinstance(parsed, list):
         return []
-    return [str(item) for item in parsed]
+    return [PipelineWarning.from_json_item(item) for item in parsed]
 
 
 class TaskDatabase:

@@ -614,7 +614,9 @@ class TaskManager:
             rows = [
                 (
                     str(r.output_path), r.doc_title, r.doc_dir, r.error,
-                    json.dumps(r.warnings, ensure_ascii=False),
+                    json.dumps(
+                        [w.to_dict() for w in r.warnings], ensure_ascii=False,
+                    ),
                 )
                 for r in results
             ]

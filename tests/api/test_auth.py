@@ -222,6 +222,17 @@ class TestAuthInfo:
         ) as ac:
             yield ac
 
+    @staticmethod
+    def _client_with_host(host: str) -> AsyncClient:
+        """构造挂 health_router 的客户端，模拟请求来自 ``host``（验回环门控）。"""
+        app = FastAPI()
+        app.add_exception_handler(
+            ApiBusinessError, api_business_error_handler,  # type: ignore[arg-type]
+        )
+        app.include_router(health_router, prefix="/api/v1")
+        transport = ASGITransport(app=app, client=(host, 12345))
+        return AsyncClient(transport=transport, base_url="http://test")
+
     @pytest.mark.asyncio
     async def test_open_without_token_and_hides_value(
         self, info_client: AsyncClient,
@@ -236,6 +247,9 @@ class TestAuthInfo:
         assert body["auth_required"] is True
         assert body["token_source"] == expected_source
         assert secret not in resp.text  # 不泄露 token 值
+        # device_file 来源回传真实文件路径（供前端精确 cat），只路径不含 token 值
+        assert body["token_file"] is not None
+        assert body["token_file"].endswith("device_token")
 
     @pytest.mark.asyncio
     async def test_insecure_mode_reports_not_required(
@@ -249,6 +263,36 @@ class TestAuthInfo:
         expected_source = "insecure"
         assert body["auth_required"] is False
         assert body["token_source"] == expected_source
+        assert body["token_file"] is None  # insecure 不回传路径
+
+    @pytest.mark.asyncio
+    async def test_token_file_hidden_from_remote_client(self) -> None:
+        """device_file 但请求非回环（远程/LAN）→ 不回传路径（token_source 仍给）。
+
+        路径含部署机 home 绝对路径（OS 用户名/目录布局），只应对本机操作者可见。
+        """
+        secret = "device-secret-remote"  # noqa: S105 — 测试用假 token
+        configure_auth(secret, source="device_file")
+        async with self._client_with_host("203.0.113.5") as ac:  # TEST-NET-3
+            resp = await ac.get("/api/v1/auth/info")
+        assert resp.status_code == 200
+        body = resp.json()
+        expected_source = "device_file"
+        assert body["token_source"] == expected_source
+        assert body["token_file"] is None  # 非本机不暴露 home 绝对路径
+
+    @pytest.mark.asyncio
+    async def test_token_file_hidden_for_unknown_source(self) -> None:
+        """unknown 来源（注入式，token 非取自设备文件）即便本机也不回传路径。"""
+        secret = "injected-secret"  # noqa: S105 — 测试用假 token
+        configure_auth(secret)  # 默认 source="unknown"
+        async with self._client_with_host("127.0.0.1") as ac:
+            resp = await ac.get("/api/v1/auth/info")
+        assert resp.status_code == 200
+        body = resp.json()
+        expected_source = "unknown"
+        assert body["token_source"] == expected_source
+        assert body["token_file"] is None  # unknown 一律不回传
 
 
 class TestErrorSanitization:

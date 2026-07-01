@@ -8,6 +8,8 @@
 
 import type React from "react";
 
+import { bboxToPercentRect } from "../features/task/bboxRect";
+
 interface BlockHighlightOverlayProps {
   /** 原图像素 bbox ``(x0, y0, x1, y1)``。 */
   readonly bbox: readonly [number, number, number, number];
@@ -21,11 +23,7 @@ export function BlockHighlightOverlay({
 }: BlockHighlightOverlayProps): React.JSX.Element | undefined {
   const [w, h] = imageSize;
   if (w <= 0 || h <= 0) return undefined;
-  const [x0, y0, x1, y1] = bbox;
-  const left = (x0 / w) * 100;
-  const top = (y0 / h) * 100;
-  const width = ((x1 - x0) / w) * 100;
-  const height = ((y1 - y0) / h) * 100;
+  const { left, top, width, height } = bboxToPercentRect(bbox, w, h);
   return (
     <div
       className="block-highlight-overlay"

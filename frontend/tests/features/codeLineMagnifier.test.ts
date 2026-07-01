@@ -32,6 +32,7 @@ function fidx(entries: readonly (readonly [number, LineBox])[]): FileLineIndex {
 describe("buildLineIndex", () => {
   it("建 path→line_no 索引；同 line_no 保留首个（去重防御）", () => {
     const payload: CodeLayoutPayload = {
+      processed: false,
       files: [{
         path: "app/foo.py",
         lines: [
@@ -182,6 +183,7 @@ const NO_SRC = null;
 describe("buildLineMaps", () => {
   it("建 path → line_map（保留 null 与空数组）", () => {
     const payload: CodeLayoutPayload = {
+      processed: false,
       files: [
         { path: "a.py", lines: [], line_map: [10, NO_SRC, 12] },
         { path: "b.py", lines: [], line_map: [] },

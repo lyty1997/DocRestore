@@ -88,11 +88,15 @@ class DocxExporter:
                 ],
                 cwd=doc_dir, tool=self.tool, fmt=self.suffix,
             )
-            # 第二遍：HTML → docx（<table>/<img> 转原生、MathML → OMML）
+            # 第二遍：HTML → docx（<table>/<img> 转原生、MathML → OMML）。
+            # 必须显式 -t docx：out_path 可能是带 .tmp 后缀的原子写临时文件
+            # （export_to_cache 传 ``{stem}.docx.tmp``），pandoc 靠扩展名推断会
+            # 误判为 HTML、exit 0 不报错，下游拿到 HTML 冒充 .docx（静默损坏）。
             run_export_command(
                 [
                     pandoc, str(html_path),
                     "-f", "html",
+                    "-t", "docx",
                     "-o", str(out_path),
                     "--resource-path", str(doc_dir),
                 ],
