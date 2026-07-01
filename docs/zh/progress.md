@@ -1,5 +1,23 @@
 # 开发进度
 
+## 2026-07-01 - 补跑 ultracode 审查 Sweep/Synthesize 并收口 10 处发现
+
+- **背景**：上一批（commit `93ca8d0`）的多 agent 审查在 Sweep（补漏）/Synthesize（合并去重）两步撞会话额度中断，覆盖对 finder 未触达文件不完整。本次重跑该缺失段（含针对性指令：系统覆盖 finder 漏掉的边界/测试/i18n 文件 + 复审 `93ca8d0` 自身是否引入回归）。10 finder → 23 候选 → 逐点对抗式 verify → 保留 12 条、驳回 4 条。**关键结论：多数确证缺陷是 `93ca8d0` 自己引入的回归**——正是这段补漏审查的价值所在。
+- **确证并修复（CONFIRMED）**：
+  - **放大预览裂图**：`SourceImageList` lightbox onClick 改传原图 `src`（原传 `displaySrc` 处理图 URL，404 回退只改 `<img>.src` 不改闭包 → 点开全屏裂图；全屏无 bbox 叠框本就该用原图）。
+  - **i18n 插值被 `$` 吃字**：`t()` 用 `String.prototype.replaceAll(pattern, 字符串)` 会把值里 `$&`/`$'`/`` $` ``/`$<name>` 当替换模式解释（OCR 文件名含 `$` 序列时降级警告文案 garble）。抽 `config.interpolate` 改**函数式替换**（按字面插入）一处根治全项目 `t()` 插值 + 补 `tests/i18n/interpolate.test.ts` 锁定。
+  - **log_redaction「零分配快路径」写反**：`"token=" in item or "token=" in item.lower()` 对无 token 的公共日志行第一个 `in` 恒 False → 仍走 `.lower()`、还多一次 `in`（脱敏仍正确、但注释误导且略慢）。退回 `"token=" in item.lower()`。
+  - **`/auth/info` 给 `unknown` 来源发错 token 路径**：`unknown`（注入式，token 非取自设备文件）不再回传 `token_file`（原前端引导 `cat` 到空/过期文件）。
+- **安全 + 正确性修复（PLAUSIBLE）**：
+  - **`/auth/info` 免鉴权泄露 device_token 绝对路径**（含 OS 用户名/home 布局）：新增 `_is_loopback_client`，**仅来源确为 device_file 且请求来自本机回环**才回传路径；远程/LAN 客户端拿 `None`（token 本由部署者带外下发）。补 2 个测试（远程客户端 + unknown 来源均 → None）。
+  - **pdf 逐页 except 顺带吞编程 bug**：`RecursionError`/`NotImplementedError` 是 `RuntimeError` 子类，先 `isinstance` 判定上抛再吞坏页，名实相符。
+  - **frozen dataclass + 可变 dict 的 hash 陷阱**：`PipelineWarning` 显式 `__hash__`（`(code, sorted items)`），避免默认 hash 触碰 `params` dict 令 `set()`/dict key 当场 `TypeError`。
+  - **路径穿越守卫第三份拷贝漂移**：`_find_processed_image` 改调 `_resolve_doc_dir_target` 单点守卫，`get_processed_image` 去掉重复内联 doc_dir 校验（非法 doc_dir 由 400 改 404，与 `/layout`、`/code-layout` 同口径；`name` → 400 守卫保留，受测试固定）。
+  - **两处悬停热路径推测性优化**：`codeLineMagnifier.pageXExtent`（WeakMap 按 fileIndex 缓存 per-page x 并集）+ `blockMatch.normalizedCandidate`（WeakMap 缓存候选块归一化）——均按对象弱引用缓存、GC 自动释放、行为不变。
+- **决策**：⑧ 采「loopback 门控」（用户拍板，优于移除/接受）；清理 ⑨（两套 404 回退 hook 强抽公共件）判过度工程**跳过**，仅做 ⑩⑪ 性能（用户拍板）。
+- **门禁**：`check_quality.sh` EXIT=0（mypy --strict 93 文件 / ruff / typos / tsc -b / eslint 0 error / pytest **1661** passed）+ 前端 vitest **270** passed。
+- **遗留**：无（补漏批次闭环）。分支 `bugfix/ultracode-review-fixes`（本批未 push）。
+
 ## 2026-07-01 - 收口 ultracode 代码审查发现的多处缺陷
 
 - **主题**：对 `main...HEAD`（101 文件）跑 workflow 版多 agent 代码审查（xhigh），合并去重后逐条修复所有通过验证的发现（1 条 style 被判 refuted 不改）。分支 `bugfix/ultracode-review-fixes`，commit `93ca8d0`。
