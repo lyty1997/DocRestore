@@ -35,6 +35,7 @@ from docrestore.api.url_guard import validate_outbound_api_base
 
 from docrestore.api.auth import (
     current_token_source,
+    device_token_path,
     is_auth_required,
     require_auth_ws,
 )
@@ -78,6 +79,7 @@ from docrestore.api.schemas import (
     TaskListResponse,
     TaskResponse,
     TaskResultResponse,
+    WarningPayload,
     TaskResultsResponse,
     UpdateCodeFileRequest,
     UpdateMarkdownRequest,
@@ -144,10 +146,20 @@ async def auth_info() -> AuthInfoResponse:
     - ``auth_required=False``（insecure）→ 前端不提示设 token，避免误报；
     - 需要 token 时按 ``token_source`` 给「在部署机器上如何获取 token」的指引
       （device_file → cat 配置文件；env → 向部署者索取/查环境变量）。
+
+    ``token_file``：仅 device_file / unknown 来源回传 device token 文件的**真实路径**
+    （遵循 XDG_CONFIG_HOME / 平台约定），供前端显示精确 ``cat <path>``，取代前端硬编码
+    的默认路径（设了 XDG 或非 Linux 平台会指错文件）。**只暴露路径、绝不含 token 值**。
     """
+    source = current_token_source()
     return AuthInfoResponse(
         auth_required=is_auth_required(),
-        token_source=current_token_source(),
+        token_source=source,
+        token_file=(
+            str(device_token_path())
+            if source in ("device_file", "unknown")
+            else None
+        ),
     )
 
 
@@ -1008,7 +1020,10 @@ async def get_result(
         markdown=task.result.markdown,
         doc_title=task.result.doc_title,
         doc_dir=task.result.doc_dir,
-        warnings=list(task.result.warnings),
+        warnings=[
+            WarningPayload(code=w.code, params=w.params)
+            for w in task.result.warnings
+        ],
     )
 
 
@@ -1043,7 +1058,10 @@ async def get_results(
             doc_title=r.doc_title,
             doc_dir=r.doc_dir,
             error=r.error,
-            warnings=list(r.warnings),
+            warnings=[
+                WarningPayload(code=w.code, params=w.params)
+                for w in r.warnings
+            ],
         )
         for r in task.results
     ]
@@ -1668,6 +1686,24 @@ def _find_processed_image(
     return None
 
 
+def _resolve_doc_dir_target(output_dir: Path, doc_dir: str) -> Path | None:
+    """把可选 ``doc_dir``（多文档相对子目录）解析为 ``output_dir`` 下的目标目录。
+
+    边界守卫：拒穿越（``..`` / 绝对路径）与 resolve 后越界（词法 ``is_relative_to``
+    不跟随 symlink）；``doc_dir`` 空 → 直接返回 ``output_dir``。非法 → None（调用方
+    404 / 视作无数据）。layout / code-layout 两端点同口径复用，避免路径穿越守卫多处
+    复制后漂移（加固只改此一处）。
+    """
+    if not doc_dir:
+        return output_dir
+    if ".." in Path(doc_dir).parts or Path(doc_dir).is_absolute():
+        return None
+    target_dir = (output_dir / doc_dir).resolve(strict=False)
+    if not target_dir.is_relative_to(output_dir):
+        return None
+    return target_dir
+
+
 @router.get(
     "/tasks/{task_id}/layout",
     response_model=LayoutPayload,
@@ -1694,15 +1730,10 @@ async def get_task_layout(
         from docrestore.output.ppt_layout import load_ppt_layout
 
         output_dir = Path(task.output_dir).resolve(strict=False)
-        # doc_dir 边界守卫：拒 .. / 绝对路径 / 越界（与 get_task_code_file 同口径）
-        if doc_dir:
-            if ".." in Path(doc_dir).parts or Path(doc_dir).is_absolute():
-                return None
-            target_dir = (output_dir / doc_dir).resolve(strict=False)
-            if not target_dir.is_relative_to(output_dir):
-                return None
-        else:
-            target_dir = output_dir
+        # doc_dir 边界守卫（拒 .. / 绝对路径 / 越界，layout/code-layout 同口径）。
+        target_dir = _resolve_doc_dir_target(output_dir, doc_dir)
+        if target_dir is None:
+            return None
 
         # processed：OCR 前做过预处理（PPT 矫正 / content_crop 裁剪 / 手动裁剪）→
         # bbox 在处理图坐标系，前端须改显对应处理图才对齐（§13/§15）。按处理图目录
@@ -1789,20 +1820,19 @@ async def get_task_code_layout(
         from docrestore.output.code_layout_sidecar import load_code_layout
 
         output_dir = Path(task.output_dir).resolve(strict=False)
-        # doc_dir 边界守卫：拒 .. / 绝对路径 / 越界（与 get_task_layout 同口径）
-        if doc_dir:
-            if ".." in Path(doc_dir).parts or Path(doc_dir).is_absolute():
-                return None
-            target_dir = (output_dir / doc_dir).resolve(strict=False)
-            if not target_dir.is_relative_to(output_dir):
-                return None
-        else:
-            target_dir = output_dir
+        # doc_dir 边界守卫（拒 .. / 绝对路径 / 越界，layout/code-layout 同口径）。
+        target_dir = _resolve_doc_dir_target(output_dir, doc_dir)
+        if target_dir is None:
+            return None
 
         code_layout = load_code_layout(target_dir)
         if code_layout is None:
             return None
+        # processed：代码模式手动裁剪（§14.1）后行 bbox 在裁剪图坐标系，前端放大镜
+        # 须改显处理图才对齐（与文档 LayoutPayload.processed 同口径、复用同一探测）。
+        processed = _has_processed_files(target_dir, task)
         return CodeLayoutPayload(
+            processed=processed,
             files=[
                 CodeFileLayoutPayload(
                     path=file_layout.path,
@@ -1814,6 +1844,9 @@ async def get_task_code_layout(
                         )
                         for line in file_layout.lines
                     ],
+                    # #5 精修行映射：sidecar 已算好，透传给前端放大镜做行号换算
+                    # （rewrite/repair 增删行后，缺此映射悬停会放大错行）。
+                    line_map=list(file_layout.line_map),
                 )
                 for file_layout in code_layout.files
             ],

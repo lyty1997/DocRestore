@@ -67,6 +67,10 @@ export const SourceImageList = forwardRef<
               data-page={image.pageKey}
             >
               <img
+                // key 绑 displaySrc：displaySrc 改变（processed 切换 / docDir 变更）时
+                // 重挂 <img>，清掉下面命令式写的 fellBack 标志；否则复用旧元素会带着
+                // 过期 fellBack='1'，新的处理图 URL 再次 404 时 onError 不回退 → 裂图。
+                key={displaySrc}
                 src={displaySrc}
                 alt={image.name}
                 title={image.name}

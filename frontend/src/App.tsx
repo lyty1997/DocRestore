@@ -200,6 +200,7 @@ function App(): React.JSX.Element {
         <TokenSettings
           authRequired={authStatus.authRequired}
           tokenSource={authStatus.tokenSource}
+          tokenFile={authStatus.tokenFile}
           onClose={() => {
             setShowTokenSettings(false);
             authStatus.refresh();

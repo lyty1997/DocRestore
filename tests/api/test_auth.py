@@ -236,6 +236,9 @@ class TestAuthInfo:
         assert body["auth_required"] is True
         assert body["token_source"] == expected_source
         assert secret not in resp.text  # 不泄露 token 值
+        # device_file 来源回传真实文件路径（供前端精确 cat），只路径不含 token 值
+        assert body["token_file"] is not None
+        assert body["token_file"].endswith("device_token")
 
     @pytest.mark.asyncio
     async def test_insecure_mode_reports_not_required(
@@ -249,6 +252,7 @@ class TestAuthInfo:
         expected_source = "insecure"
         assert body["auth_required"] is False
         assert body["token_source"] == expected_source
+        assert body["token_file"] is None  # insecure 不回传路径
 
 
 class TestErrorSanitization:

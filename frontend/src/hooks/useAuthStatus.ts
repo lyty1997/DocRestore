@@ -19,6 +19,8 @@ export interface AuthStatus {
   readonly authRequired: boolean | undefined;
   /** token 来源枚举；undefined = 尚未拿到 /auth/info。 */
   readonly tokenSource: TokenSource | undefined;
+  /** device token 文件真实路径（仅 device_file / unknown 提供）；undefined = 无/未知。 */
+  readonly tokenFile: string | undefined;
   /** 本地 localStorage 是否已保存 token。 */
   readonly hasToken: boolean;
   /** 是否应提示用户设置 token：服务**明确**要求 token 且本地没存。 */
@@ -31,6 +33,7 @@ export function useAuthStatus(): AuthStatus {
   // 无参 useState 重载：初值即 undefined（不显式传 undefined，避免 no-useless-undefined）。
   const [authRequired, setAuthRequired] = useState<boolean | undefined>();
   const [tokenSource, setTokenSource] = useState<TokenSource | undefined>();
+  const [tokenFile, setTokenFile] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
   const [hasToken, setHasToken] = useState<boolean>(() => loadApiToken() !== "");
   // 自增触发器：refresh() 改它 → 拉取 effect 重跑（effect 内 cancelled 标志防竞态）。
@@ -53,6 +56,7 @@ export function useAuthStatus(): AuthStatus {
         if (cancelled) return;
         setAuthRequired(info.auth_required);
         setTokenSource(info.token_source);
+        setTokenFile(info.token_file ?? undefined);
       })
       .catch(() => {
         // /auth/info 拉取失败（后端不可达等）：authRequired 留 undefined，
@@ -61,6 +65,7 @@ export function useAuthStatus(): AuthStatus {
         if (cancelled) return;
         setAuthRequired(undefined);
         setTokenSource(undefined);
+        setTokenFile(undefined);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -74,5 +79,8 @@ export function useAuthStatus(): AuthStatus {
   // authRequired 为 undefined（未知/拉取失败）时不弹横幅，避免打扰。
   const needsToken = authRequired === true && !hasToken;
 
-  return { loading, authRequired, tokenSource, hasToken, needsToken, refresh };
+  return {
+    loading, authRequired, tokenSource, tokenFile, hasToken, needsToken,
+    refresh,
+  };
 }

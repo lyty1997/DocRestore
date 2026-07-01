@@ -484,8 +484,13 @@ export function DocCodePreview({
           <div className="doc-warning-banner" role="alert">
             <span className="doc-warning-icon" aria-hidden="true">⚠</span>
             <ul className="doc-warning-list">
-              {selectedDoc.warnings.map((w) => (
-                <li key={w}>{w}</li>
+              {selectedDoc.warnings.map((w, i) => (
+                // key 带 index：同一 code 可能重复出现（如多个缺口），纯用 code 会
+                // React key 冲突而丢重复项。legacy（旧任务原中文串）走 warnings.legacy
+                // = "{text}" 模板，统一由 t() 渲染，组件内不直接索引 params。
+                <li key={`${String(i)}-${w.code}`}>
+                  {t(`taskDetail.warnings.${w.code}`, w.params)}
+                </li>
               ))}
             </ul>
           </div>

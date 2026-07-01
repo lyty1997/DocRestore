@@ -590,6 +590,7 @@ describe("CodeViewer", () => {
     const user = userEvent.setup();
     // sidecar：3 行 bbox 均属 page1（行号即 OCR line_no，与 data-line / gutter 同源）。
     getTaskCodeLayoutMock.mockResolvedValue({
+      processed: false,
       files: [
         {
           path: "src/foo.cc",
@@ -679,6 +680,7 @@ describe("CodeViewer", () => {
   it("切换到编辑态清空只读悬停的活动行，首次落光标后才高亮（无幽灵当前行）", async () => {
     const user = userEvent.setup();
     getTaskCodeLayoutMock.mockResolvedValue({
+      processed: false,
       files: [
         {
           path: "src/foo.cc",

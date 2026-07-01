@@ -70,11 +70,11 @@ def test_layout_block_from_region_carries_image_ref() -> None:
     """图片区域 → sidecar 块：image_ref 由调用方传入（已解析为输出引用）。"""
     region = LayoutRegion((1, 2, 3, 4), "image", "")
     block = layout_block_from_region(
-        region, text="", image_ref="images/DSC_0.jpg",
+        region, text="", image_ref="images/sample_0.jpg",
     )
     assert block.label == "image"
     assert block.text == ""
-    assert block.image_ref == "images/DSC_0.jpg"
+    assert block.image_ref == "images/sample_0.jpg"
 
 
 def test_round_trip_preserves_image_ref() -> None:

@@ -74,6 +74,7 @@ from docrestore.models import (
     MergedDocument,
     PageOCR,
     PipelineResult,
+    PipelineWarning,
     RefineContext,
     RefinedResult,
     TaskProgress,
@@ -326,7 +327,7 @@ def _apply_pdf_missing_warnings(
         if missing:
             r.warnings = [
                 *r.warnings,
-                f"源 PDF 渲染缺失 {missing} 页（坏页已跳过），文档不完整",
+                PipelineWarning("pdf_pages_missing", {"count": missing}),
             ]
 
 
@@ -1587,33 +1588,41 @@ class Pipeline:
             """图片 / 图表区域：OCR 相对引用 → 最终输出引用，对齐 markdown <img src>。
 
             命名 stem 用 OCR 目录名去 ``_OCR``（与 renderer 同源；裁剪/矫正时是处理图
-            stem，如 ``DSC04643_crop``）。非图片区域 / 无引用 / 无 OCR 目录 → 空。
+            stem，如 ``page01_crop``）。非图片区域 / 无引用 / 无 OCR 目录 → 空。
             """
             if not region.image_ref or page.output_dir is None:
                 return ""
             stem = page.output_dir.name.removesuffix("_OCR")
             return resolve_output_image_ref(stem, region.image_ref)
 
-        layout_pages = [
-            (
-                page.image_path.name,
-                page.image_size,
-                [
-                    layout_block_from_region(
-                        region,
-                        text=_redact(region.content),
-                        image_ref=_image_ref(page, region),
-                    )
-                    for region in page.layout_regions
-                ],
-            )
-            for page in pages_ref
-        ]
-        layout = build_doc_layout(layout_pages)
-        if layout is None:
-            return
+        def _build_and_write() -> None:
+            """构建 sidecar（含 PII 脱敏电池，CPU/NER 密集）+ 落盘。
+
+            整体在线程里跑：``_redact`` 逐区域走 redact_for_cloud（regex + 本地 NER），
+            大文档多页多区域时同步跑会阻塞事件循环（原实现只 offload 落盘）。
+            ``asyncio.to_thread`` 传播 contextvars，出云脱敏策略不受影响。
+            """
+            layout_pages = [
+                (
+                    page.image_path.name,
+                    page.image_size,
+                    [
+                        layout_block_from_region(
+                            region,
+                            text=_redact(region.content),
+                            image_ref=_image_ref(page, region),
+                        )
+                        for region in page.layout_regions
+                    ],
+                )
+                for page in pages_ref
+            ]
+            layout = build_doc_layout(layout_pages)
+            if layout is not None:
+                write_doc_layout(output_dir, layout)
+
         try:
-            await asyncio.to_thread(write_doc_layout, output_dir, layout)
+            await asyncio.to_thread(_build_and_write)
         except OSError:
             logger.warning(
                 "版面高亮 sidecar 落盘失败（不阻断主流程，前端不高亮）",
@@ -2019,8 +2028,13 @@ class Pipeline:
             output_path=render_result.document_path,
             markdown="",
             warnings=[
-                f"code_mode: {len(render_result.written_files)} files, "
-                f"{len(render_result.skipped)} skipped",
+                PipelineWarning(
+                    "code_files_summary",
+                    {
+                        "files": len(render_result.written_files),
+                        "skipped": len(render_result.skipped),
+                    },
+                ),
             ],
         )
 
@@ -3946,39 +3960,40 @@ class Pipeline:
         ), any_truncated
 
     @staticmethod
-    def _engine_degraded_warnings(reason: str) -> list[str]:
-        """引擎降级原因码（#96）转任务级 warning（空原因返回空列表）。
+    def _engine_degraded_warnings(reason: str) -> list[PipelineWarning]:
+        """引擎降级原因码（#96）转任务级结构化 warning（空原因返回空列表）。
 
         ``reason`` 由生产者在本任务 ensure() 时刻同步捕获并透传（**不**读共享 live
-        标志），避免并发混模式任务互改引擎全局 degraded_reason 造成误报/漏报。warning
-        是服务端中文文案（与既有 _collect_warnings 同口径，前端直接渲染、不走 i18n
-        key）；/ocr/status 另透 degraded_reason 码供前端徽章本地化，两条通道各司其职。
+        标志），避免并发混模式任务互改引擎全局 degraded_reason 造成误报/漏报。返回
+        i18n code+params（前端按 code 本地化渲染）；/ocr/status 另透 degraded_reason
+        码供前端徽章本地化，两条通道各司其职。
         """
         if not reason:
             return []
         if reason in ("vl_no_server_python", "vl_server_python_missing"):
-            return [
-                "请求了 PaddleOCR-VL 但退回了本地推理（paddle_server_python "
-                "未配置或路径无效），OCR 结果与 VL 模式不符"
-            ]
-        return [f"OCR 引擎降级：{reason}"]
+            return [PipelineWarning("vl_fell_back_to_local")]
+        return [PipelineWarning("engine_degraded", {"reason": reason})]
 
     @staticmethod
     def _collect_warnings(
         refined_results: list[RefinedResult],
         all_gaps: list[Gap],
         final_truncated: bool,
-    ) -> list[str]:
-        """聚合所有警告信息。"""
-        warnings: list[str] = []
+    ) -> list[PipelineWarning]:
+        """聚合所有警告信息（结构化 code+params，前端本地化渲染）。"""
+        warnings: list[PipelineWarning] = []
         for i, r in enumerate(refined_results):
             if r.truncated:
-                warnings.append(f"段 {i + 1} 精修输出疑似被截断")
+                warnings.append(
+                    PipelineWarning("segment_truncated", {"index": i + 1}),
+                )
         if final_truncated:
-            warnings.append("整篇文档级精修输出疑似被截断")
+            warnings.append(PipelineWarning("document_truncated"))
         for g in all_gaps:
             if not g.filled:
                 warnings.append(
-                    f"缺口（{g.after_image} 之后）未能自动补充"
+                    PipelineWarning(
+                        "gap_unfilled", {"after_image": g.after_image},
+                    ),
                 )
         return warnings

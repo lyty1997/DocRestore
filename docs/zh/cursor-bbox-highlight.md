@@ -418,7 +418,7 @@ bbox 在矫正图坐标系，原图却因透视矫正长宽比已变（1706×127
 
 > 用户报「光标在文档上高亮框非常不准，且没开精修」。真机实测（注入 device token 打开任务）
 > 定位：该任务**文档模式 + content_crop（正文自动裁剪，默认开）**。`.layout.json`
-> `image_size=[1418,1646]`=裁剪图，原图 `DSC04641.JPG=[2467,1646]`——bbox 在裁剪图坐标系，
+> `image_size=[1418,1646]`=裁剪图，原图 `page01.JPG=[2467,1646]`——bbox 在裁剪图坐标系，
 > 源图栏却显原图 → 标题框画在 3%–81% 而正文实际 ~23%–68%，**左偏 ~20% + 横向拉宽 1.74×**。
 
 ### 15.1 根因：预处理坐标系不匹配是**通用** bug，#90 只解了 PPT
@@ -455,7 +455,7 @@ bbox 在矫正图坐标系，原图却因透视矫正长宽比已变（1706×127
   探 `_crop`）；API 全目录 255 passed 零回归。
 - [x] 前端 217 passed（client `getProcessedImageUrl` 3 + SourceImageList processed src 2 改名）；
   tsc -b + `npm run lint` 0 error。
-- [x] 真机视觉：用**用户实际任务**的真实裁剪图 `.content_crop/DSC04641_crop.JPG`（1418×1646）+
+- [x] 真机视觉：用**用户实际任务**的真实裁剪图 `.content_crop/page01_crop.JPG`（1418×1646）+
   `.layout.json` 真实 bbox 按 % 叠加，标题/双表/各标题块**精准框住**（对比修复前原图上左偏拉宽）。
 - 代价：「原图」栏对裁剪页显示去掉左右空白边的裁剪图（内容一致），与 PPT(#90) 同口径。
 
@@ -473,8 +473,8 @@ image/chart 区域捕获时已按阅读序认领 `<img src="images/N.jpg">`
 
 - **后端**：`LayoutBlock`/`LayoutBlockPayload` 加 `image_ref`；`_write_doc_layout_sidecar` 用
   `resolve_output_image_ref(ocr_stem, region.image_ref)` 算输出引用（`ocr_stem` =
-  `page.output_dir.name` 去 `_OCR`，裁剪/矫正时是处理图 stem，如 `DSC04643_crop`）→
-  `images/{stem}_N.ext`，**与 markdown `<img src="images/DSC04643_crop_0.jpg">` 一致**（已验证）。
+  `page.output_dir.name` 去 `_OCR`，裁剪/矫正时是处理图 stem，如 `page01_crop`）→
+  `images/{stem}_N.ext`，**与 markdown `<img src="images/page01_crop_0.jpg">` 一致**（已验证）。
   to_dict/from_dict 带 image_ref，旧 sidecar 无此字段 → 默认空（向后兼容）。PPT 回退用
   `region.image_ref`（ppt sidecar 本就有）。
 - **前端**：`CursorBlock` 加 `imageRef`；`extractImageRef(src)` 取 `<img src>` 的 `images/xxx` 尾段

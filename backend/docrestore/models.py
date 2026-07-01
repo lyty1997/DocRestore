@@ -159,6 +159,45 @@ class RedactionRecord:
     count: int  # 替换次数
 
 
+@dataclass(frozen=True)
+class PipelineWarning:
+    """软降级/不完整警告（#96）：i18n code + 参数，前端按 code 翻译渲染。
+
+    后端不再硬编码中文文案（原实现直接塞中文串，无法本地化）。``params`` 值仅
+    str/int（可 JSON 序列化、可作 i18n 插值）。向后兼容：DB 里旧任务存的是纯中文串，
+    反序列化时包成 ``code="legacy"`` + ``params={"text": 原串}``，前端 legacy 直接显示
+    text 不翻译（见 :meth:`from_json_item`），旧任务警告不丢失。
+    """
+
+    code: str
+    params: dict[str, str | int] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, object]:
+        """→ JSON 可序列化 dict（DB 落盘 / API 载荷统一形态）。"""
+        return {"code": self.code, "params": dict(self.params)}
+
+    @classmethod
+    def from_json_item(cls, raw: object) -> PipelineWarning:
+        """从 DB/JSON 单项还原：``{code,params}`` 新式；裸 str=旧任务 → legacy 包裹。
+
+        非法元素（缺 code / 结构异常）也 legacy 包裹其字符串化，不丢信息、不炸读取。
+        """
+        if isinstance(raw, dict):
+            code = raw.get("code")
+            if isinstance(code, str):
+                params: dict[str, str | int] = {}
+                raw_params = raw.get("params")
+                if isinstance(raw_params, dict):
+                    for key, val in raw_params.items():
+                        # bool 是 int 子类，用户参数不含布尔，一并按 int 收即可。
+                        if isinstance(key, str) and isinstance(val, (str, int)):
+                            params[key] = val
+                return cls(code=code, params=params)
+        if isinstance(raw, str):
+            return cls(code="legacy", params={"text": raw})
+        return cls(code="legacy", params={"text": str(raw)})
+
+
 @dataclass
 class PipelineResult:
     """Pipeline 处理的最终结果"""
@@ -167,7 +206,8 @@ class PipelineResult:
     markdown: str  # 最终 markdown 内容
     images: list[Region] = field(default_factory=list)
     gaps: list[Gap] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)  # 流程警告信息
+    # 软降级警告（#96）：结构化 code+params，前端本地化渲染（见 PipelineWarning）。
+    warnings: list[PipelineWarning] = field(default_factory=list)
     redaction_records: list[RedactionRecord] = field(
         default_factory=list,
     )

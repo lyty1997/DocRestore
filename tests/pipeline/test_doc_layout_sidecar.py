@@ -125,13 +125,13 @@ async def test_sidecar_image_block_carries_resolved_image_ref(
 ) -> None:
     """图片块：sidecar ``image_ref`` = ``resolve(ocr_stem, raw)``，对齐 markdown
     ``<img src>``。ocr_stem 取 ``output_dir.name`` 去 ``_OCR``（裁剪时为处理图 stem，
-    如 ``DSC04643_crop`` → ``images/DSC04643_crop_0.jpg``）。"""
+    如 ``page01_crop`` → ``images/page01_crop_0.jpg``）。"""
     out = tmp_path / "out"
     out.mkdir()
-    # 模拟 content_crop：OCR 跑在 DSC04643_crop 上 → output_dir=DSC04643_crop_OCR；
+    # 模拟 content_crop：OCR 跑在 page01_crop 上 → output_dir=page01_crop_OCR；
     # 图片区域 raw image_ref = OCR 相对 images/0.jpg（_build_layout_regions 认领的）。
     page = _make_page(
-        out, "DSC04643_crop", (1418, 1646),
+        out, "page01_crop", (1418, 1646),
         [
             LayoutRegion((14, 921, 1379, 1585), "image", "",
                          image_ref="images/0.jpg"),
@@ -148,8 +148,8 @@ async def test_sidecar_image_block_carries_resolved_image_ref(
     block = layout.pages[0].blocks[0]
     assert block.label == "image"
     assert block.text == ""
-    # 与 markdown <img src="images/DSC04643_crop_0.jpg"> 一致 → 前端按引用命中
-    assert block.image_ref == "images/DSC04643_crop_0.jpg"
+    # 与 markdown <img src="images/page01_crop_0.jpg"> 一致 → 前端按引用命中
+    assert block.image_ref == "images/page01_crop_0.jpg"
 
 
 async def test_no_sidecar_when_no_layout_regions(tmp_path: Path) -> None:

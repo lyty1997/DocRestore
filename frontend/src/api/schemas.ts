@@ -45,6 +45,16 @@ export type TaskResponse = z.infer<typeof TaskResponseSchema>;
 /** 处理模式（与后端 TaskResponse.mode / 表单三选一对齐） */
 export type ProcessingMode = TaskResponse["mode"];
 
+/** 软降级警告载荷（#96）：i18n code + 参数，前端按 code 本地化渲染。
+ *  与后端 WarningPayload 同构；code="legacy" 时 params.text 为旧任务原中文串（直接显示）。 */
+export const WarningPayloadSchema = z.object({
+  code: z.string(),
+  params: z
+    .record(z.string(), z.union([z.string(), z.number()]))
+    .default({}),
+});
+export type WarningPayload = z.infer<typeof WarningPayloadSchema>;
+
 /** 任务结果响应 */
 export const TaskResultResponseSchema = z.object({
   task_id: z.string(),
@@ -59,11 +69,11 @@ export const TaskResultResponseSchema = z.object({
    */
   error: z.string().default(""),
   /**
-   * 软降级警告（#96，非致命）：VL 退本地推理 / PDF 缺页 / 段截断等。
-   * error 为空但 warnings 非空 = 文档可用但有降级，前端显示软提示而非失败态。
-   * 旧后端缺字段时 default 回退为空数组。
+   * 软降级警告（#96，非致命，结构化 code+params）：VL 退本地推理 / PDF 缺页 /
+   * 段截断等。error 为空但 warnings 非空 = 文档可用但有降级，前端显示软提示而非
+   * 失败态。旧后端缺字段时 default 回退为空数组。
    */
-  warnings: z.array(z.string()).default([]),
+  warnings: z.array(WarningPayloadSchema).default([]),
 });
 export type TaskResultResponse = z.infer<typeof TaskResultResponseSchema>;
 
@@ -424,9 +434,11 @@ export const CodeFileLayoutPayloadSchema = z.object({
 export type CodeFileLayoutPayload = z.infer<typeof CodeFileLayoutPayloadSchema>;
 
 /** GET /tasks/{id}/code-layout 响应：各源文件逐行 bbox，供悬停行↔原图局部放大（#93）。
- *  代码模式无 content_crop / 无矫正 → bbox 恒原图坐标，故无 processed 字段。 */
+ *  processed：代码模式手动裁剪（§14.1）后行 bbox 在裁剪图坐标系，放大镜须改显处理图对齐
+ *  （与 LayoutPayload.processed 同义，逐页 onError 回退原图）。 */
 export const CodeLayoutPayloadSchema = z.object({
   files: z.array(CodeFileLayoutPayloadSchema).default([]),
+  processed: z.boolean().default(false),
 });
 export type CodeLayoutPayload = z.infer<typeof CodeLayoutPayloadSchema>;
 
@@ -436,6 +448,9 @@ export type CodeLayoutPayload = z.infer<typeof CodeLayoutPayloadSchema>;
 export const AuthInfoResponseSchema = z.object({
   auth_required: z.boolean(),
   token_source: z.enum(["env", "device_file", "insecure", "unknown"]),
+  /** device token 文件真实路径（仅 device_file / unknown 来源提供，遵循 XDG /
+   *  平台约定）；前端据此显示精确 cat 命令。缺失/env/insecure → null/undefined。 */
+  token_file: z.string().nullish(),
 });
 export type AuthInfoResponse = z.infer<typeof AuthInfoResponseSchema>;
 export type TokenSource = AuthInfoResponse["token_source"];

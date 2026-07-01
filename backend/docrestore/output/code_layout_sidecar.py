@@ -29,11 +29,16 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from docrestore.output.sidecar_common import (
+    as_int_quad,
+    load_json_sidecar,
+    write_json_sidecar,
+)
 
 if TYPE_CHECKING:
     from docrestore.processing.code_file_grouping import PageColumn, SourceFile
@@ -192,22 +197,11 @@ def to_dict(layout: CodeLayout) -> dict[str, object]:
 # ── 反序列化（宽松：坏行 / 坏文件跳过、不整份失败）────────────
 
 
-def _as_int_quad(raw: object) -> tuple[int, int, int, int] | None:
-    """长度 4 的整型序列；非法返回 None。"""
-    if not isinstance(raw, list) or len(raw) != 4:
-        return None
-    try:
-        vals = [int(v) for v in raw]
-    except (TypeError, ValueError):
-        return None
-    return (vals[0], vals[1], vals[2], vals[3])
-
-
 def _line_from_dict(raw: object) -> CodeLineBox | None:
     """单行 dict → ``CodeLineBox``；字段非法返回 None（调用方跳过该行）。"""
     if not isinstance(raw, dict):
         return None
-    bbox = _as_int_quad(raw.get("bbox"))
+    bbox = as_int_quad(raw.get("bbox"))
     page = raw.get("page")
     raw_line_no = raw.get("line_no")
     if bbox is None or not isinstance(page, str) or not isinstance(
@@ -277,21 +271,10 @@ def from_dict(data: object) -> CodeLayout | None:
 
 def write_code_layout(output_dir: Path, layout: CodeLayout) -> Path:
     """把 ``CodeLayout`` 写到 ``output_dir/.code_layout.json``，返回路径。"""
-    path = output_dir / CODE_LAYOUT_FILENAME
-    path.write_text(
-        json.dumps(to_dict(layout), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    return path
+    return write_json_sidecar(output_dir / CODE_LAYOUT_FILENAME, to_dict(layout))
 
 
 def load_code_layout(output_dir: Path) -> CodeLayout | None:
     """读 ``output_dir/.code_layout.json`` → ``CodeLayout``；缺失 / 损坏 → None。"""
-    path = output_dir / CODE_LAYOUT_FILENAME
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return from_dict(data)
+    data = load_json_sidecar(output_dir / CODE_LAYOUT_FILENAME)
+    return None if data is None else from_dict(data)

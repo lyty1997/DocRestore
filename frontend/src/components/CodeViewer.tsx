@@ -338,6 +338,8 @@ export function CodeViewer({
   >();
   // #5：path → 行映射（精修后行序 → 原 OCR line_no）；与 codeLayoutIndex 同源同生命周期。
   const [codeLineMaps, setCodeLineMaps] = useState<CodeLineMaps | undefined>();
+  // §14.1：手动裁剪任务行 bbox 在裁剪图坐标系 → 放大镜改显处理图对齐（与 index 同源）。
+  const [codeLayoutProcessed, setCodeLayoutProcessed] = useState(false);
   const [activeLine, setActiveLine] = useState<
     { readonly path: string; readonly lineNo: number } | undefined
   >();
@@ -467,11 +469,13 @@ export function CodeViewer({
         setCodeLineMaps(
           payload === undefined ? undefined : buildLineMaps(payload),
         );
+        setCodeLayoutProcessed(payload?.processed ?? false);
       })
       .catch(() => {
         if (!cancelled) {
           setCodeLayoutIndex(undefined);
           setCodeLineMaps(undefined);
+          setCodeLayoutProcessed(false);
         }
       });
     return () => {
@@ -855,6 +859,7 @@ export function CodeViewer({
             target={magnifierTarget}
             image={magnifierImage}
             hint={t("codeViewer.magnifierHint")}
+            processed={codeLayoutProcessed}
           />
         )}
         {saveError !== undefined && (

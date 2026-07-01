@@ -25,11 +25,16 @@ sidecar 的严格 fail-safe 互补。设计真相源 ``docs/zh/cursor-bbox-highl
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from docrestore.models import LayoutRegion
+from docrestore.output.sidecar_common import (
+    as_int_pair,
+    as_int_quad,
+    load_json_sidecar,
+    write_json_sidecar,
+)
 
 #: sidecar 文件名：dot 前缀=内部文件，不进下载 zip / asset 白名单。
 DOC_LAYOUT_FILENAME = ".layout.json"
@@ -133,33 +138,11 @@ def to_dict(layout: DocLayout) -> dict[str, object]:
 # ── 反序列化（宽松：坏块跳过、不整页失败）─────────────────────
 
 
-def _as_int_pair(raw: object) -> tuple[int, int] | None:
-    """长度 2 的整型序列；非法返回 None。"""
-    if not isinstance(raw, list) or len(raw) != 2:
-        return None
-    try:
-        vals = [int(v) for v in raw]
-    except (TypeError, ValueError):
-        return None
-    return (vals[0], vals[1])
-
-
-def _as_int_quad(raw: object) -> tuple[int, int, int, int] | None:
-    """长度 4 的整型序列；非法返回 None。"""
-    if not isinstance(raw, list) or len(raw) != 4:
-        return None
-    try:
-        vals = [int(v) for v in raw]
-    except (TypeError, ValueError):
-        return None
-    return (vals[0], vals[1], vals[2], vals[3])
-
-
 def _block_from_dict(raw: object) -> LayoutBlock | None:
     """单块 dict → ``LayoutBlock``；字段非法返回 None（调用方跳过该块）。"""
     if not isinstance(raw, dict):
         return None
-    bbox = _as_int_quad(raw.get("bbox"))
+    bbox = as_int_quad(raw.get("bbox"))
     label = raw.get("label")
     text = raw.get("text", "")
     # image_ref 向后兼容：旧 sidecar 无此字段 → 默认空（图片块退化为不命中）。
@@ -178,7 +161,7 @@ def _page_from_dict(raw: object) -> LayoutPage | None:
     """
     if not isinstance(raw, dict):
         return None
-    size = _as_int_pair(raw.get("image_size"))
+    size = as_int_pair(raw.get("image_size"))
     filename = raw.get("filename")
     raw_blocks = raw.get("blocks")
     if size is None or not isinstance(filename, str) or not isinstance(
@@ -218,21 +201,10 @@ def from_dict(data: object) -> DocLayout | None:
 
 def write_doc_layout(output_dir: Path, layout: DocLayout) -> Path:
     """把 ``DocLayout`` 写到 ``output_dir/.layout.json``，返回路径。"""
-    path = output_dir / DOC_LAYOUT_FILENAME
-    path.write_text(
-        json.dumps(to_dict(layout), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    return path
+    return write_json_sidecar(output_dir / DOC_LAYOUT_FILENAME, to_dict(layout))
 
 
 def load_doc_layout(output_dir: Path) -> DocLayout | None:
     """读 ``output_dir/.layout.json`` → ``DocLayout``；缺失 / 损坏 → None。"""
-    path = output_dir / DOC_LAYOUT_FILENAME
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return from_dict(data)
+    data = load_json_sidecar(output_dir / DOC_LAYOUT_FILENAME)
+    return None if data is None else from_dict(data)
