@@ -75,7 +75,7 @@ describe("getTaskLayout", () => {
           filename: "IMG_0001.jpg",
           image_size: [3024, 4032],
           blocks: [
-            { bbox: [120, 88, 2900, 240], label: "text", text: "第一章" },
+            { bbox: [120, 88, 2900, 240], label: "text", index: 0, text: "第一章" },
           ],
         },
       ],

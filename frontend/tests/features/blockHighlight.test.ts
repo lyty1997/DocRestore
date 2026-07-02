@@ -16,18 +16,21 @@ const LAYOUT: LayoutPayload = {
         {
           bbox: [120, 88, 2900, 240],
           label: "paragraph_title",
+          index: 0,
           text: "第一章",
           image_ref: "",
         },
         {
           bbox: [120, 260, 2900, 980],
           label: "text",
+          index: 1,
           text: "本文研究OCR还原",
           image_ref: "",
         },
         {
           bbox: [300, 1100, 2700, 2000],
           label: "image",
+          index: 2,
           text: "",
           image_ref: "images/IMG_0001_0.jpg",
         },
@@ -37,7 +40,7 @@ const LAYOUT: LayoutPayload = {
       filename: "IMG_0002.jpg",
       image_size: [3024, 4032],
       blocks: [
-        { bbox: [0, 0, 100, 50], label: "text", text: "第二页正文", image_ref: "" },
+        { bbox: [0, 0, 100, 50], label: "text", index: 0, text: "第二页正文", image_ref: "" },
       ],
     },
   ],

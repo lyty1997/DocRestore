@@ -1113,6 +1113,32 @@ body {
     width 0.12s ease, height 0.12s ease;
 }
 
+/* 版面全览叠加层（E8/#92）：整页彩色分类框 + 阅读序角标。
+   边框 / 填充 / 角标底色由分类色（layoutCategory）经 inline style 注入，
+   这里只定结构；不拦截点击，与单块橙色高亮共存（全览在下、命中框在上）。 */
+.layout-overlay-box {
+  position: absolute;
+  pointer-events: none;
+  border-width: 1.5px;
+  border-style: solid;
+  border-radius: 2px;
+  box-sizing: border-box;
+}
+
+.layout-overlay-badge {
+  position: absolute;
+  top: 0;
+  left: 0;
+  min-width: 1.1em;
+  padding: 0 3px;
+  font-size: 10px;
+  line-height: 1.4;
+  font-weight: 600;
+  color: #fff;
+  text-align: center;
+  border-radius: 0 0 3px;
+}
+
 .preview-split > .markdown-preview {
   flex: 1;
   min-width: 0;

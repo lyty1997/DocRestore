@@ -360,6 +360,7 @@ export const zhCN = {
   // ── 原图面板 ──
   "sourceImages.title": "原图（点击放大）",
   "sourceImages.lightboxAlt": "放大查看",
+  "sourceImages.layoutOverlay": "版面全览",
 
   // ── 上传预览 ──
   "uploadPreview.title": "上传预览",

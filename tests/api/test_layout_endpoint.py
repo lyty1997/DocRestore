@@ -100,6 +100,8 @@ async def test_returns_payload_when_sidecar_present(
     assert first["bbox"] == [120, 88, 2900, 240]
     assert first["label"] == "paragraph_title"
     assert first["text"] == "第一章"
+    # 阅读序 index 按 blocks 列表位置派生，从 0 递增（E8/#92，§17.2）
+    assert [b["index"] for b in page["blocks"]] == [0, 1]
 
 
 @pytest.mark.asyncio
@@ -202,6 +204,8 @@ async def test_ppt_fallback_returns_processed_layout(
     assert page["blocks"][0]["text"] == "标题块"
     assert page["blocks"][0]["bbox"] == [311, 79, 909, 131]
     assert page["blocks"][1]["text"] == "正文块"
+    # PPT 回退路径同样按 regions 位置派生 index（§17.2）
+    assert [b["index"] for b in page["blocks"]] == [0, 1]
 
 
 @pytest.mark.asyncio

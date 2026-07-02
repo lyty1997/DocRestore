@@ -1,5 +1,16 @@
 # 开发进度
 
+## 2026-07-02 - Epic E · E8 版面全览叠加层（#92，仿 mineru.net 彩色版面图）
+
+- **主题**：Epic E 正向高亮（E1–E6）已全部落地后，实现 #92「版面全览」——源图叠**整页全部**版面块的彩色分类框（按 `label` 着色）+ 阅读序角标，可开关，达 mineru.net 版面图效果。设计真相源 `docs/zh/cursor-bbox-highlight.md` §17。
+- **关键洞察 + 决策 D1**：叠加层所需数据 `.layout.json`（含 PPT 回退 `.ppt_layout.json`）已全含（bbox/label/image_size），唯一「新」信息是阅读序 `index`。而 `index` = blocks **列表位置**，从 OCR `layout_regions`（有序）→ sidecar → API → zod → 前端**全程保序**。**偏离 issue 原文（用户拍板）**：不落 sidecar，改由 API 层 `get_task_layout` 两路（doc `enumerate(page.blocks)`、ppt 回退 `enumerate(page.regions)`）派生 → **doc 模式现有任务零重跑**，不动 sidecar/pipeline，无向后兼容分支；payload 仍显式带 `index` 字段（前端用 `block.index`，比裸数组下标稳）。
+- **后端**（仅 2 文件）：`schemas.LayoutBlockPayload` 加 `index: int`；`routes.get_task_layout` 两路 `enumerate` 派生。`test_layout_endpoint.py` doc + ppt 两路断言 `index` 从 0 递增。
+- **前端**：新建 `features/task/layoutCategory.ts`（`categoryColor(label)`→分类色，标题蓝/正文绿/表格橙/图紫/公式青/页眉页脚灰/参考粉/印章金，未知落 fallback 灰；用逗号 `rgb()/rgba()` 语法避 jsdom 丢样式）+ `components/LayoutOverlay.tsx`（全块彩框 + `index+1` 角标，复用 `bboxRect` 换算）；`SourceImageList`/`SourceImagePanel` 加 `layoutPages`+`showOverlay`（按 `filename===pageKey` 逐图铺该页全览，在单块橙色高亮之下共存）；`DocCodePreview` 加「版面全览」toggle（`canHighlight && layout!==undefined` 才显示、默认关、离开高亮态复位）；i18n 三语 `sourceImages.layoutOverlay`；`App.css` 加 `.layout-overlay-box`/`.layout-overlay-badge`。
+- **工程判断：刚刚好**——1 派生字段 + 1 overlay 组件 + 1 色表 + 1 toggle，全程复用地基（现有 `/layout` 端点、`bboxRect`、SourceImageList cell）；不引入稳定块 ID（全览是展示非联动）。
+- **门禁**：`check_quality.sh` EXIT=0（mypy --strict / ruff / typos / tsc -b / eslint 0 error / pytest **1661** passed）+ 前端 vitest **281** passed（270→281：layoutCategory 4 + LayoutOverlay 5 + SourceImageList 全览 2）。
+- **视觉**：无头 chrome 静态 harness 用**现有文档任务真实 `.layout.json`（E8 前生成、无 `index` 字段）** + 真实裁剪图（1418×1646 content_crop 处理图）复刻 overlay/CSS/色表/公式截图 —— 14 块彩框逐一精准框住（header 灰 / 标题蓝 / 正文绿 / 表格橙），阅读序角标 1..13 递增、半透明填充不遮正文。**sidecar 无 `index` 仍正确出序号，端到端实证 D1 零重跑**。
+- **遗留**：无（#92 闭环）。Epic E 剩 #89（E5 反向联动）、#91（E7 行级 bbox 精度）两个 phase-2 未做。**本批未提交**（待用户确认提交方式）。
+
 ## 2026-07-01 - 补跑 ultracode 审查 Sweep/Synthesize 并收口 10 处发现
 
 - **背景**：上一批（commit `93ca8d0`）的多 agent 审查在 Sweep（补漏）/Synthesize（合并去重）两步撞会话额度中断，覆盖对 finder 未触达文件不完整。本次重跑该缺失段（含针对性指令：系统覆盖 finder 漏掉的边界/测试/i18n 文件 + 复审 `93ca8d0` 自身是否引入回归）。10 finder → 23 候选 → 逐点对抗式 verify → 保留 12 条、驳回 4 条。**关键结论：多数确证缺陷是 `93ca8d0` 自己引入的回归**——正是这段补漏审查的价值所在。
