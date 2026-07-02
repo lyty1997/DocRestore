@@ -855,3 +855,325 @@ test_sidecar_image_ref_uses_ocr_dir_stem_after_rectify` 锁定。
 
 **教训**：「还原原文」≠「复刻照片」——采样统计量会把**拍摄链路的系统性偏差**（白平衡 / 曝光 / 色偏）
 一并搬进结果。凡「从照片采颜色 / 亮度」的特征，须在采样前 / 后做一次**拍摄畸变归一化**（白平衡是最常见的一项）。
+
+## Epic E：源图 `data-page` 锚点从 `<img>` 移到外层 wrapper，破坏按 data-page 取 img 的测试
+
+现象（Epic E E3）：为承载 bbox 高亮 overlay，`SourceImageList` 把每张 `<img>` 包进
+`.source-image-cell`（`position:relative`），并把 `data-page` 从 `<img>` **移到外层 cell div**。
+`CodeViewer.test.tsx` 原断言 `.code-source-images-list [data-page="X"]` 取到的元素有 `alt` 属性
+（旧结构 data-page 在 img 上），结构变更后该选择器命中的是 cell div（无 `alt`）→ `getAttribute("alt")` 返回 null 失败。
+per-file lint/tsc hook 看不出（跨文件、运行期 DOM 断言），全量 `npx vitest run` 才暴露。
+
+处理策略：
+- 结构变更后，**按 data-page 取的是锚点容器，不再是图片本身**；要图片标识改查内层 `[data-page="X"] img` 的 `alt`。
+- scroll-sync 仍按 `[data-page]` 定位：cell 紧裹 img、垂直 offsetTop 等价，锚点数量不变，**零回归**（勿在 cell 与 img 上同时打 data-page，否则双锚点扰乱连续映射）。
+- **教训**：改动共享底层组件（`SourceImageList` 被文档+代码模式共用）的 DOM 结构后，必须跑**全量**前端测试，不能只信 per-file hook。
+
+## 前端 `unicorn/no-useless-undefined`：箭头/回调里禁 `return undefined`，函数声明里放行
+
+现象（Epic E E3）：在 `useMemo(() => { if (x) return undefined; ... })` 这类**箭头回调**里写
+`return undefined` 被 `unicorn/no-useless-undefined` 判错；但同样的 `return undefined` 写在**具名函数声明**
+（如 `function computeBlockHighlight(): T | undefined { if (...) return undefined; }`）里却放行。
+直接把 `undefined` 当实参传（`fn(LAYOUT, undefined)`）也被该规则判为「useless」。
+
+处理策略：
+- 需要早返回 `undefined` 的逻辑，抽成**具名函数声明**（顺带更可单测）；箭头/memo 只调用它。
+- 传 `undefined` 实参时改用具名变量（`const noCursor: T | undefined = undefined; fn(a, noCursor)`），
+  或对可选参数直接省略（`fn(a)`）。
+- 此约定与 codebase 既有写法一致（既有代码用三元 `cond ? undefined : val` 而非 `return undefined` 语句）。
+
+## 前端 lint：`Element.textContent` 非空 + `unicorn/no-null` 拿真实 null 的写法
+
+现象（Epic E E4，#88）：
+- `block.textContent ?? ""` 被 `@typescript-eslint/no-unnecessary-condition` 判错——本项目 DOM 类型里
+  `Element.textContent` 推断为 `string`（非 `string | null`），`?? ""` 左侧不可能为空 → 多余。
+  对 `Element`（非裸 `Node`）直接 `block.textContent.trim()` 即可（Element 的 textContent 运行期恒为字符串）。
+- 单测里要传「运行期 null」给入参（如模拟 `e.target` 为 null）时，**禁止写 `null` 字面量**
+  （`unicorn/no-null`），也别用 `x ?? null` 把 `undefined` 转 null（同样判错）。
+
+处理策略：
+- 取真实 null 用 `container.querySelector(".does-not-exist")`（落空返回真 `null`，类型 `Element | null`），
+  既覆盖 null 运行期路径，又不写字面量。
+- 纯函数入参若既可能 null 又可能 undefined，签名直接放宽到 `Element | null | undefined`，
+  调用侧（`querySelector` 返回 `Element|null`、`at(-1)` 返回 `Element|undefined`）都能直传，免去 `?? null` 转换。
+
+## 光标高亮在 PPT 任务上不亮：是「文档模式特性 + PPT 坐标系」而非缺陷（#90）
+
+现象：用户在 PPT 模式任务里把光标放文档上，右侧原图不出现 bbox 高亮框。
+
+根因（排查链）：
+- 该任务 `ppt.enable=true, rectify=true`（DB `tasks.ppt` 字段、`.rectified/` 目录、`*_after_OCR` 可佐证）。
+- E3/E4 高亮是**纯文档模式**：只读 `.layout.json`（`_write_doc_layout_sidecar` 仅在 `_finalize_single_doc`
+  调用），PPT 模式只落 `.ppt_layout.json` → `/layout` 404 → 前端 fail-safe 不高亮。
+- 即便有数据，PPT bbox 在**矫正图 `_after.jpg`** 坐标系，源图栏却显**原图**（透视矫正后长宽比已变）→ 不对齐。
+
+处理：#90 让 `/layout` 在 `.layout.json` 缺失时回退读 `.ppt_layout.json`（含 filename/image_size/regions），
+置 `rectified=true`；前端据此把源图栏改显矫正图 `_after.jpg`（坐标系对齐）。**现有 PPT 任务零重跑即可高亮**。
+
+排查教训：报「功能不工作」先确认**被测任务的模式/配置**（查 DB `tasks` 行 + output_dir 里落了哪种
+sidecar），别假设是代码 bbox bug——很多「不工作」是数据/模式不匹配（旧任务无 sidecar、PPT vs 文档）。
+
+## 前端 zod `.default()` 让 `z.infer` 类型字段变**必填**（输出类型）
+
+现象（#90）：`LayoutPayloadSchema` 加 `rectified: z.boolean().default(false)` 后，`type LayoutPayload =
+z.infer<...>` 的 `rectified` 是**必填** `boolean`（zod 的 output 类型含默认值后的字段），导致测试里
+手写的 `LayoutPayload` 字面量（缺 `rectified`）`tsc -b` 报 TS2741。per-file hook 的逐文件 tsc 看不出
+（错在**别的**测试文件引用该类型），全量 `npm run typecheck`(`tsc -b`) 才暴露。
+
+处理：给所有手写该类型的测试 fixture 补上新字段（`rectified: false`）。生产代码不受影响——它走
+`handleResponse`→zod 解析，`.default()` 在解析期补值，无需手写。
+
+## 光标高亮框「非常不准」：OCR 前预处理坐标系不匹配（通用，#90 只解了 PPT）
+
+现象：文档模式光标高亮框水平方向严重错位（左偏 + 拉宽），**没开 LLM 精修也错**（排除匹配问题）。
+
+根因（`pipeline.py:2047`）：OCR 前任一预处理——PPT 透视矫正 / content_crop 正文裁剪（**默认开**）/
+手动裁剪——后，`ocr_input` 是处理图，OCR 出的 `image_size`+`layout_regions.bbox` 在**处理图坐标系**，
+但 `page.image_path` 被改回原图（marker/源图按原名匹配）。Epic E sidecar 落的就是处理图坐标，而
+源图栏显示**原图** → bbox 与显示图坐标系不符。实测 content_crop：裁剪图 1418 宽、原图 2467 宽，
+标题框画在 3%–81% 而实际 ~23%–68%，左偏 ~20% + 拉宽 1.74×。
+
+排查关键证据：浏览器注入 device token（`~/.config/docrestore/device_token`，localStorage key
+`docrestore_api_token`）打开真实任务，hover 块后 `evaluate` 抓 overlay 的 `style.left/width` +
+`img.naturalWidth` 一比就实锤（naturalWidth=原图 2467 vs image_size=裁剪 1418）。
+
+处理（§15）：把 #90 的「显处理图」机制**通用化**——`rectified`→`processed`、`rectified-image`→
+`processed-image`（逐 variant 探 `.rectified/_after` + `.content_crop/_crop`）。`processed` 按
+**探处理图目录是否有文件**统一判定；源图栏对处理页改显处理图、`onError` 回退原图（未处理页 bbox
+本在原图系，逐页混合自洽）。**现有任务零重跑**（裁剪图/矫正图已在盘）。
+
+教训：**任何「OCR 在变换后的图上跑、却把坐标当原图用」都会错位**。新增预处理（去畸变/裁剪/旋转）
+时，要么把 bbox 变换回原图坐标，要么前端显示处理图——二选一，别让两个坐标系混着用。
+
+## resume 缓存命中可能用残缺 `.layout.json` 覆盖首跑完整 sidecar（待跟踪）
+
+来源：调研 Epic E #91（行级 bbox，已决定不做，见 `cursor-bbox-highlight.md` §18）时附带查清，**块级方案
+也存在、非 #91 引入**，故单列跟踪。
+
+现象/风险：`.layout.json` 只在**首跑** `_finalize_single_doc` 落盘（bbox 取自 OCR 期 `layout_regions`）。
+resume 时若 OCR/精修缓存命中，`layout_regions` 不重建（VL 块坐标无持久化回读），部分 resume 路径可能以
+残缺（甚至空）的 sidecar 覆盖首跑写好的完整 sidecar，导致 Epic E 高亮/版面全览在 resume 后失效或不全。
+
+暂缓处理（未修）：优先级低于已闭环的块级功能。若将来修复，方向是 **resume 命中时跳过 sidecar 重写**
+（保留首跑产物），或把 `layout_regions` 一并持久化以便 resume 回读重建。修前先复现：对同一任务先跑成功、
+再触发 resume，比对 `.layout.json` 前后是否被截短/清空。
+
+## curl localhost 返回 Privoxy 502：环境 http_proxy 拦截本地请求
+
+现象：`curl http://127.0.0.1:8000/...` 返回 `502 ... (Privoxy@localhost)`，但服务其实正常。
+根因：环境设了 `http_proxy`/`https_proxy` 指向 Privoxy，curl 默认走代理，代理转发不到本地端口。
+处理：本地 curl 加 `--noproxy '*'`（或 `NO_PROXY=127.0.0.1`）。Playwright/浏览器访问 localhost
+不受影响（自有网络栈）。
+
+## 错误处理：掩盖问题的兜底（landmine）批量整改（2026-06-29 审计）
+
+现象 / 背景：
+- 全量审计 343 个 `except` + 32 个 `suppress` + 55 个前端 `catch`，找出"掩盖问题的兜底"。
+- 总评：项目错误处理底子不错（多数有日志 / 用 `PipelineResult.error`/`flags`/`quality_report`
+  暴露失败 / PII 默认 fail-closed / 大量窄类型 except），地雷密度低。
+- **唯一成体系反模式 = 输出/渲染链路的"静默数据丢失"**：产出"看似完整其实缺东西"的产物，
+  只有服务端日志（或无日志），不进 `result.error`，用户无感。
+
+根因（4 个真地雷，已修）：
+- `output/renderer.py` `_copy_image`：源图缺失仍重写引用 → `document.md` 死图引用，零日志。
+- `pipeline/render/pdf.py`：单页渲染 `except Exception` 吞编程 bug；缺页被 sentinel 永久缓存
+  （`_read_sentinel` 只校 sha 不校 `rendered==expected_pages`）；调用方丢弃返回值缺页不进 error。
+- `llm/base.py` `refine`/`final_refine`：`content or ""` 把模型空响应当成"成功精修成空文档"，
+  小段还写进缓存污染 resume。
+- `persistence/database.py` `_migrate_add_column`：`suppress(Exception)` 裹裸 ALTER，吞磁盘满/锁/语法错。
+
+处理策略（**新代码必须遵守的四条**）：
+1. **静默处补日志**：宽/窄 except 后若 `pass`/`continue`/`return 默认值`，至少 `logger.warning`
+   （或 debug，视严重度），让失败可见。完全静默 = 缺陷，哪怕是窄类型。
+2. **收窄 except 类型**：只兜可预期的运行/IO 异常（`OSError`/`ValueError`/库自有异常），别用宽
+   `except Exception` 顺手吞掉 `KeyError`/`AttributeError`/`TypeError` 等编程 bug——它们应崩出来。
+   构造对象（pydantic 等）尽量移出 try，避免校验 bug 被当成"读取失败"。
+3. **丢弃的数据要透出**：被跳过/丢失的项收集进 `skipped`/`missing` 计数，透到 `result`/日志
+   （范式见 `output/code_renderer.py` 的 `logger + skipped[]`）；产物层截断要在产物里留可见标记
+   （如 xlsx 截断行）。
+4. **区分"预期不适用"与"真实失败"**：前端 `catch` 用 `isNotFoundError`（`ApiError.httpStatus===404`）
+   把 404（任务未完成/非代码模式）与 500/网络/解析错误分开——404 静默、其它 `console.error`，
+   不能把请求失败伪装成"正常空态"或"无限处理中"。
+5. **取消必须透传**：`suppress`/`except` 不要包含 `asyncio.CancelledError`；`gather(return_exceptions=True)`
+   的结果若是 `CancelledError` 要 `raise` 而非当普通失败回退（项目约定"CancelledError 一路传播"）。
+6. **安全边界 fail-closed 优先 / 至少可见**：出云 PII 闸口在云端 provider 无策略时记 warning
+   （生产路径恒装策略，命中即接线 bug）；删除/清理失败不报成功（DB 删除失败返回错误，避免重启幽灵任务）；
+   引用集合收集失败上抛让清理跳过本轮（fail-safe），不返回残缺集合误删在用目录。
+
+提交：分支 `bugfix/error-handling-hardening`，A/B/C/D 四组 commit；门禁全绿。
+
+遗留（建 issue 跟踪，未在本批改代码逻辑）：
+- ~~**#95** `privacy/redactor.py` `_looks_like_name` 把含撇号/连字符的西文人名（O'Brien 等）整条丢弃~~
+  → **已修（2026-06-30）**：收窄 `_MARKUP_CHARS` 剔除撇号/双引号，配 PII 召回/精度测试。详见
+  「PII 含撇号/连字符西文人名漏脱出云（#95）」段。
+- ~~**#96** VL 退本地 / PDF 缺页 降级未透到任务侧~~ → **已修**，详见「VL 退本地 / PDF 缺页 降级未透到任务侧（#96）」段。
+
+## PPT 模式不应自动裁剪（§14.2 已回退）
+
+现象：
+- 用户反馈"PPT 模式任务（如 121528c1）自动裁掉了几张幻灯图，记得 PPT 没有前置裁剪"。
+
+根因：
+- 2026-06-25 §14.2 曾有意把文档模式的正文自动裁剪（content_crop）扩到 PPT（透视矫正后串联裁剪），
+  PPT 从 `skip_content_crop` 移出。屏摄幻灯无固定正文列，矫正后再自动裁会误伤图文版式。
+
+处理策略（2026-06-29 回退）：
+- PPT 重新纳入 `skip_content_crop`（`skip = code_cfg.enable or ppt_cfg.enable or is_pdf_rendered_dir`），
+  PPT 只做透视矫正、**不自动裁剪**；需要裁剪走手动框（任务级 `crop_boxes`，独占、模式无关）。
+- `_processed_source_variants` 移除链末 `_after_crop` 变体（PPT 不再产）。
+- 回归测试 `tests/pipeline/test_ppt_content_crop_skip.py` 锁定：PPT 不产 `.content_crop`，文档模式同图作对照。
+- 历史任务（如 121528c1）已落盘的 `.content_crop/*_after_crop.*` 是回退前产物，重跑该任务即不再裁剪。
+
+## 代码模式 repair/audit 在大病态文件上不收敛卡死（#94）
+
+现象：
+- 代码模式 `rewrite` 任务在真实大 C++ 文件上长时间卡死（实测 12+ 分钟无进展、需手动 cancel）。
+  `llm_timing.log` 显示对**同一文件**反复发 ~30s LLM 调用、`input_chars` 恒定，但始终不前进。
+- `enable_refine=false` 或 `refine` 模式（行数守恒）不受影响。
+
+根因（对抗式核验确认，非 issue 原假设的 repair↔audit 死循环）：
+- `DiagnosticCodeRepairer.repair` 是**单趟**逐窗口循环（`for context in contexts`），每个窗口
+  无条件发一次 ~30s LLM 调用 + 一次 g++ 重诊断，**窗口数无任何上限**。
+- 病态 OCR 大文件产生大量 `syntax_dirty` 失败行 → `_merge_line_windows` 出十几~几十个窗口，
+  串行跑就是十几分钟。`input_chars` 恒定是因为每个窗口 prompt 的大头是全文件共享的
+  outline/diagnostics（一次算好、各窗口复用），局部行只占极小比例。
+- 既有 `_CODE_REPAIR_LARGE_FILE_LINE_THRESHOLD=400` 守卫是 syntax_dirty `if` 之后的 `elif`，
+  **对大+脏文件失效**（只挡 clean 大文件的 refine）。
+- 附带：进度只在整文件修完才上报一次，且 4 个 code 模式进度键（codeLayout/codeGroup/
+  codeRefine/codeRender）**从未进过前端 i18n**，UI 直接显示裸键字符串。
+
+修复（`backend/docrestore/llm/code_repair.py` + `pipeline.py` + 前端 i18n）：
+- **窗口预算上限** `_MAX_REPAIR_WINDOWS=12`：超限只处理前 N 个（已按 start_line 升序，
+  不按严重度重排——重排会破坏 `_shift_range` 偏移不变量），其余窗口范围作为 `unresolved` 透出。
+- **连续无改善早停** `_MAX_REPAIR_NO_IMPROVEMENT=3`：从第 1 个窗口起计、每落一个 patch 清零、
+  `reject_diagnostic_worse` 与无 patch 同等计数；零落 patch 的病态文件约 3 窗口（~90s）即放弃回退。
+- **超大文件熔断** `_MAX_REPAIR_CHARS=60000`：正文超限直接跳过、回退原文 + warning，失败行透出；
+  `repair` 与 `audit` 共用同一闸口（`is_oversized_for_repair`），熔断后 audit 也不再发 LLM/跑 g++。
+- **audit 防御封顶** `_MAX_AUDIT_PATCHES=24`（每 patch 一次 g++ 重诊断，封顶极端响应）。
+- **逐窗口进度上报**：`repair(progress_cb=...)` → 新键 `progress.codeRepairWindow`，前端不再长时间停在
+  「归类得到 N 个源文件」；同时补齐 4 个缺失 code 进度键到 zh-CN/en/zh-TW（TS 类型强制三语对齐）。
+- 不埋雷：所有被跳过/早停/熔断的范围都进 `flags` + `unresolved`，让“哪段没修”可见。
+
+测试：`tests/llm/test_code_repair.py::TestRepairConvergenceBounds`（早停 / 落 patch 清零 / 窗口预算 /
+repair 与 audit 超大熔断 / progress_cb 逐窗上报，6 例）；既有 21 例无回归。
+
+坑点：`radius=1` 时相邻窗口间隔须 ≥4 才不合并（`start <= 上一窗口 end+1` 即并），构造多窗口测试
+用步长 4；步长 3 会塌成一个窗口导致预算上限测不到。
+
+## VL 退本地 / PDF 缺页 降级未透到任务侧（#96）
+
+背景：错误处理审计（#96）的两处 medium——已从「静默」改「记 warning」，但失败信号仍只在服务端
+日志、未到任务 `result` / 前端，用户侧不可见。
+
+根因（调查确认）：项目本有 `PipelineResult.warnings`「流程警告」字段，且已被段截断/缺口填补复用，
+但**端到端断头**——从不写 DB、不进 `TaskResultResponse`、前端无渲染（write-only 死字段）；
+`/ocr/status` 是前端唯一在轮询的引擎通道，但 VL 退本地后仍报 `pipeline=vl`，降级不可见。
+
+修复（复用 `warnings` 通道 + `/ocr/status`，不改「降级不失败」）：
+- **warnings 端到端接通**：`task_results` 加 `warnings` 列（`_migrate_add_column` 幂等迁移，
+  JSON 数组）+ `ResultRow`/`_normalize_results`(五元组兼容三/四) + 两条 INSERT + `get_results`
+  (`_parse_warnings_json` 防御解析) + `task_manager` 持久化/水合 + `TaskResultResponse.warnings`
+  + `/result`·`/results` + 前端 `TaskResultResponseSchema.warnings`(zod default) + `DocCodePreview`
+  琥珀色软横幅（区别 error 红色失败态）。**副作用**：既有静默的段截断/缺口 warning 现在也可见（不埋雷）。
+- **案 1 VL 退本地**（引擎全局 + 任务级双通道）：`EngineManager._degraded_reason`
+  （两 fallback 置 `vl_no_server_python`/`vl_server_python_missing`，起 server 顶部 + `_shutdown_current`
+  清）→ `degraded_reason` property → `OCRStatusResponse` + `/ocr/status` → 前端徽章提示（建任务前
+  即可见、可先修配置）；任务侧由生产者在**本任务 `ensure()` 时刻同步捕获**原因码到 `degraded_sink`
+  （`_switch_lock` 已序列化、读写间无 await），经 `_engine_degraded_warnings(reason)` 在 `_stream_pipeline`
+  末追加到任务 `warnings`（doc/ppt/code 统一一处）。**绝不在结果汇总处读引擎全局 live 标志**——
+  review 抓到：并发混模式任务会互改全局 `degraded_reason`，导致 code 任务误报 VL 降级（false positive）
+  或 VL 任务的降级被并发任务 `_shutdown_current` 清掉而漏报（false negative，恰好打回 #96 要治的静默降级）。
+- **案 2 PDF 缺页**（按文档）：`render_pdf_to_dir` 返回 `PdfRenderResult(rendered, expected)`；
+  `_expand_pdfs` 回传缺页 map（按 `doc_dir`：单 PDF=""、多 PDF=stem）；`process_tree` 用
+  `_apply_pdf_missing_warnings` 注入到对应成功结果（坏页跳过仍出可用页、任务仍 COMPLETED）。
+
+红线：降级**只进 `warnings`、绝不进 `error`**（`error` 非空会被 `task_manager` 翻成 FAILED）。
+缓存命中即「上次渲染完整」（`_read_sentinel` 仅 `rendered==expected` 命中）→ 缓存路径 expected==rendered。
+
+测试：DB warnings 往返 + 三/四/五元组兼容；EngineManager 两 fallback 置 degraded_reason；
+`_apply_pdf_missing_warnings` 按 doc_dir 匹配 + `_engine_degraded_warnings`；/ocr/status 透 degraded_reason；
+`render_pdf_to_dir` 返回 rendered/expected（截断不算缺页）。门禁后端 689 passed、前端 247 passed。
+
+坑点：`render_pdf_to_dir` 返回类型从 `int` 改 `PdfRenderResult` NamedTuple，调用方/测试断言须改
+`.rendered`（否则 `PdfRenderResult==int` 永假）；`/ocr/status` 测试 mock 须补 `degraded_reason` 字符串
+（否则 MagicMock 属性触发 pydantic 校验失败）；前端无运行 dev server / 截图脚本，UI 验证靠 tsc +
+数据流测试（软横幅 / 徽章为简单条件渲染）。
+
+## PII 含撇号/连字符西文人名漏脱出云（#95）
+
+背景：错误处理审计（2026-06-29）发现的 PII 召回缺陷，该批仅补"丢弃计数"可观测、过滤逻辑未改，单独立项。
+
+根因（调查确认）：`privacy/redactor.py` 的 `_looks_like_name`（词表净化第二道闸）用 `_MARKUP_CHARS`
+判定候选是否"像名字"，**该集含半角撇号 `'` 与双引号 `"`**。spaCy NER 会把 `O'Brien` / `d'Angelo`
+正向判定为 PERSON 并以 `ent.text` 原样（含撇号）进 `EntityLexicon`；到替换层 `_looks_like_name`
+因撇号命中 `_MARKUP_CHARS` 把整条候选丢弃 → **不脱敏、直接进送云文本**。问题在于把"markup 结构
+字符"与"人名内合法标点"混为一谈：§A `split_protected` 落地后撇号已落自由文本、`_sub_in_free` 走词边界
+本可安全替换，B2 这条丢弃比结构所需更宽，确定性放走一类真实西文人名出云，且漏替对用户不可见。
+
+修复（收窄结构字符集，不改三重防护架构）：
+- `_MARKUP_CHARS` 由 `/\<>${};'"()[]|=`` 收窄为 `/\<>${};()[]|=``——剔除 `'` 与 `"`（人名内合法标点），
+  保留真结构字符。含撇号/连字符人名（`O'Brien`/`d'Angelo`/`Jean-Paul`）现进 `_sub_in_free`，纯 ASCII 走
+  词边界精确替换（`(?<![0-9A-Za-z])…(?![0-9A-Za-z])`，不吃词内子串）。
+- overredaction 防护不退化：`;'>kcat` 这类碎片仍因 `;`/`>` 被丢弃；`\mu`（含 `\`）、`L)-aspartate`（含 `)`）、
+  文件名（扩展名规则）、整句（长度）、数字串（字母占比）均不受影响。
+
+测试（`tests/privacy/test_redactor.py`）：`_looks_like_name` 放行 `O'Brien`/`d'Angelo`/`Jean-Paul`/`Smith & Co`、
+仍丢弃 `;>cell`/`a<b`/`L)-aspartate`/`\mu`；端到端 `apply_lexicon` 断言含撇号人名/带 `&` 机构名在出云文本
+被脱敏、缩写词（`don't`，不在词表）不被误替、`;'>kcat` 碎片仍不替。断言全部从入参派生（无写死数据集标识）。
+门禁：privacy 115 passed。
+
+红线/取舍：仍是"召回换精度"——若 NER 误把缩写词判为人名才会过脱敏，但词表只含 NER 正向判定项，
+且安全边界（人名出云 false-negative）优先收窄。高危结构化 PII（手机/邮箱/证件/卡）走 `redact_structured_pii`
+本不受此影响。
+
+## 访问日志泄露明文 API Token + 前端缺 token 引导（token-leak-and-onboarding）
+
+背景：用户反馈后端访问日志出现形如
+`"GET /api/v1/tasks/<id>/source-images/x.JPG?token=<明文> HTTP/1.1" 200` 的行——
+明文 API Token 被写进日志；同时自部署用户不清楚「缺 token 时去哪拿、怎么填」。
+
+### 一、访问日志泄露明文 token
+
+根因：`<img src>` / `<a href>` / WebSocket 这些浏览器无法设置 `Authorization` Header 的场景，
+鉴权走 `?token=<token>` query param（`auth.require_auth` 的备选通道，前端 `appendTokenToUrl` 拼接）。
+而 `start.sh` 仅 `--log-level info` 启动 uvicorn，**未配 log filter**，uvicorn 原样打印请求行
+（含 query string），token 即配对密钥被明文落两类日志（等同泄露）：HTTP 走 `uvicorn.access`
+（`'%s - "%s %s HTTP/%s" %d'`，URL 在 args[2]），**WebSocket 握手走 `uvicorn.error`**
+（`'%s - "WebSocket %s" [accepted]'`，URL 在 args[1]）——后者最初被漏掉，由对抗式审计补出。
+
+修复（脱敏 filter，不动鉴权链路）：新增 `backend/docrestore/api/log_redaction.py`，在
+`uvicorn.access` **与 `uvicorn.error`** 两个 logger 上各挂 `AccessLogTokenRedactor`
+（`logging.Filter`），在 record 进 formatter 前**遍历 `args` 所有字符串项**逐一把
+`token`/`api_token`/`access_token` 值正则替换成 `<redacted>`（保留参数名便于排错）。
+`create_app` 早期幂等 `install_access_log_redaction()`（uvicorn 已先 configure_logging 配好两 logger）。
+query param 鉴权本身照常解析，零行为变化。
+
+坑点：① WS 握手日志走 `uvicorn.error` 而非 `uvicorn.access`，URL 在 args[1] 不是 args[2]——
+故 filter 不能写死下标，须遍历 args（顺带消除 uvicorn 改 record 结构后静默失效的隐患，
+新增 `AccessFormatter` 集成测试锁定契约）。② 前置 `[?&]` 锚点确保只动 query 参数、不误伤自由文本
+里的 "token=" 子串；filter 恒返回 True（只改写不丢弃）；args 为空时退回扫 msg 兜底。
+③ 已知限制（低危）：只识别字面 key 拼写，百分号编码 key（如 `%74oken=`）不脱敏——正常前端恒发
+字面 `?token=`，构造此类请求只泄露攻击者自己已持有的 token。
+
+### 二、前端缺 token 引导
+
+根因：服务默认自动生成 device token 落地 `~/.config/docrestore/device_token`（0600），
+`start.sh` 不回显 token 值（安全），用户不知从何获取；前端 401 只弹通用「缺少或无效的 API Token」，
+无获取指引；且 insecure 无鉴权模式下也无从判断是否真需要 token。
+
+修复：
+- 后端新增**免鉴权** `GET /api/v1/auth/info`（挂 health_router），返回
+  `{auth_required, token_source}`（**绝不含 token 值**）。`auth.py` 记录 `_TOKEN_SOURCE`
+  （env / device_file / insecure / unknown）+ `is_auth_required()` / `current_token_source()` getter。
+  device_file 分支启动日志补「`cat <路径>` 获取 + 填前端」操作指引（只打印路径不打印值）。
+- 前端 `useAuthStatus` 拉 `/auth/info` + 读本地 token 派生 `needsToken`（服务要求 token 且本地无 token）；
+  `MissingTokenBanner` 顶部横幅提示去设置（insecure 不弹，避免误报）；`TokenSettings` 按 `token_source`
+  定制「如何获取 Token」步骤（device_file → `cat ~/.config/docrestore/device_token`；env → 向部署者索取）；
+  `errors.api.unauthorized` 文案改为可操作（指向「API Token 设置」）。三语 i18n 同步。
+
+红线：`/auth/info` 与启动日志**只暴露 token 来源/路径、绝不暴露 token 值**；`needsToken` 仅在
+`auth_required===true` 且本地无 token 时为真，`/auth/info` 拉取失败（authRequired=undefined）不弹横幅。
+
+测试：后端 `test_log_redaction.py`（脱敏 + 幂等安装）+ `test_auth.py` 扩（source 解析 + `/auth/info`
+免鉴权可读且不含 token 值）；前端 `MissingTokenBanner` / `TokenSettings`（按来源定制指引）/ `useAuthStatus`
+（needsToken 派生 4 路）/ `getAuthInfo`（zod 校验）。

@@ -75,3 +75,20 @@ export function lookupTranslation(
   const fallback = locales[DEFAULT_LANGUAGE] as Record<string, string | undefined>;
   return dict[key] ?? fallback[key] ?? key;
 }
+
+/**
+ * 把翻译模板里的 ``{name}`` 占位替换为 ``params`` 对应值。
+ *
+ * 用**函数式替换**：字符串替换参数会把值里的 ``$&``/``$'``/`` $` ``/``$<name>`` 当
+ * 替换模式解释（如 OCR 文件名含 ``$`` 序列会被 garble）；函数替换按字面插入、不解释 ``$``。
+ */
+export function interpolate(
+  text: string,
+  params: Record<string, string | number>,
+): string {
+  let result = text;
+  for (const [k, v] of Object.entries(params)) {
+    result = result.replaceAll(`{${k}}`, () => String(v));
+  }
+  return result;
+}

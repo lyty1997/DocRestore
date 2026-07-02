@@ -258,3 +258,16 @@ class TestRenderer:
         # 图片已复制到子目录的 images/
         assert (sub_dir / "images" / "page1_0.jpg").exists()
 
+    @pytest.mark.asyncio
+    async def test_missing_source_image_logs_warning(
+        self,
+        renderer: Renderer,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """源图缺失不再静默：记 warning，让 document.md 死引用可被发现/排查。"""
+        doc = MergedDocument(markdown="![](page1_OCR/images/0.jpg)")
+        with caplog.at_level("WARNING", logger="docrestore.output.renderer"):
+            await renderer.render(doc, tmp_path)
+        assert any("图片源缺失" in m for m in caplog.messages)
+

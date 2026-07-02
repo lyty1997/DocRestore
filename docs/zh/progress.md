@@ -1,5 +1,229 @@
 # 开发进度
 
+## 2026-07-02 - Epic E 收尾 · #89（反向联动）/ #91（行级 bbox）不做（no plan）
+
+- **主题**：用户决策 Epic E 收尾于 **E1–E8 块级方案**，剩余两个 phase-2 子任务 **#89（反向联动）、#91（行级 bbox 精度）均不做（no plan）**，回退相关代码与文档改动。设计真相源 `docs/zh/cursor-bbox-highlight.md` **新增 §18** 记录决策与理由。
+- **#89 反向联动**：曾实现并 `--no-ff` 合入 dev（点原图版面块 → 反查定位 markdown 正文块 + 橙色 flash，`reverseBlockLocate.ts` 复用 `blockMatch` 对称反查）。**无技术阻塞，纯范围收窄**。按决策 `git reset --hard` 回退 dev 到 E8 合并点 `9868c5e`，删除 `feature/s-e89-reverse-linkage` 分支（commit `a263092`/`cb7706c` 仍在 reflog，可恢复）。
+- **#91 行级 bbox**：仅有一次「调研 + 2 spike（未写生产代码）」的文档提交（`8ddbca0`），一并回退。结论：三条候选路（VL 免费出行框 / 纯 CV 投影切行 / 块裁剪重跑 basic）逐一不划算，**根本拦路虎=文档模式无「光标行↔源图行」可对齐信号**（VL `LayoutBlock.text` 零 `\n`、编辑器是 LLM 精修重排文字）；issue 本身即警告「切行不准会比块级更差」。完整论证已落 §18.2。
+- **附带隐患**：#91 调研查清一处**块级也存在、非 #91 引入**的隐患（resume 缓存命中不重建 `layout_regions`，部分 resume 可能用残缺 `.layout.json` 覆盖首跑完整 sidecar）——已记入 `known-issues.md` 另行跟踪。
+- **GitHub**：子 issue **#89、#91 关闭为 not planned**；父 issue #74 据此收口（Epic E 块级方案 E1–E8 已闭环）。
+- **门禁**：代码回退到已绿的 E8 合并点 `9868c5e`（原 EXIT=0 / pytest 1661 / vitest 281），本次仅文档改动。
+
+## 2026-07-02 - Epic E · E8 版面全览叠加层（#92，仿 mineru.net 彩色版面图）
+
+- **主题**：Epic E 正向高亮（E1–E6）已全部落地后，实现 #92「版面全览」——源图叠**整页全部**版面块的彩色分类框（按 `label` 着色）+ 阅读序角标，可开关，达 mineru.net 版面图效果。设计真相源 `docs/zh/cursor-bbox-highlight.md` §17。
+- **关键洞察 + 决策 D1**：叠加层所需数据 `.layout.json`（含 PPT 回退 `.ppt_layout.json`）已全含（bbox/label/image_size），唯一「新」信息是阅读序 `index`。而 `index` = blocks **列表位置**，从 OCR `layout_regions`（有序）→ sidecar → API → zod → 前端**全程保序**。**偏离 issue 原文（用户拍板）**：不落 sidecar，改由 API 层 `get_task_layout` 两路（doc `enumerate(page.blocks)`、ppt 回退 `enumerate(page.regions)`）派生 → **doc 模式现有任务零重跑**，不动 sidecar/pipeline，无向后兼容分支；payload 仍显式带 `index` 字段（前端用 `block.index`，比裸数组下标稳）。
+- **后端**（仅 2 文件）：`schemas.LayoutBlockPayload` 加 `index: int`；`routes.get_task_layout` 两路 `enumerate` 派生。`test_layout_endpoint.py` doc + ppt 两路断言 `index` 从 0 递增。
+- **前端**：新建 `features/task/layoutCategory.ts`（`categoryColor(label)`→分类色，标题蓝/正文绿/表格橙/图紫/公式青/页眉页脚灰/参考粉/印章金，未知落 fallback 灰；用逗号 `rgb()/rgba()` 语法避 jsdom 丢样式）+ `components/LayoutOverlay.tsx`（全块彩框 + `index+1` 角标，复用 `bboxRect` 换算）；`SourceImageList`/`SourceImagePanel` 加 `layoutPages`+`showOverlay`（按 `filename===pageKey` 逐图铺该页全览，在单块橙色高亮之下共存）；`DocCodePreview` 加「版面全览」toggle（`canHighlight && layout!==undefined` 才显示、默认关、离开高亮态复位）；i18n 三语 `sourceImages.layoutOverlay`；`App.css` 加 `.layout-overlay-box`/`.layout-overlay-badge`。
+- **工程判断：刚刚好**——1 派生字段 + 1 overlay 组件 + 1 色表 + 1 toggle，全程复用地基（现有 `/layout` 端点、`bboxRect`、SourceImageList cell）；不引入稳定块 ID（全览是展示非联动）。
+- **门禁**：`check_quality.sh` EXIT=0（mypy --strict / ruff / typos / tsc -b / eslint 0 error / pytest **1661** passed）+ 前端 vitest **281** passed（270→281：layoutCategory 4 + LayoutOverlay 5 + SourceImageList 全览 2）。
+- **视觉**：无头 chrome 静态 harness 用**现有文档任务真实 `.layout.json`（E8 前生成、无 `index` 字段）** + 真实裁剪图（1418×1646 content_crop 处理图）复刻 overlay/CSS/色表/公式截图 —— 14 块彩框逐一精准框住（header 灰 / 标题蓝 / 正文绿 / 表格橙），阅读序角标 1..13 递增、半透明填充不遮正文。**sidecar 无 `index` 仍正确出序号，端到端实证 D1 零重跑**。
+- **遗留**：无（#92 闭环）。Epic E 剩 #89（E5 反向联动）、#91（E7 行级 bbox 精度）两个 phase-2 —— **后续决策为不做（no plan），见本文件顶部 2026-07-02 收尾条目**。
+
+## 2026-07-01 - 补跑 ultracode 审查 Sweep/Synthesize 并收口 10 处发现
+
+- **背景**：上一批（commit `93ca8d0`）的多 agent 审查在 Sweep（补漏）/Synthesize（合并去重）两步撞会话额度中断，覆盖对 finder 未触达文件不完整。本次重跑该缺失段（含针对性指令：系统覆盖 finder 漏掉的边界/测试/i18n 文件 + 复审 `93ca8d0` 自身是否引入回归）。10 finder → 23 候选 → 逐点对抗式 verify → 保留 12 条、驳回 4 条。**关键结论：多数确证缺陷是 `93ca8d0` 自己引入的回归**——正是这段补漏审查的价值所在。
+- **确证并修复（CONFIRMED）**：
+  - **放大预览裂图**：`SourceImageList` lightbox onClick 改传原图 `src`（原传 `displaySrc` 处理图 URL，404 回退只改 `<img>.src` 不改闭包 → 点开全屏裂图；全屏无 bbox 叠框本就该用原图）。
+  - **i18n 插值被 `$` 吃字**：`t()` 用 `String.prototype.replaceAll(pattern, 字符串)` 会把值里 `$&`/`$'`/`` $` ``/`$<name>` 当替换模式解释（OCR 文件名含 `$` 序列时降级警告文案 garble）。抽 `config.interpolate` 改**函数式替换**（按字面插入）一处根治全项目 `t()` 插值 + 补 `tests/i18n/interpolate.test.ts` 锁定。
+  - **log_redaction「零分配快路径」写反**：`"token=" in item or "token=" in item.lower()` 对无 token 的公共日志行第一个 `in` 恒 False → 仍走 `.lower()`、还多一次 `in`（脱敏仍正确、但注释误导且略慢）。退回 `"token=" in item.lower()`。
+  - **`/auth/info` 给 `unknown` 来源发错 token 路径**：`unknown`（注入式，token 非取自设备文件）不再回传 `token_file`（原前端引导 `cat` 到空/过期文件）。
+- **安全 + 正确性修复（PLAUSIBLE）**：
+  - **`/auth/info` 免鉴权泄露 device_token 绝对路径**（含 OS 用户名/home 布局）：新增 `_is_loopback_client`，**仅来源确为 device_file 且请求来自本机回环**才回传路径；远程/LAN 客户端拿 `None`（token 本由部署者带外下发）。补 2 个测试（远程客户端 + unknown 来源均 → None）。
+  - **pdf 逐页 except 顺带吞编程 bug**：`RecursionError`/`NotImplementedError` 是 `RuntimeError` 子类，先 `isinstance` 判定上抛再吞坏页，名实相符。
+  - **frozen dataclass + 可变 dict 的 hash 陷阱**：`PipelineWarning` 显式 `__hash__`（`(code, sorted items)`），避免默认 hash 触碰 `params` dict 令 `set()`/dict key 当场 `TypeError`。
+  - **路径穿越守卫第三份拷贝漂移**：`_find_processed_image` 改调 `_resolve_doc_dir_target` 单点守卫，`get_processed_image` 去掉重复内联 doc_dir 校验（非法 doc_dir 由 400 改 404，与 `/layout`、`/code-layout` 同口径；`name` → 400 守卫保留，受测试固定）。
+  - **两处悬停热路径推测性优化**：`codeLineMagnifier.pageXExtent`（WeakMap 按 fileIndex 缓存 per-page x 并集）+ `blockMatch.normalizedCandidate`（WeakMap 缓存候选块归一化）——均按对象弱引用缓存、GC 自动释放、行为不变。
+- **决策**：⑧ 采「loopback 门控」（用户拍板，优于移除/接受）；清理 ⑨（两套 404 回退 hook 强抽公共件）判过度工程**跳过**，仅做 ⑩⑪ 性能（用户拍板）。
+- **门禁**：`check_quality.sh` EXIT=0（mypy --strict 93 文件 / ruff / typos / tsc -b / eslint 0 error / pytest **1661** passed）+ 前端 vitest **270** passed。
+- **遗留**：无（补漏批次闭环）。分支 `bugfix/ultracode-review-fixes`（本批未 push）。
+
+## 2026-07-01 - 收口 ultracode 代码审查发现的多处缺陷
+
+- **主题**：对 `main...HEAD`（101 文件）跑 workflow 版多 agent 代码审查（xhigh），合并去重后逐条修复所有通过验证的发现（1 条 style 被判 refuted 不改）。分支 `bugfix/ultracode-review-fixes`，commit `93ca8d0`。
+- **正确性缺陷**：
+  - **docx 导出静默损坏**：`docx.py` 第二趟 pandoc 补 `-t docx`。原实现靠扩展名推断，`export_to_cache` 传 `.docx.tmp` 原子写临时路径时 pandoc 判成 HTML、exit 0 不报错，下游把 HTML 冒充 `.docx`（Word 打不开）。
+  - **code layout 放大镜端到端断头 + 裁剪坐标错位**：`CodeFileLayoutPayload` 补 `line_map`（#5 精修行映射本已算好却被 API drop）+ `CodeLayoutPayload` 补 `processed`（代码模式现支持手动裁剪，行 bbox 落裁剪图坐标系）；路由复用文档侧 `_has_processed_files`，前端 `CodeSourceMagnifier` processed 时改显处理图（404 回退原图，回退态绑 preferredSrc 免 stale）。
+  - **PDF 单页隔离退化**：`pdf.py` 逐页 except 加宽 `RuntimeError`（pdfium 绑定层对坏页抛的非 PdfiumError 通用异常不再冲出丢整份 PDF）；`AttributeError`/`MemoryError` 仍上抛。
+  - **前端小修**：DocCodePreview 警告 key 带 index（重复警告不折叠）；SourceImageList/CodeSourceMagnifier `<img>` key 绑 displaySrc，处理图 404 回退不再 stale 致裂图。
+- **后端降级警告 i18n 重构（#96 收尾）**：硬编码中文 warning 改结构化 `PipelineWarning(code, params)`，前端 `taskDetail.warnings.*` 三语本地化；DB 向后兼容旧任务裸中文串（`legacy` 包裹不丢失，`legacy: "{text}"` 模板统一走 t()）。贯穿 models/pipeline/database/task_manager/schemas/routes + 前端 schema/DocCodePreview/三语 locale + 测试。
+- **token 上手引导**：`/auth/info` 增 `token_file` 回传真实设备令牌路径（遵循 XDG/平台约定，仅路径无值），取代前端硬编码 `~/.config/docrestore/device_token`（设 XDG 或 macOS/Windows 会指错文件）。
+- **复用/效率**：抽 `output/sidecar_common.py`（`as_int_pair/quad` + JSON 读写）三 sidecar 去重；`routes._resolve_doc_dir_target` 路径穿越守卫单点化；`client.ts fetchOptionalLayout`；前端 `bboxRect.ts`；schemas 复用 `auth.TokenSource`；`_write_doc_layout_sidecar` PII 脱敏电池整体 offload 线程（不再阻塞事件循环）；log_redaction 零分配快路径。
+- **规范**：清理测试/文档中硬编码 `DSC*` 数据集标识（仅本 PR 新增处，历史日志不动）。
+- **门禁**：`check_quality.sh` EXIT=0（mypy --strict / ruff / typos / tsc / eslint / pytest 1659 passed）+ 前端 vitest 262 passed。
+- **遗留**：docx `-t docx` 修复无单测（需 pandoc，靠审查 verify agent 复现佐证）；审查的 Sweep/Synthesize 两步因会话额度中断，未覆盖 finder 未触达文件（覆盖不完整）。
+
+## 2026-06-30 - 收口访问日志明文 token 泄露 + 前端缺 token 引导
+
+- **主题**：用户反馈两点——① 后端访问日志出现 `?token=<明文>` 明文 token（`<img>`/`<a>`/WS 走 query param 鉴权，uvicorn 默认 access formatter 原样打印请求行）；② 自部署用户不清楚缺 token 时去哪获取、怎么填。
+- **完成**（分支 `bugfix/token-leak-and-onboarding`）：
+  - **日志脱敏**：新增 `api/log_redaction.py`（`AccessLogTokenRedactor` 挂 `uvicorn.access` **+ `uvicorn.error`**，遍历 record.args 所有字符串项把请求行 query string 里的 token/api_token/access_token 值替换成 `<redacted>`），`create_app` 幂等安装。鉴权链路零改动。**对抗式审计抓出 HIGH 漏点**：WS 握手日志走 `uvicorn.error`、URL 在 args[1]（非 access 的 args[2]），最初只挂 access 会漏脱——改为遍历 args + 双 logger 修复，并补 `AccessFormatter` 集成测试锁定契约。
+  - **缺 token 引导**：免鉴权 `GET /auth/info` 返回 `{auth_required, token_source}`（**不含 token 值**）；`auth.py` 记 token 来源 + getter + device_file 启动日志补「`cat <路径>` 获取」操作指引。前端 `useAuthStatus` 派生 `needsToken`、`MissingTokenBanner` 顶部横幅、`TokenSettings` 按来源定制「如何获取 Token」步骤、`errors.api.unauthorized` 文案可操作化；三语 i18n 同步。
+  - **测试**：后端 `test_log_redaction.py` + `test_auth.py` 扩（source 解析 + `/auth/info` 免鉴权可读不含 token 值）；前端 `MissingTokenBanner`/`TokenSettings`/`useAuthStatus`/`getAuthInfo`。门禁 EXIT=0（后端 1657 passed / 前端 typecheck+lint 0 error）。
+  - **文档**：`known-issues.md` 新增专段（根因/修复/红线/测试）。
+- **红线**：`/auth/info` 与日志只暴露 token 来源/路径、绝不暴露 token 值；横幅仅在服务明确要求 token 且本地无 token 时弹（insecure / 拉取失败不弹，避免误报）。
+- **遗留**：无。
+
+## 2026-06-30 - 修复 #95 PII 含撇号/连字符西文人名漏脱出云
+
+- **主题**：错误处理审计遗留的 PII 召回缺陷——`_looks_like_name` 把含撇号的西文人名（`O'Brien`/`d'Angelo`）整条丢弃 → 不脱敏直接出云。
+- **根因**：词表净化用的 `_MARKUP_CHARS` 含半角撇号 `'`/双引号 `"`，把"人名内合法标点"误当"markup 结构字符"。spaCy NER 正向判定的含撇号人名进 lexicon 后被这道闸否决整条放走（§A `split_protected` 落地后本可由词边界安全替换）。
+- **完成**：
+  - `redactor.py` 收窄 `_MARKUP_CHARS`（剔除 `'` `"`，保留真结构字符）；含撇号/连字符人名进 `_sub_in_free` 词边界精确替换。
+  - `tests/privacy/test_redactor.py` 补 #95 召回/精度测试：放行 `O'Brien`/`d'Angelo`/`Jean-Paul`/`Smith & Co`；回归断言 `;'>kcat`/`\mu`/`L)-aspartate` 仍丢弃、缩写词不被误替；端到端 `apply_lexicon` 断言出云文本被脱敏。privacy 115 passed。
+  - 文档：`pii-entity-overredaction-fix.md` §3-B2 收窄说明；`known-issues.md` 标 #95 已修 + 独立解决段。
+- **遗留**：无（#95 闭环）。分支 `bugfix/pii-apostrophe-name-95`。
+
+## 2026-06-30 - 修复 #96 VL 退本地 / PDF 缺页 降级透到任务侧
+
+主题：用户指派"继续推进 #96"——两处降级（VL 缺 server python 退本地、PDF 部分缺页）已记 warning
+但只在服务端日志，用户侧不可见。
+
+设计（先调查 workflow 映射现有管线 → 出方案经用户确认两项推荐：全部 warning 都显示 + VL 双通道）：
+复用本就存在但端到端断头的 `PipelineResult.warnings` 通道 + 前端已轮询的 `/ocr/status`，不改"降级不失败"。
+
+完成（分支 `bugfix/degradation-visibility-96`）：
+- **warnings 端到端**：`task_results.warnings` 列(_migrate_add_column)+ResultRow+_normalize_results 五元组
+  (兼容三/四)+两 INSERT+get_results(_parse_warnings_json 防御)+task_manager 持久化/水合+
+  TaskResultResponse+/result·/results+前端 schema(zod default)+DocCodePreview 琥珀软横幅。
+  副作用：既有静默的段截断/缺口 warning 现在也可见（不埋雷）。
+- **案 1 VL 退本地**：EngineManager._degraded_reason(两 fallback 置位/起 server 顶部+shutdown 清)→
+  /ocr/status degraded_reason→TaskForm 徽章提示；任务侧由生产者在本任务 ensure() 时刻**同步捕获**
+  原因码(degraded_sink)→_engine_degraded_warnings(reason) 追加到 warnings（doc/ppt/code 统一）。
+  **review 抓到并发缺陷**：原在结果汇总处读引擎全局 live 标志，混模式并发任务会互相污染（code 误报 /
+  VL 降级被并发任务清掉漏报）→ 改 per-task 同步捕获修复。
+- **案 2 PDF 缺页**：render_pdf_to_dir 返 PdfRenderResult(rendered,expected)；_expand_pdfs 回传缺页
+  map(按 doc_dir)；process_tree 经 _apply_pdf_missing_warnings 注入对应成功结果。
+- 红线：降级只进 warnings 不进 error（error 会翻 FAILED）。
+- 测试：DB 往返/三四五元组兼容、EngineManager 两 fallback、_apply_pdf_missing_warnings+
+  _engine_degraded_warnings、/ocr/status degraded_reason、PdfRenderResult；门禁后端 689 passed、前端 247 passed。
+- review workflow 对抗式复核（见结论）。
+
+遗留：UI 软横幅 / 徽章无运行 dev server 截图（环境无 dev server / 截图脚本），靠 tsc + 数据流测试验证。
+环境内 pypdfium2/DeepSeek-OCR python 未配，相关用例预存失败（非本次回归）。
+
+## 2026-06-30 - 修复 #94 代码模式 repair/audit 大病态文件不收敛卡死
+
+主题：用户指派"解掉 #94"——代码模式 `rewrite` 任务在真实大 C++ 文件上 repair 循环不收敛、
+任务卡死 12+ 分钟需手动 cancel。
+
+根因（先跑对抗式核验 workflow 确认，推翻 issue 原假设）：**非** repair↔audit 死循环，而是
+`DiagnosticCodeRepairer.repair` 的**单趟逐窗口循环窗口数无上限**——病态 OCR 大文件出几十个
+失败行窗口，每窗口一次 ~30s LLM + 一次 g++ 串行跑就是十几分钟；`_CODE_REPAIR_LARGE_FILE_LINE
+_THRESHOLD=400` 守卫是 syntax_dirty 之后的 elif，对大+脏文件失效。附带 4 个 code 进度 i18n 键
+从未进前端、UI 显示裸键，且进度只在整文件修完才报一次。
+
+完成（先 verify workflow 定位 → 实现 → review workflow 对抗式复核）：
+- `code_repair.py`：窗口预算上限 12（取前 N 保升序，不按严重度重排以守 `_shift_range` 不变量）+
+  连续无改善早停 3（从窗口 1 起计、落 patch 清零、`reject_diagnostic_worse` 同等计数）+ 超大文件
+  熔断 60000 字符（`is_oversized_for_repair`，repair/audit 共用，熔断后 audit 不再发 LLM/g++）+
+  audit patch 防御封顶 24；被跳过/早停/熔断范围全进 `flags`+`unresolved`（不埋雷）。
+- `pipeline.py`：`repair(progress_cb=...)` 逐窗口上报（新键 `progress.codeRepairWindow`）；
+  `codeLayout` 起始帧补 `current:"0"` 让一条 i18n 文案兼容两处调用。
+- 前端 i18n：补齐 codeLayout/codeGroup/codeRefine/codeRender + codeRepairWindow 到 zh-CN/en/zh-TW
+  （TS `TranslationKey` 强制三语对齐）。
+- 测试：`TestRepairConvergenceBounds` 6 例；门禁 tests/llm 159 passed、前端 247 passed + typecheck/lint 绿。
+- review 复核：0 blocker/major，1 needs_judgment（熔断只 gate repair 未 gate audit）→ 已在 audit 加
+  同闸口熔断闭合。
+
+遗留：无（#94 可关）。环境内 `pypdfium2`/DeepSeek-OCR python 未配，7 个无关用例预存失败（非本次回归）。
+
+## 2026-06-29 - 回退 PPT 模式自动 content_crop（§14.2）
+
+主题：用户问"任务 121528c1 的 PPT 模式怎么自动裁剪了几张图？记得 PPT 没前置裁剪"。
+
+排查结论：**非 bug，是 2026-06-25 §14.2 有意加的功能**——用户当时拍板把文档模式的正文
+自动裁剪扩到 PPT（矫正后串联）。用户记忆停在改动前。任务 121528c1（PPT+矫正）9 张图里
+5 张被自动裁（`.content_crop/*_after_crop.jpg`、OCR 目录 `*_after_crop_OCR`），4 张只矫正。
+
+决策（用户确认）：**回退**。屏摄幻灯无固定正文列、矫正后再自动裁易误伤图文版式 →
+PPT 恢复为「只做透视矫正、不自动裁剪」（手动框仍可用）。
+
+完成（分支 `bugfix/error-handling-hardening`）：
+- 后端 `pipeline.py`：PPT 重新纳入 `skip_content_crop`
+  （`skip = code_cfg.enable or ppt_cfg.enable or is_pdf_rendered_dir`）。
+- `routes.py` `_processed_source_variants`：移除已不可能产生的链末 `_after_crop` 变体，探测序
+  收敛为 `_after`（PPT 矫正）→ `_crop`（文档/手动裁剪）。
+- 测试：删 `test_layout_endpoint.py::test_processed_image_prefers_chained_after_crop`（场景已不存在）；
+  新增 `tests/pipeline/test_ppt_content_crop_skip.py`（PPT 不产 `.content_crop` + 文档模式同图对照证非空转）。
+- 文档：`doc-content-crop.md §14`/§14.2/§14.3 标注回退；`known-issues.md` 记录。
+- 门禁：相关 70 测全绿（layout/content_crop/pdf_ingest/ppt_refine/ppt_layout/process_tree/新测）。
+
+## 2026-06-29 18:33:14 CST - 错误处理审计：掩盖问题的兜底（landmine）批量整改
+
+主题：用户问"开发过程中是否加了很多兜底把问题掩盖住了？要优雅的错误处理不是埋雷"。
+对 343 个 `except` + 32 个 `suppress` + 55 个前端 `catch` 做多 agent 审计 + 对抗式核验。
+
+总评：**不算埋雷成性**——只有 4 个真地雷 + ~23 borderline，地雷密度对 33k LOC 很低；
+项目错误处理底子不错（多有日志 / 用 `result.error`·`flags`·`quality_report` 暴露 / PII fail-closed）。
+唯一成体系反模式 = **输出/渲染链路的"静默数据丢失"**（看似完整实缺、只服务端日志、不进 error、用户无感）。
+
+完成（分支 `bugfix/error-handling-hardening`，4 组 commit）：
+- **A 组（4 地雷 + 9 测试）** `9acd469`：renderer 死图引用记 warning；pdf 缺页不写完成态
+  （新增 `expected_pages`，重跑重试）+ 收窄 except；llm `refine`/`final_refine` 空响应当失败回退；
+  database ALTER 收窄到 `OperationalError` 判 duplicate。
+- **B 组（medium 后端 + 3 测试）** `c86bfeb`：egress_gate 云端无策略记 warning（fail-open 可见）；
+  engine_manager VL 退本地告警说明质量降级；task_manager 收集失败上抛触发清理 fail-safe（防误删）、
+  删除失败不报成功（防幽灵任务）。
+- **C 组（前端 5 处）** `3800aef`：新增 `isNotFoundError`，TaskDetail/DocCodePreview/useTaskProgress/
+  useTaskRunner/SidebarTaskList 区分 404 与真错误，不再把失败伪装成正常空态/无限处理中。
+- **D 组（low 16 文件）** `bb7f5e1`：~20 处静默丢弃补 warning/debug 计数 + 收窄 except；
+  ocr/base & pipeline final_refine 取消透传（不吞 CancelledError）。
+
+验证：`bash scripts/check_quality.sh` **EXIT=0**（mypy --strict / ruff / typos / 前端 tsc+eslint；
+pytest 1624 passed, 45 skipped；前端 vitest 247 passed；eslint 仅 2 个既有 Fast Refresh warning）。
+文档：`docs/zh/known-issues.md` 新增"错误处理 landmine 批量整改"含 6 条新代码必守原则。
+
+遗留（已建 issue 跟踪）：**#95** redactor `_looks_like_name` 撇号人名漏脱需配 PII 召回测试再收窄过滤
+（本批仅加丢弃计数）；**#96** engine_manager VL 退本地 / pdf 缺页已记 warning 但未透到任务 `result.error`/前端。
+
+## 2026-06-26 20:47:00 CST - 536759e 之后改动全面 review
+
+按 code-review 口径审查 `536759e52622154ad70acac8aac7ffc0c2c84963..HEAD`：范围 39 commits / 118 files / 约 1.48 万行新增，重点看 Epic A/C/D/E、PII、导出缓存、代码源图放大镜与前端高亮链路。
+
+发现需修复问题：PII 结构保护把 markdown 链接 label 一并保护导致链接文字实体不脱敏，且 `$$...$$` display math 未完整保护；导出缓存仅以 `document.md` 为 key 且直接写目标 cache path，存在 stale export 与并发半成品 zip 风险；代码放大镜在代码精修改行数后仍按 OCR 原始行 bbox 映射，可能错行。另有既有问题被新功能继承：代码源图 stem 含点时 `sourcePage.indexOf('.')` 截断错误。
+
+验证：`bash scripts/check_quality.sh` 通过（mypy/ruff/typos/前端 tsc+eslint；pytest 1588 passed, 45 skipped；eslint 2 个既有 Fast Refresh warning）。
+
+## 2026-06-26 20:30:55 CST - Epic A-E issue 交付复核与收口
+
+复核 GitHub issue 与 `dev` 提交记录：
+
+- **Epic A**：#72/#75/#76 已关闭，PDF 输入后端+前端完整交付。
+- **Epic B**：当前 GitHub issue 树中未找到独立 Epic B；本轮无可审查/关闭对象。
+- **Epic C**：C1 #77 已关闭，前端公式渲染已交付。
+- **Epic D**：#73 与 D1-D5 #78-#82 已关闭，docx/pdf/xlsx/pptx 导出与后续 PPT 版面定位增强已交付。
+- **Epic E**：父 issue #74 仍保持打开，因为 E5 #89、E7 #91、E8 #92 仍是未完成 phase-2 范围；本次关闭已落地但未关的子 issue #83/#84/#85/#88/#90，并逐个补充提交与验证说明。
+
+结论：A/C/D 可视为完整交付；E 的已实现子集可交付，但 Epic E 不能整体关闭。未发现需要新开 bug 的阻断问题；#93 仍开放但属于代码模式源图放大镜，不在 Epic A-E 本轮范围内。
+
+## 2026-06-24 - Epic E（光标 ↔ 原图 bbox 高亮，#74）E1/E2/E3 全部落地
+
+设计 `docs/zh/cursor-bbox-highlight.md`（用户已确认）。编辑器里光标所在段 → 右侧原图对应版面块
+高亮成矩形。**架构反转**：不让「块→bbox 映射」穿透 dedup+精修（#83 原列「核心难点」，已证不可逆/脆弱），
+改成**展示期、页级模糊匹配**——sidecar 按页存块 bbox（OCR 期数据，早于 dedup/精修），前端光标移动时
+在「该页少量候选块」里模糊匹配 raw OCR 文字定位 bbox。
+
+- **E1 后端坐标层（#83）**：新建 `output/layout_sidecar.py`（纯模块，镜像 `ppt_layout.py` round-trip，
+  减熵到 `bbox+label+text`，反序列化「坏块跳过不整页失败」）；`pipeline._write_doc_layout_sidecar`
+  在文档模式收尾落 `.layout.json`，文字过同一 PII 出云闸口 `redact_for_cloud`（与 document.md 同口径）；
+  非 VL/无区域不落盘 fail-safe；dot 前缀天然不进下载 zip（zip 显式 allowlist）。
+- **E2 API 载荷（#84）**：`LayoutPayload` + 独立懒加载端点 `GET /tasks/{id}/layout?doc_dir=`
+  （doc_dir 边界守卫 `resolve`+`is_relative_to`，与 `get_task_code_file` 同口径），无 sidecar → 404；
+  新增 `LAYOUT_NOT_FOUND` + 三语 i18n；前端 `LayoutPayloadSchema` + `getTaskLayout`（404→undefined 不弹错）。
+- **E3 前端 overlay（#85）**：`features/task/blockMatch.ts`（§8 归一化+最长公共子串模糊匹配，阈值 0.5 退化不高亮）+
+  `features/task/blockHighlight.ts`（域类型 `CursorBlock`/`SourceImageHighlight` + `computeBlockHighlight`，
+  下沉 features 避免反向依赖）+ `BlockHighlightOverlay`（复用 CropEditor bbox→% 换算，分母用 payload
+  `image_size` 避 decode race）+ 编辑器 `blockAtCursor`（光标顶层块 `$from.node(1).textContent` + 最近前置
+  pageAnchor，debounce 80ms）→ `SourceImageList` 仅命中页叠框（`data-page` 移到 `.source-image-cell` 承载
+  相对定位，scroll-sync 零回归）。**未改 `markdownSanitize.ts`**（overlay 非 markdown 渲染，纠正 #85 顾虑）。
+- **本期范围**：编辑器光标驱动 / 只做正向 / 文档模式（PPT 矫正图坐标系不符显示图，前端高亮延后 phase-2）。
+
+**证据/门禁**：后端 mypy --strict 全绿（88 文件）+ Epic E 后端 21 测（layout_sidecar 12 + doc sidecar 4 +
+layout 端点 5），output+pipeline 397 回归绿；前端 203 测全绿（新增 blockMatch 10 + blockHighlight 6 +
+overlay 3 + SourceImageList 3 + blockAtCursor 真实 Tiptap 3 + client 3）+ typecheck/lint 干净；
+**真机静态 harness 截图**核对 overlay 落段精准、非命中页无框。**未提交**（待用户「提交」）。
+
 ## 2026-06-24 - Epic D Phase-2b 增强：positioned-pptx 区域颜色采样 + 字号估计
 
 设计 `docs/zh/ppt-layout-export.md` §11。让 positioned-pptx 重排文字接近原屏摄图的颜色与字号
@@ -2606,3 +2830,252 @@ soffice 渲染 + bbox 叠加图目视。
 
 **证据**：门禁全绿（**1505 passed, 45 skipped**，mypy 88 文件）+ E2E 渲染图/叠加图（/tmp/e2e_vis/）。
 Phase-2b 关精修版面定位**真机验证通过**。
+
+## 2026-06-24 - Epic E Phase-2 E4：只读预览 hover 高亮（#88）
+
+把光标→原图 bbox 高亮从「仅 WYSIWYG 编辑器」扩到**只读预览模式**，**零新算法**，复用 phase-1
+全部地基（`getTaskLayout` + `computeBlockHighlight` + `matchBlock` + `BlockHighlightOverlay` +
+`SourceImageList` overlay）。
+
+**改动**：
+- 新增纯函数 `features/task/previewBlockAtPointer.ts`，**镜像** `blockAtCursor`：块=命中元素向上到
+  `.markdown-preview` 直接子节点（对应编辑器 `$from.node(1)` depth-1，列表/表格整块），文本=`textContent`，
+  页=该块**最近前置** `[data-page]` 锚点（`compareDocumentPosition` 取文档序前最后一个）。
+- `DocCodePreview.tsx`：`canHighlight` 去掉 `editMode` 约束（预览+编辑两模式都取 layout、都传
+  `highlight`）；预览容器挂 `onMouseMove`(debounce 80ms)→`previewBlockAtPointer`→`setCursorBlock`、
+  `onMouseLeave` 清空；`editMode` 切换复位 + 卸载清定时器。
+- 设计文档 `cursor-bbox-highlight.md` §12 落 E4 设计与镜像语义对照表。
+
+**验证**：
+- 单测 `previewBlockAtPointer.test.ts`(9)：hover 段落/标题/块内子元素 → 正确 {page,text}；
+  容器外/空块/无前置页/null/包裹形态锚点等退化路径全覆盖。全量前端 **212 passed**（203→212）。
+- `tsc -b`（全项目）+ `eslint` 0 error（仅 2 条既有 react-refresh warning）。
+- 真机视觉验证：忠实 harness（真图 1.jpg 3018×2753 + E3 同款 overlay 标记/CSS + 真实匹配算法）
+  截三态——hover 第一段→上区蓝框、hover 第二段→框下移、移出→清空，% 换算精确（240/3018 等）。
+- overlay 组件与 E3 逐字复用（已像素核对），E4 仅新增触发交互，无视觉改动。
+
+**状态**：实现 + 验证完成，**未提交**（待用户「提交」）。phase-2 下一步建议 #89 反向联动。
+
+## 2026-06-25 - Epic E Phase-2 E6：PPT 模式光标→bbox 高亮（#90）
+
+用户实测「光标在文档上原图不高亮」，定位根因：被测任务是 **PPT 模式（rectify=true）**，而
+E3/E4 是**纯文档模式特性**——PPT 只落 `.ppt_layout.json` 不落 `.layout.json`，且 bbox 在矫正图
+坐标系而源图栏显原图（§7 早标延后）。本次让高亮覆盖 PPT 模式（设计 §13）。
+
+**关键决策**：`.ppt_layout.json` 已含高亮全部所需（filename=原图名/marker 对齐、image_size=矫正图尺寸、
+regions[].bbox=矫正图坐标 + content），**零 pipeline 改动、现有 PPT 任务无需重跑**——让 API 回退读它。
+
+**改动**（复用 E1-E4 全链）：
+- 后端 `api/routes.py` `get_task_layout`：`.layout.json` 缺失时回退 `load_ppt_layout`，
+  `regions→blocks`(`content→text`)、`rectified=True`；新端点 `GET /tasks/{id}/rectified-image?name=&doc_dir=`
+  服务 `.rectified/{stem}_after{suffix}`（镜像 `get_source_image` 词法越界守卫，缺失 404）。
+- 后端 `schemas.py`：`LayoutPayload.rectified: bool = False`。
+- 前端 `schemas.ts`(`rectified` 入 zod)/`client.ts`(`getRectifiedImageUrl`)；
+  `SourceImageList` 在 `rectified` 时 img 显矫正图 URL（`data-page`/pageKey 仍原图名保三键对齐），
+  `onError` 一次性回退原图（未矫正页 bbox 本就原图坐标，回退即对）。
+
+**坐标系**：原图 1706×1279 → 矫正图 1205×809；bbox/image_size 同在矫正图系，源图栏改显矫正图即对齐。
+
+**验证**：后端 `test_layout_endpoint.py` 9 passed（+4：PPT 回退/rectified-image 200·404·400）、API 全目录
+253 passed 零回归；前端 217 passed（+5：getRectifiedImageUrl 3 + SourceImageList 矫正图 src 2）；
+tsc -b + `npm run lint` 0 error。**真机视觉**：现有 PPT 任务真实 `.ppt_layout.json` 全部 region bbox 按 %
+叠真实矫正图 `_after.jpg`，标题/正文/双图/footer 精准框住内容。
+
+**状态**：实现+验证完成，**未提交**（待用户「提交」）。现有 PPT 任务零重跑即可高亮。
+
+## 2026-06-25 - 修复文档模式光标高亮错位（content_crop 坐标系）+ 「处理图」机制通用化
+
+用户报「光标高亮框非常不准、没开精修」。真机实测（注入 device token 打开任务 d47b5c3e）定位：
+文档模式 + content_crop（正文裁剪，默认开），`.layout.json` image_size=[1418,1646]=裁剪图、
+原图 [2467,1646]——bbox 裁剪图坐标 vs 显示原图 → 左偏 ~20% + 拉宽 1.74×。根因通用
+（`pipeline.py:2047` 预处理后坐标系随处理图），#90 只解了 PPT。
+
+**修复**（设计 §15，决策=泛化「显处理图」而非重跑）：
+- 后端：`LayoutPayload.rectified`→`processed`；`get_task_layout` 按「探 .rectified/.content_crop
+  目录有文件」统一判 `processed`；`rectified-image` 端点→`processed-image`，逐 variant 探
+  `.rectified/{stem}_after` + `.content_crop/{stem}_crop`，均无→404。
+- 前端：`getRectifiedImageUrl`→`getProcessedImageUrl`（打 /processed-image）；`SourceImageList`
+  `rectified`→`processed`，processed 时 img 显处理图、onError 回退原图（逐页混合自洽）。
+- **现有任务零重跑**（裁剪图/矫正图已在盘）。
+
+**验证**：后端 test_layout_endpoint 11 passed（+content_crop layout/processed-image）、API 255 passed
+零回归；前端 217 passed、tsc+lint 0 error；**真机视觉**用用户实际任务真实裁剪图 `_crop`(1418×1646)+
+真实 bbox 叠加，标题/双表/各块精准框住（对比修复前原图上左偏拉宽）。
+
+**状态**：实现+验证完成，**未提交**。注：被测后端当时已停，真机 harness 验证用真实裁剪图+bbox；
+端到端活机验证需重启后端加载新代码（Vite 前端已热更新带新代码）。
+
+## 2026-06-25 - 图片/图表块高亮（image_ref 匹配）+ 高亮框改橙色
+
+用户报「插图图片不高亮、图表不高亮、换橙色」。
+
+**根因**：image/chart 区域 OCR 无文字（content=""），文字模糊匹配命中不了；光标落图片块时
+textContent 空，块检测直接返回 undefined。表格有 HTML 文字已可匹配。
+
+**修复**（设计 §16）：
+- 图片按 **image_ref** 精确匹配：后端 `LayoutBlock`/payload 加 `image_ref`，
+  `_write_doc_layout_sidecar` 用 `resolve_output_image_ref(ocr_stem, region.image_ref)` 算输出引用
+  `images/{stem}_N.ext`（与 markdown `<img src>` 一致，已验证）；前端 `extractImageRef` 取 `<img src>`
+  的 `images/xxx`，`previewBlockAtPointer`/`blockAtCursor` 无文字块时取图片引用，`computeBlockHighlight`
+  有 imageRef 走精确匹配。to_dict/from_dict + zod 向后兼容（旧 sidecar 无字段→空）。
+- 橙色：`.block-highlight-overlay` 改独立 `#f97316`（不动共享 `--color-primary`，避免波及按钮）。
+
+**验证**：后端 test_layout_sidecar 30 passed（+image_ref 3 测）+ resolve 值一致性验证；前端 222 passed
+（+image 5 测）、tsc+lint 0 error。
+
+**限制**：image_ref 是 sidecar 新字段 → **图片高亮需重跑任务**（现有 .layout.json 无此字段）；橙色即时生效
+（前端热更新）。
+
+**状态**：实现+单测完成，**未提交**。活机图片高亮验证待重跑任务 + 重启后端。
+
+## 2026-06-25 - content_crop 扩到代码（手动）/ PPT（自动串联）模式
+
+用户：让代码、PPT 模式也支持文档模式那种正文裁剪。决策（用户拍板）：代码=人工裁剪开关不自动；
+PPT=自动 content_crop 且矫正后串联。
+
+**实现**（设计 doc-content-crop.md §14）：
+- 后端 `skip_content_crop = code_cfg.enable or is_pdf_rendered_dir`（去掉 PPT）；代码模式坐标依赖强
+  + 已有列裁剪 + content_crop 不适配 IDE → 仍跳过自动裁剪（保留手动框）。
+- producer 预处理由互斥 `elif` 改**串联**：`if 手动框(独占) else { 矫正(若开) → content_crop(若开) }`。
+  PPT+矫正 → `.rectified/{stem}_after.jpg` 再裁 → `.content_crop/{stem}_after_crop.jpg`，各步 fail-safe。
+- 高亮 `_processed_source_variants` 加链末变体，探测序 `_after_crop`→`_after`→`_crop`（命中最深处理图对齐）。
+- 前端 TaskForm：手动裁剪面板/`cropBoxes` 的 `mode==='doc'` gating 放开到代码模式（`cropAllowed=doc||code`）；
+  后端 `user_box` 分支本就 mode 无关，零改动生效。
+
+**验证**：后端 layout 端点 12 passed（+串联 `_after_crop` 优先命中）、pipeline+api 534 passed 零回归；
+前端 222 passed、tsc+lint 0 error。
+
+**澄清（经核实非 bug，2026-06-25）**：曾标「代码模式手动裁剪后源图锚点 overlay 按原图坐标可能错位」，
+逐行核对否定——代码模式源图不画任何 bbox 叠加层（`BlockHighlightOverlay` 仅文档/PPT 传 `highlight` 时渲染），
+唯一 `code-page-anchor` 画在代码正文列、不叠图上；源图显原图、同步靠 pageKey=原图名（裁剪后 `image_path`
+还原），页级同步不受裁剪影响 → 无可见错位。决策：代码模式源图保持显原图（需完整 IDE 上下文，用户拍板）。
+producer 串联未单测（需 mock OCR 引擎）→ 靠设计 + 端点测 + 活机 PPT 跑验证。
+
+**状态**：实现+测试完成，**未提交**。活机验证（PPT 串联裁剪 + 代码手动裁剪 UI）待重启服务。
+
+---
+
+## 2026-06-26 代码模式源图放大镜（#93，悬停行→原图局部放大 + 底部缩略图）
+
+**主题**：代码模式右侧源图整张缩在窄栏看不清 → 给一个跟随鼠标的「源图放大镜」：悬停某代码行 →
+在 IDE 编辑栏顶部放大显示**该行±1 行**对应的原图局部，整张源图退化为**界面最下方**缩略图条并标记
+当前行所属那张。设计 `docs/zh/code-source-magnifier.md`。
+
+**决策**：精确·行级坐标（后端导出已算好但被丢弃的 `CodeLine.bbox`）；悬停驱动（只读查看器无真光标）；
+放大镜嵌编辑栏顶部、缩略图条落界面最下方全宽（用户拍板）。
+
+**完成**（B1→F5 逐个有证据闭环）：
+- **B1** `output/code_layout_sidecar.py` 纯模块：`build_code_layout(sources)` 逐行取胜出页 bbox
+  （重叠区按 `line_provenance`），`.code_layout.json` 只含 `line_no+page+bbox`、无正文 → 零 PII 面、无需脱敏；
+  宽松反序列化（坏行/坏文件跳过）。15 单测。
+- **B2** `_code_pipeline` 在 `render_code_files` 后 `_write_code_layout_sidecar`（失败仅告警不阻断）。3 测。
+- **B3** `GET /tasks/{id}/code-layout` + `CodeLayoutPayload` + `CODE_LAYOUT_NOT_FOUND` 三语 i18n
+  （doc_dir 越界守卫，无 processed——代码模式 bbox 恒原图坐标）。端点测 5（命中/越界 404/无 sidecar 404）。
+- **F1** schema + `getTaskCodeLayout`(404→undefined) + 单测（含 3 新用例）。
+- **F2** `features/task/codeLineMagnifier.ts`：`buildLineIndex` + `computeMagnifierRegion`
+  （line±1 **同页** bbox 并集，跨页边界只并同页那侧；当前行无 bbox 就近回退；`focus`=当前行框）。8 单测。
+- **F3** CodeViewer 接线：拉 layout 建索引；代码容器 `onMouseMove` 取最近 `[data-line]`(=line_no) →
+  `hover{path,lineNo}`（绑 path 切档自动失效）→ `computeMagnifierRegion`；放大镜 `<CodeSourceMagnifier>`
+  复用 `CropZoomViewport`（自然尺寸探测 + 同图换行命令式 refit）+ `BlockHighlightOverlay` 描当前行；
+  底部 `SourceImageList`(新增 `activePageKey`) 当前页橙描边。撤右源图 aside + 去纵向 scroll-sync。
+- **F4** CSS：`.code-viewer` 由 `220px 1fr 220px` 改 `220px 1fr` + 行 `minmax(0,1fr) auto`，
+  缩略图 `grid-column:1/-1` 全宽底部；放大镜复用 `.figure-crop-viewport`(高度改 `min(24vh,260px)`)，
+  `:has(.code-magnifier-probe)` 探测期保高防塌陷，focus 框按 `--crop-zoom` 反缩放保细线。
+- **F5** 静态 harness（`devHarness/` + `harness.html` + public 喂图，8000 静态服务器经 Vite 代理命中）+
+  Playwright 截图核对：放大镜在编辑栏顶部显原图局部放大（文字清晰可读）、橙色 focus 框框住当前行、
+  底部缩略图当前页橙描边——**harness 临时件已删**。
+
+**复用件（零造轮子）**：`CropZoomViewport`+`fitRegion`（bbox→纯 CSS 放大）、Epic E `layout_sidecar`+
+`/layout`+`getTaskLayout` 模板、`SourceImageList`+`ImageLightbox`、`pageKeyBySourcePage`。
+
+**门禁**：`check_quality.sh` EXIT=0（mypy/ruff/typos 绿，前端 tsc+eslint 绿，后端 pytest 1588 passed/45 skipped）。
+
+**状态**：实现+测试+视觉验证完成，**未提交**。真机 E2E（真实代码模式 OCR 跑出 `.code_layout.json` 后悬停验证）
+需 GPU+vLLM 起任务，待用户需要时再跑（行级数据流已由 F2 单测 + 静态 harness 覆盖）。
+
+**优化（行宽恒定，2026-06-26）**：用户反馈「保持放大镜行宽，无需把文字动态全部铺开」。根因 `fitRegion`
+按**每行 region 宽度**铺满视口 78% → 行长不同则缩放系数不同、字号「呼吸」。修法：`computeMagnifierRegion`
+的 region **横向恒取当前页所有行的 x 并集**（`pageXExtent`，固定行宽参考），纵向才用 ±1 band → 宽 >> 高、
+`fitRegion` 宽度主导 → zoom 恒定，短行不铺开、字号稳定，只纵向跟随光标；`focus` 仍是当前行真实框。
+F2 加「同页不同行宽」用例（9 passed）；静态 harness 长行/短行双放大镜截图核对字号一致。门禁 EXIT=0。
+
+**增量（编辑态光标跟随 + 放大镜收高，2026-06-26）**：用户「编辑模式也加上跟随高亮，编辑光标在哪
+就高亮哪一行」+「放大镜区域太高，收小」。设计 §11。改动：
+- **统一活动行**：`hover{path,lineNo}` → `activeLine`，语义升为「来源：只读悬停 *或* 编辑光标」。
+  `<CodeSourceMagnifier>` 本就常驻渲染，原编辑态因无 mousemove 停在上次悬停行；现编辑态由
+  `handleEditorCaret` 驱动。两态 DOM 互斥（编辑无 `.code-content-text`、只读无 textarea）不串扰。
+- **光标行映射**：纯函数 `lineIndexAtOffset(text,offset)`（数 `selectionStart` 前换行，越界钳制）→
+  `displayLineNumber=line_no_range[0]+idx` 还原 OCR `line_no`（== sidecar 键 == 只读 `data-line`），
+  喂同一 `computeMagnifierRegion`，零新链路。textarea 挂 `onSelect/onKeyUp/onClick/onFocus`（React
+  `onSelect` 覆盖键鼠移动，余为跨浏览器与测试兜底；`activeLine` 按 `(path,lineNo)` 去重）。
+- **gutter 当前行高亮**：编辑行号槽当前行加 `current-line` 类（橙左条+微底色，与缩略图 `.active`
+  同色 #f97316），直接满足「高亮哪一行」字面诉求。
+- **放大镜收高**：`min(24vh,260px)` → `min(15vh,160px)`（viewport + 探测期 min-height 同步）。
+- **坑**：`activeLine?.path === selectedPath` **不收窄** `activeLine`（两者皆 undefined 时相等为真）→
+  全量 `tsc` 报 TS18048（逐文件 hook 的 tsc 漏报），改显式 `activeLine !== undefined &&` 前置守卫。
+- **证据**：`lineIndexAtOffset` 单测 5 例（空/首/中/尾/越界，合并 codeLineMagnifier 14 passed）；
+  CodeViewer 编辑光标测（置 `selectionStart`→keyUp→gutter `current-line` 行 2→3 + 缩略图 `.active`，
+  10 passed）；门禁 `check_quality.sh` **EXIT=0**（1588 passed/45 skipped + tsc/lint/mypy/ruff/typos 绿）；
+  静态 harness Playwright 截图核对放大条收窄 + gutter 橙高亮。
+- **对抗式审查 + 修复（设计 §11.1）**：4 视角 finder→逐条 verify，6 条全 low、无功能 bug，修 3 项——
+  **A** 多行选区按 `selectionDirection` 取焦点端（原只读 `selectionStart` 跟到选区顶端）；
+  **B** `useEffect([editing])` 清 `activeLine` 防跨态「幽灵当前行」（textarea 无 autofocus，`onFocus` 兜底失效）；
+  **C** `.current-line` 改**纯结构高亮**（橙条+底色，删 `color/font-weight`）避免压住诊断行号错误红，
+  截图验证「既诊断又当前=红字+橙条」并存。新增选区方向测 + 切态清空测；前端 vitest **241 passed**，
+  门禁 **EXIT=0**。已提交 dev：`feat(core)` 4338bd9 + `feat(tui)` b50350f + `docs(core)` 96287b0。
+- **D 死代码清理（独立 `refactor(tui)`）**：grep 全仓确证代码路径无 `[data-page]`/`useScrollSync` 消费方
+  （消费方全在文档/PPT 路径）后，移除 `CodePageAnchor`/`buildCodePageAnchors`/`clampLineIndex`/`codePageAnchors`
+  useMemo + 只读 overlay span + `.code-content-text .code-page-anchor` CSS + stale 注释；两测改断言**存活**的
+  源图缩略图（`.source-image-cell` 的 `data-page`，不依赖 `source_page_ranges`），覆盖未丢。
+  前端 vitest 241 passed、门禁 EXIT=0。
+
+**当前行高亮改整行背景带（2026-06-26，用户反馈，设计 §11.2）**：用户「高亮框不要边、只要整行背景
+染色，边框太粗挡住正文，且有动态缩放效果，整行染色更好避免动态缩放渲染」。两改：
+- **`focus` 横向铺满固定行宽**（`codeLineMagnifier.ts`）：由「当前行真实窄框」改 `[ref.x0, line.y0, ref.x1,
+  line.y1]`——x 复用 `region` 同份 `pageXExtent`（页行宽并集），同页内 left/width **恒定**、仅纵向跟随
+  → 行长不再驱动宽度跳变（动态缩放根因之一）。
+- **CSS 无边框半透明带**（`.code-magnifier-viewport .block-highlight-overlay` 覆盖）：`border:none` +
+  `border-radius:0` + `background: rgb(249 115 22 / .2)`（正文透出）+ `transition:none`（不再独立动画，
+  随 `figure-crop-zoom` 的 `transform` 一体平移贴住当前行，消「overlay 0.12s vs 图层 0.25s」异步错位）。
+  base `.block-highlight-overlay`（Epic E 文档高亮共用）不动，仅放大镜作用域覆盖。
+- **证据**：`codeLineMagnifier` 短行用例 `focus` 由 `[10,20,60,40]`→`[10,20,200,40]`（整行带）；前端
+  vitest **241 passed**、门禁 `check_quality.sh` **EXIT=0**（1588 passed/45 skipped）；harness 旧/新并排
+  Playwright 截图核对（旧=橙描边贯穿 `clean(`、右端切词；新=无边框全幅半透明带、`cleaned = clean(text)`
+  透出可读、横幅到 viewport 端）。harness 临时件已删。
+
+---
+
+## 2026-06-26 23:10 CST — code review 6 条发现修复（PII / 导出 / 放大镜）
+
+**主题**：对用户提交的 6 条 review 发现逐条对抗式核验（6/6 成立，2 条下调/限定严重度），再实现修复。
+全程门禁 `check_quality.sh` **EXIT=0**（后端 pytest 1615 passed/45 skipped、mypy 91 文件无问题；前端
+vitest 247 passed、tsc+eslint 绿）。**未提交**（待用户「提交」）。
+
+**clear-bugfix（4 条，直接修）**：
+- **#1 PII 漏脱链接 label**（高）：`privacy/markup.py` 结构正则把整个 `[label](url)` 当保护段，label 里
+  人名/机构名既不进 NER 也不替换 → 随文上云泄露。修：图片仍整段保护、链接拆为只保护 `](目标)`、放出
+  label 进脱敏。单一真相源，redactor/ner 零改动。测 redactor +1、新建 `test_markup.py`（mask_structure +
+  split_protected）。
+- **#2 `$$...$$` display math 未保护**（中高）：正则只匹配行内 `$...$`，display math 被拆成两个 `$$`、
+  中间正文落自由段被替换 / 暴露给云端 NER。修：加 `\$\$.*?\$\$` 分支并**列在行内 `$...$` 之前**（DOTALL）。
+- **#4 导出写盘非原子**（中高）：`routes._ensure_export_product` check-then-act + exporter 直写最终路径，
+  并发下载可能把半成品打进 zip。修：新 `export_to_cache`（`tempfile.mkstemp` 同目录 + `os.replace` 原子落位），
+  4 个 exporter 零改动。测 `test_export_atomic.py`（探测半成品不可见 + 并发两写仍完整 + 无临时残留）。
+- **#6 含点 stem 解析错**（低）：`CodeViewer.tsx` `stemFromSourcePage` 用 `indexOf(".")` 把 `a.b.col0`
+  截成 `a` → 含点文件名源图反查失败、放大镜失效。修：改 `/\.col\d+$/` 剥尾。测 CodeViewer +1。
+
+**需拍板（用户已选）**：
+- **#3 导出缓存 key 只哈希 document.md → stale**（核验下调中低，crop-figure 反例不成立、窗口极窄）：
+  **选「重跑时清空缓存」**。`base.clear_export_caches(root)` 删子树所有 `.exports/`，在 `resume_task`
+  复用 output_dir 前调（`asyncio.to_thread`）。测 +2。
+- **#5 放大镜精修后错行**（仅 rewrite/repair 真改行数触发）：**选「行映射方案（全程可用）」**，设计 §12。
+  **实现取舍**：弃勘察设计的「穿透 refiner 逐 return + patch 重建 + compose」（12+5 项、compose 易写反），
+  改 `pipeline:1889` 单点 `difflib.SequenceMatcher` 对原文 vs 精修文求 `line_map`（`build_refined_line_map`），
+  refiner 零改动、无 compose、blast radius ~4+3。原则「不放大优于错放」：仅 `equal` 段精确映回原 OCR
+  `line_no`，改写/新增行 → `None` 不放大。三档零回归退化为 identity（守恒→空 / 旧 sidecar 缺键 / 映射空）。
+  落点：`SourceFile.refined_line_map` + sidecar `line_map`（非空才输出、宽松反序列化）+ 前端
+  `buildLineMaps`/`mapDisplayLineToRaw`/`resolveMagnifierTarget`。测后端 build_refined_line_map 7 +
+  序列化 5、前端映射 4。坑：zod `.default([])` 让 `line_map` infer 必填 → 3 处既有 fixture 补 `line_map: []`
+  （全项目 `tsc -b` 才报）；测试 null 用豁免注释具名常量 `NO_SRC`。
+
+**遗留**：本批未提交；#2 的 `\[...\]`/`\(...\)` 两种 LaTeX 定界符同源暴露未一并补（小步起见，待定）。

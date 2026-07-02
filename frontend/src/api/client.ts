@@ -27,6 +27,12 @@ import {
   GpuListResponseSchema,
   CropDetectResponseSchema,
   CropFigureResponseSchema,
+  LayoutPayloadSchema,
+  type LayoutPayload,
+  CodeLayoutPayloadSchema,
+  type CodeLayoutPayload,
+  AuthInfoResponseSchema,
+  type AuthInfoResponse,
   type ActionResponse,
   type BrowseDirsResponse,
   type CreateTaskResponse,
@@ -161,6 +167,12 @@ export class ApiError extends Error {
   }
 }
 
+/** 是否 404（资源不存在）。用于区分"预期的未就绪/不适用"与真实失败，
+ * 避免把 500/网络/解析错误一并当成 404 静默吞掉。 */
+export function isNotFoundError(error: unknown): boolean {
+  return error instanceof ApiError && error.httpStatus === 404;
+}
+
 /** HTTP 状态码 → 客户端诊断 hint i18n key（不含主错误，只是补充提示）。 */
 function hintKeyForStatus(status: number): string | undefined {
   if (status === 413) return "errors.http.413";
@@ -250,6 +262,13 @@ export async function createTask(
     body: JSON.stringify(body),
   });
   return handleResponse(response, CreateTaskResponseSchema);
+}
+
+/** 公共鉴权信息（免鉴权可读）：是否需要 token + token 来源，供前端提示用户。
+ *  不带 Authorization（端点本就免鉴权；前端拿到 token 前也需能读它）。 */
+export async function getAuthInfo(): Promise<AuthInfoResponse> {
+  const response = await fetch(`${API_BASE}/auth/info`);
+  return handleResponse(response, AuthInfoResponseSchema);
 }
 
 /** 裁剪预览取图 URL（带认证 token）：从 image_dir 按相对名取一张图 */
@@ -499,10 +518,76 @@ export async function listSourceImages(
   return handleResponse(response, SourceImagesResponseSchema);
 }
 
+/**
+ * 拉取可选的版面 sidecar 载荷（layout / code-layout 共用）。
+ *
+ * 无 sidecar（非 VL 引擎 / 老任务 / 模式不产出版面）→ 后端 404 → 返回 undefined
+ * （前端不高亮/不放大、不弹错误）；多文档可传 docDir 取对应子目录。``endpoint`` 为
+ * 端点段（``layout`` / ``code-layout``）。两端点「空数据」语义在此单点维护。
+ */
+async function fetchOptionalLayout<T>(
+  taskId: string,
+  endpoint: string,
+  schema: { parse: (data: unknown) => T },
+  docDir?: string,
+): Promise<T | undefined> {
+  const query =
+    docDir !== undefined && docDir !== ""
+      ? `?doc_dir=${encodeURIComponent(docDir)}`
+      : "";
+  const response = await fetch(
+    `${API_BASE}/tasks/${taskId}/${endpoint}${query}`,
+    { headers: apiHeaders() },
+  );
+  if (response.status === 404) {
+    return undefined;
+  }
+  return handleResponse(response, schema);
+}
+
+/**
+ * 获取任务版面高亮载荷（Epic E：编辑器光标↔原图 bbox 高亮）。
+ * 无 sidecar → 404 → undefined（前端不高亮、不弹错误）；多文档可传 docDir。
+ */
+export function getTaskLayout(
+  taskId: string,
+  docDir?: string,
+): Promise<LayoutPayload | undefined> {
+  return fetchOptionalLayout(taskId, "layout", LayoutPayloadSchema, docDir);
+}
+
+/**
+ * 获取代码任务行级版面载荷（#93：悬停行↔原图局部放大）。
+ * 无 sidecar → 404 → undefined（前端不显示放大镜、不弹错误）；多文档可传 docDir。
+ */
+export function getTaskCodeLayout(
+  taskId: string,
+  docDir?: string,
+): Promise<CodeLayoutPayload | undefined> {
+  return fetchOptionalLayout(
+    taskId, "code-layout", CodeLayoutPayloadSchema, docDir,
+  );
+}
+
 /** 构建源图片 URL（附加 token 供 <img src> 直接使用） */
 export function getSourceImageUrl(taskId: string, filename: string): string {
   return appendTokenToUrl(
     `${API_BASE}/tasks/${taskId}/source-images/${encodeURIComponent(filename)}`,
+  );
+}
+
+/** 构建 OCR 前**处理图** URL（PPT 矫正 ``_after`` / content_crop 裁剪 ``_crop``，按原图名
+ *  取，附 token；Epic E §13/§15）。处理图任务 bbox 在处理图坐标系，源图栏改显此 URL 才对齐；
+ *  该页无处理图时端点 404，调用方 <img onError> 回退原图（其 bbox 本在原图系）。 */
+export function getProcessedImageUrl(
+  taskId: string,
+  name: string,
+  docDir?: string,
+): string {
+  const params = new URLSearchParams({ name });
+  if (docDir !== undefined && docDir !== "") params.set("doc_dir", docDir);
+  return appendTokenToUrl(
+    `${API_BASE}/tasks/${taskId}/processed-image?${params.toString()}`,
   );
 }
 

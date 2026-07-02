@@ -310,6 +310,8 @@ class TestStartPpocrServer:
 
         # 无子进程启动，内部属性为 None
         assert manager._ppocr_server_proc is None
+        # #96：VL 退本地降级须置位 degraded_reason，供 /ocr/status + 任务 warnings 透出
+        assert manager.degraded_reason == "vl_no_server_python"
 
     @pytest.mark.asyncio
     async def test_skip_when_python_path_not_exists(
@@ -322,6 +324,8 @@ class TestStartPpocrServer:
         await manager._start_ppocr_server(config, on_progress=None)
 
         assert manager._ppocr_server_proc is None
+        # #96：路径无效同样置位降级原因（路径变体）
+        assert manager.degraded_reason == "vl_server_python_missing"
 
     @pytest.mark.asyncio
     async def test_stdout_drain_starts_before_wait_ready(

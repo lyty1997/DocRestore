@@ -23,6 +23,7 @@ import {
   diagnoseCodeFileContent,
   getCodeFileContent,
   getFilesIndex,
+  getTaskCodeLayout,
   updateCodeFileContent,
 } from "../api/client";
 import type {
@@ -31,14 +32,26 @@ import type {
   FilesIndex,
   FilesIndexEntry,
 } from "../api/schemas";
+import {
+  buildLineIndex,
+  buildLineMaps,
+  type CodeLineIndex,
+  type CodeLineMaps,
+  computeMagnifierRegion,
+  type FileLineIndex,
+  type FileLineMap,
+  lineIndexAtOffset,
+  type MagnifierTarget,
+  mapDisplayLineToRaw,
+} from "../features/task/codeLineMagnifier";
 import { tokenizeCodeLine } from "../features/task/codeSyntax";
 import { computeLineWindow } from "../features/task/lineWindow";
 import {
   type SourceImageListItem,
   imageNameToPageKey,
 } from "../features/task/sourceImagePreview";
-import { usePreviewScrollSync } from "../hooks/usePreviewScrollSync";
 import { useTranslation } from "../i18n";
+import { CodeSourceMagnifier } from "./CodeSourceMagnifier";
 import { SourceImageList } from "./SourceImageList";
 
 interface CodeViewerProps {
@@ -51,12 +64,6 @@ interface CodeSourceImage extends SourceImageListItem {
   readonly sourcePage: string;
 }
 
-interface CodePageAnchor {
-  readonly pageKey: string;
-  readonly sourcePage: string;
-  readonly lineIndex: number;
-}
-
 interface VisibleDiagnosticItem {
   readonly item: CodeDiagnosticItem;
   readonly lineIndex: number;
@@ -64,10 +71,14 @@ interface VisibleDiagnosticItem {
   readonly key: string;
 }
 
-/** 把 "page06835.col0" 拆为 page_stem="page06835" */
+/**
+ * 把 source_page 键拆出 page_stem：剥掉结尾的 `.col{N}`（column_index 恒为整数）。
+ * "page06835.col0" → "page06835"；含点 stem 也正确："a.b.col0" → "a.b"。
+ * 旧实现按第一个点切（indexOf(".")）会把 "a.b.col0" 误截成 "a"，导致含点文件名
+ * 的源图反查不到（源图列表/放大镜对该页失效）。无 `.colN` 后缀时原样返回。
+ */
 function stemFromSourcePage(sourcePage: string): string {
-  const dotIdx = sourcePage.indexOf(".");
-  return dotIdx > 0 ? sourcePage.slice(0, dotIdx) : sourcePage;
+  return sourcePage.replace(/\.col\d+$/, "");
 }
 
 function basename(path: string): string {
@@ -113,61 +124,6 @@ function resolveSourceImages(
   return out;
 }
 
-function buildCodePageAnchors(
-  entry: FilesIndexEntry,
-  imageMatches: readonly CodeSourceImage[],
-  content: string,
-): CodePageAnchor[] {
-  if (imageMatches.length === 0) return [];
-
-  const lineCount = Math.max(1, content.split("\n").length);
-  const pageKeyBySourcePage = new Map<string, CodeSourceImage>();
-  for (const match of imageMatches) {
-    pageKeyBySourcePage.set(match.sourcePage, match);
-  }
-
-  const firstLineNo = entry.line_no_range[0] ?? 1;
-  const anchors: CodePageAnchor[] = [];
-  const ranges = entry.source_page_ranges
-    .filter((range) => pageKeyBySourcePage.has(range.page))
-    .toSorted((a, b) => a.start_line - b.start_line);
-
-  if (ranges.length > 0) {
-    for (const range of ranges) {
-      const match = pageKeyBySourcePage.get(range.page);
-      if (match === undefined) continue;
-      anchors.push({
-        pageKey: match.pageKey,
-        sourcePage: range.page,
-        lineIndex: clampLineIndex(range.start_line - firstLineNo, lineCount),
-      });
-    }
-  } else {
-    for (const [idx, match] of imageMatches.entries()) {
-      anchors.push({
-        pageKey: match.pageKey,
-        sourcePage: match.sourcePage,
-        lineIndex: clampLineIndex(
-          Math.floor((idx * lineCount) / imageMatches.length),
-          lineCount,
-        ),
-      });
-    }
-  }
-
-  const seen = new Set<string>();
-  return anchors.filter((anchor) => {
-    const dedupeKey = `${anchor.pageKey}:${anchor.lineIndex.toString()}`;
-    if (seen.has(dedupeKey)) return false;
-    seen.add(dedupeKey);
-    return true;
-  });
-}
-
-function clampLineIndex(value: number, lineCount: number): number {
-  return Math.max(0, Math.min(value, lineCount - 1));
-}
-
 function splitEditorLines(content: string): string[] {
   return content === "" ? [""] : content.split("\n");
 }
@@ -179,6 +135,22 @@ function firstDisplayLine(entry: FilesIndexEntry | undefined): number {
 
 function displayLineNumber(entry: FilesIndexEntry, lineIndex: number): number {
   return firstDisplayLine(entry) + lineIndex;
+}
+
+/**
+ * 活动行 → 放大目标（#5 行映射翻译）：把显示行号经 line_map 翻成原 OCR line_no 再查 bbox。
+ * 无映射（精修守恒 / 旧 sidecar）→ identity 用显示行号；命中 null（rewrite/repair 改写或
+ * 新增行）→ undefined 不放大（优于错放邻行）。抽成函数声明以便单测 + 容许 return undefined。
+ */
+function resolveMagnifierTarget(
+  fileLineIndex: FileLineIndex | undefined,
+  fileLineMap: FileLineMap | undefined,
+  displayLineNo: number,
+  firstLineNo: number,
+): MagnifierTarget | undefined {
+  const mapped = mapDisplayLineToRaw(fileLineMap, displayLineNo - firstLineNo);
+  if (mapped === null) return undefined;
+  return computeMagnifierRegion(fileLineIndex, mapped ?? displayLineNo);
 }
 
 function isCompileFailingLine(
@@ -359,7 +331,18 @@ export function CodeViewer({
   const [contentLoading, setContentLoading] = useState(false);
   const [contentError, setContentError] = useState<string | undefined>();
   const [codeScrollEl, setCodeScrollEl] = useState<HTMLDivElement>();
-  const [imageScrollEl, setImageScrollEl] = useState<HTMLDivElement>();
+  // 代码版面行级 bbox 索引（#93）+ 当前活动行（来源：只读悬停 或 编辑光标，
+  // 绑定 path，切档自动失效）。
+  const [codeLayoutIndex, setCodeLayoutIndex] = useState<
+    CodeLineIndex | undefined
+  >();
+  // #5：path → 行映射（精修后行序 → 原 OCR line_no）；与 codeLayoutIndex 同源同生命周期。
+  const [codeLineMaps, setCodeLineMaps] = useState<CodeLineMaps | undefined>();
+  // §14.1：手动裁剪任务行 bbox 在裁剪图坐标系 → 放大镜改显处理图对齐（与 index 同源）。
+  const [codeLayoutProcessed, setCodeLayoutProcessed] = useState(false);
+  const [activeLine, setActiveLine] = useState<
+    { readonly path: string; readonly lineNo: number } | undefined
+  >();
   const editGutterRef = useRef<HTMLDivElement>(null);
   // D：行级虚拟化的滚动位置 / 视口高度 / 实测行高。
   const [codeScrollTop, setCodeScrollTop] = useState(0);
@@ -473,13 +456,112 @@ export function CodeViewer({
         : resolveSourceImages(selectedEntry, allSourceImages),
     [allSourceImages, selectedEntry],
   );
-  const codePageAnchors = useMemo(
+
+  // 代码版面 sidecar：拉一次建「path→(line_no→{page,bbox})」索引（404→无放大镜）。
+  useEffect(() => {
+    let cancelled = false;
+    void getTaskCodeLayout(taskId)
+      .then((payload) => {
+        if (cancelled) return;
+        setCodeLayoutIndex(
+          payload === undefined ? undefined : buildLineIndex(payload),
+        );
+        setCodeLineMaps(
+          payload === undefined ? undefined : buildLineMaps(payload),
+        );
+        setCodeLayoutProcessed(payload?.processed ?? false);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCodeLayoutIndex(undefined);
+          setCodeLineMaps(undefined);
+          setCodeLayoutProcessed(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [taskId]);
+
+  // page → 源图反查，供放大镜把 target.page 解析成源图文件。
+  const imageByPage = useMemo(
     () =>
-      selectedEntry === undefined
-        ? []
-        : buildCodePageAnchors(selectedEntry, selectedImages, content),
-    [content, selectedEntry, selectedImages],
+      new Map<string, CodeSourceImage>(
+        selectedImages.map((img) => [img.sourcePage, img]),
+      ),
+    [selectedImages],
   );
+
+  // 活动行 → 放大目标（仅当活动行属当前文件，避免切档串行号）。
+  const fileLineIndex = codeLayoutIndex?.get(selectedPath ?? "");
+  const fileLineMap = codeLineMaps?.get(selectedPath ?? "");
+  // #5：先经行映射把显示行翻成原 OCR line_no 再查 bbox（守恒/旧 sidecar 走 identity）。
+  const magnifierTarget = useMemo(
+    () =>
+      activeLine === undefined || activeLine.path !== selectedPath
+        ? undefined
+        : resolveMagnifierTarget(
+            fileLineIndex,
+            fileLineMap,
+            activeLine.lineNo,
+            firstDisplayLine(selectedEntry),
+          ),
+    [activeLine, selectedPath, selectedEntry, fileLineIndex, fileLineMap],
+  );
+  const magnifierImage =
+    magnifierTarget === undefined
+      ? undefined
+      : imageByPage.get(magnifierTarget.page);
+
+  // 只读态代码区悬停：取最近 [data-line] 行号 → 设活动行（同行去重，避免抖动重渲染）。
+  const handleCodeHover = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>): void => {
+      if (selectedPath === undefined) return;
+      const node = event.target;
+      if (!(node instanceof globalThis.HTMLElement)) return;
+      const lineEl = node.closest<HTMLElement>("[data-line]");
+      const raw = lineEl?.dataset.line;
+      if (raw === undefined) return;
+      const lineNo = Number.parseInt(raw, 10);
+      if (Number.isNaN(lineNo)) return;
+      setActiveLine((prev) =>
+        prev?.path === selectedPath && prev.lineNo === lineNo
+          ? prev
+          : { path: selectedPath, lineNo },
+      );
+    },
+    [selectedPath],
+  );
+
+  // 编辑态首行号（line_no_range[0]）：取自基本值，使光标回调跨无关重渲染保持稳定。
+  const editorFirstLineNo = firstDisplayLine(selectedEntry);
+
+  // 编辑态光标移动：selectionStart 行内偏移 + 首行号 → OCR line_no（与只读 data-line
+  // 同源），喂同一放大镜链路；同行去重，避免逐键重渲染。
+  const handleEditorCaret = useCallback(
+    (event: React.SyntheticEvent<HTMLTextAreaElement>): void => {
+      if (selectedPath === undefined) return;
+      const el = event.currentTarget;
+      // 多行拖选时光标（焦点端）位于 forward 选区的 selectionEnd / backward 的 selectionStart；
+      // 取焦点端，使高亮与放大跟随用户实际光标而非选区顶端（折叠光标两者相等，行为不变）。
+      const caret =
+        el.selectionDirection === "backward" ? el.selectionStart : el.selectionEnd;
+      const lineNo = editorFirstLineNo + lineIndexAtOffset(el.value, caret);
+      setActiveLine((prev) =>
+        prev?.path === selectedPath && prev.lineNo === lineNo
+          ? prev
+          : { path: selectedPath, lineNo },
+      );
+    },
+    [selectedPath, editorFirstLineNo],
+  );
+
+  // 切换只读 ↔ 编辑态时清空活动行：新态首次交互（悬停 / 落光标）前并无真实活动行，
+  // 否则会把上一态的悬停 / 光标行当作「幽灵当前行」高亮 + 放大。同文件态切换时
+  // path 守卫不生效（路径未变），故在此显式清空；切档另由 path 守卫兜底。
+  useEffect(() => {
+    setActiveLine(undefined);
+  }, [editing]);
 
   // A：整文件一次性分词后缓存。键取 content + 语言 + 路径（均为基本值，
   // selectedEntry 每渲染换引用但字段值稳定），避免无关重渲染时重复切词。
@@ -491,15 +573,7 @@ export function CodeViewer({
     );
   }, [content, selectedEntry?.language, selectedEntry?.path]);
 
-  usePreviewScrollSync(
-    codeScrollEl,
-    imageScrollEl,
-    !contentLoading &&
-      !editing &&
-      contentError === undefined &&
-      codePageAnchors.length > 0 &&
-      selectedImages.length > 0,
-  );
+  // 代码模式不再做纵向滚动同步（源图改为底部缩略图 + 悬停放大镜，#93）。
 
   // D：跟踪 code 容器滚动位置与视口高度（rAF 节流），驱动可视窗口。
   useEffect(() => {
@@ -779,6 +853,15 @@ export function CodeViewer({
             </div>
           </div>
         )}
+        {selectedEntry !== undefined && (
+          <CodeSourceMagnifier
+            taskId={taskId}
+            target={magnifierTarget}
+            image={magnifierImage}
+            hint={t("codeViewer.magnifierHint")}
+            processed={codeLayoutProcessed}
+          />
+        )}
         {saveError !== undefined && (
           <div className="code-save-error">
             {t("codeViewer.saveError")}: {saveError}
@@ -822,7 +905,13 @@ export function CodeViewer({
                           key={lineIndex}
                           className={
                             "code-line-number" +
-                            diagnosticClass(lineItems)
+                            diagnosticClass(lineItems) +
+                            (activeLine !== undefined &&
+                            activeLine.path === selectedPath &&
+                            activeLine.lineNo ===
+                              displayLineNumber(selectedEntry, lineIndex)
+                              ? " current-line"
+                              : "")
                           }
                           title={diagnosticTitle(lineItems)}
                         >
@@ -840,6 +929,10 @@ export function CodeViewer({
                       setDraftContent(event.currentTarget.value);
                     }}
                     onScroll={syncEditGutterScroll}
+                    onSelect={handleEditorCaret}
+                    onKeyUp={handleEditorCaret}
+                    onClick={handleEditorCaret}
+                    onFocus={handleEditorCaret}
                   />
                 </div>
                 {(liveDiagnosticLoading ||
@@ -911,19 +1004,10 @@ export function CodeViewer({
               <div
                 ref={(el) => { setCodeScrollEl(el ?? undefined); }}
                 className="code-content-text"
+                onMouseMove={handleCodeHover}
               >
                 {selectedEntry !== undefined && (
                   <div className="code-virtual-inner">
-                    {/* 锚点 overlay：所有 page 锚点绝对定位在 lineIndex*rowH，
-                        与窗口化的行解耦，保证 useScrollSync 始终量得到锚点。 */}
-                    {codePageAnchors.map((anchor) => (
-                      <span
-                        key={anchor.sourcePage}
-                        data-page={anchor.pageKey}
-                        className="code-page-anchor"
-                        style={{ top: `${(anchor.lineIndex * codeRowH).toString()}px` }}
-                      />
-                    ))}
                     <div
                       className="code-virtual-spacer"
                       style={{ height: `${codeTopSpacer.toString()}px` }}
@@ -984,37 +1068,20 @@ export function CodeViewer({
         )}
       </main>
 
-      <aside className="code-source-images">
-        <h4>{t("codeViewer.sourcePagesTitle")}</h4>
-        {selectedEntry !== undefined && selectedEntry.source_pages.length > 0 && (
-          <details className="code-source-pages-details">
-            <summary>
-              {t("codeViewer.sourcePagesCount", {
-                count: selectedEntry.source_pages.length,
-              })}
-            </summary>
-            <ul className="code-source-pages-list">
-              {selectedEntry.source_pages.map((sp) => (
-                <li key={sp} className="code-source-page-tag">
-                  {sp}
-                </li>
-              ))}
-            </ul>
-          </details>
-        )}
+      <div className="code-source-thumbs">
         <SourceImageList
-          ref={(el) => { setImageScrollEl(el ?? undefined); }}
           taskId={taskId}
           images={selectedImages}
-          listClassName="code-source-images-list"
-          imageClassName="code-source-image-item"
+          listClassName="code-source-thumbs-list"
+          imageClassName="code-source-thumb-item"
+          activePageKey={magnifierImage?.pageKey}
           empty={
             <div className="code-source-images-empty">
               {t("codeViewer.noSourceImages")}
             </div>
           }
         />
-      </aside>
+      </div>
     </div>
   );
 }

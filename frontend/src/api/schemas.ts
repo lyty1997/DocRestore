@@ -45,6 +45,16 @@ export type TaskResponse = z.infer<typeof TaskResponseSchema>;
 /** 处理模式（与后端 TaskResponse.mode / 表单三选一对齐） */
 export type ProcessingMode = TaskResponse["mode"];
 
+/** 软降级警告载荷（#96）：i18n code + 参数，前端按 code 本地化渲染。
+ *  与后端 WarningPayload 同构；code="legacy" 时 params.text 为旧任务原中文串（直接显示）。 */
+export const WarningPayloadSchema = z.object({
+  code: z.string(),
+  params: z
+    .record(z.string(), z.union([z.string(), z.number()]))
+    .default({}),
+});
+export type WarningPayload = z.infer<typeof WarningPayloadSchema>;
+
 /** 任务结果响应 */
 export const TaskResultResponseSchema = z.object({
   task_id: z.string(),
@@ -58,6 +68,12 @@ export const TaskResultResponseSchema = z.object({
    * 后端老版本无此字段时默认为空字符串。
    */
   error: z.string().default(""),
+  /**
+   * 软降级警告（#96，非致命，结构化 code+params）：VL 退本地推理 / PDF 缺页 /
+   * 段截断等。error 为空但 warnings 非空 = 文档可用但有降级，前端显示软提示而非
+   * 失败态。旧后端缺字段时 default 回退为空数组。
+   */
+  warnings: z.array(WarningPayloadSchema).default([]),
 });
 export type TaskResultResponse = z.infer<typeof TaskResultResponseSchema>;
 
@@ -202,6 +218,11 @@ export const OcrStatusResponseSchema = z.object({
   current_gpu_name: z.string().default(""),
   is_ready: z.boolean(),
   is_switching: z.boolean(),
+  /**
+   * 降级原因码（#96，空=未降级）：请求 VL 但退回本地推理时为
+   * vl_no_server_python / vl_server_python_missing。旧后端缺字段时回退为 ""。
+   */
+  degraded_reason: z.string().default(""),
 });
 export type OcrStatusResponse = z.infer<typeof OcrStatusResponseSchema>;
 
@@ -362,3 +383,76 @@ export const CropFigureResponseSchema = z.object({
   asset_path: z.string(),
 });
 export type CropFigureResponse = z.infer<typeof CropFigureResponseSchema>;
+
+/** 版面块：原图像素 bbox (x0,y0,x1,y1) + 类型 + raw OCR 文字（光标模糊匹配，Epic E） */
+export const LayoutBlockPayloadSchema = z.object({
+  bbox: z.tuple([z.number(), z.number(), z.number(), z.number()]),
+  label: z.string(),
+  /** 阅读序（0-based）：后端按 blocks 列表位置 enumerate 派生；版面全览画 index+1 角标（E8/#92）。 */
+  index: z.number(),
+  text: z.string(),
+  /** 图片/图表块输出引用 `images/{stem}_N.ext`（对齐 markdown <img src>），
+   *  供前端按引用匹配光标所在图片块；文字块为空。旧 sidecar 无此字段 → 默认空。 */
+  image_ref: z.string().default(""),
+});
+export type LayoutBlockPayload = z.infer<typeof LayoutBlockPayloadSchema>;
+
+/** 单页版面：原图文件名 + 像素尺寸 (w,h)（% 换算分母）+ 块列表 */
+export const LayoutPagePayloadSchema = z.object({
+  filename: z.string(),
+  image_size: z.tuple([z.number(), z.number()]),
+  blocks: z.array(LayoutBlockPayloadSchema),
+});
+export type LayoutPagePayload = z.infer<typeof LayoutPagePayloadSchema>;
+
+/** GET /tasks/{id}/layout 响应：各页块 bbox，供编辑器光标↔原图高亮（Epic E）。
+ *  processed=true：bbox/image_size 在**处理图**坐标系（OCR 前做过 PPT 矫正 `_after` /
+ *  content_crop 裁剪 `_crop`，§13/§15），前端须改显对应处理图才对齐（逐页尝试，无处理图
+ *  的页 onError 回退原图）；缺省 false（无预处理，bbox=原图坐标，显原图）。 */
+export const LayoutPayloadSchema = z.object({
+  pages: z.array(LayoutPagePayloadSchema),
+  processed: z.boolean().default(false),
+});
+export type LayoutPayload = z.infer<typeof LayoutPayloadSchema>;
+
+/** 代码单行在原图的像素框 (x0,y0,x1,y1) + 来源页标识 + 行号（#93 悬停放大）。
+ *  page = `{stem}.col{idx}`，对齐 files-index 的 source_page_ranges。 */
+export const CodeLineBoxPayloadSchema = z.object({
+  line_no: z.number(),
+  page: z.string(),
+  bbox: z.tuple([z.number(), z.number(), z.number(), z.number()]),
+});
+export type CodeLineBoxPayload = z.infer<typeof CodeLineBoxPayloadSchema>;
+
+/** 单源文件行级版面：path 对齐 files-index entry.path。
+ *  line_map（#5）：按精修后正文行序（0-based）索引、值为该行对应的原 OCR line_no
+ *  （= CodeLineBox.line_no 键），null = rewrite/repair 新增行→不放大；
+ *  空数组 = 精修守恒（identity，前端按 displayLineNumber 直接查表，零回归）。 */
+export const CodeFileLayoutPayloadSchema = z.object({
+  path: z.string(),
+  lines: z.array(CodeLineBoxPayloadSchema).default([]),
+  line_map: z.array(z.number().nullable()).default([]),
+});
+export type CodeFileLayoutPayload = z.infer<typeof CodeFileLayoutPayloadSchema>;
+
+/** GET /tasks/{id}/code-layout 响应：各源文件逐行 bbox，供悬停行↔原图局部放大（#93）。
+ *  processed：代码模式手动裁剪（§14.1）后行 bbox 在裁剪图坐标系，放大镜须改显处理图对齐
+ *  （与 LayoutPayload.processed 同义，逐页 onError 回退原图）。 */
+export const CodeLayoutPayloadSchema = z.object({
+  files: z.array(CodeFileLayoutPayloadSchema).default([]),
+  processed: z.boolean().default(false),
+});
+export type CodeLayoutPayload = z.infer<typeof CodeLayoutPayloadSchema>;
+
+/** GET /auth/info 响应：是否需要 token + token 来源（**绝不含 token 值**）。
+ *  前端据此判断是否提示用户设置 token，并按 token_source 给出获取指引。
+ *  token_source 与后端 auth.TokenSource 一一对应。 */
+export const AuthInfoResponseSchema = z.object({
+  auth_required: z.boolean(),
+  token_source: z.enum(["env", "device_file", "insecure", "unknown"]),
+  /** device token 文件真实路径（仅 device_file / unknown 来源提供，遵循 XDG /
+   *  平台约定）；前端据此显示精确 cat 命令。缺失/env/insecure → null/undefined。 */
+  token_file: z.string().nullish(),
+});
+export type AuthInfoResponse = z.infer<typeof AuthInfoResponseSchema>;
+export type TokenSource = AuthInfoResponse["token_source"];

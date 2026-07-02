@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import io
+import ipaddress
 import json
 import logging
 import zipfile
@@ -33,12 +34,21 @@ from starlette.websockets import WebSocketDisconnect
 from docrestore.api.errors import APIErrorCode, ApiBusinessError
 from docrestore.api.url_guard import validate_outbound_api_base
 
-from docrestore.api.auth import require_auth_ws
+from docrestore.api.auth import (
+    current_token_source,
+    device_token_path,
+    is_auth_required,
+    require_auth_ws,
+)
 
 from docrestore.api.schemas import (
     ActionResponse,
+    AuthInfoResponse,
     BrowseDirsResponse,
     CodeDiagnosticResponse,
+    CodeFileLayoutPayload,
+    CodeLayoutPayload,
+    CodeLineBoxPayload,
     CreateTaskRequest,
     CropBox,
     CropDetectItem,
@@ -52,6 +62,9 @@ from docrestore.api.schemas import (
     DirEntry,
     GPUInfoResponse,
     GPUListResponse,
+    LayoutBlockPayload,
+    LayoutPagePayload,
+    LayoutPayload,
     NERSetupStatusResponse,
     NERStatusResponse,
     OCRStatusResponse,
@@ -67,6 +80,7 @@ from docrestore.api.schemas import (
     TaskListResponse,
     TaskResponse,
     TaskResultResponse,
+    WarningPayload,
     TaskResultsResponse,
     UpdateCodeFileRequest,
     UpdateMarkdownRequest,
@@ -87,6 +101,7 @@ from docrestore.output.exporters import (
     ExportToolUnavailable,
     export_cache_path,
     export_content_hash,
+    export_to_cache,
     get_exporter,
 )
 from docrestore.pipeline.path_guard import (
@@ -122,6 +137,49 @@ async def healthz() -> dict[str, str]:
     避免反复打鉴权端点刷 401 噪声，并被 fail-closed 401 误判成「后端未响应」。
     """
     return {"status": "ok"}
+
+
+def _is_loopback_client(request: Request) -> bool:
+    """请求是否来自本机回环（127.0.0.0/8 / ::1，含 IPv4-mapped）。
+
+    ``request.client`` 缺失或地址不可解析 → 保守判为**非**本机（不暴露路径）。
+    """
+    client = request.client
+    if client is None:
+        return False
+    try:
+        host = ipaddress.ip_address(client.host)
+    except ValueError:
+        return False
+    mapped = getattr(host, "ipv4_mapped", None)
+    if mapped is not None:  # ::ffff:127.0.0.1 → 归一成 IPv4 再判回环
+        host = mapped
+    return host.is_loopback
+
+
+@health_router.get("/auth/info", include_in_schema=False)
+async def auth_info(request: Request) -> AuthInfoResponse:
+    """无鉴权：返回是否需要 API Token 及 token 来源（**绝不返回 token 值**）。
+
+    前端拿到 token 前需先读它，故挂在免鉴权 health_router 上。用途：
+    - ``auth_required=False``（insecure）→ 前端不提示设 token，避免误报；
+    - 需要 token 时按 ``token_source`` 给「在部署机器上如何获取 token」的指引
+      （device_file → cat 配置文件；env → 向部署者索取/查环境变量）。
+
+    ``token_file``：device token 文件的**真实路径**（遵循 XDG / 平台约定），
+    供前端显示精确 ``cat <path>``，取代硬编码默认路径（XDG 或非 Linux 会指错）。
+    该路径含部署机 OS 用户名/目录布局，属内部信息，故**仅当来源确为 device_file
+    且请求来自本机回环**才回传（本机操作者才需 cat 该文件）；远程/LAN 客户端拿
+    ``None``，token 由部署者带外下发、不应看到路径。``unknown`` 来源（注入式，
+    token 非取自该文件）一律不回传。**只暴露路径、绝不含 token 值**。
+    """
+    source = current_token_source()
+    expose_path = source == "device_file" and _is_loopback_client(request)
+    return AuthInfoResponse(
+        auth_required=is_auth_required(),
+        token_source=source,
+        token_file=str(device_token_path()) if expose_path else None,
+    )
 
 
 # 由 app.py 在 lifespan 中注入
@@ -291,7 +349,8 @@ def _ensure_export_product(doc_dir: Path, fmt: str) -> Path:
 
     try:
         exporter.ensure_available()
-        exporter.export(doc_md, doc_dir / "images", cache)
+        # 临时文件 + os.replace 原子落位，避免并发下载读到半成品（详见 export_to_cache）
+        export_to_cache(exporter, doc_md, doc_dir / "images", cache)
     except ExportToolUnavailable as exc:
         raise ApiBusinessError(
             APIErrorCode.EXPORT_TOOL_UNAVAILABLE, 503,
@@ -980,6 +1039,10 @@ async def get_result(
         markdown=task.result.markdown,
         doc_title=task.result.doc_title,
         doc_dir=task.result.doc_dir,
+        warnings=[
+            WarningPayload(code=w.code, params=w.params)
+            for w in task.result.warnings
+        ],
     )
 
 
@@ -1014,6 +1077,10 @@ async def get_results(
             doc_title=r.doc_title,
             doc_dir=r.doc_dir,
             error=r.error,
+            warnings=[
+                WarningPayload(code=w.code, params=w.params)
+                for w in r.warnings
+            ],
         )
         for r in task.results
     ]
@@ -1321,6 +1388,10 @@ def _update_code_index_after_write(
 
     data: object = json.loads(index_path.read_text(encoding="utf-8"))
     if not isinstance(data, list):
+        logger.warning(
+            "files-index.json 形态异常（非 list），跳过行数刷新；文件已保存但"
+            "索引行数可能与内容不一致: %s", index_path,
+        )
         return
 
     rel_path = rel.as_posix()
@@ -1465,8 +1536,13 @@ async def get_task_quality_report(task_id: str) -> dict[str, object]:
                 reports.append(_json.loads(
                     p.read_text(encoding="utf-8"),
                 ))
-            except (OSError, _json.JSONDecodeError):
-                continue
+            except (OSError, _json.JSONDecodeError) as exc:
+                # 不静默跳过：扫到文件却解析失败时，返回的"无问题"实为数据缺失，
+                # 记 warning 避免把"报告损坏"伪装成"质量良好"误导用户。
+                logger.warning(
+                    "质量报告解析失败，跳过（'无问题'可能实为数据缺失）: %s: %s",
+                    p, exc,
+                )
 
         if not reports:
             return {"summary": {"total": 0}, "issues": []}
@@ -1562,6 +1638,288 @@ async def get_source_image(task_id: str, filename: str) -> FileResponse:
     if target is None:
         raise ApiBusinessError(
             APIErrorCode.IMAGE_NOT_FOUND, 404, "图片不存在",
+        )
+
+    return FileResponse(path=target)
+
+
+def _processed_source_variants(task: Task) -> list[tuple[str, str]]:
+    """该任务可能的处理图 ``(debug_dir, 文件名后缀标记)``，按优先级（矫正先于裁剪）。
+
+    OCR 前预处理把图喂 OCR、坐标随处理图（§13/§15）。PPT 矫正产 ``_after``、文档/手动
+    裁剪产 ``_crop``，二者互斥（PPT 不自动裁剪，2026-06-29 回退 §14.2 矫正后串联），命中
+    即与 bbox 坐标系对齐。矫正目录取任务 ppt 配置（默认 ``.rectified``）；裁剪目录走默认
+    ``.content_crop``。
+    """
+    rectify_dir = (
+        task.ppt.rectify_debug_dir if task.ppt is not None else ".rectified"
+    )
+    return [
+        (rectify_dir, "_after"),
+        (".content_crop", "_crop"),
+    ]
+
+
+def _has_processed_files(target_dir: Path, task: Task) -> bool:
+    """处理图目录是否有文件 → 决定 ``LayoutPayload.processed``（须显处理图对齐）。"""
+    for dirname, _tag in _processed_source_variants(task):
+        directory = target_dir / dirname
+        try:
+            if directory.is_dir() and any(
+                p.is_file() for p in directory.iterdir()
+            ):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _find_processed_image(
+    output_dir_str: str,
+    doc_dir: str,
+    name: str,
+    variants: list[tuple[str, str]],
+) -> Path | None:
+    """逐 variant 目录按原图名找处理图（``{stem}{tag}{suffix}``），越界/缺失跳过。
+
+    ``doc_dir`` 穿越守卫复用 ``_resolve_doc_dir_target`` 单点实现（拒 ``..``/绝对 +
+    resolve 后 ``is_relative_to``，不跟随 symlink），避免此处再抄一份而与之漂移；
+    命中候选再 ``is_file`` 跟随确认存在。非法 ``doc_dir`` → None（调用方 404）。
+    """
+    output_dir = Path(output_dir_str).resolve(strict=False)
+    target_dir = _resolve_doc_dir_target(output_dir, doc_dir)
+    if target_dir is None:
+        return None
+    original = Path(name)
+    for dirname, tag in variants:
+        candidate = (
+            target_dir / dirname / f"{original.stem}{tag}{original.suffix}"
+        )
+        if not candidate.is_relative_to(output_dir):
+            continue
+        if not candidate.is_file():
+            continue
+        if candidate.suffix.lower() not in _IMAGE_EXTS:
+            continue
+        return candidate
+    return None
+
+
+def _resolve_doc_dir_target(output_dir: Path, doc_dir: str) -> Path | None:
+    """把可选 ``doc_dir``（多文档相对子目录）解析为 ``output_dir`` 下的目标目录。
+
+    边界守卫：拒穿越（``..`` / 绝对路径）与 resolve 后越界（词法 ``is_relative_to``
+    不跟随 symlink）；``doc_dir`` 空 → 直接返回 ``output_dir``。非法 → None（调用方
+    404 / 视作无数据）。layout / code-layout 两端点同口径复用，避免路径穿越守卫多处
+    复制后漂移（加固只改此一处）。
+    """
+    if not doc_dir:
+        return output_dir
+    if ".." in Path(doc_dir).parts or Path(doc_dir).is_absolute():
+        return None
+    target_dir = (output_dir / doc_dir).resolve(strict=False)
+    if not target_dir.is_relative_to(output_dir):
+        return None
+    return target_dir
+
+
+@router.get(
+    "/tasks/{task_id}/layout",
+    response_model=LayoutPayload,
+)
+async def get_task_layout(
+    task_id: str,
+    doc_dir: str = "",
+) -> LayoutPayload:
+    """返回任务版面高亮载荷 ``.layout.json``（Epic E：光标↔原图 bbox 高亮）。
+
+    可选 ``doc_dir``（多文档场景的相对子目录）；单文档留空读根 output_dir。
+    无 sidecar（非 VL 引擎 / 老任务 / 文档模式未产出版面）→ 404 优雅，
+    前端 client 把 404 视作「无版面数据、不高亮」，不弹错误。
+    """
+    manager = _get_manager()
+    task = manager.get_task(task_id)
+    if task is None:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
+
+    def _load() -> LayoutPayload | None:
+        from docrestore.output.layout_sidecar import load_doc_layout
+        from docrestore.output.ppt_layout import load_ppt_layout
+
+        output_dir = Path(task.output_dir).resolve(strict=False)
+        # doc_dir 边界守卫（拒 .. / 绝对路径 / 越界，layout/code-layout 同口径）。
+        target_dir = _resolve_doc_dir_target(output_dir, doc_dir)
+        if target_dir is None:
+            return None
+
+        # processed：OCR 前做过预处理（PPT 矫正 / content_crop 裁剪 / 手动裁剪）→
+        # bbox 在处理图坐标系，前端须改显对应处理图才对齐（§13/§15）。按处理图目录
+        # 是否有文件统一判定（逐页 onError 回退兜底混合页：未处理页 bbox 本在原图系）。
+        processed = _has_processed_files(target_dir, task)
+
+        # 文档模式：.layout.json。无预处理→bbox 原图坐标；content_crop→裁剪图坐标。
+        doc_layout = load_doc_layout(target_dir)
+        if doc_layout is not None:
+            return LayoutPayload(
+                processed=processed,
+                pages=[
+                    LayoutPagePayload(
+                        filename=page.filename,
+                        image_size=page.image_size,
+                        blocks=[
+                            LayoutBlockPayload(
+                                bbox=block.bbox,
+                                label=block.label,
+                                # 阅读序按 blocks 列表位置派生（有序、零重跑，§17.2）。
+                                index=i,
+                                text=block.text,
+                                image_ref=block.image_ref,
+                            )
+                            for i, block in enumerate(page.blocks)
+                        ],
+                    )
+                    for page in doc_layout.pages
+                ],
+            )
+
+        # PPT 模式回退：.ppt_layout.json，bbox 在矫正图坐标系。regions.content→text。
+        ppt_layout = load_ppt_layout(target_dir)
+        if ppt_layout is not None:
+            return LayoutPayload(
+                processed=processed,
+                pages=[
+                    LayoutPagePayload(
+                        filename=page.filename,
+                        image_size=page.image_size,
+                        blocks=[
+                            LayoutBlockPayload(
+                                bbox=region.bbox,
+                                label=region.label,
+                                # PPT 同样按 regions 位置派生（§17.2）。
+                                index=i,
+                                text=region.content,
+                                image_ref=region.image_ref,
+                            )
+                            for i, region in enumerate(page.regions)
+                        ],
+                    )
+                    for page in ppt_layout.pages
+                ],
+            )
+        return None
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        raise ApiBusinessError(
+            APIErrorCode.LAYOUT_NOT_FOUND, 404, "版面数据不存在",
+        )
+    return payload
+
+
+@router.get(
+    "/tasks/{task_id}/code-layout",
+    response_model=CodeLayoutPayload,
+)
+async def get_task_code_layout(
+    task_id: str,
+    doc_dir: str = "",
+) -> CodeLayoutPayload:
+    """返回代码任务行级版面 ``.code_layout.json``（#93：悬停行↔原图局部放大）。
+
+    可选 ``doc_dir``（多文档相对子目录）；单文档留空读根 output_dir。代码模式无
+    content_crop / 无矫正 → bbox 恒原图坐标，故无 ``processed`` 字段。无 sidecar
+    （非 VL 引擎 / 老任务 / 文档或 PPT 模式）→ 404 优雅，前端视作「无放大数据」不弹错。
+    """
+    manager = _get_manager()
+    task = manager.get_task(task_id)
+    if task is None:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
+
+    def _load() -> CodeLayoutPayload | None:
+        from docrestore.output.code_layout_sidecar import load_code_layout
+
+        output_dir = Path(task.output_dir).resolve(strict=False)
+        # doc_dir 边界守卫（拒 .. / 绝对路径 / 越界，layout/code-layout 同口径）。
+        target_dir = _resolve_doc_dir_target(output_dir, doc_dir)
+        if target_dir is None:
+            return None
+
+        code_layout = load_code_layout(target_dir)
+        if code_layout is None:
+            return None
+        # processed：代码模式手动裁剪（§14.1）后行 bbox 在裁剪图坐标系，前端放大镜
+        # 须改显处理图才对齐（与文档 LayoutPayload.processed 同口径、复用同一探测）。
+        processed = _has_processed_files(target_dir, task)
+        return CodeLayoutPayload(
+            processed=processed,
+            files=[
+                CodeFileLayoutPayload(
+                    path=file_layout.path,
+                    lines=[
+                        CodeLineBoxPayload(
+                            line_no=line.line_no,
+                            page=line.page,
+                            bbox=line.bbox,
+                        )
+                        for line in file_layout.lines
+                    ],
+                    # #5 精修行映射：sidecar 已算好，透传给前端放大镜做行号换算
+                    # （rewrite/repair 增删行后，缺此映射悬停会放大错行）。
+                    line_map=list(file_layout.line_map),
+                )
+                for file_layout in code_layout.files
+            ],
+        )
+
+    payload = await asyncio.to_thread(_load)
+    if payload is None:
+        raise ApiBusinessError(
+            APIErrorCode.CODE_LAYOUT_NOT_FOUND, 404, "代码版面数据不存在",
+        )
+    return payload
+
+
+@router.get("/tasks/{task_id}/processed-image")
+async def get_processed_image(
+    task_id: str,
+    name: str,
+    doc_dir: str = "",
+) -> FileResponse:
+    """提供 OCR 前**处理图**（PPT 矫正 ``_after`` / content_crop 裁剪 ``_crop``）。
+
+    预处理把图喂 OCR、bbox 随处理图坐标系，前端按原图名（pageKey）取对应处理图
+    叠框对齐（§13/§15）。原图名 → 逐 variant 探
+    ``{output_dir}/{doc_dir}/{debug_dir}/{stem}{tag}{suffix}``（后缀沿用原图），
+    命中即返回；均无 → 404（前端 onError 回退原图，未处理页 bbox 本在原图系）。
+    边界守卫镜像 ``get_source_image``：词法 ``is_relative_to`` 不跟随 symlink。
+    """
+    manager = _get_manager()
+    task = manager.get_task(task_id)
+    if task is None:
+        raise ApiBusinessError(
+            APIErrorCode.TASK_NOT_FOUND, 404, "任务不存在",
+        )
+
+    # name 必须是单层原图基名（无目录分隔/穿越）→ 400。doc_dir 的穿越/绝对守卫下沉到
+    # _find_processed_image → _resolve_doc_dir_target（非法 doc_dir → 无匹配 → 404，
+    # 与 /layout、/code-layout 同口径），不在此重复一份词法校验。
+    if not name or ".." in name or "/" in name or "\\" in name:
+        raise ApiBusinessError(
+            APIErrorCode.INVALID_FILENAME, 400, "非法文件名",
+        )
+
+    variants = _processed_source_variants(task)
+    target = await asyncio.to_thread(
+        _find_processed_image, task.output_dir, doc_dir, name, variants,
+    )
+
+    if target is None:
+        raise ApiBusinessError(
+            APIErrorCode.IMAGE_NOT_FOUND, 404, "处理图不存在",
         )
 
     return FileResponse(path=target)
@@ -1983,6 +2341,7 @@ async def get_ocr_status(request: Request) -> OCRStatusResponse:
         current_gpu_name=em.current_gpu_name,
         is_ready=em.is_ready,
         is_switching=em.is_switching,
+        degraded_reason=em.degraded_reason,
     )
 
 

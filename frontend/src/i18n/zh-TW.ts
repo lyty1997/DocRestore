@@ -88,6 +88,8 @@ export const zhTW: Record<TranslationKey, string> = {
   "taskForm.engineWarming": "引擎載入中...",
   "taskForm.engineReady": "已就緒",
   "taskForm.engineError": "載入失敗",
+  "taskForm.engineDegraded":
+    "已請求 PaddleOCR-VL 但將退回本地推理（paddle_server_python 未設定或路徑無效），OCR 結果與 VL 模式不符，請檢查設定",
   "taskForm.gpuAuto": "自動選擇（推薦）",
   "taskForm.gpuAutoWithHint": "自動（{hint}）",
   "taskForm.llmConfigExpanded": "▾ LLM 精修設定",
@@ -200,6 +202,14 @@ export const zhTW: Record<TranslationKey, string> = {
   "taskDetail.docSummaryPartial": "已完成 {done}/{total}，{failed} 個失敗",
   "taskDetail.docFailedTitle": "此子文件處理失敗",
   "taskDetail.docFailedHint": "可點擊頁首的「繼續」按鈕，複用已完成內容、僅重跑失敗部分。",
+  "taskDetail.warnings.pdf_pages_missing": "來源 PDF 算繪缺失 {count} 頁（壞頁已略過），文件不完整",
+  "taskDetail.warnings.vl_fell_back_to_local": "已請求 PaddleOCR-VL 但退回本機推理（paddle_server_python 未設定或路徑無效），OCR 結果與 VL 模式不符",
+  "taskDetail.warnings.engine_degraded": "OCR 引擎降級：{reason}",
+  "taskDetail.warnings.segment_truncated": "段 {index} 精修輸出疑似被截斷",
+  "taskDetail.warnings.document_truncated": "整篇文件級精修輸出疑似被截斷",
+  "taskDetail.warnings.gap_unfilled": "缺口（{after_image} 之後）未能自動補充",
+  "taskDetail.warnings.code_files_summary": "程式碼模式：{files} 個檔案，{skipped} 個略過",
+  "taskDetail.warnings.legacy": "{text}",
   "taskDetail.loadError": "載入任務資訊失敗",
   "taskDetail.loadingTask": "載入任務資訊...",
   "taskDetail.cancelFailed": "取消失敗",
@@ -224,6 +234,7 @@ export const zhTW: Record<TranslationKey, string> = {
   "codeViewer.sourcePagesTitle": "原圖來源",
   "codeViewer.sourcePagesCount": "{count} 張原圖來源（點擊展開）",
   "codeViewer.noSourceImages": "無對應原圖",
+  "codeViewer.magnifierHint": "懸停程式碼行檢視其原圖局部放大",
   "codeViewer.editAreaLabel": "編輯程式碼檔案內容",
   "codeViewer.saveError": "儲存程式碼檔案失敗",
   "codeViewer.liveDiagnosticPending": "正在檢查...",
@@ -287,6 +298,21 @@ export const zhTW: Record<TranslationKey, string> = {
   "tokenSettings.hintSuffix": "。未設定時留空即可。",
   "tokenSettings.placeholder": "貼上 API Token",
   "tokenSettings.ariaLabel": "API Token 設定",
+  "tokenSettings.howToTitle": "如何取得 Token？",
+  "tokenSettings.howToDeviceStep1": "在執行後端服務的電腦上開啟終端機",
+  "tokenSettings.howToDeviceStep2": "執行指令查看自動產生的 token：",
+  "tokenSettings.howToDeviceStep3": "複製輸出的 token，貼到下方輸入框並儲存",
+  "tokenSettings.howToDeviceNote":
+    "首次啟動後端時會自動產生該 token 並儲存於上述檔案，重啟後保持不變。",
+  "tokenSettings.howToEnvStep1": "Token 由部署者透過環境變數 ",
+  "tokenSettings.howToEnvStep1Suffix": " 設定",
+  "tokenSettings.howToEnvStep2":
+    "向部署該服務的人索取該 token，或查看啟動設定，複製後貼到下方儲存",
+  "tokenSettings.insecureNote":
+    "目前服務執行在本機無鑑權模式，無需設定 Token。",
+  // ── 缺少 Token 頂部橫幅 ──
+  "tokenBanner.message": "未設定 API Token，無法存取後端服務",
+  "tokenBanner.action": "前往設定",
 
   // ── 檔案上傳 ──
   "fileUploader.selectFiles": "選擇檔案",
@@ -317,6 +343,7 @@ export const zhTW: Record<TranslationKey, string> = {
   // ── 原圖面板 ──
   "sourceImages.title": "原圖（點擊放大）",
   "sourceImages.lightboxAlt": "放大查看",
+  "sourceImages.layoutOverlay": "版面全覽",
 
   // ── 上傳預覽 ──
   "uploadPreview.title": "上傳預覽",
@@ -360,6 +387,12 @@ export const zhTW: Record<TranslationKey, string> = {
   "progress.pptPage": "PPT 模式：精修第 {current}/{total} 頁",
   "progress.pptPagePlain": "PPT 模式：處理第 {current}/{total} 頁",
   "progress.pptRender": "PPT 模式：組裝文件...",
+  "progress.codeLayout": "程式碼模式：分析版面 {current}/{total}",
+  "progress.codeGroup": "程式碼模式：歸類得到 {count} 個原始檔",
+  "progress.codeRefine": "程式碼模式：LLM 精修 {current}/{total}",
+  "progress.codeRepairWindow":
+    "程式碼模式：修復第 {current}/{total} 個檔案（視窗 {window}/{windows}）",
+  "progress.codeRender": "程式碼模式：寫出 {count} 個檔案",
   // ── API 業務錯誤 ──
   "errors.api.mode_conflict": "模式衝突：文件 / 程式碼 / PPT 三選一互斥",
   "errors.api.llm_api_base_rejected":
@@ -369,7 +402,8 @@ export const zhTW: Record<TranslationKey, string> = {
     "輸出目錄（output_dir）被安全策略拒絕：必須落在伺服端受信工作根之下" +
     "（預設系統暫存目錄，可由 DOCRESTORE_WORK_ROOT 設定），" +
     "以防誤刪工作根外的任意目錄",
-  "errors.api.unauthorized": "缺少或無效的 API Token",
+  "errors.api.unauthorized":
+    "缺少或無效的 API Token，請在側邊欄「API Token 設定」中設定",
   "errors.api.service_not_initialized": "服務未初始化",
   "errors.api.engine_manager_not_initialized": "OCR 引擎管理器未初始化",
   "errors.api.task_not_found": "任務不存在",
@@ -383,6 +417,8 @@ export const zhTW: Record<TranslationKey, string> = {
   "errors.api.files_index_not_found": "任務未產生程式碼索引（非程式碼模式或未完成）",
   "errors.api.files_index_parse_error": "程式碼索引解析失敗：{reason}",
   "errors.api.files_index_bad_format": "程式碼索引格式異常（非陣列）",
+  "errors.api.layout_not_found": "版面資料不存在",
+  "errors.api.code_layout_not_found": "程式碼版面資料不存在",
   "errors.api.read_failed": "讀取失敗：{reason}",
   "errors.api.invalid_filename": "非法檔名",
   "errors.api.markdown_update_failed": "儲存失敗：{reason}",

@@ -1,0 +1,109 @@
+import { describe, expect, it } from "vitest";
+
+import type { LayoutPayload } from "../../src/api/schemas";
+import {
+  computeBlockHighlight,
+  type CursorBlock,
+} from "../../src/features/task/blockHighlight";
+
+const LAYOUT: LayoutPayload = {
+  processed: false,
+  pages: [
+    {
+      filename: "IMG_0001.jpg",
+      image_size: [3024, 4032],
+      blocks: [
+        {
+          bbox: [120, 88, 2900, 240],
+          label: "paragraph_title",
+          index: 0,
+          text: "第一章",
+          image_ref: "",
+        },
+        {
+          bbox: [120, 260, 2900, 980],
+          label: "text",
+          index: 1,
+          text: "本文研究OCR还原",
+          image_ref: "",
+        },
+        {
+          bbox: [300, 1100, 2700, 2000],
+          label: "image",
+          index: 2,
+          text: "",
+          image_ref: "images/IMG_0001_0.jpg",
+        },
+      ],
+    },
+    {
+      filename: "IMG_0002.jpg",
+      image_size: [3024, 4032],
+      blocks: [
+        { bbox: [0, 0, 100, 50], label: "text", index: 0, text: "第二页正文", image_ref: "" },
+      ],
+    },
+  ],
+};
+
+describe("computeBlockHighlight", () => {
+  it("layout 缺省 → undefined", () => {
+    const cursor: CursorBlock = { page: "IMG_0001.jpg", text: "第一章" };
+    expect(computeBlockHighlight(undefined, cursor)).toBeUndefined();
+  });
+
+  it("cursorBlock 缺省 → undefined", () => {
+    const noCursor: CursorBlock | undefined = undefined;
+    expect(computeBlockHighlight(LAYOUT, noCursor)).toBeUndefined();
+  });
+
+  it("光标所在页不在 layout → undefined", () => {
+    const cursor: CursorBlock = { page: "GHOST.jpg", text: "第一章" };
+    expect(computeBlockHighlight(LAYOUT, cursor)).toBeUndefined();
+  });
+
+  it("命中 → 该页 bbox + image_size + pageKey", () => {
+    const cursor: CursorBlock = { page: "IMG_0001.jpg", text: "本文研究 OCR 还原" };
+    const hit = computeBlockHighlight(LAYOUT, cursor);
+    expect(hit).toEqual({
+      pageKey: "IMG_0001.jpg",
+      bbox: [120, 260, 2900, 980],
+      imageSize: [3024, 4032],
+    });
+  });
+
+  it("命中页正确：第二页文字定位到第二页 bbox（不串页）", () => {
+    const cursor: CursorBlock = { page: "IMG_0002.jpg", text: "第二页正文" };
+    const hit = computeBlockHighlight(LAYOUT, cursor);
+    expect(hit?.pageKey).toBe("IMG_0002.jpg");
+    expect(hit?.bbox).toEqual([0, 0, 100, 50]);
+  });
+
+  it("该页内无相近块 → undefined", () => {
+    const cursor: CursorBlock = { page: "IMG_0001.jpg", text: "毫不相干的内容" };
+    expect(computeBlockHighlight(LAYOUT, cursor)).toBeUndefined();
+  });
+
+  it("图片块按 imageRef 精确匹配（无文字，模糊匹配命中不了）", () => {
+    const cursor: CursorBlock = {
+      page: "IMG_0001.jpg",
+      text: "",
+      imageRef: "images/IMG_0001_0.jpg",
+    };
+    const hit = computeBlockHighlight(LAYOUT, cursor);
+    expect(hit).toEqual({
+      pageKey: "IMG_0001.jpg",
+      bbox: [300, 1100, 2700, 2000],
+      imageSize: [3024, 4032],
+    });
+  });
+
+  it("imageRef 无对应版面图片块 → undefined", () => {
+    const cursor: CursorBlock = {
+      page: "IMG_0001.jpg",
+      text: "",
+      imageRef: "images/NOPE_9.jpg",
+    };
+    expect(computeBlockHighlight(LAYOUT, cursor)).toBeUndefined();
+  });
+});

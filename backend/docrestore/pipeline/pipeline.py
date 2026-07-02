@@ -70,9 +70,11 @@ from docrestore.llm.prompts import (
 from docrestore.processing.segmenter import StreamSegmentExtractor
 from docrestore.models import (
     Gap,
+    LayoutRegion,
     MergedDocument,
     PageOCR,
     PipelineResult,
+    PipelineWarning,
     RefineContext,
     RefinedResult,
     TaskProgress,
@@ -283,6 +285,50 @@ def _has_syntax_dirty_diagnostic(
         and bool(diagnostic.failing_lines)
         for diagnostic in diagnostics
     )
+
+
+def _make_repair_progress(
+    report_fn: ReportFn, file_index: int, file_total: int,
+) -> Callable[[int, int], None]:
+    """构造 repair 逐窗口进度回调（#94）。
+
+    病态大文件的 scoped repair 单文件要跑十几个窗口、每个 ~30s，原先只在整文件
+    修完才上报一次，前端长时间停在「归类得到 N 个源文件」。此回调让每个窗口都推
+    一帧（文件级 current/total 不变，message 带窗口进度），避免看起来卡死。
+    """
+    def _cb(window: int, windows: int) -> None:
+        report_fn(
+            "code_refine", file_index + 1, file_total,
+            f"代码修复 第 {file_index + 1}/{file_total} 个文件"
+            f"（窗口 {window}/{windows}）",
+            message_key="progress.codeRepairWindow",
+            message_params={
+                "current": str(file_index + 1),
+                "total": str(file_total),
+                "window": str(window),
+                "windows": str(windows),
+            },
+        )
+    return _cb
+
+
+def _apply_pdf_missing_warnings(
+    results: list[PipelineResult], missing_by_doc: dict[str, int],
+) -> None:
+    """把 PDF 缺页数挂到对应文档结果的 warnings（#96，按 doc_dir 匹配，就地改）。
+
+    单 PDF 落根=doc_dir ""、多 PDF=stem；坏页跳过后文档不完整但仍可用（任务仍
+    COMPLETED，不翻 error），软降级 warning 让用户知道"缺了几页"。
+    """
+    if not missing_by_doc:
+        return
+    for r in results:
+        missing = missing_by_doc.get(r.doc_dir)
+        if missing:
+            r.warnings = [
+                *r.warnings,
+                PipelineWarning("pdf_pages_missing", {"count": missing}),
+            ]
 
 
 def _augment_metas_with_code_context(
@@ -680,7 +726,9 @@ class Pipeline:
         if self._refiner is None and self._config.llm.model:
             self._refiner = self._create_refiner(self._config.llm)
 
-    async def _expand_pdfs(self, image_dir: Path) -> list[PipelineResult]:
+    async def _expand_pdfs(
+        self, image_dir: Path,
+    ) -> tuple[list[PipelineResult], dict[str, int]]:
         """摄取入口 PDF 展开（Epic A）：image_dir 根层 *.pdf 逐页渲染成 PNG。
 
         - 单 PDF → 渲染到 image_dir 根（命中 process_many 快路）；
@@ -691,18 +739,21 @@ class Pipeline:
         转占位失败结果返回，交 process_tree 合入 results（复用部分失败聚合）。
         """
         if not self._config.pdf.enable:
-            return []
+            return [], {}
 
         from docrestore.pipeline.render import render_pdf_to_dir, safe_pdf_stem
 
         pdfs = await asyncio.to_thread(_scan_pdfs, image_dir)
         if not pdfs:
-            return []
+            return [], {}
 
         cfg = self._config.pdf
         single = len(pdfs) == 1
         used: set[str] = set()
         failures: list[PipelineResult] = []
+        # #96：部分缺页（rendered<expected，坏页跳过但非整篇失败）→ 缺页数按 doc_dir
+        # 回传（单 PDF=根 ""、多 PDF=stem），由 process_tree 挂到对应结果 warnings。
+        missing_by_doc: dict[str, int] = {}
         for pdf in pdfs:
             base = safe_pdf_stem(pdf.name)
             stem, suffix = base, 2
@@ -710,8 +761,9 @@ class Pipeline:
                 stem, suffix = f"{base}_{suffix}", suffix + 1
             used.add(stem)
             out_dir = image_dir if single else image_dir / stem
+            doc_key = "" if single else stem
             try:
-                await asyncio.to_thread(
+                render = await asyncio.to_thread(
                     render_pdf_to_dir,
                     pdf,
                     out_dir,
@@ -727,11 +779,15 @@ class Pipeline:
                     PipelineResult(
                         output_path=out_dir / "document.md",
                         markdown="",
-                        doc_dir="" if single else stem,
+                        doc_dir=doc_key,
                         error=f"{type(exc).__name__}: {str(exc)[:200]}",
                     ),
                 )
-        return failures
+                continue
+            missing = render.expected - render.rendered
+            if missing > 0:
+                missing_by_doc[doc_key] = missing
+        return failures, missing_by_doc
 
     async def process_tree(
         self,
@@ -762,7 +818,7 @@ class Pipeline:
                 # Epic A：PDF 输入 → 逐页 PNG 展开（摄取入口，未持 gpu_lock）。
                 # 单 PDF 落根命中 process_many 快路，多 PDF 分子目录走多文档分支；
                 # 坏 PDF 转占位失败结果，合入返回供 TaskManager 聚合。
-                pdf_failures = await self._expand_pdfs(image_dir)
+                pdf_failures, pdf_missing = await self._expand_pdfs(image_dir)
 
                 leaf_dirs = await asyncio.to_thread(
                     find_image_dirs, image_dir,
@@ -794,6 +850,7 @@ class Pipeline:
                         llm, gpu_lock, pii, ocr, code=code, ppt=ppt,
                         overrides=overrides,
                     )
+                    _apply_pdf_missing_warnings([result], pdf_missing)
                     return [result, *pdf_failures]
 
                 # 多子目录：warmup cold start + 并发剩余（详见 _process_subdirs）
@@ -801,6 +858,7 @@ class Pipeline:
                     leaf_dirs, image_dir, output_dir, on_progress,
                     llm, gpu_lock, pii, ocr, code, ppt, overrides,
                 )
+                _apply_pdf_missing_warnings(results, pdf_missing)
                 return [*results, *pdf_failures]
 
     async def _process_subdirs(
@@ -1092,6 +1150,9 @@ class Pipeline:
 
         page_queue: asyncio.Queue[PageOCR | None] = asyncio.Queue()
         pages_ref: list[PageOCR] = []
+        # #96：本任务 ensure() 时刻捕获的引擎降级原因（生产者同步写入）。绝不读共享
+        # live 标志——并发混模式任务会互改全局 degraded_reason，造成误报/漏报。
+        degraded_sink: list[str] = []
         pii_cfg = pii or self._config.pii
 
         # 质量报告收集：每阶段的异常信号汇总到 .quality_report.json
@@ -1120,8 +1181,10 @@ class Pipeline:
             default_ocr=self._config.ocr,
         )
 
-        # content_crop 仅文档模式生效；PDF 渲染页无屏摄侧栏 UI（据 sentinel 判定），
-        # 自动裁剪无收益只有误裁风险，一并跳过（Epic A D8）。
+        # 自动 content_crop：仅文档模式生效。其余模式一律跳过自动裁剪（仍可手动框）：
+        # 代码模式坐标依赖强 + 已有列裁剪 + 文档正文列检测不适配 IDE；PPT 屏摄幻灯无
+        # 固定正文列、透视矫正后再裁易误伤图文版式（2026-06-29 回退 §14.2 自动串联，
+        # 改回仅手动框）；PDF 渲染页无屏摄侧栏 UI（Epic A D8）。
         from docrestore.pipeline.render import is_pdf_rendered_dir
 
         skip_content_crop = (
@@ -1134,6 +1197,7 @@ class Pipeline:
             self._ocr_producer(
                 images, output_dir, gpu_lock, page_queue,
                 pages_ref, controller, _report, ocr_effective, pii_cfg,
+                degraded_sink=degraded_sink,
                 quality=quality, ppt=ppt_cfg,
                 content_crop=(
                     None if skip_content_crop else self._config.content_crop
@@ -1189,6 +1253,14 @@ class Pipeline:
                 output_dir / ".quality_report.json",
                 exc_info=True,
             )
+        # #96：VL 退本地推理降级，所有模式（doc/ppt/code）统一在此挂任务级 warning，让
+        # "请求 VL 实际跑本地"在文档结果侧也可见。原因码由生产者在本任务 ensure() 时刻
+        # 同步捕获（degraded_sink），不读共享 live 标志，避免并发任务互相污染。
+        # 无降级时返回空列表，extend 为 no-op（不加分支）。
+        captured_reason = degraded_sink[0] if degraded_sink else ""
+        result.warnings = [
+            *result.warnings, *self._engine_degraded_warnings(captured_reason),
+        ]
         return result
 
     @staticmethod
@@ -1482,6 +1554,109 @@ class Pipeline:
                 exc_info=True,
             )
 
+    async def _write_doc_layout_sidecar(
+        self,
+        pages_ref: list[PageOCR],
+        output_dir: Path,
+        pii_cfg: PIIConfig,
+        entity_lexicon: EntityLexicon | None,
+    ) -> None:
+        """落通用版面 sidecar ``.layout.json``（Epic E 光标↔原图高亮真相源）。
+
+        每页把捕获的 ``layout_regions`` 转成 sidecar 块（``bbox + label + text``）：
+        文字过同一 PII 出云闸口（``redact_for_cloud``，与 ``document.md`` 同口径——
+        PII 开时脱敏后再落，保证前端拿光标块文字与 sidecar 文字归一化一致可匹配）。
+        非 VL / 无版面区域 → ``build_doc_layout`` 返回 None 不落盘，前端无数据不高亮。
+        落盘失败仅告警，不阻断主流程（高亮是增强）。
+        """
+        from docrestore.output.layout_sidecar import (
+            build_doc_layout,
+            layout_block_from_region,
+            write_doc_layout,
+        )
+        from docrestore.output.ppt_layout import resolve_output_image_ref
+
+        guard = PIIGuard(pii_cfg) if pii_cfg.enable else None
+
+        def _redact(text: str) -> str:
+            """文字脱敏：PII 开时走出云闸口（结构化 + 实体），否则原文。"""
+            if guard is None:
+                return text
+            return guard.redact_for_cloud(text, entity_lexicon)
+
+        def _image_ref(page: PageOCR, region: LayoutRegion) -> str:
+            """图片 / 图表区域：OCR 相对引用 → 最终输出引用，对齐 markdown <img src>。
+
+            命名 stem 用 OCR 目录名去 ``_OCR``（与 renderer 同源；裁剪/矫正时是处理图
+            stem，如 ``page01_crop``）。非图片区域 / 无引用 / 无 OCR 目录 → 空。
+            """
+            if not region.image_ref or page.output_dir is None:
+                return ""
+            stem = page.output_dir.name.removesuffix("_OCR")
+            return resolve_output_image_ref(stem, region.image_ref)
+
+        def _build_and_write() -> None:
+            """构建 sidecar（含 PII 脱敏电池，CPU/NER 密集）+ 落盘。
+
+            整体在线程里跑：``_redact`` 逐区域走 redact_for_cloud（regex + 本地 NER），
+            大文档多页多区域时同步跑会阻塞事件循环（原实现只 offload 落盘）。
+            ``asyncio.to_thread`` 传播 contextvars，出云脱敏策略不受影响。
+            """
+            layout_pages = [
+                (
+                    page.image_path.name,
+                    page.image_size,
+                    [
+                        layout_block_from_region(
+                            region,
+                            text=_redact(region.content),
+                            image_ref=_image_ref(page, region),
+                        )
+                        for region in page.layout_regions
+                    ],
+                )
+                for page in pages_ref
+            ]
+            layout = build_doc_layout(layout_pages)
+            if layout is not None:
+                write_doc_layout(output_dir, layout)
+
+        try:
+            await asyncio.to_thread(_build_and_write)
+        except OSError:
+            logger.warning(
+                "版面高亮 sidecar 落盘失败（不阻断主流程，前端不高亮）",
+                exc_info=True,
+            )
+
+    async def _write_code_layout_sidecar(
+        self,
+        sources: list[SourceFile],
+        output_dir: Path,
+    ) -> None:
+        """落代码版面 sidecar ``.code_layout.json``（#93 悬停行↔原图放大真相源）。
+
+        逐行取胜出页 bbox（``build_code_layout``，重叠区按 ``line_provenance``）；
+        只含 ``line_no + page + bbox``、无正文 → 无 PII 面、无需脱敏。无任何行
+        bbox（非 VL 引擎）→ ``build_code_layout`` 返回 None 不落盘，前端不放大。
+        落盘失败仅告警，不阻断主流程（放大镜是增强）。
+        """
+        from docrestore.output.code_layout_sidecar import (
+            build_code_layout,
+            write_code_layout,
+        )
+
+        layout = build_code_layout(sources)
+        if layout is None:
+            return
+        try:
+            await asyncio.to_thread(write_code_layout, output_dir, layout)
+        except OSError:
+            logger.warning(
+                "代码版面 sidecar 落盘失败（不阻断主流程，前端不放大）",
+                exc_info=True,
+            )
+
     async def _code_pipeline(  # noqa: C901
         self,
         page_queue: asyncio.Queue[PageOCR | None],
@@ -1540,7 +1715,7 @@ class Pipeline:
             "code_layout", 0, len(pages_ref),
             "代码模式：分析 IDE 布局",
             message_key="progress.codeLayout",
-            message_params={"total": str(len(pages_ref))},
+            message_params={"current": "0", "total": str(len(pages_ref))},
         )
         all_pcs: list[PageColumn] = []
         ledgers: dict[tuple[str, int], LineLedger] = {}
@@ -1558,8 +1733,14 @@ class Pipeline:
                 from PIL import Image
                 with Image.open(page.image_path) as img:
                     image_size = img.size
-            except OSError:
-                # 用 bbox 兜底（max x2,y2）
+            except OSError as exc:
+                # 用 bbox 兜底（max x2,y2）；记 warning：兜底尺寸通常小于真实画幅
+                # （不含右/下留白），会让列检测/版面分析略偏，应可见而非静默。
+                logger.warning(
+                    "代码模式：打开原图失败，改用 bbox 兜底尺寸"
+                    "（版面可能略偏）: %s: %s",
+                    page.image_path.name, exc,
+                )
                 image_size = (
                     max((ln.bbox[2] for ln in text_lines), default=0),
                     max((ln.bbox[3] for ln in text_lines), default=0),
@@ -1738,6 +1919,9 @@ class Pipeline:
             code_auditor = CodeConsistencyAuditor(
                 base_refiner_obj, redact=prompt_redact,
             )
+            # #5：精修可能改行数（rewrite/repair），放大镜需「精修后行→原 OCR line_no」
+            # 映射；在回写 merged_text 处按原文 vs 精修文 difflib 求映射挂到 src。
+            from docrestore.output.code_layout_sidecar import build_refined_line_map
             for i, src in enumerate(sources):
                 try:
                     diagnostics = pre_refine_diagnostics_by_path.get(
@@ -1749,6 +1933,9 @@ class Pipeline:
                             diagnostics,
                             related_sources=sources,
                             context_provider=context_provider,
+                            progress_cb=_make_repair_progress(
+                                report_fn, i, len(sources),
+                            ),
                         )
                         audit_source = replace(
                             src,
@@ -1790,7 +1977,13 @@ class Pipeline:
                         )
                     else:
                         result = await code_refiner.refine(src)
+                    # 先捕原文再覆盖：精修文已落 merged_text（即使下行映射计算异常也
+                    # 不丢精修结果）；再按原文 vs 精修文求行映射（守恒→空=identity）。
+                    original_text = src.merged_text
                     src.merged_text = result.refined_text
+                    src.refined_line_map = build_refined_line_map(
+                        original_text, src.merged_text, src.line_no_range[0],
+                    )
                     if result.flags:
                         src.flags = list({*src.flags, *result.flags})
                 except Exception:  # noqa: BLE001
@@ -1811,6 +2004,8 @@ class Pipeline:
         render_result = await render_code_files(
             sources, output_dir, enable_diagnostics=True,
         )
+        # 落代码版面 sidecar（悬停行↔原图放大；失败仅告警不阻断）。
+        await self._write_code_layout_sidecar(sources, output_dir)
         if quality is not None:
             await detect_code_mode_quality(
                 quality,
@@ -1833,8 +2028,13 @@ class Pipeline:
             output_path=render_result.document_path,
             markdown="",
             warnings=[
-                f"code_mode: {len(render_result.written_files)} files, "
-                f"{len(render_result.skipped)} skipped",
+                PipelineWarning(
+                    "code_files_summary",
+                    {
+                        "files": len(render_result.written_files),
+                        "skipped": len(render_result.skipped),
+                    },
+                ),
             ],
         )
 
@@ -1927,6 +2127,7 @@ class Pipeline:
         report_fn: ReportFn,
         ocr: OCRConfig | None,
         pii_cfg: PIIConfig,
+        degraded_sink: list[str] | None = None,
         quality: QualityReport | None = None,
         ppt: PowerPointRestoreConfig | None = None,
         content_crop: ContentCropConfig | None = None,
@@ -1936,11 +2137,18 @@ class Pipeline:
 
         异常路径也必须发哨兵（finally），避免 _stream_process 永远阻塞在
         `await queue.get()`。
+
+        ``degraded_sink`` 非空时在本任务 ensure() 返回后**同步**写入引擎降级原因码
+        （#96）：ensure 已由 ``_switch_lock`` 序列化、读写间无 await，不被并发任务的
+        ensure 抢改——避免读共享 live 标志的误报/漏报。
         """
         profiler = current_profiler()
         total = len(images)
         try:
             engine = await self._resolve_ocr_engine(ocr, report_fn)
+            # 紧跟 ensure() 同步捕获本任务降级原因（下一行不得插入 await）。
+            if degraded_sink is not None and self._engine_manager is not None:
+                degraded_sink.append(self._engine_manager.degraded_reason)
             cleaner = OCRCleaner()
             guard = (
                 PIIGuard(pii_cfg) if pii_cfg.enable else None
@@ -1957,6 +2165,7 @@ class Pipeline:
                     else overrides.crop_boxes.get(img)
                 )
                 if user_box is not None:
+                    # 手动框：独占（用户显式选定，不再叠自动处理）。
                     from docrestore.processing.content_crop import (
                         crop_page_manual,
                     )
@@ -1966,25 +2175,28 @@ class Pipeline:
                         save_debug=cc.save_debug,
                         debug_dir=cc.debug_dir,
                     )
-                elif ppt is not None and ppt.enable and ppt.rectify:
-                    from docrestore.processing.slide_rectify import (
-                        rectify_page,
-                    )
-                    ocr_input = await rectify_page(
-                        img, output_dir,
-                        save_debug=ppt.rectify_save_debug,
-                        debug_dir=ppt.rectify_debug_dir,
-                        top_extend_ratio=ppt.rectify_top_extend_ratio,
-                    )
-                elif content_crop is not None and content_crop.enable:
-                    from docrestore.processing.content_crop import (
-                        crop_page,
-                    )
-                    ocr_input = await crop_page(
-                        img, output_dir,
-                        save_debug=content_crop.save_debug,
-                        debug_dir=content_crop.debug_dir,
-                    )
+                else:
+                    # 自动预处理串联（§14.2）：PPT 透视矫正（先）→ content_crop 正文
+                    # 裁剪（后，可裁矫正图）。各步 fail-safe 失败/无效回退上一步图。
+                    if ppt is not None and ppt.enable and ppt.rectify:
+                        from docrestore.processing.slide_rectify import (
+                            rectify_page,
+                        )
+                        ocr_input = await rectify_page(
+                            ocr_input, output_dir,
+                            save_debug=ppt.rectify_save_debug,
+                            debug_dir=ppt.rectify_debug_dir,
+                            top_extend_ratio=ppt.rectify_top_extend_ratio,
+                        )
+                    if content_crop is not None and content_crop.enable:
+                        from docrestore.processing.content_crop import (
+                            crop_page,
+                        )
+                        ocr_input = await crop_page(
+                            ocr_input, output_dir,
+                            save_debug=content_crop.save_debug,
+                            debug_dir=content_crop.debug_dir,
+                        )
                 with profiler.stage("ocr.single", stem=img.stem):
                     if gpu_lock is not None:
                         async with gpu_lock:
@@ -2457,6 +2669,13 @@ class Pipeline:
         # final_md 来自 renderer 返回值（带 <!-- page: xxx --> marker 的
         # 预览版），供前端左右同步滚动锚点定位。磁盘上的 document.md 是
         # 剥除 marker 的下载版，两者互不干扰。
+
+        # Epic E：落通用版面 sidecar .layout.json（光标↔原图 bbox 高亮真相源）。
+        # 用捕获期 layout_regions（OCR 期、按页原图，早于 dedup/精修），与
+        # document.md 同口径脱敏；非 VL/无区域不落盘，fail-safe 不阻断主流程。
+        await self._write_doc_layout_sidecar(
+            pages_ref, output_dir, pii_cfg, entity_lexicon,
+        )
 
         warnings = self._collect_warnings(
             refined_results, final_gaps, truncated,
@@ -3693,6 +3912,10 @@ class Pipeline:
         merged_gaps: list[Gap] = []
         any_truncated = False
         for i, r in enumerate(results):
+            if isinstance(r, asyncio.CancelledError):
+                # 取消须透传（项目约定 CancelledError 一路传播），不能当普通
+                # "块失败"吞掉回退原文，否则破坏结构化取消 / 资源回收。
+                raise r
             if isinstance(r, BaseException):
                 logger.warning(
                     "整篇精修第 %d/%d 块失败，回退到原文: %s",
@@ -3737,21 +3960,40 @@ class Pipeline:
         ), any_truncated
 
     @staticmethod
+    def _engine_degraded_warnings(reason: str) -> list[PipelineWarning]:
+        """引擎降级原因码（#96）转任务级结构化 warning（空原因返回空列表）。
+
+        ``reason`` 由生产者在本任务 ensure() 时刻同步捕获并透传（**不**读共享 live
+        标志），避免并发混模式任务互改引擎全局 degraded_reason 造成误报/漏报。返回
+        i18n code+params（前端按 code 本地化渲染）；/ocr/status 另透 degraded_reason
+        码供前端徽章本地化，两条通道各司其职。
+        """
+        if not reason:
+            return []
+        if reason in ("vl_no_server_python", "vl_server_python_missing"):
+            return [PipelineWarning("vl_fell_back_to_local")]
+        return [PipelineWarning("engine_degraded", {"reason": reason})]
+
+    @staticmethod
     def _collect_warnings(
         refined_results: list[RefinedResult],
         all_gaps: list[Gap],
         final_truncated: bool,
-    ) -> list[str]:
-        """聚合所有警告信息。"""
-        warnings: list[str] = []
+    ) -> list[PipelineWarning]:
+        """聚合所有警告信息（结构化 code+params，前端本地化渲染）。"""
+        warnings: list[PipelineWarning] = []
         for i, r in enumerate(refined_results):
             if r.truncated:
-                warnings.append(f"段 {i + 1} 精修输出疑似被截断")
+                warnings.append(
+                    PipelineWarning("segment_truncated", {"index": i + 1}),
+                )
         if final_truncated:
-            warnings.append("整篇文档级精修输出疑似被截断")
+            warnings.append(PipelineWarning("document_truncated"))
         for g in all_gaps:
             if not g.filled:
                 warnings.append(
-                    f"缺口（{g.after_image} 之后）未能自动补充"
+                    PipelineWarning(
+                        "gap_unfilled", {"after_image": g.after_image},
+                    ),
                 )
         return warnings

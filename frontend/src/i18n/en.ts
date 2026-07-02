@@ -92,6 +92,8 @@ export const en: Record<TranslationKey, string> = {
   "taskForm.engineWarming": "Loading...",
   "taskForm.engineReady": "Ready",
   "taskForm.engineError": "Load Failed",
+  "taskForm.engineDegraded":
+    "PaddleOCR-VL was requested but will fall back to local inference (paddle_server_python unset or invalid); OCR results won't match VL mode — please check the config",
   "taskForm.gpuAuto": "Auto (recommended)",
   "taskForm.gpuAutoWithHint": "Auto ({hint})",
   "taskForm.llmConfigExpanded": "▾ LLM Refinement Settings",
@@ -208,6 +210,14 @@ export const en: Record<TranslationKey, string> = {
   "taskDetail.docSummaryPartial": "Completed {done}/{total}, {failed} failed",
   "taskDetail.docFailedTitle": "This sub-document failed to process",
   "taskDetail.docFailedHint": "Click \"Resume\" in the header to reuse completed parts and retry only the failures.",
+  "taskDetail.warnings.pdf_pages_missing": "Source PDF is missing {count} rendered page(s) (bad pages skipped); the document is incomplete",
+  "taskDetail.warnings.vl_fell_back_to_local": "PaddleOCR-VL was requested but fell back to local inference (paddle_server_python unset or invalid path); OCR output does not match VL mode",
+  "taskDetail.warnings.engine_degraded": "OCR engine degraded: {reason}",
+  "taskDetail.warnings.segment_truncated": "Segment {index} refined output appears truncated",
+  "taskDetail.warnings.document_truncated": "Document-level refined output appears truncated",
+  "taskDetail.warnings.gap_unfilled": "Gap (after {after_image}) could not be auto-filled",
+  "taskDetail.warnings.code_files_summary": "Code mode: {files} file(s), {skipped} skipped",
+  "taskDetail.warnings.legacy": "{text}",
   "taskDetail.loadError": "Failed to load task info",
   "taskDetail.loadingTask": "Loading task info...",
   "taskDetail.cancelFailed": "Cancel failed",
@@ -232,6 +242,7 @@ export const en: Record<TranslationKey, string> = {
   "codeViewer.sourcePagesTitle": "Source pages",
   "codeViewer.sourcePagesCount": "{count} source pages (click to expand)",
   "codeViewer.noSourceImages": "No matching source image",
+  "codeViewer.magnifierHint": "Hover a code line to magnify its source photo",
   "codeViewer.editAreaLabel": "Edit code file content",
   "codeViewer.saveError": "Failed to save code file",
   "codeViewer.liveDiagnosticPending": "Checking...",
@@ -295,6 +306,26 @@ export const en: Record<TranslationKey, string> = {
   "tokenSettings.hintSuffix": ". Leave empty if not configured.",
   "tokenSettings.placeholder": "Paste API Token",
   "tokenSettings.ariaLabel": "API Token Settings",
+  "tokenSettings.howToTitle": "How to get your token",
+  "tokenSettings.howToDeviceStep1":
+    "On the machine running the backend, open a terminal",
+  "tokenSettings.howToDeviceStep2":
+    "Run this command to read the auto-generated token: ",
+  "tokenSettings.howToDeviceStep3":
+    "Copy the token and paste it into the field below, then save",
+  "tokenSettings.howToDeviceNote":
+    "The backend generates this token on first start and stores it in the " +
+    "file above; it stays the same across restarts.",
+  "tokenSettings.howToEnvStep1": "The token is set by the deployer via the ",
+  "tokenSettings.howToEnvStep1Suffix": " environment variable",
+  "tokenSettings.howToEnvStep2":
+    "Ask whoever deployed the service for the token, or check the startup " +
+    "config, then paste it below and save",
+  "tokenSettings.insecureNote":
+    "This service runs in local insecure mode; no token is required.",
+  // ── Missing-token top banner ──
+  "tokenBanner.message": "No API token set — set one to access the backend",
+  "tokenBanner.action": "Set token",
 
   // ── File uploader ──
   "fileUploader.selectFiles": "Select Files",
@@ -326,6 +357,7 @@ export const en: Record<TranslationKey, string> = {
   // ── Source images ──
   "sourceImages.title": "Source Images (click to enlarge)",
   "sourceImages.lightboxAlt": "Enlarged view",
+  "sourceImages.layoutOverlay": "Layout overview",
 
   // ── Upload preview ──
   "uploadPreview.title": "Upload Preview",
@@ -369,6 +401,12 @@ export const en: Record<TranslationKey, string> = {
   "progress.pptPage": "PPT mode: refining page {current}/{total}",
   "progress.pptPagePlain": "PPT mode: processing page {current}/{total}",
   "progress.pptRender": "PPT mode: assembling document...",
+  "progress.codeLayout": "Code mode: analyzing layout {current}/{total}",
+  "progress.codeGroup": "Code mode: grouped into {count} source file(s)",
+  "progress.codeRefine": "Code mode: LLM refine {current}/{total}",
+  "progress.codeRepairWindow":
+    "Code mode: repairing file {current}/{total} (window {window}/{windows})",
+  "progress.codeRender": "Code mode: wrote {count} file(s)",
   // ── API business errors ──
   "errors.api.mode_conflict":
     "Mode conflict: Document / Code / PPT are mutually exclusive",
@@ -380,7 +418,9 @@ export const en: Record<TranslationKey, string> = {
     "output_dir rejected by security policy: must be under the server's " +
     "trusted work root (defaults to the system temp dir, configurable via " +
     "DOCRESTORE_WORK_ROOT) to prevent deleting arbitrary directories",
-  "errors.api.unauthorized": "Missing or invalid API Token",
+  "errors.api.unauthorized":
+    "Missing or invalid API Token — set it in the sidebar under " +
+    "\"API Token Settings\"",
   "errors.api.service_not_initialized": "Service not initialized",
   "errors.api.engine_manager_not_initialized": "OCR engine manager not initialized",
   "errors.api.task_not_found": "Task not found",
@@ -395,6 +435,8 @@ export const en: Record<TranslationKey, string> = {
     "Files index not generated (non-code mode or not finished)",
   "errors.api.files_index_parse_error": "Failed to parse files index: {reason}",
   "errors.api.files_index_bad_format": "Files index format invalid (not an array)",
+  "errors.api.layout_not_found": "Layout data not found",
+  "errors.api.code_layout_not_found": "Code layout data not found",
   "errors.api.read_failed": "Read failed: {reason}",
   "errors.api.invalid_filename": "Invalid filename",
   "errors.api.markdown_update_failed": "Save failed: {reason}",

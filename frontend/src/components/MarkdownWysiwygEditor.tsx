@@ -31,6 +31,7 @@ import { Placeholder } from "@tiptap/extension-placeholder";
 import {
   Table, TableCell, TableHeader, TableRow,
 } from "@tiptap/extension-table";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import { StarterKit } from "@tiptap/starter-kit";
 import {
@@ -42,6 +43,7 @@ import {
 } from "react";
 
 import { getAssetUrl } from "../api/client";
+import { type CursorBlock, extractImageRef } from "../features/task/blockHighlight";
 import {
   editorAssetUrlsToImages,
   editorImagesToAssetUrls,
@@ -75,7 +77,7 @@ function getScrollContainer(editor: Editor | null): HTMLElement | undefined {
  * 自定义 PageAnchor 节点：把 ``<!-- page: X -->`` 锚点渲染为一行小灰条，
  * 用户能看到位置但无法误编辑（``atom: true`` 让它一整块选中删除）。
  */
-const PageAnchor = TiptapNode.create({
+export const PageAnchor = TiptapNode.create({
   name: "pageAnchor",
   group: "block",
   atom: true,
@@ -135,6 +137,44 @@ function pageAtCursor(editor: Editor): string | undefined {
     return true;
   });
   return page;
+}
+
+
+/** 顶层块（含自身）里第一个 image 节点的 ``images/xxx`` 引用，无则 undefined。 */
+function firstImageRef(node: ProseMirrorNode): string | undefined {
+  let ref: string | undefined;
+  const take = (n: ProseMirrorNode): boolean => {
+    if (ref !== undefined) return false;
+    if (n.type.name === "image") {
+      const src: unknown = n.attrs.src;
+      if (typeof src === "string") ref = extractImageRef(src);
+    }
+    return ref === undefined;
+  };
+  if (!take(node)) return ref;
+  node.descendants((child) => take(child));
+  return ref;
+}
+
+/**
+ * 光标所在顶层块（页 + 纯文本 / 图片引用），供 Epic E 高亮匹配。
+ *
+ * 页沿用 ``pageAtCursor``（最近前置 pageAnchor）；文本取光标所在**顶层块节点**
+ * （depth 1，doc 的直接子节点）的 ``textContent``——段落/标题即该段，表格/列表即
+ * 整块，配合外层 §8 归一化前缀匹配足够。无文字块（图片/图表）→ 取块内 image 节点
+ * 的 ``images/xxx`` 引用按引用匹配。无页标记 / 既无文字又无图 → undefined（外层不高亮）。
+ */
+export function blockAtCursor(editor: Editor): CursorBlock | undefined {
+  const page = pageAtCursor(editor);
+  if (page === undefined) return undefined;
+  const { $from } = editor.state.selection;
+  if ($from.depth < 1) return undefined;
+  const node = $from.node(1);
+  const text = node.textContent.trim();
+  if (text !== "") return { page, text };
+  const imageRef = firstImageRef(node);
+  if (imageRef !== undefined) return { page, text: "", imageRef };
+  return undefined;
 }
 
 
@@ -282,6 +322,14 @@ interface MarkdownWysiwygEditorProps {
   readonly initialPagePosition?: PagePosition | undefined;
   /** 滚动容器就绪/卸载时回调（卸载时无参调用），供外层绑定源图栏同步滚动。 */
   readonly onScrollContainerChange?: ((el?: HTMLElement) => void) | undefined;
+  /**
+   * 光标块变化回调（Epic E，已内部 debounce）：移动光标 → 报告所在块的页 + 文字，
+   * 供外层高亮原图对应 bbox；无页标记 / 空块 → 传 undefined（外层不高亮）。
+   * 须为稳定引用（外层 ``useCallback``），useEditor 初始化时捕获一次。
+   */
+  readonly onCursorBlockChange?:
+    | ((block: CursorBlock | undefined) => void)
+    | undefined;
 }
 
 /** 命令式句柄：供外层（离开编辑回预览时）读取编辑器当前 page 位置。 */
@@ -301,11 +349,14 @@ export const MarkdownWysiwygEditor = forwardRef<
     docDir,
     initialPagePosition,
     onScrollContainerChange,
+    onCursorBlockChange,
   },
   ref,
 ): React.JSX.Element {
   const { t } = useTranslation();
   const lastEmittedRef = useRef<string>("");
+  /* 光标块上报 debounce 定时器（卸载时清理，防 setTimeout 泄漏）。 */
+  const cursorBlockTimer = useRef<number | undefined>(undefined);
   const [showFigureDialog, setShowFigureDialog] = useState<boolean>(false);
   /* 打开「插入截图」时锁定的光标所在页（原图文件名），用于自动选源图。 */
   const [cursorPage, setCursorPage] = useState<string | undefined>();
@@ -358,7 +409,24 @@ export const MarkdownWysiwygEditor = forwardRef<
       lastEmittedRef.current = md;
       onChange(md);
     },
+    onSelectionUpdate: ({ editor: ed }) => {
+      // Epic E：光标移动 → debounce 后上报所在块，外层据此高亮原图 bbox。
+      if (onCursorBlockChange === undefined) return;
+      if (cursorBlockTimer.current !== undefined) {
+        globalThis.clearTimeout(cursorBlockTimer.current);
+      }
+      cursorBlockTimer.current = globalThis.setTimeout(() => {
+        onCursorBlockChange(blockAtCursor(ed));
+      }, 80);
+    },
   });
+
+  /* 卸载时清理光标块 debounce 定时器（防 setTimeout 泄漏）。 */
+  useEffect(() => () => {
+    if (cursorBlockTimer.current !== undefined) {
+      globalThis.clearTimeout(cursorBlockTimer.current);
+    }
+  }, []);
 
   /* 外部 value 变化时（例如切换文档 tab）同步到编辑器；
      但用户自己在编辑时 onUpdate 已经把 md 写进 lastEmittedRef，

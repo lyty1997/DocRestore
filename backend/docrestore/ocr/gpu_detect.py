@@ -160,17 +160,25 @@ def _probe_pynvml() -> list[GPUInfo] | None:
                     cc = f"{major}.{minor}"
                 except Exception:  # noqa: BLE001
                     cc = None
-                gpus.append(
-                    GPUInfo(
-                        index=str(i),
-                        name=name,
-                        memory_total_mb=int(mem.total // (1024 * 1024)),
-                        memory_free_mb=int(mem.free // (1024 * 1024)),
-                        compute_capability=cc,
-                    ),
+            except Exception as exc:  # noqa: BLE001 — 仅 NVML 读取失败
+                # 提到 warning（含总数上下文）：某卡被丢应可见，否则下游在残缺
+                # 列表上选卡 / 前端少显示一张卡而无人察觉。
+                logger.warning(
+                    "读取 GPU %d/%d 信息失败，已从可选列表排除: %s",
+                    i, count, exc,
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("读取 GPU %d 信息失败: %s", i, exc)
+                continue
+            # GPUInfo 构造移出 NVML try：pydantic 校验等编程 bug 应冒泡，
+            # 不被当成"此卡读取失败"一并吞掉。
+            gpus.append(
+                GPUInfo(
+                    index=str(i),
+                    name=name,
+                    memory_total_mb=int(mem.total // (1024 * 1024)),
+                    memory_free_mb=int(mem.free // (1024 * 1024)),
+                    compute_capability=cc,
+                ),
+            )
         return gpus
     finally:
         with contextlib.suppress(Exception):

@@ -112,8 +112,11 @@ export const SidebarTaskList = forwardRef<
           sortTasks(append ? [...prev, ...resp.tasks] : resp.tasks),
         );
         return true;
-      } catch {
-        /* 静默失败，保留已有列表 */
+      } catch (error_: unknown) {
+        // 保留已有列表；不再完全静默——记录失败便于排查。初次加载由
+        // retryUntilSuccess 消费返回值退避重试，refresh/loadMore 失败也有线索，
+        // 避免"新建任务不出现 / 加载更多无反应"却无任何提示。
+        console.error("加载任务列表失败", error_);
         return false;
       } finally {
         setLoading(false);

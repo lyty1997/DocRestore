@@ -26,12 +26,15 @@ from __future__ import annotations
 
 import html as _html
 import json
+import logging
 import re
 import shutil
 import subprocess
 from pathlib import Path
 
 from docrestore.output.exporters.base import ExportFailed, ExportToolUnavailable
+
+logger = logging.getLogger(__name__)
 
 #: repo 根：exporters → output → docrestore → backend → repo
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -123,6 +126,15 @@ def prerender_math(html_doc: str) -> str:
         items.append({"tex": tex, "display": display})
 
     rendered = _run_katex(items)
+
+    failed = sum(1 for r in rendered if r is None)
+    if failed:
+        # 单条公式渲染失败保留原始 TeX（不致整篇失败），但记 warning：长文档里
+        # 个别未排版公式易被漏看，也便于统计失败率。
+        logger.warning(
+            "KaTeX 预渲染 %d/%d 条公式失败，PDF 中保留原始 TeX",
+            failed, len(rendered),
+        )
 
     parts: list[str] = []
     cursor = 0

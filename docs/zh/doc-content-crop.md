@@ -198,3 +198,45 @@ exclude_images 同 key 空间），随 OCR 配置入 DB、resume 自动沿用：
 `apply_crop_boxes` 已删除（源码处留"勿复活"注释）。E2E 实证：软链 stage 源 + 手动框
 (900,300,2400,2000) → `.content_crop/DSC07963_crop.JPG` 精确 1500×1700、OCR 目录
 `DSC07963_crop_OCR`、NAS 原图完好。
+
+## 14. 扩展到代码 / PPT 模式（2026-06-25 用户确认；PPT 部分 2026-06-29 回退）
+
+原 §3 范围「仅文档模式」一度放开到代码 / PPT，两模式分别处理（用户拍板）。
+**自动 content_crop 现行范围最终回到「仅文档模式」**：代码模式只放开手动框（§14.1，仍有效），
+PPT 自动裁剪（§14.2）已回退（屏摄幻灯误裁风险高），只保留透视矫正。
+
+### 14.1 代码模式：人工裁剪（手动框），不自动裁剪
+
+- 代码模式**坐标依赖强**（`code_assembly` 按 bbox 在原图坐标系重组行/列）+ 已有列裁剪
+  （`code_column_ocr`），自动 content_crop（文档正文列检测，未适配 IDE）误裁风险高 →
+  **代码模式不自动裁剪**（`skip_content_crop` 仍含 `code_cfg.enable`）。
+- 改为放开**手动框**：前端裁剪面板（`cropBoxes` 手动框，原 gated 在 `mode==='doc'`）扩到代码模式。
+  后端 `user_box` 分支本就**模式无关**（在 `skip_content_crop` 之前、无条件判定），零改动即生效。
+- **澄清（经核实非 bug）**：曾担心「手动裁剪后代码模式源图锚点 overlay 按原图坐标错位」，逐行核对
+  否定——代码模式源图**不画任何像素 bbox 叠加层**（`BlockHighlightOverlay` 仅在 `highlight` prop
+  存在时渲染，文档/PPT 专属；`CodeViewer` 调 `SourceImageList` 不传 `highlight`/`processed`）；唯一的
+  `code-page-anchor` 是画在**代码正文列**里的隐形页边界 span（`top: lineIndex*rowH`），不叠在图上。
+  源图显原图、同步靠 `pageKey`=原图名（手动裁剪后 `page.image_path` 还原原图名，pageKey 不变）→ 页级
+  同步不受裁剪影响，**无可见错位**。裁剪只改 OCR 输入。
+- **决策**：代码模式源图**保持显原图**（用户拍板），需完整 IDE 截图上下文（侧栏/终端）定位代码出处，
+  优于显裁剪图。后端 `/processed-image` 已 mode 无关、手动裁剪 `_crop` 天然可被发现，若日后代码模式
+  新增源图 bbox 高亮，前端一行 wiring 即接上，非坐标平移难题。
+
+### 14.2 PPT 模式：~~自动 content_crop，矫正后串联~~ → 已回退（2026-06-29）
+
+> **回退说明（2026-06-29 用户确认）**：原 §14.2「PPT 自动 content_crop、矫正后串联」已回退。
+> 屏摄幻灯无固定正文列，透视矫正后再自动裁剪易误伤图文版式（实测任务 121528c1：9 张矫正图里
+> 5 张被自动裁剪，部分裁掉了幻灯边缘图文）。**PPT 模式恢复为：只做透视矫正，不自动裁剪**（仍可手动框）。
+
+- PPT **重新纳入** `skip_content_crop`：`skip = code_cfg.enable or ppt_cfg.enable or is_pdf_rendered_dir`。
+- 预处理串联结构保留（`if 手动框（独占）else { 矫正(若开) → content_crop(若开) }`），但 PPT 任务
+  传入 `content_crop=None`，故只跑矫正、不跑自动裁剪；矫正产 `.rectified/{stem}_after.jpg` 即 OCR 输入。
+- **坐标系**：PPT 任务 OCR 图 = `_after`（仅矫正），bbox/image_size 随之；`.ppt_layout.json` 自洽。
+  自动裁剪链末 `_after_crop` 不再产生。
+- **高亮 processed-image**：`_processed_source_variants` 移除 `_after_crop` 变体，探测序
+  `_after`（PPT 矫正）→ `_crop`（文档/手动裁剪），二者互斥，命中即对齐。
+
+### 14.3 验收
+
+- PPT+矫正任务：`.rectified/{stem}_after.jpg` 落盘，OCR 跑在其上；`.content_crop/` 不再产出自动裁剪图；
+  processed-image 返回矫正图、高亮对齐。代码模式：手动框生效（crop_boxes 透传），自动裁剪不触发。

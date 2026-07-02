@@ -439,6 +439,22 @@ class TestDeleteTask:
 
         db.delete_task.assert_awaited_once_with(task.task_id)
 
+    @pytest.mark.asyncio
+    async def test_db_delete_failure_returns_error_not_success(
+        self, tmp_path: Path,
+    ) -> None:
+        """DB 删除失败不能再报成功（否则重启后幽灵任务回来）：返回错误消息。"""
+        db = AsyncMock(spec=TaskDatabase)
+        db.delete_task = AsyncMock(side_effect=RuntimeError("db boom"))
+        mgr = _make_manager(db=db)
+        task = _make_completed_task("dd", tmp_path, [])
+        mgr._tasks[task.task_id] = task
+
+        err = await mgr.delete_task(task.task_id)
+
+        assert err  # 非空错误字符串，而非 "" 成功
+        assert "db boom" in err
+
 
 class TestDeleteTaskBoundary:
     """delete_task rmtree 前的边界二次校验（#34 TOCTOU 防御）。"""
@@ -822,22 +838,26 @@ class TestCollectReferencedImageDirs:
         assert dirs == {dir_mem, dir_db}
 
     @pytest.mark.asyncio
-    async def test_db_exception_does_not_break(
+    async def test_db_exception_raises_for_fail_safe_skip(
         self, tmp_path: Path,
     ) -> None:
-        """DB 故障时只从内存收集，保守返回；不让 cleanup 崩。"""
+        """DB 故障时上抛而非返回残缺内存集合（fail-safe）。
+
+        旧行为"只从内存收集保守返回"实为 fail-open：缺了 DB 里被引用的目录，
+        上传清理会误删仍在用的 upload_dir。改为上抛，让调用方
+        （cleanup_expired_sessions / shutdown）跳过本轮清理，不删任何目录。
+        """
         db = MagicMock(spec=TaskDatabase)
         db.list_tasks = AsyncMock(side_effect=RuntimeError("db down"))
 
-        dir_m = str(tmp_path / "m")
         mgr = _make_manager(db=db)
         mgr._tasks["m"] = Task(
             task_id="m", status=TaskStatus.COMPLETED,
-            image_dir=dir_m, output_dir="/",
+            image_dir=str(tmp_path / "m"), output_dir="/",
         )
 
-        dirs = await mgr.collect_referenced_image_dirs()
-        assert dirs == {dir_m}
+        with pytest.raises(RuntimeError):
+            await mgr.collect_referenced_image_dirs()
 
 
 class TestProgressPubSub:

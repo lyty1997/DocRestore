@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -38,6 +39,9 @@ if TYPE_CHECKING:
 
     from docrestore.privacy.guard import PIIGuard
     from docrestore.privacy.redactor import EntityLexicon
+
+
+logger = logging.getLogger(__name__)
 
 
 class CloudEgressBlockedError(RuntimeError):
@@ -114,6 +118,15 @@ def enforce_egress(kwargs: dict[str, object], provider: str) -> None:
         return
     policy = _egress_policy.get()
     if policy is None:
+        # 云端 provider 却没装出云策略：生产路径 process_tree 必在 leaf 协程内
+        # egress_scope 安装策略（PII 关也会装 guard=None 的空策略），故此分支只应
+        # 出现在"测试直构 refiner"或"新增了绕过 pipeline 的云端调用"——后者会让
+        # 未脱敏内容静默出云，是接线 bug，必须可见而非静默 fail-open。
+        logger.warning(
+            "出云闸口未安装策略，跳过 PII 脱敏直接出云（provider=%s）；"
+            "若非测试直构，请确认该云端调用位于 pipeline 的 egress_scope 内",
+            provider,
+        )
         return
     if policy.block_cloud:
         msg = "PII fail-closed：实体检测失败，已拒绝出云调用（block_cloud）"

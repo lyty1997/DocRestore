@@ -8,8 +8,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { cancelTask } from "./api/client";
 import { BackToTopButton } from "./components/BackToTopButton";
+import { MissingTokenBanner } from "./components/MissingTokenBanner";
 import { Sidebar } from "./components/Sidebar";
 import { renderLocalized, useTranslation } from "./i18n";
+import { useAuthStatus } from "./hooks/useAuthStatus";
 import { useTheme } from "./hooks/useTheme";
 import type { SidebarTaskListHandle } from "./components/SidebarTaskList";
 import { TaskDetail } from "./components/TaskDetail";
@@ -26,6 +28,7 @@ function App(): React.JSX.Element {
   const [showTokenSettings, setShowTokenSettings] = useState(false);
   const { theme, toggleTheme } = useTheme();
   const { t } = useTranslation();
+  const authStatus = useAuthStatus();
 
   const taskListRef = useRef<SidebarTaskListHandle>(null);
 
@@ -104,6 +107,13 @@ function App(): React.JSX.Element {
 
       {/* 右侧主内容 */}
       <main className="main-content">
+        {/* 缺少 API Token 提示（仅在服务要求 token 且本地未配置时显示） */}
+        {authStatus.needsToken && (
+          <MissingTokenBanner
+            onOpenSettings={() => { setShowTokenSettings(true); }}
+          />
+        )}
+
         {/* 新建任务模式 */}
         {isCreateMode && (
           <>
@@ -185,9 +195,17 @@ function App(): React.JSX.Element {
         )}
       </main>
 
-      {/* Token 设置弹窗 */}
+      {/* Token 设置弹窗：关闭时 refresh 鉴权状态，让横幅按新 token 即时隐藏 */}
       {showTokenSettings && (
-        <TokenSettings onClose={() => { setShowTokenSettings(false); }} />
+        <TokenSettings
+          authRequired={authStatus.authRequired}
+          tokenSource={authStatus.tokenSource}
+          tokenFile={authStatus.tokenFile}
+          onClose={() => {
+            setShowTokenSettings(false);
+            authStatus.refresh();
+          }}
+        />
       )}
 
       {/* 回到顶部悬浮按钮（常驻右下角） */}

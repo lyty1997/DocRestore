@@ -7,11 +7,15 @@
  * - 点击原图打开通用 lightbox
  */
 
-import { forwardRef, useState } from "react";
+import { forwardRef, useMemo, useState } from "react";
 
-import { getSourceImageUrl } from "../api/client";
+import { getProcessedImageUrl, getSourceImageUrl } from "../api/client";
+import type { LayoutPagePayload } from "../api/schemas";
+import type { SourceImageHighlight } from "../features/task/blockHighlight";
 import type { SourceImageListItem } from "../features/task/sourceImagePreview";
+import { BlockHighlightOverlay } from "./BlockHighlightOverlay";
 import { ImageLightbox } from "./ImageLightbox";
+import { LayoutOverlay } from "./LayoutOverlay";
 
 interface SourceImageListProps {
   readonly taskId: string;
@@ -19,16 +23,40 @@ interface SourceImageListProps {
   readonly listClassName: string;
   readonly imageClassName: string;
   readonly empty?: React.ReactNode;
+  /** 光标块 bbox 高亮（仅命中页那张图叠矩形）；缺省不高亮。 */
+  readonly highlight?: SourceImageHighlight | undefined;
+  /** 处理图高亮：true 时改显处理图（PPT 矫正 ``_after`` / content_crop 裁剪 ``_crop``，
+   *  bbox 同坐标系才对齐，§13/§15）；data-page/pageKey 仍用原图名保持三键对齐；该页无
+   *  处理图（404）时 onError 回退原图。 */
+  readonly processed?: boolean;
+  /** 多文档相对子目录，构造处理图 URL 用（单文档留空）。 */
+  readonly docDir?: string | undefined;
+  /** 高亮某页缩略图（命中 pageKey 加 ``active`` 类描边）；缺省不高亮（#93 代码模式）。 */
+  readonly activePageKey?: string | undefined;
+  /** 版面全览（E8）：各页全部块，按 ``filename`` 对齐 pageKey；``showOverlay`` 开时铺彩色分类框。 */
+  readonly layoutPages?: readonly LayoutPagePayload[] | undefined;
+  /** 是否显示版面全览叠加层（E8 toggle）；缺省关。 */
+  readonly showOverlay?: boolean;
 }
 
 export const SourceImageList = forwardRef<
   HTMLDivElement,
   SourceImageListProps
 >(function SourceImageList(
-  { taskId, images, listClassName, imageClassName, empty },
+  {
+    taskId, images, listClassName, imageClassName, empty, highlight,
+    processed = false, docDir, activePageKey, layoutPages, showOverlay = false,
+  },
   scrollRef,
 ): React.JSX.Element {
   const [lightboxSrc, setLightboxSrc] = useState<string | undefined>();
+
+  // 版面全览：按原图基名（filename === pageKey）索引各页块，逐图 O(1) 取该页全览。
+  const pageByKey = useMemo(() => {
+    const map = new Map<string, LayoutPagePayload>();
+    for (const page of layoutPages ?? []) map.set(page.filename, page);
+    return map;
+  }, [layoutPages]);
 
   return (
     <>
@@ -36,16 +64,63 @@ export const SourceImageList = forwardRef<
         {images.length === 0 && empty}
         {images.map((image) => {
           const src = getSourceImageUrl(taskId, image.name);
+          // 处理图高亮：改显处理图(pageKey 仍原图名保三键对齐)；其余/缺失显原图。
+          const displaySrc = processed
+            ? getProcessedImageUrl(taskId, image.pageKey, docDir)
+            : src;
+          const hit =
+            highlight?.pageKey === image.pageKey ? highlight : undefined;
+          // 版面全览：开时取该页全部块铺彩色分类框（在单块高亮之下共存）。
+          const overlayPage = showOverlay
+            ? pageByKey.get(image.pageKey)
+            : undefined;
           return (
-            <img
+            <div
               key={image.name}
-              src={src}
-              alt={image.name}
-              title={image.name}
+              className={
+                "source-image-cell" +
+                (activePageKey === image.pageKey ? " active" : "")
+              }
               data-page={image.pageKey}
-              className={imageClassName}
-              onClick={() => { setLightboxSrc(src); }}
-            />
+            >
+              <img
+                // key 绑 displaySrc：displaySrc 改变（processed 切换 / docDir 变更）时
+                // 重挂 <img>，清掉下面命令式写的 fellBack 标志；否则复用旧元素会带着
+                // 过期 fellBack='1'，新的处理图 URL 再次 404 时 onError 不回退 → 裂图。
+                key={displaySrc}
+                src={displaySrc}
+                alt={image.name}
+                title={image.name}
+                className={imageClassName}
+                // lightbox 恒开原图：全屏无 bbox 叠框，原图更清晰，且避开处理图
+                // 404 时闭包仍抓着失效 displaySrc 导致点开裂图。
+                onClick={() => { setLightboxSrc(src); }}
+                onError={
+                  displaySrc === src
+                    ? undefined
+                    : (event) => {
+                        // 该页无处理图（bbox 本就在原图坐标）→ 一次性回退原图。
+                        const img = event.currentTarget;
+                        if (img.dataset.fellBack !== "1") {
+                          img.dataset.fellBack = "1";
+                          img.src = src;
+                        }
+                      }
+                }
+              />
+              {overlayPage !== undefined && (
+                <LayoutOverlay
+                  blocks={overlayPage.blocks}
+                  imageSize={overlayPage.image_size}
+                />
+              )}
+              {hit !== undefined && (
+                <BlockHighlightOverlay
+                  bbox={hit.bbox}
+                  imageSize={hit.imageSize}
+                />
+              )}
+            </div>
           );
         })}
       </div>

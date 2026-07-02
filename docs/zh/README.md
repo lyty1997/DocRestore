@@ -49,6 +49,7 @@ docs/zh/
 ├── progress.md                  # 开发进度记录
 ├── ppt-mode.md                  # PPT 还原模式设计
 ├── pdf-mode.md                  # PDF 输入支持设计（Epic A）
+├── cursor-bbox-highlight.md     # 光标↔原图 bbox 高亮设计（Epic E · #74）
 ├── backend/                     # 后端文档
 │   ├── README.md                # 后端架构总览
 │   ├── data-models.md           # 数据模型与配置

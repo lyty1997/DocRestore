@@ -19,14 +19,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 from collections.abc import Sequence
-from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 import aiosqlite
 
+from docrestore.models import PipelineWarning
 from docrestore.pipeline.config import (
     CodeRestoreConfig,
     LLMConfig,
@@ -71,7 +72,8 @@ CREATE TABLE IF NOT EXISTS task_results (
     output_path TEXT NOT NULL,
     doc_title   TEXT NOT NULL DEFAULT '',
     doc_dir     TEXT NOT NULL DEFAULT '',
-    error       TEXT NOT NULL DEFAULT ''
+    error       TEXT NOT NULL DEFAULT '',
+    warnings    TEXT NOT NULL DEFAULT '[]'
 )"""
 
 _CREATE_RESULTS_IDX = (
@@ -108,6 +110,8 @@ class ResultRow:
     doc_title: str
     doc_dir: str
     error: str
+    #: 软降级警告（#96，结构化 code+params）；末尾 + 默认空，兼容旧行/旧测试。
+    warnings: list[PipelineWarning] = field(default_factory=list)
 
 
 @dataclass
@@ -131,6 +135,28 @@ class TaskListResult:
     total: int
     page: int
     page_size: int
+
+
+def _parse_warnings_json(raw: object) -> list[PipelineWarning]:
+    """把 DB warnings 列的 JSON 数组字符串解析为 ``list[PipelineWarning]``（#96）。
+
+    旧行 NULL / 脏数据不应炸读取路径：只吞 JSON 解码这一可预期异常并记 warning
+    （不静默、不宽吞编程 bug），非 list 一律归一化空。逐元素经
+    ``PipelineWarning.from_json_item`` 还原（新式 ``{code,params}`` / 旧任务裸中文串
+    → legacy 包裹），旧任务警告不丢失、前端仍可显示。
+    """
+    if not isinstance(raw, str) or not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning(
+            "task_results.warnings JSON 解析失败，按空处理: %r", raw[:80],
+        )
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [PipelineWarning.from_json_item(item) for item in parsed]
 
 
 class TaskDatabase:
@@ -166,6 +192,10 @@ class TaskDatabase:
         await self._migrate_add_column(
             "task_results", "error", "TEXT NOT NULL DEFAULT ''",
         )
+        # #96：每文档软降级（VL 退本地 / PDF 缺页等）留痕，JSON 数组字符串。
+        await self._migrate_add_column(
+            "task_results", "warnings", "TEXT NOT NULL DEFAULT '[]'",
+        )
 
         await self._db.commit()
 
@@ -181,12 +211,22 @@ class TaskDatabase:
         column: str,
         col_type: str,
     ) -> None:
-        """安全地为已有表添加新列（列已存在时静默跳过）。"""
+        """安全地为已有表添加新列（列已存在时跳过，其余失败上抛）。
+
+        SQLite 的 ALTER TABLE 不支持 IF NOT EXISTS，靠捕获 "duplicate column
+        name" 这一预期错误实现幂等；磁盘满/库锁/语法错等真实失败必须暴露，
+        不能像旧版 suppress(Exception) 那样连真故障一起静默吞掉。
+        """
         db = self._get_db()
-        with suppress(Exception):
+        try:
             await db.execute(
                 f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"  # noqa: S608
             )
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                logger.error("迁移加列失败 %s.%s: %s", table, column, exc)
+                raise
+            logger.debug("列已存在，跳过迁移 %s.%s", table, column)
 
     async def close(self) -> None:
         """关闭数据库连接。"""
@@ -266,7 +306,9 @@ class TaskDatabase:
         self,
         task_id: str,
         results: Sequence[
-            tuple[str, str, str] | tuple[str, str, str, str]
+            tuple[str, str, str]
+            | tuple[str, str, str, str]
+            | tuple[str, str, str, str, str]
         ],
     ) -> None:
         """批量插入任务结果。
@@ -281,8 +323,9 @@ class TaskDatabase:
             await db.executemany(
                 """\
                 INSERT INTO task_results
-                    (task_id, output_path, doc_title, doc_dir, error)
-                VALUES (?, ?, ?, ?, ?)""",
+                    (task_id, output_path, doc_title, doc_dir, error,
+                     warnings)
+                VALUES (?, ?, ?, ?, ?, ?)""",
                 [(task_id, *r) for r in normalized],
             )
             await db.commit()
@@ -290,18 +333,31 @@ class TaskDatabase:
     @staticmethod
     def _normalize_results(
         results: Sequence[
-            tuple[str, str, str] | tuple[str, str, str, str]
+            tuple[str, str, str]
+            | tuple[str, str, str, str]
+            | tuple[str, str, str, str, str]
         ],
-    ) -> list[tuple[str, str, str, str]]:
-        """把结果行规整成四元组（兼容旧三元组，缺省 error 视为空串）。"""
-        normalized: list[tuple[str, str, str, str]] = []
+    ) -> list[tuple[str, str, str, str, str]]:
+        """把结果行规整成五元组（兼容旧三/四元组）。
+
+        第 5 元为 warnings 的 JSON 数组字符串（#96），缺省视为 ``'[]'``；
+        缺省 error 视为空串。
+        """
+        normalized: list[tuple[str, str, str, str, str]] = []
         for row in results:
             if len(row) == 3:
                 output_path, doc_title, doc_dir = row
-                normalized.append((output_path, doc_title, doc_dir, ""))
-            else:
+                normalized.append((output_path, doc_title, doc_dir, "", "[]"))
+            elif len(row) == 4:
                 output_path, doc_title, doc_dir, error = row
-                normalized.append((output_path, doc_title, doc_dir, error))
+                normalized.append(
+                    (output_path, doc_title, doc_dir, error, "[]"),
+                )
+            else:
+                output_path, doc_title, doc_dir, error, warnings = row
+                normalized.append(
+                    (output_path, doc_title, doc_dir, error, warnings),
+                )
         return normalized
 
     async def complete_task_with_results(
@@ -309,7 +365,9 @@ class TaskDatabase:
         task_id: str,
         status: str,
         results: Sequence[
-            tuple[str, str, str] | tuple[str, str, str, str]
+            tuple[str, str, str]
+            | tuple[str, str, str, str]
+            | tuple[str, str, str, str, str]
         ],
         error: str | None = None,
     ) -> None:
@@ -332,8 +390,9 @@ class TaskDatabase:
                 await db.executemany(
                     """\
                     INSERT INTO task_results
-                        (task_id, output_path, doc_title, doc_dir, error)
-                    VALUES (?, ?, ?, ?, ?)""",
+                        (task_id, output_path, doc_title, doc_dir, error,
+                         warnings)
+                    VALUES (?, ?, ?, ?, ?, ?)""",
                     [(task_id, *r) for r in normalized],
                 )
             await db.commit()
@@ -371,7 +430,7 @@ class TaskDatabase:
         db = self._get_db()
         cursor = await db.execute(
             """\
-            SELECT task_id, output_path, doc_title, doc_dir, error
+            SELECT task_id, output_path, doc_title, doc_dir, error, warnings
             FROM task_results WHERE task_id=?
             ORDER BY id""",
             (task_id,),
@@ -384,6 +443,7 @@ class TaskDatabase:
                 doc_title=r[2],
                 doc_dir=r[3],
                 error=r[4] or "",
+                warnings=_parse_warnings_json(r[5]),
             )
             for r in rows
         ]
@@ -475,7 +535,8 @@ class TaskDatabase:
         旧版本曾把含明文 ``api_key`` 的 ``LLMConfig`` 整体序列化入库，旧记录及
         其备份/快照长期留存凭据。启动时一次性把 key 字段从 JSON 中移除（与新写
         入的 ``exclude={"api_key"}`` 格式一致）。幂等：已无 key 的行不重写；JSON
-        损坏的行跳过（交由 ``_row_to_task`` 的容错分支处理）。
+        损坏的行跳过并记 warning（``_row_to_task`` 无 try/except 容错分支，旧说法
+        有误；若损坏原文残留 ``api_key`` 子串则单独告警，提示可能仍留明文凭据）。
         """
         db = self._get_db()
         cursor = await db.execute(
@@ -484,11 +545,20 @@ class TaskDatabase:
         )
         rows = await cursor.fetchall()
         scrubbed = 0
+        skipped = 0
         for row in rows:
             try:
                 data = json.loads(row[1])
             except (TypeError, ValueError):
-                continue  # 损坏 JSON 行跳过，不阻断启动
+                # 损坏 JSON 不阻断启动，但不再静默：若原文残留 api_key 子串，
+                # 该行明文凭据未被清洗，必须让运维可见。
+                skipped += 1
+                if isinstance(row[1], str) and "api_key" in row[1]:
+                    logger.warning(
+                        "scrub: tasks.llm JSON 损坏无法清洗，疑似残留明文 "
+                        "api_key task_id=%s", row[0],
+                    )
+                continue
             if not isinstance(data, dict) or not data.get("api_key"):
                 continue  # 已干净 / 非对象，无需重写
             data.pop("api_key", None)
@@ -500,6 +570,10 @@ class TaskDatabase:
         if scrubbed:
             logger.info("已清洗 %d 条历史任务的明文 api_key（#37）", scrubbed)
             await db.commit()
+        if skipped:
+            logger.warning(
+                "scrub: %d 行 tasks.llm JSON 损坏被跳过未清洗", skipped,
+            )
 
     @staticmethod
     def _row_to_task(row: aiosqlite.Row) -> TaskRow:

@@ -54,7 +54,9 @@ def test_render_basic(tmp_path: Path) -> None:
     make_pdf(pdf, labels)
     out = tmp_path / "out"
 
-    count = render_pdf_to_dir(pdf, out, cfg=PdfRenderConfig(), name_prefix="doc_")
+    count = render_pdf_to_dir(
+        pdf, out, cfg=PdfRenderConfig(), name_prefix="doc_",
+    ).rendered
 
     assert count == len(labels)
     names = sorted(p.name for p in out.glob("doc_page_*.png"))
@@ -78,6 +80,7 @@ def test_sentinel_records_digest(tmp_path: Path) -> None:
     data = json.loads((out / ".render_done.json").read_text(encoding="utf-8"))
     assert data["rendered"] == 2
     assert data["source_pages"] == 2
+    assert data["expected_pages"] == 2  # 完整渲染：expected == rendered
     assert len(data["pdf_sha256"]) == 64
 
 
@@ -88,10 +91,10 @@ def test_idempotent_short_circuit(tmp_path: Path) -> None:
     out = tmp_path / "out"
     cfg = PdfRenderConfig()
 
-    first = render_pdf_to_dir(pdf, out, cfg=cfg, name_prefix="d_")
+    first = render_pdf_to_dir(pdf, out, cfg=cfg, name_prefix="d_").rendered
     (out / "d_page_0002.png").unlink()  # 故意删除一页
 
-    second = render_pdf_to_dir(pdf, out, cfg=cfg, name_prefix="d_")
+    second = render_pdf_to_dir(pdf, out, cfg=cfg, name_prefix="d_").rendered
 
     assert first == second == 2  # 返回缓存页数
     assert not (out / "d_page_0002.png").exists()  # 幂等短路，未重渲染
@@ -106,7 +109,7 @@ def test_sentinel_busts_on_content_change(tmp_path: Path) -> None:
     render_pdf_to_dir(pdf, out, cfg=cfg, name_prefix="d_")
 
     make_pdf(pdf, ["A", "B", "C"])  # 覆盖同名 PDF，内容变 3 页
-    count = render_pdf_to_dir(pdf, out, cfg=cfg, name_prefix="d_")
+    count = render_pdf_to_dir(pdf, out, cfg=cfg, name_prefix="d_").rendered
 
     assert count == 3
     assert (out / "d_page_0003.png").exists()
@@ -120,7 +123,7 @@ def test_max_pages_truncates(tmp_path: Path) -> None:
 
     count = render_pdf_to_dir(
         pdf, out, cfg=PdfRenderConfig(max_pages=2), name_prefix="d_",
-    )
+    ).rendered
 
     assert count == 2
     names = sorted(p.name for p in out.glob("d_page_*.png"))
@@ -136,7 +139,7 @@ def test_zero_pad_auto_widen(tmp_path: Path) -> None:
 
     count = render_pdf_to_dir(
         pdf, out, cfg=PdfRenderConfig(zero_pad=1), name_prefix="",
-    )
+    ).rendered
 
     assert count == 12
     names = sorted(p.name for p in out.glob("page_*.png"))
@@ -158,6 +161,33 @@ def test_long_side_downscale(tmp_path: Path) -> None:
         assert max(im.size) == 400
 
 
+def test_render_returns_rendered_and_expected(tmp_path: Path) -> None:
+    """返回 PdfRenderResult：完整渲染 rendered == expected（#96 缺页判据=差值）。"""
+    pdf = tmp_path / "doc.pdf"
+    make_pdf(pdf, ["A", "B", "C"])
+    out = tmp_path / "out"
+
+    result = render_pdf_to_dir(pdf, out, cfg=PdfRenderConfig(), name_prefix="d_")
+
+    assert result.rendered == 3
+    assert result.expected == 3
+    assert result.expected - result.rendered == 0  # 无缺页
+
+
+def test_render_expected_reflects_max_pages_cap(tmp_path: Path) -> None:
+    """expected = min(源页数, max_pages)：截断不算缺页（expected==rendered）。"""
+    pdf = tmp_path / "doc.pdf"
+    make_pdf(pdf, ["A", "B", "C", "D"])
+    out = tmp_path / "out"
+
+    result = render_pdf_to_dir(
+        pdf, out, cfg=PdfRenderConfig(max_pages=2), name_prefix="d_",
+    )
+
+    assert result.rendered == 2
+    assert result.expected == 2  # 截断后预期也是 2，差值 0
+
+
 def test_corrupt_pdf_propagates(tmp_path: Path) -> None:
     """损坏 / 加密 PDF 的 PdfDocument 构造异常上浮，交调用方处理。"""
     bad = tmp_path / "bad.pdf"
@@ -166,3 +196,47 @@ def test_corrupt_pdf_propagates(tmp_path: Path) -> None:
 
     with pytest.raises(pdfium.PdfiumError):
         render_pdf_to_dir(bad, out, cfg=PdfRenderConfig(), name_prefix="")
+
+
+def test_incomplete_render_not_cached_as_complete(tmp_path: Path) -> None:
+    """缺页的 sentinel（rendered < expected_pages）不算命中：重跑重试缺页。
+
+    防止"坏页被跳过 → sentinel 把残缺渲染永久标记为完成 → resume 不再补渲"。
+    """
+    pdf = tmp_path / "doc.pdf"
+    make_pdf(pdf, ["A", "B"])
+    out = tmp_path / "out"
+    cfg = PdfRenderConfig()
+
+    render_pdf_to_dir(pdf, out, cfg=cfg, name_prefix="d_")
+    # 篡改 sentinel 模拟"上次只成功渲染 1/2 页"，并删掉第 2 页 PNG
+    sentinel = out / ".render_done.json"
+    data = json.loads(sentinel.read_text(encoding="utf-8"))
+    data["rendered"] = 1
+    sentinel.write_text(json.dumps(data), encoding="utf-8")
+    (out / "d_page_0002.png").unlink()
+
+    count = render_pdf_to_dir(pdf, out, cfg=cfg, name_prefix="d_").rendered
+
+    assert count == 2  # 不短路，重渲染补回缺页
+    assert (out / "d_page_0002.png").exists()
+
+
+def test_legacy_sentinel_without_expected_is_honored(tmp_path: Path) -> None:
+    """旧 sentinel 无 expected_pages 字段 → 向后兼容视为完成，不强制重渲。"""
+    pdf = tmp_path / "doc.pdf"
+    make_pdf(pdf, ["A", "B"])
+    out = tmp_path / "out"
+    cfg = PdfRenderConfig()
+
+    render_pdf_to_dir(pdf, out, cfg=cfg, name_prefix="d_")
+    sentinel = out / ".render_done.json"
+    data = json.loads(sentinel.read_text(encoding="utf-8"))
+    del data["expected_pages"]  # 模拟旧格式 sentinel
+    sentinel.write_text(json.dumps(data), encoding="utf-8")
+    (out / "d_page_0002.png").unlink()
+
+    count = render_pdf_to_dir(pdf, out, cfg=cfg, name_prefix="d_").rendered
+
+    assert count == 2  # 命中缓存返回页数
+    assert not (out / "d_page_0002.png").exists()  # 未重渲（向后兼容短路）

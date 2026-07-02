@@ -20,6 +20,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from docrestore.api.auth import TokenSource
+
 
 class LLMConfigRequest(BaseModel):
     """LLM 配置（请求级覆盖）"""
@@ -273,6 +275,18 @@ class TaskResponse(BaseModel):
     mode: str = "doc"
 
 
+class WarningPayload(BaseModel):
+    """软降级警告载荷（#96）：i18n code + 参数，前端按 code 本地化渲染。
+
+    与 :class:`docrestore.models.PipelineWarning` 同构（后端不再回传硬编码中文文案）。
+    ``params`` 值仅 str/int，作前端 i18n 插值。旧任务的裸中文串在持久层还原为
+    ``code="legacy"`` + ``params={"text": 原串}``，前端 legacy 直接显示 text。
+    """
+
+    code: str
+    params: dict[str, str | int] = Field(default_factory=dict)
+
+
 class TaskResultResponse(BaseModel):
     """任务结果响应（单篇文档）
 
@@ -286,6 +300,9 @@ class TaskResultResponse(BaseModel):
     doc_title: str = ""
     doc_dir: str = ""
     error: str = ""
+    #: 软降级警告（#96，非致命，结构化 code+params）：VL 退本地推理 / PDF 缺页 /
+    #: 段截断等。error 为空但 warnings 非空 = 文档可用但有降级，前端显示软提示。
+    warnings: list[WarningPayload] = Field(default_factory=list)
 
 
 class TaskResultsResponse(BaseModel):
@@ -396,6 +413,75 @@ class SourceImagesResponse(BaseModel):
     images: list[str]
 
 
+class LayoutBlockPayload(BaseModel):
+    """版面块：bbox + 类型 + raw 文字 / 图片引用（前端匹配光标块，Epic E）。"""
+
+    bbox: tuple[int, int, int, int]  # (x0, y0, x1, y1) 像素
+    label: str
+    #: 阅读序（0-based）：API 层按 blocks 列表位置 ``enumerate`` 派生，不落 sidecar
+    #: （§17.2）；前端版面全览（E8/#92）画 index+1 角标。
+    index: int
+    text: str
+    #: 图片 / 图表块的输出引用 ``images/{stem}_N.ext``（对齐 markdown <img src>），
+    #: 供前端按引用匹配光标所在图片块；文字块为空。
+    image_ref: str = ""
+
+
+class LayoutPagePayload(BaseModel):
+    """单页版面：原图文件名 + 像素尺寸（bbox 坐标空间）+ 块列表。"""
+
+    filename: str
+    image_size: tuple[int, int]  # (width, height) 像素，作 % 换算分母
+    blocks: list[LayoutBlockPayload]
+
+
+class LayoutPayload(BaseModel):
+    """任务版面高亮载荷（Epic E）：各页块 bbox，供编辑器光标↔原图高亮。
+
+    ``processed``：bbox/image_size 是否处于**处理图**坐标系——OCR 前做过预处理
+    （PPT 透视矫正 `_after` / 文档 content_crop 正文裁剪 `_crop` / 手动裁剪），坐标空间
+    与原图不符（§13/§15）。为真时前端源图栏须改显对应处理图才对齐（逐页尝试，
+    无处理图的页 onError 回退原图）；无预处理时为假（bbox=原图坐标，显原图）。
+    """
+
+    pages: list[LayoutPagePayload]
+    processed: bool = False
+
+
+class CodeLineBoxPayload(BaseModel):
+    """代码单行在原图的像素框（#93 悬停放大）：行号 + 来源页 + bbox。"""
+
+    line_no: int  # OCR 行号（与前端编辑器 data-line 同值）
+    page: str  # 来源页标识 ``{page_stem}.col{column_index}``
+    bbox: tuple[int, int, int, int]  # (x0, y0, x1, y1) 原图像素
+
+
+class CodeFileLayoutPayload(BaseModel):
+    """单个源文件的行级版面：path 对齐 files-index entry.path。"""
+
+    path: str
+    lines: list[CodeLineBoxPayload]
+    #: #5 行映射：按**精修后**正文行序（0-based）索引、值为该行对应的原 OCR
+    #: line_no（= ``lines`` 的 CodeLineBox.line_no 键），None = rewrite/repair 新增行
+    #: → 前端不放大。空 = 精修守恒（identity，前端按 displayLineNumber 直接查表）。
+    #: 缺省 ``[]`` 兼容旧 sidecar / 无精修任务。前端放大镜依赖此字段做行号换算，
+    #: 缺则 rewrite/repair 移位文件悬停会放大错行（sidecar 已算好、务必透传）。
+    line_map: list[int | None] = []  # noqa: RUF012 — pydantic 字段默认，非可变类属性
+
+
+class CodeLayoutPayload(BaseModel):
+    """代码任务行级版面载荷（#93）：各源文件逐行 bbox，供悬停行↔原图局部放大。
+
+    ``processed``：与 ``LayoutPayload.processed`` 同义——代码模式现也支持**手动裁剪**
+    （§14.1），裁剪图落 ``.content_crop/{stem}_crop`` 后 OCR 在其上跑，行 bbox 遂在
+    **裁剪图坐标系**。为真时前端放大镜须改显对应处理图才对齐（逐页 onError 回退：
+    未裁剪页 bbox 本在原图系，回退原图即对）。无任何裁剪时为假（bbox=原图坐标）。
+    """
+
+    files: list[CodeFileLayoutPayload]
+    processed: bool = False
+
+
 class UploadSessionResponse(BaseModel):
     """创建上传会话响应"""
 
@@ -469,6 +555,9 @@ class OCRStatusResponse(BaseModel):
     current_gpu_name: str = ""  # 人类可读型号，便于 UI 区分同机多卡
     is_ready: bool
     is_switching: bool
+    #: 降级原因码（#96，空=未降级）：请求 VL 但退回本地推理时为
+    #: vl_no_server_python / vl_server_python_missing，前端徽章据此提示。
+    degraded_reason: str = ""
 
 
 # ── 本地 NER 可用性 ───────────────────────────────────────
@@ -514,3 +603,23 @@ class GPUListResponse(BaseModel):
 
     gpus: list[GPUInfoResponse]
     recommended: str | None = None
+
+
+# ── 公共鉴权信息（无鉴权可读，不含 token 值） ─────────────────
+
+
+class AuthInfoResponse(BaseModel):
+    """GET /auth/info 响应：是否需要 token 及 token 来源（**绝不返回 token 值**）。
+
+    前端据此判断是否提示用户设置 token，并按 ``token_source`` 给出
+    「在部署机器上如何获取 token」的指引。免鉴权可读（前端拿到 token 前需先读它）。
+    """
+
+    #: True = 服务要求 token 鉴权；False = insecure 无鉴权模式（前端无需设 token）
+    auth_required: bool
+    #: token 来源：env（环境变量）/ device_file（自动生成落地）/ insecure / unknown。
+    #: 复用 auth.TokenSource 单一真相源，避免枚举分支两处漂移。
+    token_source: TokenSource
+    #: device token 文件真实路径（仅 device_file / unknown 来源提供，遵循 XDG /
+    #: 平台约定）；供前端显示精确 ``cat <path>``。env/insecure → None。只路径无值。
+    token_file: str | None = None

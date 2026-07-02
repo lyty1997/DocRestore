@@ -25,10 +25,12 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import logging
 import os
 import shutil
 import signal
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -36,6 +38,8 @@ try:
     import resource as _resource
 except ImportError:  # pragma: no cover - 非 POSIX 平台
     _resource = None  # type: ignore[assignment]
+
+logger = logging.getLogger(__name__)
 
 #: 导出产物缓存目录名（落在每个 doc_dir 下，不进 asset 白名单、不裸打进 zip）
 EXPORT_CACHE_DIRNAME = ".exports"
@@ -112,6 +116,72 @@ def export_content_hash(doc_md: Path) -> str:
 def export_cache_path(doc_dir: Path, suffix: str, content_hash: str) -> Path:
     """导出产物缓存路径：``{doc_dir}/.exports/{content_hash}.{suffix}``。"""
     return doc_dir / EXPORT_CACHE_DIRNAME / f"{content_hash}.{suffix}"
+
+
+def export_to_cache(
+    exporter: Exporter,
+    doc_md: Path,
+    assets_dir: Path,
+    cache: Path,
+) -> None:
+    """原子地把导出产物写入 ``cache``：先写同目录临时文件，再 ``os.replace`` 落位。
+
+    解决并发下载竞态：缓存命中走 ``cache.is_file()`` 这条「存在即用」路径，若产物
+    直接写最终路径，另一个并发请求可能读到尚未写完的半成品并打进 zip。临时文件
+    与 ``cache`` 同目录（同一文件系统）保证 ``os.replace`` 是原子 rename；读者只会
+    看到「不存在」或「完整产物」。重复导出（两请求都 miss）仍可能各跑一遍，但
+    「最后写者胜」是原子的，两份都是完整产物，无损坏。
+
+    任一步失败都清理临时文件并向上抛原异常（:class:`ExportFailed` /
+    :class:`ExportToolUnavailable`），由调用方映射 HTTP 状态。
+    """
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{cache.stem}.",
+        suffix=f".{exporter.suffix}.tmp",
+        dir=str(cache.parent),
+    )
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        exporter.export(doc_md, assets_dir, tmp_path)
+        os.replace(tmp_path, cache)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def clear_export_caches(root: Path) -> int:
+    """删除 ``root`` 子树下所有导出缓存目录（``.exports/``），返回删除的目录数。
+
+    续跑（resume）复用同一 ``output_dir`` 时，``document.md`` 可能字节不变（LLM
+    缓存命中产出相同字节）而附属输入（图片 / ``.ppt_layout.json``）已变；导出缓存键
+    只哈希 ``document.md``（见 :func:`export_content_hash`），命中即返回 stale 产物。
+    续跑前清空缓存即关闭该窗口（#3），下次下载按新产物重新导出。
+
+    逐目录删除：良性 race（``FileNotFoundError``，遍历途中消失）静默；其它
+    ``OSError``（如权限）记 warning——清理半途而废会让 #3 stale 窗口重新打开、
+    用户下次下载拿到旧产物，不能静默 no-op。``removed`` 只计真正删成功的目录。
+    """
+    removed = 0
+    try:
+        cache_dirs = list(root.rglob(EXPORT_CACHE_DIRNAME))
+    except OSError as exc:
+        logger.warning("遍历导出缓存目录失败: %s: %s", root, exc)
+        return removed
+    for cache_dir in cache_dirs:
+        if not cache_dir.is_dir():
+            continue
+        try:
+            shutil.rmtree(cache_dir)
+            removed += 1
+        except FileNotFoundError:
+            pass  # 遍历途中消失，良性 race
+        except OSError as exc:
+            logger.warning(
+                "清理导出缓存失败（stale 窗口可能未关闭）: %s: %s",
+                cache_dir, exc,
+            )
+    return removed
 
 
 def resolve_tool(tool: str) -> str | None:

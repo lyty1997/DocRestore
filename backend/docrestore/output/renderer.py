@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 from pathlib import Path
@@ -27,6 +28,8 @@ import aiofiles
 
 from docrestore.models import MergedDocument
 from docrestore.pipeline.config import OutputConfig
+
+logger = logging.getLogger(__name__)
 
 #: 带 page marker 的"预览版"markdown sidecar 文件名。
 #: ``document.md`` 是剥除版（下载/交付，用户不看 HTML 注释）；本 sidecar 保留
@@ -132,6 +135,13 @@ class Renderer:
 
             if src.exists() and not dst.exists():
                 shutil.copy2(src, dst)
+            elif not src.exists() and not dst.exists():
+                # 引用仍会被重写成 images/{new_name}，但源图缺失（OCR 未产出 /
+                # stem 映射错 / resume 清了 OCR 目录），该引用将指向不存在的文件。
+                # 不能静默：否则用户拿到"看着有图、实际全裂"的 document.md。
+                logger.warning(
+                    "图片源缺失，document.md 中该引用将失效: %s", src,
+                )
 
             return new_name
 

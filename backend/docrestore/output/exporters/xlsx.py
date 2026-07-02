@@ -28,6 +28,7 @@ openpyxl 是纯 Python 依赖（无系统库）：**惰性导入** fail-closed
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import TypeAlias
@@ -39,6 +40,8 @@ from docrestore.output.exporters.base import (
 from docrestore.output.exporters.html_table import RawCell
 from docrestore.output.exporters.html_table import build_grid as _build_grid
 from docrestore.output.exporters.html_table import parse_tables as _parse_tables
+
+logger = logging.getLogger(__name__)
 
 #: 纯整数（禁前导 0，避免电话/编号被转成数字丢前导 0）
 _INT_RE = re.compile(r"-?[1-9]\d*|0")
@@ -119,6 +122,7 @@ def _fill_table_sheet(sheet: object, rows: list[list[RawCell]]) -> None:
 def _fill_text_sheet(sheet: object, markdown: str) -> None:
     """无表退化：每非空 markdown 行写入 A 列一行（产物非空）。"""
     row = 1
+    truncated = False
     for line in markdown.splitlines():
         stripped = line.strip()
         if not stripped:
@@ -126,4 +130,14 @@ def _fill_text_sheet(sheet: object, markdown: str) -> None:
         sheet.cell(row=row, column=1, value=stripped)  # type: ignore[attr-defined]
         row += 1
         if row > _MAX_TEXT_ROWS:
+            truncated = True
             break
+    if truncated:
+        # 不再静默截断：记 warning + 在末尾追加可见标记，避免"看着完整其实缺尾"。
+        logger.warning(
+            "xlsx 无表退化 sheet 正文超 %d 行已截断，余下行未导出", _MAX_TEXT_ROWS,
+        )
+        sheet.cell(  # type: ignore[attr-defined]
+            row=row, column=1,
+            value=f"（已截断：正文超过 {_MAX_TEXT_ROWS} 行，余下行未导出）",
+        )

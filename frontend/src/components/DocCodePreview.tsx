@@ -12,16 +12,24 @@
 
 import "katex/dist/katex.min.css";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Markdown from "react-markdown";
 
 import {
   getFilesIndex,
+  getTaskLayout,
+  isNotFoundError,
   listSourceImages,
   updateResultMarkdown,
 } from "../api/client";
-import type { TaskResultResponse } from "../api/schemas";
+import type { LayoutPayload, TaskResultResponse } from "../api/schemas";
+import {
+  computeBlockHighlight,
+  type CursorBlock,
+  type SourceImageHighlight,
+} from "../features/task/blockHighlight";
 import { preprocessMarkdown } from "../features/task/markdown";
+import { previewBlockAtPointer } from "../features/task/previewBlockAtPointer";
 import {
   PREVIEW_REHYPE_PLUGINS,
   PREVIEW_REMARK_PLUGINS,
@@ -95,6 +103,40 @@ export function DocCodePreview({
   /* 编辑模式右侧滚动容器（编辑器就绪后经 onScrollContainerChange 填入） */
   const [editorScrollEl, setEditorScrollEl] = useState<HTMLElement>();
 
+  /* Epic E：光标块 ↔ 原图 bbox 高亮（仅文档编辑模式）。
+     layout = 该文档 .layout.json 载荷；cursorBlock = 编辑器上报的光标所在块。 */
+  const [layout, setLayout] = useState<LayoutPayload | undefined>();
+  const [cursorBlock, setCursorBlock] = useState<CursorBlock | undefined>();
+  /* E8：版面全览叠加层开关（默认关，仅有 layout 数据时显示 toggle）。 */
+  const [showLayoutOverlay, setShowLayoutOverlay] = useState(false);
+  const handleCursorBlock = useCallback(
+    (block: CursorBlock | undefined): void => { setCursorBlock(block); },
+    [],
+  );
+  /* E4：预览模式 hover 防抖定时器（与编辑器 onSelectionUpdate 同 80ms）。 */
+  const previewHoverTimer = useRef<number | undefined>(undefined);
+  const handlePreviewMouseMove = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>): void => {
+      /* React 合成事件在 setTimeout 回调里 currentTarget 会被置空，先同步取出。 */
+      const container = event.currentTarget;
+      const target = event.target as Element | null;
+      if (previewHoverTimer.current !== undefined) {
+        globalThis.clearTimeout(previewHoverTimer.current);
+      }
+      previewHoverTimer.current = globalThis.setTimeout(() => {
+        setCursorBlock(previewBlockAtPointer(target, container));
+      }, 80);
+    },
+    [],
+  );
+  const handlePreviewMouseLeave = useCallback((): void => {
+    if (previewHoverTimer.current !== undefined) {
+      globalThis.clearTimeout(previewHoverTimer.current);
+      previewHoverTimer.current = undefined;
+    }
+    setCursorBlock(undefined);
+  }, []);
+
   const selectedDoc = results[selectedIdx];
   const selectedDocFailed =
     selectedDoc !== undefined && selectedDoc.error !== "";
@@ -110,6 +152,14 @@ export function DocCodePreview({
     selectedDoc?.doc_dir,
     selectedDoc?.markdown ?? "",
   );
+
+  /* Epic E：文档视图（预览或编辑）且选中文档正常时取版面、做高亮（E4 起
+     去掉 editMode 约束，预览模式也启用）。 */
+  const canHighlight =
+    viewMode === "doc" &&
+    !selectedDocFailed &&
+    selectedDoc !== undefined;
+  const editDocDir = selectedDoc?.doc_dir;
 
   /* results 长度变化时收敛 selectedIdx */
   useEffect(() => {
@@ -141,13 +191,62 @@ export function DocCodePreview({
       .then((idx) => {
         if (!cancelled) setCodeAvailable(idx.length > 0);
       })
-      .catch(() => {
+      .catch((error_: unknown) => {
         if (!cancelled) setCodeAvailable(false);
+        // 404 = 非代码模式（预期，不显示 toggle）；其它错误是真实失败，
+        // 不能静默吞成"无代码视图"——记录便于排查后端瞬时故障。
+        if (!isNotFoundError(error_)) {
+          console.error("探测代码模式产物失败", error_);
+        }
       });
     return () => {
       cancelled = true;
     };
   }, [taskId]);
+
+  /* Epic E：进入文档编辑模式时取该文档 .layout.json（懒加载）；离开 / 切文档时
+     重置。无 sidecar（非 VL / 老任务）→ getTaskLayout 返回 undefined，不高亮。 */
+  useEffect(() => {
+    if (!canHighlight) {
+      setLayout(undefined);
+      setCursorBlock(undefined);
+      setShowLayoutOverlay(false);
+      return;
+    }
+    let cancelled = false;
+    getTaskLayout(taskId, editDocDir)
+      .then((res) => {
+        if (!cancelled) setLayout(res);
+      })
+      .catch(() => {
+        if (!cancelled) setLayout(undefined);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [taskId, canHighlight, editDocDir]);
+
+  /* 光标块 → 命中页 bbox 高亮（纯计算，失配 → undefined 不高亮）。 */
+  const highlight = useMemo<SourceImageHighlight | undefined>(
+    () => computeBlockHighlight(layout, cursorBlock),
+    [layout, cursorBlock],
+  );
+
+  /* E4：编辑 ↔ 预览互切时复位光标块，避免残留上一模式的高亮（新模式首次
+     交互前没有事件）。layout 不动（同文档共用）。 */
+  useEffect(() => {
+    setCursorBlock(undefined);
+  }, [editMode]);
+
+  /* E4：卸载时清掉 hover 防抖定时器。 */
+  useEffect(
+    () => () => {
+      if (previewHoverTimer.current !== undefined) {
+        globalThis.clearTimeout(previewHoverTimer.current);
+      }
+    },
+    [],
+  );
 
   usePreviewScrollSync(
     leftScrollEl,
@@ -290,6 +389,16 @@ export function DocCodePreview({
             )}
           </>
         )}
+        {/* E8：版面全览开关（仅取到 .layout.json 数据时显示，默认关） */}
+        {canHighlight && layout !== undefined && (
+          <button
+            type="button"
+            className={`toggle-btn ${showLayoutOverlay ? "active" : ""}`}
+            onClick={() => { setShowLayoutOverlay((v) => !v); }}
+          >
+            {t("sourceImages.layoutOverlay")}
+          </button>
+        )}
         {headerExtras}
       </div>
     );
@@ -370,6 +479,11 @@ export function DocCodePreview({
           ref={(el) => { setLeftScrollEl(el ?? undefined); }}
           taskId={taskId}
           images={filteredImages}
+          highlight={highlight}
+          processed={layout?.processed ?? false}
+          docDir={editDocDir}
+          layoutPages={layout?.pages}
+          showOverlay={showLayoutOverlay}
         />
         {selectedDocFailed && failedDocStyle === "panel" && (
           <div className="doc-failed-panel">
@@ -378,6 +492,22 @@ export function DocCodePreview({
             <p className="doc-failed-hint">
               {t("taskDetail.docFailedHint")}
             </p>
+          </div>
+        )}
+        {/* #96：非致命软降级（VL 退本地 / PDF 缺页 / 段截断），文档可用但有降级 */}
+        {!selectedDocFailed && selectedDoc.warnings.length > 0 && (
+          <div className="doc-warning-banner" role="alert">
+            <span className="doc-warning-icon" aria-hidden="true">⚠</span>
+            <ul className="doc-warning-list">
+              {selectedDoc.warnings.map((w, i) => (
+                // key 带 index：同一 code 可能重复出现（如多个缺口），纯用 code 会
+                // React key 冲突而丢重复项。legacy（旧任务原中文串）走 warnings.legacy
+                // = "{text}" 模板，统一由 t() 渲染，组件内不直接索引 params。
+                <li key={`${String(i)}-${w.code}`}>
+                  {t(`taskDetail.warnings.${w.code}`, w.params)}
+                </li>
+              ))}
+            </ul>
           </div>
         )}
         {!selectedDocFailed && editMode && (
@@ -390,6 +520,7 @@ export function DocCodePreview({
               docDir={selectedDoc.doc_dir}
               initialPagePosition={editStartPosition}
               onScrollContainerChange={setEditorScrollEl}
+              onCursorBlockChange={handleCursorBlock}
             />
           </div>
         )}
@@ -397,6 +528,8 @@ export function DocCodePreview({
           <div
             ref={(el) => { setRightScrollEl(el ?? undefined); }}
             className="markdown-preview"
+            onMouseMove={canHighlight ? handlePreviewMouseMove : undefined}
+            onMouseLeave={canHighlight ? handlePreviewMouseLeave : undefined}
           >
             <Markdown
               remarkPlugins={PREVIEW_REMARK_PLUGINS}

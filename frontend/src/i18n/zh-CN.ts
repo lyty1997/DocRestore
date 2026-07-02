@@ -84,6 +84,8 @@ export const zhCN = {
   "taskForm.engineWarming": "引擎加载中...",
   "taskForm.engineReady": "已就绪",
   "taskForm.engineError": "加载失败",
+  "taskForm.engineDegraded":
+    "已请求 PaddleOCR-VL 但将退回本地推理（paddle_server_python 未配置或路径无效），OCR 结果与 VL 模式不符，请检查配置",
   "taskForm.gpuAuto": "自动选择（推荐）",
   "taskForm.gpuAutoWithHint": "自动（{hint}）",
   "taskForm.llmConfigExpanded": "▾ LLM 精修配置",
@@ -181,6 +183,12 @@ export const zhCN = {
   "progress.pptPage": "PPT 模式：精修第 {current}/{total} 页",
   "progress.pptPagePlain": "PPT 模式：处理第 {current}/{total} 页",
   "progress.pptRender": "PPT 模式：组装文档...",
+  "progress.codeLayout": "代码模式：分析版面 {current}/{total}",
+  "progress.codeGroup": "代码模式：归类得到 {count} 个源文件",
+  "progress.codeRefine": "代码模式：LLM 精修 {current}/{total}",
+  "progress.codeRepairWindow":
+    "代码模式：修复第 {current}/{total} 个文件（窗口 {window}/{windows}）",
+  "progress.codeRender": "代码模式：写出 {count} 个文件",
 
   // ── 任务结果 ──
   "taskResult.title": "处理结果",
@@ -211,6 +219,14 @@ export const zhCN = {
   "taskDetail.docSummaryPartial": "已完成 {done}/{total}，{failed} 个失败",
   "taskDetail.docFailedTitle": "此子文档处理失败",
   "taskDetail.docFailedHint": "可点击页头的“继续”按钮，复用已完成内容、仅重跑失败部分。",
+  "taskDetail.warnings.pdf_pages_missing": "源 PDF 渲染缺失 {count} 页（坏页已跳过），文档不完整",
+  "taskDetail.warnings.vl_fell_back_to_local": "请求了 PaddleOCR-VL 但退回了本地推理（paddle_server_python 未配置或路径无效），OCR 结果与 VL 模式不符",
+  "taskDetail.warnings.engine_degraded": "OCR 引擎降级：{reason}",
+  "taskDetail.warnings.segment_truncated": "段 {index} 精修输出疑似被截断",
+  "taskDetail.warnings.document_truncated": "整篇文档级精修输出疑似被截断",
+  "taskDetail.warnings.gap_unfilled": "缺口（{after_image} 之后）未能自动补充",
+  "taskDetail.warnings.code_files_summary": "代码模式：{files} 个文件，{skipped} 个跳过",
+  "taskDetail.warnings.legacy": "{text}",
   "taskDetail.loadError": "加载任务信息失败",
   "taskDetail.loadingTask": "加载任务信息...",
   "taskDetail.cancelFailed": "取消失败",
@@ -235,6 +251,7 @@ export const zhCN = {
   "codeViewer.sourcePagesTitle": "原图来源",
   "codeViewer.sourcePagesCount": "{count} 张原图来源（点击展开）",
   "codeViewer.noSourceImages": "无对应原图",
+  "codeViewer.magnifierHint": "悬停代码行查看其原图局部放大",
   "codeViewer.editAreaLabel": "编辑代码文件内容",
   "codeViewer.saveError": "保存代码文件失败",
   "codeViewer.liveDiagnosticPending": "正在检查...",
@@ -298,6 +315,21 @@ export const zhCN = {
   "tokenSettings.hintSuffix": "。未设置时留空即可。",
   "tokenSettings.placeholder": "粘贴 API Token",
   "tokenSettings.ariaLabel": "API Token 设置",
+  "tokenSettings.howToTitle": "如何获取 Token？",
+  "tokenSettings.howToDeviceStep1": "在运行后端服务的电脑上打开终端",
+  "tokenSettings.howToDeviceStep2": "运行命令查看自动生成的 token：",
+  "tokenSettings.howToDeviceStep3": "复制输出的 token，粘贴到下方输入框并保存",
+  "tokenSettings.howToDeviceNote":
+    "首次启动后端时会自动生成该 token 并保存在上述文件，重启后保持不变。",
+  "tokenSettings.howToEnvStep1": "Token 由部署者通过环境变量 ",
+  "tokenSettings.howToEnvStep1Suffix": " 设置",
+  "tokenSettings.howToEnvStep2":
+    "向部署该服务的人索取该 token，或查看启动配置，复制后粘贴到下方保存",
+  "tokenSettings.insecureNote":
+    "当前服务运行在本机无鉴权模式，无需设置 Token。",
+  // ── 缺少 Token 顶部横幅 ──
+  "tokenBanner.message": "未设置 API Token，无法访问后端服务",
+  "tokenBanner.action": "去设置",
 
   // ── 文件上传 ──
   "fileUploader.selectFiles": "选择文件",
@@ -328,6 +360,7 @@ export const zhCN = {
   // ── 原图面板 ──
   "sourceImages.title": "原图（点击放大）",
   "sourceImages.lightboxAlt": "放大查看",
+  "sourceImages.layoutOverlay": "版面全览",
 
   // ── 上传预览 ──
   "uploadPreview.title": "上传预览",
@@ -365,7 +398,8 @@ export const zhCN = {
     "输出目录（output_dir）被安全策略拒绝：必须落在服务端受信工作根之下" +
     "（默认系统临时目录，可由 DOCRESTORE_WORK_ROOT 配置），" +
     "以防误删工作根外的任意目录",
-  "errors.api.unauthorized": "缺少或无效的 API Token",
+  "errors.api.unauthorized":
+    "缺少或无效的 API Token，请在侧边栏「API Token 设置」中配置",
   "errors.api.service_not_initialized": "服务未初始化",
   "errors.api.engine_manager_not_initialized": "OCR 引擎管理器未初始化",
   "errors.api.task_not_found": "任务不存在",
@@ -379,6 +413,8 @@ export const zhCN = {
   "errors.api.files_index_not_found": "任务未生成代码索引（非代码模式或未完成）",
   "errors.api.files_index_parse_error": "代码索引解析失败：{reason}",
   "errors.api.files_index_bad_format": "代码索引格式异常（非数组）",
+  "errors.api.layout_not_found": "版面数据不存在",
+  "errors.api.code_layout_not_found": "代码版面数据不存在",
   "errors.api.read_failed": "读取失败：{reason}",
   "errors.api.invalid_filename": "非法文件名",
   "errors.api.markdown_update_failed": "保存失败：{reason}",

@@ -21,11 +21,16 @@ PPT 版面定位导出（Epic D Phase-2b）的位置真相源：``_ppt_pipeline`
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from docrestore.models import LayoutRegion
+from docrestore.output.sidecar_common import (
+    as_int_pair,
+    as_int_quad,
+    load_json_sidecar,
+    write_json_sidecar,
+)
 
 #: sidecar 文件名：dot 前缀=内部文件，不进下载 zip / asset 白名单。
 PPT_LAYOUT_FILENAME = ".ppt_layout.json"
@@ -207,28 +212,6 @@ def to_dict(layout: PptLayout) -> dict[str, object]:
     }
 
 
-def _as_int_pair(raw: object) -> tuple[int, int] | None:
-    """长度 2 的整型序列；非法返回 None。"""
-    if not isinstance(raw, list) or len(raw) != 2:
-        return None
-    try:
-        vals = [int(v) for v in raw]
-    except (TypeError, ValueError):
-        return None
-    return (vals[0], vals[1])
-
-
-def _as_int_quad(raw: object) -> tuple[int, int, int, int] | None:
-    """长度 4 的整型序列；非法返回 None。"""
-    if not isinstance(raw, list) or len(raw) != 4:
-        return None
-    try:
-        vals = [int(v) for v in raw]
-    except (TypeError, ValueError):
-        return None
-    return (vals[0], vals[1], vals[2], vals[3])
-
-
 def _as_rgb(raw: object) -> tuple[int, int, int] | None:
     """长度 3 的 0..255 整型序列 → RGB；缺失 / 非法 → None（不报错，向后兼容）。"""
     if not isinstance(raw, list) or len(raw) != 3:
@@ -250,7 +233,7 @@ def _region_from_dict(raw: object) -> PptLayoutRegion | None:
     """
     if not isinstance(raw, dict):
         return None
-    bbox = _as_int_quad(raw.get("bbox"))
+    bbox = as_int_quad(raw.get("bbox"))
     label = raw.get("label")
     content = raw.get("content", "")
     image_ref = raw.get("image_ref", "")
@@ -275,7 +258,7 @@ def from_dict(data: object) -> PptLayout | None:
     """JSON dict → ``PptLayout``；版本不符 / 任一字段非法 → None（fail-safe）。"""
     if not isinstance(data, dict) or data.get("version") != _LAYOUT_VERSION:
         return None
-    canvas = _as_int_pair(data.get("slide_size_emu"))
+    canvas = as_int_pair(data.get("slide_size_emu"))
     raw_pages = data.get("pages")
     if canvas is None or not isinstance(raw_pages, list):
         return None
@@ -283,7 +266,7 @@ def from_dict(data: object) -> PptLayout | None:
     for raw_page in raw_pages:
         if not isinstance(raw_page, dict):
             return None
-        size = _as_int_pair(raw_page.get("image_size"))
+        size = as_int_pair(raw_page.get("image_size"))
         filename = raw_page.get("filename")
         raw_regions = raw_page.get("regions")
         if (
@@ -309,21 +292,10 @@ def from_dict(data: object) -> PptLayout | None:
 
 def write_ppt_layout(output_dir: Path, layout: PptLayout) -> Path:
     """把 ``PptLayout`` 写到 ``output_dir/.ppt_layout.json``，返回路径。"""
-    path = output_dir / PPT_LAYOUT_FILENAME
-    path.write_text(
-        json.dumps(to_dict(layout), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    return path
+    return write_json_sidecar(output_dir / PPT_LAYOUT_FILENAME, to_dict(layout))
 
 
 def load_ppt_layout(output_dir: Path) -> PptLayout | None:
     """读 ``output_dir/.ppt_layout.json`` → ``PptLayout``；缺失/损坏 → None。"""
-    path = output_dir / PPT_LAYOUT_FILENAME
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return from_dict(data)
+    data = load_json_sidecar(output_dir / PPT_LAYOUT_FILENAME)
+    return None if data is None else from_dict(data)

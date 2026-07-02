@@ -393,6 +393,9 @@ def detect_boxes_for_dir(
             continue
         img = cv2.imread(str(p))
         if img is None:
+            # 与 _crop_sync 对齐：读图失败要可见，否则整批损坏/权限问题被静默吞、
+            # 前端无法区分"无需裁剪"与"读不出来"。
+            logger.warning("裁剪建议读图失败，跳过: %s", p)
             continue
         h, w = img.shape[:2]
         box = compute_crop_box(img)

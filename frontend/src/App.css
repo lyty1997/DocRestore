@@ -1091,6 +1091,54 @@ body {
   opacity: 0.85;
 }
 
+/* 源图单元：相对定位容器，承载 bbox 高亮 overlay（Epic E）。
+   line-height:0 去掉 <img> 行内底部间隙，使 overlay % 与图像素严格对齐。 */
+.source-image-cell {
+  position: relative;
+  width: 100%;
+  line-height: 0;
+}
+
+/* 光标块 ↔ 原图 bbox 高亮矩形（Epic E）：百分比定位，不拦截点击。 */
+.block-highlight-overlay {
+  position: absolute;
+  pointer-events: none;
+  /* 醒目橙色，独立于主题 primary（避免改色波及按钮/进度条等共享变量）。 */
+  border: 2.5px solid #f97316;
+  background: rgb(249 115 22 / 0.22);
+  border-radius: 3px;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.7),
+    0 0 8px rgb(249 115 22 / 0.6);
+  transition: left 0.12s ease, top 0.12s ease,
+    width 0.12s ease, height 0.12s ease;
+}
+
+/* 版面全览叠加层（E8/#92）：整页彩色分类框 + 阅读序角标。
+   边框 / 填充 / 角标底色由分类色（layoutCategory）经 inline style 注入，
+   这里只定结构；不拦截点击，与单块橙色高亮共存（全览在下、命中框在上）。 */
+.layout-overlay-box {
+  position: absolute;
+  pointer-events: none;
+  border-width: 1.5px;
+  border-style: solid;
+  border-radius: 2px;
+  box-sizing: border-box;
+}
+
+.layout-overlay-badge {
+  position: absolute;
+  top: 0;
+  left: 0;
+  min-width: 1.1em;
+  padding: 0 3px;
+  font-size: 10px;
+  line-height: 1.4;
+  font-weight: 600;
+  color: #fff;
+  text-align: center;
+  border-radius: 0 0 3px;
+}
+
 .preview-split > .markdown-preview {
   flex: 1;
   min-width: 0;
@@ -3299,6 +3347,39 @@ body {
   line-height: 1.4;
 }
 
+/* #96：非致命软降级提示——复用主题 warning 变量（琥珀），区别 doc-failed 红色失败态 */
+.ocr-engine-degraded {
+  margin: 0.35rem 0 0;
+  font-size: 0.78rem;
+  color: var(--color-warning-dark);
+  line-height: 1.4;
+}
+
+.doc-warning-banner {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  margin: 0 0 0.75rem;
+  padding: 0.6rem 0.85rem;
+  background: var(--color-warning-bg);
+  border: 1px solid var(--color-warning);
+  border-radius: 6px;
+  color: var(--color-text);
+  font-size: 0.85rem;
+}
+
+.doc-warning-icon {
+  flex-shrink: 0;
+  color: var(--color-warning);
+  line-height: 1.4;
+}
+
+.doc-warning-list {
+  margin: 0;
+  padding-left: 1.1rem;
+  line-height: 1.5;
+}
+
 /* ── 本地 NER 一键配置（开 PII 后人名/机构名脱敏依赖本地模型）── */
 .ner-ready {
   margin: 0 0 0.6rem;
@@ -3675,6 +3756,101 @@ body {
   border-color: var(--color-error);
 }
 
+/* ── Token 获取指引（TokenSettings 内） ── */
+.token-howto {
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+}
+
+.token-howto-title {
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 0.5rem;
+}
+
+.token-howto-steps {
+  margin: 0;
+  padding-left: 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.token-howto-cmd {
+  display: block;
+  margin-top: 0.3rem;
+  background: var(--color-bg);
+  padding: 0.4rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  color: var(--color-primary);
+  user-select: all;
+  /* 命令需整体复制，禁止断词；过长时横向滚动而非折断 */
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
+.token-howto-note {
+  margin: 0.6rem 0 0;
+  font-size: 0.8rem;
+  opacity: 0.85;
+}
+
+.token-insecure-note {
+  background: var(--color-success-bg);
+  border: 1px solid var(--color-success);
+  border-radius: 6px;
+  padding: 0.6rem 0.9rem;
+  margin-bottom: 1rem;
+  font-size: 0.85rem;
+  color: var(--color-text);
+}
+
+/* ── 缺少 Token 顶部横幅（App 主内容区顶部） ── */
+.missing-token-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: var(--color-warning-bg);
+  border: 1px solid var(--color-warning);
+  border-radius: 8px;
+  padding: 0.7rem 1rem;
+  margin: 0 0 1rem;
+  color: var(--color-text);
+  font-size: 0.9rem;
+}
+
+.missing-token-banner-icon {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.missing-token-banner-msg {
+  flex: 1;
+}
+
+.missing-token-banner-btn {
+  background: var(--color-warning-dark);
+  color: var(--color-on-primary);
+  border: none;
+  border-radius: 5px;
+  padding: 0.4rem 0.9rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: opacity 0.15s;
+}
+
+.missing-token-banner-btn:hover {
+  opacity: 0.88;
+}
+
 .token-input-row {
   display: flex;
   gap: 0.5rem;
@@ -3856,7 +4032,8 @@ body {
 
 .code-viewer {
   display: grid;
-  grid-template-columns: 220px 1fr 220px;
+  grid-template-columns: 220px 1fr;
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: 1rem;
   height: 80vh;
 }
@@ -4225,19 +4402,6 @@ body {
   width: 100%;
 }
 
-.code-content-text .code-page-anchor {
-  /* 锚点改为绝对定位 overlay（top 由 JS 按 lineIndex*rowH 内联给出），
-     与窗口化的行解耦，始终存在于 DOM 供 useScrollSync 量测。 */
-  position: absolute;
-  left: 0;
-  height: 0;
-  margin: 0;
-  padding: 0;
-  overflow: hidden;
-  visibility: hidden;
-  pointer-events: none;
-}
-
 .code-content-loading,
 .code-content-error,
 .code-save-error {
@@ -4274,6 +4438,14 @@ body {
 
 [data-theme="light"] .code-editor-edit-gutter {
   border-right-color: rgb(0 0 0 / 0.1);
+}
+
+/* 编辑态当前光标行（#93 增量）：橙色左条 + 微底色，与缩略图 .active 描边同色系，
+   直接标出「编辑光标在哪行」。仅施结构性高亮（背景 + 左条），不改 color/font-weight，
+   避免特异性压住诊断行号配色（.has-*-diagnostic 错误红/依赖黄会被同时命中的当前行覆盖）。 */
+.code-editor-edit-gutter .code-line-number.current-line {
+  background: rgb(249 115 22 / 0.16);
+  box-shadow: inset 2px 0 0 #f97316;
 }
 
 .code-editor-textarea {
@@ -4451,6 +4623,99 @@ body {
   font-size: 0.8rem;
 }
 
+/* ── #93 悬停放大镜（嵌入 IDE 编辑栏顶部）─────────────────────── */
+/* 放大镜条：.code-content（flex column）的首个内容块，header 之下、代码之上。 */
+.code-magnifier {
+  flex: 0 0 auto;
+  display: flex;
+  border-bottom: 1px solid var(--color-border);
+  background: #151922;
+}
+[data-theme="light"] .code-magnifier {
+  background: #f7f4ee;
+}
+/* 探测期（取自然尺寸）保住高度，避免空→图的塌陷闪烁。 */
+.code-magnifier:has(.code-magnifier-probe) {
+  min-height: min(15vh, 160px);
+}
+/* 空闲/未命中：紧凑提示行，首次悬停后才展开为放大视口。 */
+.code-magnifier-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 64px;
+  color: var(--color-text-secondary);
+  font-size: 0.8rem;
+}
+/* 复用 .figure-crop-viewport（纯 CSS 局部放大），仅改高度与外观。 */
+/* 高度：2026-06-26 用户反馈过高，由 min(24vh,260px) 收至 min(15vh,160px)。 */
+.figure-crop-viewport.code-magnifier-viewport {
+  flex: 1;
+  height: min(15vh, 160px);
+  border-radius: 0;
+  background: #0f131a;
+}
+.code-magnifier-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  user-select: none;
+}
+/* 探测图：不可见但需真实加载以取 naturalWidth/Height。 */
+.code-magnifier-probe {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+/* 当前行高亮：整行背景染色带（不描边遮正文、横向恒宽 → 无随行长的动态缩放）；
+ * transition:none 让染色带随图平移一起贴住当前行，避免独立动画造成的缩放错位。 */
+.code-magnifier-viewport .block-highlight-overlay {
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: rgb(249 115 22 / 0.2);
+  transition: none;
+}
+
+/* ── #93 底部全宽源图缩略图条 ─────────────────────────────────── */
+.code-source-thumbs {
+  grid-column: 1 / -1;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface-alt);
+  padding: 0.4rem;
+  overflow: hidden;
+}
+.code-source-thumbs-list {
+  display: flex;
+  flex-direction: row;
+  gap: 0.5rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 0.25rem;
+}
+/* 横向条里每张图按高度收缩成缩略图（覆盖竖排时的 width:100%）。 */
+.code-source-thumbs-list .source-image-cell {
+  width: auto;
+  flex: 0 0 auto;
+}
+.code-source-thumb-item {
+  height: 84px;
+  width: auto;
+  border-radius: 4px;
+  cursor: pointer;
+  display: block;
+}
+/* 当前悬停行所属那张图：橙色描边定位（outline 不挤占布局）。 */
+.code-source-thumbs-list .source-image-cell.active {
+  outline: 3px solid #f97316;
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+
 .code-viewer-loading,
 .code-viewer-error,
 .code-viewer-empty {
@@ -4465,17 +4730,16 @@ body {
 @media (max-width: 980px) {
   .code-viewer {
     grid-template-columns: 1fr;
+    grid-template-rows: none;
     height: auto;
   }
 
   .code-file-list,
-  .code-content,
-  .code-source-images {
+  .code-content {
     max-height: 70vh;
   }
 
-  .code-content-text,
-  .code-source-images-list {
+  .code-content-text {
     max-height: 60vh;
   }
 }

@@ -48,6 +48,7 @@ def _make_engine_manager_mock(
     gpu_name: str = "",
     is_ready: bool = True,
     is_switching: bool = False,
+    degraded_reason: str = "",
 ) -> MagicMock:
     """构造一个 EngineManager 的鸭子类型替身。"""
     em = MagicMock(name="EngineManager")
@@ -56,6 +57,7 @@ def _make_engine_manager_mock(
     em.current_gpu_name = gpu_name
     em.is_ready = is_ready
     em.is_switching = is_switching
+    em.degraded_reason = degraded_reason
     em.ensure = AsyncMock()
     return em
 
@@ -129,6 +131,21 @@ class TestOcrStatus:
         assert body["current_gpu_name"] == "NVIDIA GeForce RTX 4070 SUPER"
         assert body["is_ready"] is False
         assert body["is_switching"] is True
+        assert body["degraded_reason"] == ""  # 默认未降级
+
+    @pytest.mark.asyncio
+    async def test_exposes_vl_degraded_reason(
+        self,
+        ocr_client_with_em: tuple[AsyncClient, MagicMock],
+    ) -> None:
+        """#96：VL 退本地降级码经 /ocr/status 透出，前端徽章据此提示。"""
+        client, em = ocr_client_with_em
+        em.degraded_reason = "vl_no_server_python"
+
+        resp = await client.get(f"{API_PREFIX}/ocr/status")
+
+        assert resp.status_code == 200
+        assert resp.json()["degraded_reason"] == "vl_no_server_python"
 
     @pytest.mark.asyncio
     async def test_returns_500_when_engine_manager_missing(

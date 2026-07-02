@@ -35,7 +35,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from PIL import Image
 
@@ -101,7 +101,16 @@ def _read_sentinel(out_dir: Path, expected_digest: str) -> int | None:
     if not isinstance(data, dict) or data.get("pdf_sha256") != expected_digest:
         return None
     rendered = data.get("rendered")
-    return rendered if isinstance(rendered, int) else None
+    if not isinstance(rendered, int):
+        return None
+    # 仅当上次渲染完整才算幂等命中：expected_pages 记录上次预期页数
+    # （min(源页数, 上限)）。若 rendered < expected_pages 说明上次有坏页被跳过，
+    # 不复用此缓存——下次重跑重试缺页，避免缺页被 sentinel 永久固化。旧 sentinel
+    # 无该字段时视为完成（向后兼容）。
+    expected = data.get("expected_pages")
+    if isinstance(expected, int) and rendered < expected:
+        return None
+    return rendered
 
 
 def _write_sentinel(
@@ -110,15 +119,21 @@ def _write_sentinel(
     *,
     source_pages: int,
     rendered: int,
+    expected_pages: int,
     width: int,
     cfg: PdfRenderConfig,
     name_prefix: str,
 ) -> None:
-    """落渲染完成 sentinel，记录幂等校验与排障所需信息。"""
+    """落渲染完成 sentinel，记录幂等校验与排障所需信息。
+
+    ``expected_pages`` 为本次预期渲染页数（min(源页数, 上限)）；幂等命中判定靠
+    它与 ``rendered`` 是否相等，缺页时不被复用。
+    """
     payload = {
         "pdf_sha256": digest,
         "source_pages": source_pages,
         "rendered": rendered,
+        "expected_pages": expected_pages,
         "dpi": cfg.dpi,
         "max_long_side": cfg.max_long_side,
         "width": width,
@@ -142,18 +157,26 @@ def _to_rgb_bounded(image: Image.Image, max_long_side: int) -> Image.Image:
     return rgb
 
 
+class PdfRenderResult(NamedTuple):
+    """单 PDF 渲染结果（#96）：``expected - rendered`` 即坏页跳过的缺页数。"""
+
+    rendered: int
+    expected: int
+
+
 def render_pdf_to_dir(
     pdf_path: Path,
     out_dir: Path,
     *,
     cfg: PdfRenderConfig,
     name_prefix: str = "",
-) -> int:
-    """把单个 PDF 逐页渲染成 RGB PNG 落 ``out_dir``，返回成功渲染页数。
+) -> PdfRenderResult:
+    """把单个 PDF 逐页渲染成 RGB PNG 落 ``out_dir``，返回成功/预期页数（#96）。
 
     幂等（sentinel 命中跳过）+ 坏页鲁棒（单页失败跳过）+ 超长截断 + 超大降采样。
     加密 / 损坏 PDF 的 ``PdfDocument`` 构造异常**不在此捕获**，由调用方转
     ``PipelineResult.error``（单 PDF 失败不影响同任务其他 PDF）。
+    ``rendered < expected`` = 部分缺页，调用方据此挂软降级 warning。
     """
     import pypdfium2 as pdfium
 
@@ -165,7 +188,9 @@ def render_pdf_to_dir(
         logger.info(
             "PDF 渲染幂等命中，跳过: %s (%d 页)", pdf_path.name, cached,
         )
-        return cached
+        # 命中即上次渲染完整（_read_sentinel 仅在 rendered==expected 时命中），
+        # 故 expected == rendered，无缺页。
+        return PdfRenderResult(cached, cached)
 
     doc = pdfium.PdfDocument(str(pdf_path))
     rendered = 0
@@ -186,16 +211,32 @@ def render_pdf_to_dir(
                 dst = out_dir / f"{name_prefix}page_{i + 1:0{width}d}.png"
                 image.save(dst)
                 rendered += 1
-            except Exception:
+            except (pdfium.PdfiumError, OSError, ValueError, RuntimeError) as exc:
+                # RecursionError/NotImplementedError 是 RuntimeError 子类、属编程 bug，
+                # 先判子类上抛，勿被当"坏页"吞掉长期掩盖（否则真 bug 伪装成坏页跳过）。
+                if isinstance(exc, (RecursionError, NotImplementedError)):
+                    raise
+                # 只吞渲染/图像 IO 异常（坏页、不可保存）：坏页跳过而非炸整篇。
+                # RuntimeError 覆盖 pdfium 绑定层对个别坏页抛的非 PdfiumError 通用异常
+                # （否则单坏页会漏出、被调用方当整篇失败，丢掉其余好页）。
+                # AttributeError/TypeError/NameError 等编程 bug、以及 MemoryError 等
+                # 系统级异常不在此列，照常向上抛（前者避免被当"坏页"长期掩盖，后者
+                # 进程状态已不可信、不宜逐页吞）。
                 logger.warning(
                     "PDF 第 %d 页渲染失败，跳过: %s",
                     i + 1, pdf_path.name, exc_info=True,
                 )
+        if rendered < limit:
+            logger.warning(
+                "PDF 渲染不完整：%d/%d 页成功，其余坏页已跳过；本次不计为完成态，"
+                "重跑将重试缺页: %s",
+                rendered, limit, pdf_path.name,
+            )
     finally:
         doc.close()
 
     _write_sentinel(
         out_dir, digest, source_pages=source_pages, rendered=rendered,
-        width=width, cfg=cfg, name_prefix=name_prefix,
+        expected_pages=limit, width=width, cfg=cfg, name_prefix=name_prefix,
     )
-    return rendered
+    return PdfRenderResult(rendered, limit)

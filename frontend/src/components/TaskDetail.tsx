@@ -11,6 +11,7 @@ import {
   deleteTask,
   getTask,
   getTaskResults,
+  isNotFoundError,
   resumeTask,
   retryTask,
 } from "../api/client";
@@ -110,8 +111,12 @@ export function TaskDetail({
     try {
       const results = await getTaskResults(taskId);
       setDocResults(results.results);
-    } catch {
-      /* 未完成的任务没有结果，静默处理 */
+    } catch (error_: unknown) {
+      // 404 = 任务未完成、暂无结果，静默；其它（500/网络/解析/鉴权）是真实失败，
+      // 不能伪装成"无结果"空态——记录便于排查，避免把拉取失败当成正常空画面。
+      if (!isNotFoundError(error_)) {
+        console.error("加载任务结果失败", error_);
+      }
     } finally {
       setResultsLoading(false);
     }

@@ -17,12 +17,14 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import aiosqlite
 import pytest
 
+from docrestore.models import PipelineWarning
 from docrestore.persistence.database import TaskDatabase
 from docrestore.pipeline.config import LLMConfig
 
@@ -66,6 +68,25 @@ async def test_insert_and_get_task(db: TaskDatabase) -> None:
 async def test_get_nonexistent_task(db: TaskDatabase) -> None:
     """查询不存在的任务返回 None。"""
     assert await db.get_task("nonexist") is None
+
+
+async def test_migrate_add_column_idempotent_but_surfaces_real_error(
+    db: TaskDatabase,
+) -> None:
+    """加列幂等（"列已存在"静默跳过），但真实失败必须上抛而非 suppress 吞掉。
+
+    旧版 ``with suppress(Exception)`` 会把磁盘满/库锁/语法错一并静默吞掉，
+    导致列没建成、下游报莫名其妙的 "no such column"。收窄后：duplicate 放行、
+    其余 OperationalError 冒泡。
+    """
+    # 列已存在（initialize 时 CREATE TABLE 已含）→ 重复加同名列不抛
+    await db._migrate_add_column("tasks", "llm", "TEXT")  # noqa: SLF001
+
+    # 真实失败（对不存在的表加列）→ sqlite3.OperationalError 必须冒泡
+    with pytest.raises(sqlite3.OperationalError):
+        await db._migrate_add_column(  # noqa: SLF001
+            "table_does_not_exist", "c", "TEXT",
+        )
 
 
 async def test_update_status(db: TaskDatabase) -> None:
@@ -130,6 +151,52 @@ async def test_insert_and_get_result_errors(db: TaskDatabase) -> None:
     assert results[0].error == ""
     assert results[1].doc_dir == "bad"
     assert results[1].error == "OCR 超时"
+
+
+async def test_result_warnings_roundtrip_and_back_compat(
+    db: TaskDatabase,
+) -> None:
+    """软降级 warnings 应持久化往返（#96）：新式结构化 code+params 原样往返、旧任务
+    裸中文串向后兼容包成 legacy、旧三/四元组缺省为空列表。"""
+    await db.insert_task(
+        task_id="t002warn",
+        status="completed",
+        image_dir="/img",
+        output_dir="/out",
+    )
+    await db.insert_results("t002warn", [
+        # 五元组：新式结构化 warnings（code+params）JSON
+        (
+            "/out/document.md", "降级文档", "",
+            "",
+            '[{"code": "vl_fell_back_to_local", "params": {}}, '
+            '{"code": "pdf_pages_missing", "params": {"count": 2}}]',
+        ),
+        # 五元组：旧任务遗留的裸中文串 → 向后兼容包成 legacy（不丢失）
+        (
+            "/out/legacy/document.md", "旧文档", "legacy",
+            "", '["旧任务中文警告"]',
+        ),
+        # 四元组（旧调用方，无 warnings）→ 默认空列表
+        ("/out/ok/document.md", "正常文档", "ok", ""),
+        # 三元组（更旧）→ 默认空列表
+        ("/out/old/document.md", "老文档", "old"),
+    ])
+
+    results = await db.get_results("t002warn")
+    assert len(results) == 4
+    # 新式结构化 warnings 原样往返（code+params）
+    assert results[0].warnings == [
+        PipelineWarning("vl_fell_back_to_local"),
+        PipelineWarning("pdf_pages_missing", {"count": 2}),
+    ]
+    assert results[0].error == ""  # 软降级不占用 error（任务仍 completed）
+    # 旧任务裸中文串 → legacy 包裹，原串保留在 params["text"]
+    assert results[1].warnings == [
+        PipelineWarning("legacy", {"text": "旧任务中文警告"}),
+    ]
+    assert results[2].warnings == []
+    assert results[3].warnings == []
 
 
 async def test_delete_task_cascades_results(db: TaskDatabase) -> None:
