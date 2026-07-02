@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "docrestore"
-version = "0.1.0"
+version = "1.0.0"
 description = "处理文档屏幕拍摄照片，还原为原文格式的 markdown 文档"
 requires-python = ">=3.11"
 dependencies = [
