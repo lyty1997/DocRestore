@@ -275,10 +275,10 @@ height = (y1-y0) / image_size.h * 100  (%)
 
 ## 11. 范围外（Epic E phase-2）
 
-- 反向联动：点原图块 → 定位/滚动到 markdown 对应文字（#89）。
+- ~~反向联动：点原图块 → 定位/滚动到 markdown 对应文字（#89）~~ → **不做（no plan），见 §18**。
 - ~~只读预览 hover 高亮~~ → **已纳入 phase-2，见 §12（#88）**。
 - PPT 模式前端高亮（坐标系/显示矫正图问题，#90）。
-- 行级 bbox 高亮（VL `text_lines` 恒空，需后处理切行，#91）。
+- ~~行级 bbox 高亮（VL `text_lines` 恒空，需后处理切行，#91）~~ → **不做（no plan），见 §18**。
 - 精确块映射（穿透 dedup/精修的无损映射）。
 
 ## 12. E4 只读预览 hover 高亮（#88，phase-2）
@@ -566,4 +566,38 @@ payload 仍**显式**带 `LayoutBlockPayload.index: int`（前端用 `block.inde
 复用 `bboxRect` / SourceImageList cell / 既有 `/layout` 端点；仅 1 派生字段 + 1 overlay 组件 +
 1 色表 + 1 toggle。**不引入稳定块 ID**（全览是展示非联动，无需块身份——MinerU 的稳定 ID 方案因
 dedup/精修架构反转不适用，§14.2）。零新端点、零重跑。
+
+## 18. #89（反向联动）/ #91（行级 bbox）：不做（no plan）决策（2026-07-02）
+
+> 用户决策：Epic E 收尾于 **E1–E8 块级方案**（正向单块高亮 §3/§4 + 只读 hover #88 + PPT #90 §13
+> + 通用处理图 §15 + 版面全览 E8 §17）。**#89、#91 两个 phase-2 均不做（no plan）**，相关代码与
+> 文档已回退。GitHub 子 issue #89/#91 关闭为 not planned；父 issue #74 据此收口。
+
+### 18.1 #89 反向联动 —— 已实现后整体回退
+
+曾实现并合入 dev（点原图版面块 → 反查定位 markdown 正文块 + 橙色 flash，复用 `blockMatch`
+对称反查、`reverseBlockLocate.ts`）。**无技术阻塞**，纯属范围收窄。按决策 `git reset` 回退到 E8
+合并点，删除 `feature/s-e89-reverse-linkage` 分支（commit 仍在 reflog，如需可恢复）。
+
+### 18.2 #91 行级 bbox —— 经调研 + 2 spike 判定不划算
+
+三条候选路逐一落地均不划算，根本拦路虎是**光标行↔源图行无可对齐信号**：
+
+| 路径 | 结论 | 关键证据 |
+|---|---|---|
+| **C：VL 免费出行框** | ❌ 证伪 | `paddlex 3.6.0` VL pipeline 普通文本块只出 `block_bbox`+markdown；行级 `spotting_res` 仅对标 `"spotting"` 的布局块产出，`text`/`paragraph_title` 从不是该标签。 |
+| **B：纯 CV 投影切行** | ⚠️ 屏摄不可靠 | 真实屏摄处理图上 2 行段落被并成 1 带（轻微倾斜即抹平行间谷）；手机屏摄倾斜/畸变/反光是投影切行天敌。 |
+| **A：块裁剪重跑 basic** | 💰 太贵 | VL↔basic 共享单 worker 需重启切换，O(块×页) 无批量、GPU 串行，拖垮主路。 |
+
+**根因**：文档模式 VL 不给逐行文字（`LayoutBlock.text` 是零 `\n` 的整串），编辑器又是 LLM 精修重排
+的文字——即便几何切行完美，也拿不到「光标行↔源图行」的可靠映射（代码模式 #93 能做，只因有
+PP-OCRv5 逐行文字 + 精修期 `line_map`，文档模式两者皆无）。issue 本身即警告「切行不准会比块级更差」。
+**若将来重启**：唯一技术上成立的路 = 复用同一 VL worker 逐块跑 spotting 模式取逐行 poly+text
+（免 basic 重启）+ 建文档版 `line_map` 抗漂移，须先过 spotting 精度/耗时 spike。
+
+### 18.3 附带查清、另行跟踪的既有隐患
+
+调研 #91 时发现一处**块级也存在、非 #91 引入**的隐患（已记入 `known-issues.md`）：
+resume 缓存命中时不重建 `layout_regions`（VL 块坐标无持久化回读），部分 resume 可能用残缺
+`.layout.json` 覆盖首跑完整 sidecar（`.layout.json` 只首跑产）。
 

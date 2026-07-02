@@ -1,5 +1,14 @@
 # 开发进度
 
+## 2026-07-02 - Epic E 收尾 · #89（反向联动）/ #91（行级 bbox）不做（no plan）
+
+- **主题**：用户决策 Epic E 收尾于 **E1–E8 块级方案**，剩余两个 phase-2 子任务 **#89（反向联动）、#91（行级 bbox 精度）均不做（no plan）**，回退相关代码与文档改动。设计真相源 `docs/zh/cursor-bbox-highlight.md` **新增 §18** 记录决策与理由。
+- **#89 反向联动**：曾实现并 `--no-ff` 合入 dev（点原图版面块 → 反查定位 markdown 正文块 + 橙色 flash，`reverseBlockLocate.ts` 复用 `blockMatch` 对称反查）。**无技术阻塞，纯范围收窄**。按决策 `git reset --hard` 回退 dev 到 E8 合并点 `9868c5e`，删除 `feature/s-e89-reverse-linkage` 分支（commit `a263092`/`cb7706c` 仍在 reflog，可恢复）。
+- **#91 行级 bbox**：仅有一次「调研 + 2 spike（未写生产代码）」的文档提交（`8ddbca0`），一并回退。结论：三条候选路（VL 免费出行框 / 纯 CV 投影切行 / 块裁剪重跑 basic）逐一不划算，**根本拦路虎=文档模式无「光标行↔源图行」可对齐信号**（VL `LayoutBlock.text` 零 `\n`、编辑器是 LLM 精修重排文字）；issue 本身即警告「切行不准会比块级更差」。完整论证已落 §18.2。
+- **附带隐患**：#91 调研查清一处**块级也存在、非 #91 引入**的隐患（resume 缓存命中不重建 `layout_regions`，部分 resume 可能用残缺 `.layout.json` 覆盖首跑完整 sidecar）——已记入 `known-issues.md` 另行跟踪。
+- **GitHub**：子 issue **#89、#91 关闭为 not planned**；父 issue #74 据此收口（Epic E 块级方案 E1–E8 已闭环）。
+- **门禁**：代码回退到已绿的 E8 合并点 `9868c5e`（原 EXIT=0 / pytest 1661 / vitest 281），本次仅文档改动。
+
 ## 2026-07-02 - Epic E · E8 版面全览叠加层（#92，仿 mineru.net 彩色版面图）
 
 - **主题**：Epic E 正向高亮（E1–E6）已全部落地后，实现 #92「版面全览」——源图叠**整页全部**版面块的彩色分类框（按 `label` 着色）+ 阅读序角标，可开关，达 mineru.net 版面图效果。设计真相源 `docs/zh/cursor-bbox-highlight.md` §17。
@@ -9,7 +18,7 @@
 - **工程判断：刚刚好**——1 派生字段 + 1 overlay 组件 + 1 色表 + 1 toggle，全程复用地基（现有 `/layout` 端点、`bboxRect`、SourceImageList cell）；不引入稳定块 ID（全览是展示非联动）。
 - **门禁**：`check_quality.sh` EXIT=0（mypy --strict / ruff / typos / tsc -b / eslint 0 error / pytest **1661** passed）+ 前端 vitest **281** passed（270→281：layoutCategory 4 + LayoutOverlay 5 + SourceImageList 全览 2）。
 - **视觉**：无头 chrome 静态 harness 用**现有文档任务真实 `.layout.json`（E8 前生成、无 `index` 字段）** + 真实裁剪图（1418×1646 content_crop 处理图）复刻 overlay/CSS/色表/公式截图 —— 14 块彩框逐一精准框住（header 灰 / 标题蓝 / 正文绿 / 表格橙），阅读序角标 1..13 递增、半透明填充不遮正文。**sidecar 无 `index` 仍正确出序号，端到端实证 D1 零重跑**。
-- **遗留**：无（#92 闭环）。Epic E 剩 #89（E5 反向联动）、#91（E7 行级 bbox 精度）两个 phase-2 未做。**本批未提交**（待用户确认提交方式）。
+- **遗留**：无（#92 闭环）。Epic E 剩 #89（E5 反向联动）、#91（E7 行级 bbox 精度）两个 phase-2 —— **后续决策为不做（no plan），见本文件顶部 2026-07-02 收尾条目**。
 
 ## 2026-07-01 - 补跑 ultracode 审查 Sweep/Synthesize 并收口 10 处发现
 

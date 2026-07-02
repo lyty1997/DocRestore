@@ -945,6 +945,19 @@ z.infer<...>` 的 `rectified` 是**必填** `boolean`（zod 的 output 类型含
 教训：**任何「OCR 在变换后的图上跑、却把坐标当原图用」都会错位**。新增预处理（去畸变/裁剪/旋转）
 时，要么把 bbox 变换回原图坐标，要么前端显示处理图——二选一，别让两个坐标系混着用。
 
+## resume 缓存命中可能用残缺 `.layout.json` 覆盖首跑完整 sidecar（待跟踪）
+
+来源：调研 Epic E #91（行级 bbox，已决定不做，见 `cursor-bbox-highlight.md` §18）时附带查清，**块级方案
+也存在、非 #91 引入**，故单列跟踪。
+
+现象/风险：`.layout.json` 只在**首跑** `_finalize_single_doc` 落盘（bbox 取自 OCR 期 `layout_regions`）。
+resume 时若 OCR/精修缓存命中，`layout_regions` 不重建（VL 块坐标无持久化回读），部分 resume 路径可能以
+残缺（甚至空）的 sidecar 覆盖首跑写好的完整 sidecar，导致 Epic E 高亮/版面全览在 resume 后失效或不全。
+
+暂缓处理（未修）：优先级低于已闭环的块级功能。若将来修复，方向是 **resume 命中时跳过 sidecar 重写**
+（保留首跑产物），或把 `layout_regions` 一并持久化以便 resume 回读重建。修前先复现：对同一任务先跑成功、
+再触发 resume，比对 `.layout.json` 前后是否被截短/清空。
+
 ## curl localhost 返回 Privoxy 502：环境 http_proxy 拦截本地请求
 
 现象：`curl http://127.0.0.1:8000/...` 返回 `502 ... (Privoxy@localhost)`，但服务其实正常。
