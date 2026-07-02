@@ -357,6 +357,7 @@ export const en: Record<TranslationKey, string> = {
   // ── Source images ──
   "sourceImages.title": "Source Images (click to enlarge)",
   "sourceImages.lightboxAlt": "Enlarged view",
+  "sourceImages.layoutOverlay": "Layout overview",
 
   // ── Upload preview ──
   "uploadPreview.title": "Upload Preview",

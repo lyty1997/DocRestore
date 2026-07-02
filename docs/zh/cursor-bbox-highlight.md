@@ -497,3 +497,73 @@ image/chart 区域捕获时已按阅读序认领 `<img src="images/N.jpg">`
   imageRef 命中/失配 2）；tsc + lint 0 error。
 - [ ] 真机：橙色即时可见（前端热更新）；图片高亮须**重跑任务**生成带 image_ref 的 sidecar 后验证。
 
+## 17. E8 版面全览叠加层（#92，phase-2）
+
+> 用户希望达到 mineru.net「彩色版面图」效果：源图叠**整页全部**版面块的彩色分类框
+> + 阅读序角标，作可开关的「版面全览」图层。现状只高亮**光标 / hover 的单块**（E3/E4）；
+> E8 补上整页全览。「版面全览（E8）+ 正向单块高亮（E3/E4）+ 反向联动（#89）」≈ 完整 mineru 效果。
+
+### 17.1 关键洞察：数据已全含，唯一「新」信息是阅读序
+
+`.layout.json`（含 PPT 回退 `.ppt_layout.json`）已含高亮所需的全部：`bbox`、`label`
+（PaddleOCR-VL 原生细粒度类型，实测含 `paragraph_title/text/table/image/chart/footer/...`，
+直接作着色 key，**无需新增枚举**）、`image_size`（% 换算分母）。全览唯一多要的是**阅读序 `index`**。
+
+### 17.2 决策 D1：`index` 由 API 层 `enumerate` 派生，不落 sidecar（零重跑）
+
+阅读序 = blocks **列表位置**，从 OCR `layout_regions`（有序）→ sidecar（`to_dict`/`from_dict`
+逐项保序）→ API → zod → 前端全程保序。PPT 回退路径本就无 `index` 字段、**必须**在 API 层
+`enumerate(regions)` 派生；让 doc 路径对称 `enumerate(page.blocks)` 即可。
+
+| 方案 | doc 现有任务 | 改动面 | 单一真相 |
+|---|---|---|---|
+| **D1 API 层 enumerate（采纳）** | **零重跑** | 仅 `schemas.py` + `routes.py` | ✅（列表位置即序号，不冗余落盘） |
+| issue 原文：落 sidecar | 须重跑 | +sidecar dataclass/to_dict/from_dict/round-trip/向后兼容 | ❌ 冗余字段与列表位置重复 |
+
+payload 仍**显式**带 `LayoutBlockPayload.index: int`（前端用 `block.index`，比裸用数组下标稳，
+未来 filter/map blocks 不丢序号）。坏块跳过时 `enumerate` 自然重排无空洞（比落盘留空洞更好）。
+
+### 17.3 后端（仅 2 文件）
+
+- `api/schemas.py`：`LayoutBlockPayload` 加 `index: int`。
+- `api/routes.py` `get_task_layout`：doc 路径 `for i, block in enumerate(page.blocks)` → `index=i`；
+  ppt 回退 `for i, region in enumerate(page.regions)` → `index=i`。**不动** `layout_sidecar.py` /
+  `pipeline.py` / `ppt_layout.py`。
+
+### 17.4 前端
+
+- `api/schemas.ts`：`LayoutBlockPayloadSchema` 加 `index: z.number()`（改后 `z.infer` 字段变必填 →
+  tests 手写 `LayoutPayload` fixture 补 `index`，避 `tsc -b` TS2741，见 known-issues）。
+- 新建 `features/task/layoutCategory.ts`（纯，可测）：`categoryColor(label): string` —— `label→hue`
+  基色，未知 label 落 fallback 默认色（参考 `draw_bbox.py` 分类着色思路，不抄代码）。
+- 新建 `components/LayoutOverlay.tsx`：props `{ blocks; imageSize }`，渲染**全部**块 —— 每块
+  `bboxToPercentRect` 换算 → 彩色矩形（`categoryColor(label)` 边框 + ~0.15 透明填充）+ 左上角
+  `index+1` 角标。复用 `BlockHighlightOverlay` 同款 bbox→% 换算（同 denominator `image_size`）。
+- `SourceImageList` / `SourceImagePanel`：加 `layoutPages?` + `showOverlay?`；开时按
+  `image.pageKey === page.filename` 找该页 → 铺 `<LayoutOverlay>`（淡色全览，在单块 `highlight`
+  橙色框**之下**共存：命中块既有全览淡框、又有橙色加粗）。processed 页显处理图时全览自动对齐
+  （同 `image_size` 分母、同显示图，与 §15 单块高亮一致）。
+- `DocCodePreview`：`showLayoutOverlay` state + `preview-actions` 加「版面全览」toggle
+  （`canHighlight && layout !== undefined` 才显示、默认关；切文档 / 离开高亮态复位）。
+- i18n 三语：`sourceImages.layoutOverlay`（版面全览 / Layout overview / 版面全覽）。
+- CSS `App.css`：`.layout-overlay-box`（边框+半透明填充，色由 inline style）+ `.layout-overlay-badge`
+  （左上角序号角标）。
+
+### 17.5 验收
+
+- [x] 后端 `test_layout_endpoint.py`：doc 路径 blocks 的 `index` 从 0 递增；ppt 回退路径同样递增。
+  门禁 `check_quality.sh` EXIT=0（mypy/ruff/typos/tsc/eslint + pytest **1661 passed**）。
+- [x] 前端 `layoutCategory.test.ts`（四组各色 + 同组同色 + rgb/rgba 格式 + 未知 fallback，4 测）+
+  `LayoutOverlay.test.tsx`（每块一框一角标 / 角标 `index+1` / bbox→% / 分类色互异 / 非法尺寸不渲染，5 测）
+  + `SourceImageList` 全览 2 测；既有 fixtures 补 `index`（blockHighlight/blockMatch/client）；vitest **281 passed**。
+- [x] 视觉：无头 chrome 静态 harness 用**现有文档任务真实 `.layout.json`（E8 前生成、无 `index`）** +
+  真实裁剪图（DSC04641_crop 1418×1646，content_crop 处理图）复刻 overlay/CSS/色表/公式截图 —— 14 块彩框
+  逐一精准框住（header 灰 / doc_title·paragraph_title 蓝 / text 绿 / table 橙），阅读序角标 1..13 递增、
+  半透明填充不遮正文。**sidecar 无 `index` 字段仍正确出序号，实证 §17.2 零重跑**。
+
+### 17.6 工程判断：刚刚好
+
+复用 `bboxRect` / SourceImageList cell / 既有 `/layout` 端点；仅 1 派生字段 + 1 overlay 组件 +
+1 色表 + 1 toggle。**不引入稳定块 ID**（全览是展示非联动，无需块身份——MinerU 的稳定 ID 方案因
+dedup/精修架构反转不适用，§14.2）。零新端点、零重跑。
+

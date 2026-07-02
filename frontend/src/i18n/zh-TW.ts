@@ -343,6 +343,7 @@ export const zhTW: Record<TranslationKey, string> = {
   // ── 原圖面板 ──
   "sourceImages.title": "原圖（點擊放大）",
   "sourceImages.lightboxAlt": "放大查看",
+  "sourceImages.layoutOverlay": "版面全覽",
 
   // ── 上傳預覽 ──
   "uploadPreview.title": "上傳預覽",

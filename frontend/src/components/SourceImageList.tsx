@@ -7,13 +7,15 @@
  * - 点击原图打开通用 lightbox
  */
 
-import { forwardRef, useState } from "react";
+import { forwardRef, useMemo, useState } from "react";
 
 import { getProcessedImageUrl, getSourceImageUrl } from "../api/client";
+import type { LayoutPagePayload } from "../api/schemas";
 import type { SourceImageHighlight } from "../features/task/blockHighlight";
 import type { SourceImageListItem } from "../features/task/sourceImagePreview";
 import { BlockHighlightOverlay } from "./BlockHighlightOverlay";
 import { ImageLightbox } from "./ImageLightbox";
+import { LayoutOverlay } from "./LayoutOverlay";
 
 interface SourceImageListProps {
   readonly taskId: string;
@@ -31,6 +33,10 @@ interface SourceImageListProps {
   readonly docDir?: string | undefined;
   /** 高亮某页缩略图（命中 pageKey 加 ``active`` 类描边）；缺省不高亮（#93 代码模式）。 */
   readonly activePageKey?: string | undefined;
+  /** 版面全览（E8）：各页全部块，按 ``filename`` 对齐 pageKey；``showOverlay`` 开时铺彩色分类框。 */
+  readonly layoutPages?: readonly LayoutPagePayload[] | undefined;
+  /** 是否显示版面全览叠加层（E8 toggle）；缺省关。 */
+  readonly showOverlay?: boolean;
 }
 
 export const SourceImageList = forwardRef<
@@ -39,11 +45,18 @@ export const SourceImageList = forwardRef<
 >(function SourceImageList(
   {
     taskId, images, listClassName, imageClassName, empty, highlight,
-    processed = false, docDir, activePageKey,
+    processed = false, docDir, activePageKey, layoutPages, showOverlay = false,
   },
   scrollRef,
 ): React.JSX.Element {
   const [lightboxSrc, setLightboxSrc] = useState<string | undefined>();
+
+  // 版面全览：按原图基名（filename === pageKey）索引各页块，逐图 O(1) 取该页全览。
+  const pageByKey = useMemo(() => {
+    const map = new Map<string, LayoutPagePayload>();
+    for (const page of layoutPages ?? []) map.set(page.filename, page);
+    return map;
+  }, [layoutPages]);
 
   return (
     <>
@@ -57,6 +70,10 @@ export const SourceImageList = forwardRef<
             : src;
           const hit =
             highlight?.pageKey === image.pageKey ? highlight : undefined;
+          // 版面全览：开时取该页全部块铺彩色分类框（在单块高亮之下共存）。
+          const overlayPage = showOverlay
+            ? pageByKey.get(image.pageKey)
+            : undefined;
           return (
             <div
               key={image.name}
@@ -91,6 +108,12 @@ export const SourceImageList = forwardRef<
                       }
                 }
               />
+              {overlayPage !== undefined && (
+                <LayoutOverlay
+                  blocks={overlayPage.blocks}
+                  imageSize={overlayPage.image_size}
+                />
+              )}
               {hit !== undefined && (
                 <BlockHighlightOverlay
                   bbox={hit.bbox}

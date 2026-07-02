@@ -107,6 +107,8 @@ export function DocCodePreview({
      layout = 该文档 .layout.json 载荷；cursorBlock = 编辑器上报的光标所在块。 */
   const [layout, setLayout] = useState<LayoutPayload | undefined>();
   const [cursorBlock, setCursorBlock] = useState<CursorBlock | undefined>();
+  /* E8：版面全览叠加层开关（默认关，仅有 layout 数据时显示 toggle）。 */
+  const [showLayoutOverlay, setShowLayoutOverlay] = useState(false);
   const handleCursorBlock = useCallback(
     (block: CursorBlock | undefined): void => { setCursorBlock(block); },
     [],
@@ -208,6 +210,7 @@ export function DocCodePreview({
     if (!canHighlight) {
       setLayout(undefined);
       setCursorBlock(undefined);
+      setShowLayoutOverlay(false);
       return;
     }
     let cancelled = false;
@@ -386,6 +389,16 @@ export function DocCodePreview({
             )}
           </>
         )}
+        {/* E8：版面全览开关（仅取到 .layout.json 数据时显示，默认关） */}
+        {canHighlight && layout !== undefined && (
+          <button
+            type="button"
+            className={`toggle-btn ${showLayoutOverlay ? "active" : ""}`}
+            onClick={() => { setShowLayoutOverlay((v) => !v); }}
+          >
+            {t("sourceImages.layoutOverlay")}
+          </button>
+        )}
         {headerExtras}
       </div>
     );
@@ -469,6 +482,8 @@ export function DocCodePreview({
           highlight={highlight}
           processed={layout?.processed ?? false}
           docDir={editDocDir}
+          layoutPages={layout?.pages}
+          showOverlay={showLayoutOverlay}
         />
         {selectedDocFailed && failedDocStyle === "panel" && (
           <div className="doc-failed-panel">

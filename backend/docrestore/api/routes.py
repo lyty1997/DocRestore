@@ -1772,10 +1772,12 @@ async def get_task_layout(
                             LayoutBlockPayload(
                                 bbox=block.bbox,
                                 label=block.label,
+                                # 阅读序按 blocks 列表位置派生（有序、零重跑，§17.2）。
+                                index=i,
                                 text=block.text,
                                 image_ref=block.image_ref,
                             )
-                            for block in page.blocks
+                            for i, block in enumerate(page.blocks)
                         ],
                     )
                     for page in doc_layout.pages
@@ -1795,10 +1797,12 @@ async def get_task_layout(
                             LayoutBlockPayload(
                                 bbox=region.bbox,
                                 label=region.label,
+                                # PPT 同样按 regions 位置派生（§17.2）。
+                                index=i,
                                 text=region.content,
                                 image_ref=region.image_ref,
                             )
-                            for region in page.regions
+                            for i, region in enumerate(page.regions)
                         ],
                     )
                     for page in ppt_layout.pages

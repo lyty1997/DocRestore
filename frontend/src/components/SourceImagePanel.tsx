@@ -7,6 +7,7 @@
 
 import { forwardRef } from "react";
 
+import type { LayoutPagePayload } from "../api/schemas";
 import type { SourceImageHighlight } from "../features/task/blockHighlight";
 import { imageNameToListItem } from "../features/task/sourceImagePreview";
 import { useTranslation } from "../i18n";
@@ -22,13 +23,17 @@ interface SourceImagePanelProps {
   readonly processed?: boolean;
   /** 多文档相对子目录，构造处理图 URL 用。 */
   readonly docDir?: string | undefined;
+  /** 版面全览（E8）：各页全部块 + 是否显示叠加层；缺省不显示。 */
+  readonly layoutPages?: readonly LayoutPagePayload[] | undefined;
+  readonly showOverlay?: boolean;
 }
 
 export const SourceImagePanel = forwardRef<
   HTMLDivElement,
   SourceImagePanelProps
 >(function SourceImagePanel(
-  { taskId, images, highlight, processed = false, docDir },
+  { taskId, images, highlight, processed = false, docDir, layoutPages,
+    showOverlay = false },
   scrollRef,
 ): React.JSX.Element {
   const { t } = useTranslation();
@@ -45,6 +50,8 @@ export const SourceImagePanel = forwardRef<
         highlight={highlight}
         processed={processed}
         docDir={docDir}
+        layoutPages={layoutPages}
+        showOverlay={showOverlay}
       />
     </div>
   );

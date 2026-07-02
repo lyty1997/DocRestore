@@ -388,6 +388,8 @@ export type CropFigureResponse = z.infer<typeof CropFigureResponseSchema>;
 export const LayoutBlockPayloadSchema = z.object({
   bbox: z.tuple([z.number(), z.number(), z.number(), z.number()]),
   label: z.string(),
+  /** 阅读序（0-based）：后端按 blocks 列表位置 enumerate 派生；版面全览画 index+1 角标（E8/#92）。 */
+  index: z.number(),
   text: z.string(),
   /** 图片/图表块输出引用 `images/{stem}_N.ext`（对齐 markdown <img src>），
    *  供前端按引用匹配光标所在图片块；文字块为空。旧 sidecar 无此字段 → 默认空。 */

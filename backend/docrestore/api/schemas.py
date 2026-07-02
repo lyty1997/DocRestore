@@ -418,6 +418,9 @@ class LayoutBlockPayload(BaseModel):
 
     bbox: tuple[int, int, int, int]  # (x0, y0, x1, y1) 像素
     label: str
+    #: 阅读序（0-based）：API 层按 blocks 列表位置 ``enumerate`` 派生，不落 sidecar
+    #: （§17.2）；前端版面全览（E8/#92）画 index+1 角标。
+    index: int
     text: str
     #: 图片 / 图表块的输出引用 ``images/{stem}_N.ext``（对齐 markdown <img src>），
     #: 供前端按引用匹配光标所在图片块；文字块为空。
