@@ -1,5 +1,14 @@
 # 开发进度
 
+## 2026-07-03 - README 中英双语对齐代码现状
+
+- **主题**：README 正文最后一次内容更新停在 2026-05-26，其后 Epic A（PDF 输入）/ PPT 模式 / Epic D（多格式导出）/ Epic E（bbox 高亮·版面全览·放大镜）/ 默认鉴权 / v1.0.0 均未反映。按代码现状同步 `README.md` + `README.en.md`（双语 1:1）。
+- **硬性事实纠正**：`BACKEND_HOST` 默认 `0.0.0.0`→`127.0.0.1`（start.sh 已改仅本机）、`PPOCR_MODEL` `1.5`→`1.6`、后端 API 访问地址、修一处既有失效链接 `docs/en/progress.md`（英文进度不存在，改指 `docs/zh/progress.md` 并标注 Chinese）。
+- **新增章节**：「访问鉴权（Token）」——默认 fail-closed device token（落 `~/.config/docrestore/device_token`、`cat` 获取）、`DOCRESTORE_API_TOKEN` 显式 token、`DOCRESTORE_ALLOW_INSECURE` 逃生口（仅绑环回）、HTTP `Bearer`/`?token=` 与 WS `?token=` 携带方式、`GET /auth/info` 免鉴权探询、`/healthz` 免鉴权探针。
+- **功能补充**：顶部加三模式表（文档/代码/PPT 互斥三选一）；PDF 逐页渲染入口；使用清单补 Tiptap 编辑器 / 重截插图 / 版面全览 / 源图放大镜；配置区补 `CodeRestoreConfig`/`PowerPointRestoreConfig`/`PdfRenderConfig`/`ContentCropConfig`/`enable_refine`；REST 示例每条补 `Authorization: Bearer $TOKEN`、加模式切换注释与 `?formats=docx,pdf,xlsx,pptx` 导出；输出说明补 `.exports/` 缓存；文档链接补中文功能专题。
+- **自检**：README 内所有 `docs/**.md` 链接均存在（✅）、`typos` 无问题、鉴权小节标题↔锚点一致；`run_e2e.py --ocr-model paddle-ocr/ppocr-v4` 经核为引擎标识符（模型名另由参数控，默认已 1.6）与代码一致、未改。中英行数 319/318。
+- **遗留**：`docs/zh/README.md`/`docs/en/README.md`（完整文档入口）及各模块文档是否同步过时未在本次范围内核查；未提交（待用户指示）。
+
 ## 2026-07-02 - Epic E 收尾 · #89（反向联动）/ #91（行级 bbox）不做（no plan）
 
 - **主题**：用户决策 Epic E 收尾于 **E1–E8 块级方案**，剩余两个 phase-2 子任务 **#89（反向联动）、#91（行级 bbox 精度）均不做（no plan）**，回退相关代码与文档改动。设计真相源 `docs/zh/cursor-bbox-highlight.md` **新增 §18** 记录决策与理由。

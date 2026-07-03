@@ -1,8 +1,16 @@
 # DocRestore
 
-将一组文档屏幕拍摄照片还原为原文格式的 Markdown 文档。
+将一组文档屏幕拍摄照片（或 PDF）还原为原文格式的 Markdown 文档，并可按需导出为 docx / pdf / xlsx / pptx。
 
-**处理流程**：照片 → OCR → 清洗 → 去重合并 → PII 脱敏（可选） → LLM 精修 → 缺口补充 → Markdown 输出
+**处理流程**：照片 / PDF 逐页渲染 → OCR → 清洗 → 去重合并 → PII 脱敏（可选） → LLM 精修 → 缺口补充 → Markdown 输出
+
+**三种还原模式**（互斥三选一）：
+
+| 模式 | 适用输入 | 产物 |
+|------|---------|------|
+| 文档模式（默认） | 书籍 / 论文 / 网页文档的屏摄照片或 PDF | `document.md`（含裁剪插图、公式、表格） |
+| 代码模式 | IDE 代码截图 | 还原的源文件 + `files-index.json` + 语法诊断 |
+| PPT 模式 | 幻灯片屏摄照片 | 逐页保序合并的 `document.md`（透视矫正 + 化学结构裁图） |
 
 ## 环境要求
 
@@ -46,7 +54,9 @@ bash scripts/start.sh all
 bash scripts/start.sh --help
 ```
 
-访问前端 http://localhost:5173（后端 API 在 http://0.0.0.0:8000/api/v1）。
+访问前端 http://localhost:5173（后端 API 在 http://127.0.0.1:8000/api/v1）。
+
+> 后端默认 **fail-closed 鉴权**：首次访问前端需在「Token 设置」填入 device token（见下方 [访问鉴权](#访问鉴权token)）。
 
 ### 启动模式
 
@@ -64,12 +74,14 @@ bash scripts/start.sh --help
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `BACKEND_HOST` | `0.0.0.0` | 后端监听地址 |
+| `BACKEND_HOST` | `127.0.0.1` | 后端监听地址（默认仅本机；手机/局域网访问改 `0.0.0.0` 并配 `DOCRESTORE_API_TOKEN`） |
 | `BACKEND_PORT` | `8000` | 后端监听端口 |
 | `FRONTEND_PORT` | `5173` | Vite dev server 端口 |
 | `PPOCR_GPU_ID` | 留空 | 绑定 GPU 编号；留空则不导出 `CUDA_VISIBLE_DEVICES`，由 vLLM 自动枚举 + `gpu_detect.pick_best_gpu` 按显存挑卡 |
 | `PPOCR_PORT` | `8119` | PaddleOCR `genai_server` 端口 |
-| `PPOCR_MODEL` | `PaddleOCR-VL-1.5-0.9B` | PaddleOCR 模型名 |
+| `PPOCR_MODEL` | `PaddleOCR-VL-1.6-0.9B` | PaddleOCR 模型名 |
+
+鉴权相关环境变量见下方 [访问鉴权](#访问鉴权token)。
 
 示例：
 
@@ -86,6 +98,37 @@ FRONTEND_PORT=3000 bash scripts/start.sh frontend     # 前端改 3000
 OCR 引擎由 `EngineManager` 按需管理：前端选择引擎并提交任务后，后端自动启动对应 worker（含 ppocr-server），切换引擎时自动释放旧引擎 GPU。
 
 > 若系统设置了 `http_proxy`，访问 localhost 需先 `export no_proxy="localhost,127.0.0.1"`。
+
+## 访问鉴权（Token）
+
+后端**默认 fail-closed**：服务永不以未鉴权状态对外可达。Token 按优先级三选一（`backend/docrestore/api/auth.py`）：
+
+1. **显式 token**：设 `DOCRESTORE_API_TOKEN=<自定义token>`，最适合局域网 / 手机配对访问。
+2. **无鉴权逃生口**：设 `DOCRESTORE_ALLOW_INSECURE=1`，仅供本机调试，且 bind 守卫**只允许绑定环回地址**（`127.0.0.1`/`::1`）。
+3. **默认**：自动生成强随机 **device token** 并持久化到 `~/.config/docrestore/device_token`（POSIX，0600 权限；Windows 为 `%APPDATA%\docrestore\device_token`），重启复用。
+
+### 首次访问怎么拿 token
+
+```bash
+# 读取默认 device token（服务端启动日志也会打印此路径，不打印 token 值）
+cat ~/.config/docrestore/device_token
+```
+
+把它填进前端「Token 设置」即完成配对（手机配对同一 token）。前端可先请求免鉴权的 `GET /api/v1/auth/info` 判断是否需要 token 及其来源（`token_source`，**绝不返回 token 值**）。
+
+### 请求携带方式
+
+| 场景 | 携带方式 |
+|------|---------|
+| HTTP（含 REST API / 下载） | `Authorization: Bearer <token>`，或 `?token=<token>` query（`<img>`/`<a>` 等无法设 Header 时） |
+| WebSocket（实时进度） | 仅 `?token=<token>`（浏览器原生 WS API 不支持自定义 Header） |
+| 存活探针 `GET /api/v1/healthz` | 免鉴权（供启动脚本 / 监控探测） |
+
+| 鉴权环境变量 | 说明 |
+|-------------|------|
+| `DOCRESTORE_API_TOKEN` | 显式静态 token（非空即启用，优先级最高） |
+| `DOCRESTORE_ALLOW_INSECURE` | `1/true/yes/on` 开启无鉴权模式（仅允许绑环回，否则拒启） |
+| `DOCRESTORE_BIND_HOST` | 传给 bind 守卫的实际绑定地址；`start.sh` 已自动按 `BACKEND_HOST` 注入 |
 
 ## 配置
 
@@ -133,8 +176,12 @@ OPENAI_API_BASE=https://your-proxy/v1
 
 - `OCRConfig` — 引擎选择、GPU id、图片预处理、侧栏过滤
 - `DedupConfig` — 行级模糊匹配阈值、重叠上下文行数
-- `LLMConfig` — provider（cloud/local）、模型、API 地址、分段大小、截断检测、全局并发上限（`max_concurrent_requests`）
+- `LLMConfig` — provider（cloud/local）、模型、API 地址、分段大小、截断检测、全局并发上限（`max_concurrent_requests`）、统一精修总开关（`enable_refine`，文档 / 代码 / PPT 三模式共用）
 - `OutputConfig` / `PIIConfig` — 输出格式、PII 脱敏
+- `CodeRestoreConfig` — 代码模式开关、二级列 OCR、上下文根目录
+- `PowerPointRestoreConfig` — PPT 模式开关、透视矫正
+- `PdfRenderConfig` — PDF 逐页渲染 DPI、页数上限（默认 500）、降采样长边
+- `ContentCropConfig` — 文档模式正文区自动裁剪（去左右侧栏 / 顶部 UI，仅文档模式生效）
 
 字段说明详见 [docs/zh/backend/data-models.md](docs/zh/backend/data-models.md)。
 
@@ -143,10 +190,11 @@ OPENAI_API_BASE=https://your-proxy/v1
 ### Web 前端
 
 启动后访问 http://localhost:5173：
-- 上传图片或选择服务器路径创建任务
+- 上传图片 / PDF 或选择服务器路径创建任务，表单里选文档 / 代码 / PPT 模式
 - WebSocket 实时进度（OCR / 清洗 / 精修 / 输出）
-- Markdown 预览（多文档子文档切换）+ 人工精修 + zip 下载
-- 代码模式任务可查看 `files-index.json`、源文件、来源图片和实时诊断标注
+- Markdown 预览（多文档子文档切换）+ Tiptap 所见即所得编辑器人工精修 + 导出下载（zip / docx / pdf / xlsx / pptx）
+- 光标 ↔ 原图 bbox 高亮联动、版面全览叠加层（彩色分类框 + 阅读序角标）、编辑模式手动重截插图（矩形 / 四角透视校正）
+- 代码模式任务可查看 `files-index.json`、源文件、来源图片、实时诊断标注和源图放大镜
 - 任务历史：分页、状态筛选、取消 / 重试 / 删除
 
 ### 命令行（端到端）
@@ -164,13 +212,18 @@ python scripts/run_e2e.py \
 完整接口契约见 [docs/zh/backend/api.md](docs/zh/backend/api.md)，示例：
 
 ```bash
+# 默认 device token 鉴权：所有 REST / 下载请求都需带 token（无鉴权模式可省略）
+TOKEN=$(cat ~/.config/docrestore/device_token)
+
 # 最小创建任务（用 .env / yaml 里的 LLM 默认值）
 curl -X POST http://localhost:8000/api/v1/tasks \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"image_dir": "/path/to/images", "output_dir": "/path/to/output"}'
 
 # 指定云端 LLM
 curl -X POST http://localhost:8000/api/v1/tasks \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "image_dir": "/path/to/images",
@@ -185,6 +238,7 @@ curl -X POST http://localhost:8000/api/v1/tasks \
 
 # 切到本地 LLM（ollama 示例：API Key 可省略）
 curl -X POST http://localhost:8000/api/v1/tasks \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "image_dir": "/path/to/images",
@@ -196,8 +250,18 @@ curl -X POST http://localhost:8000/api/v1/tasks \
     }
   }'
 
-# 下载 zip 结果
-curl -O http://localhost:8000/api/v1/tasks/{task_id}/download
+# 切换还原模式：文档为默认，代码 / PPT 分别传 code.enable / ppt.enable（三选一）
+#   "code": {"enable": true}   # 代码模式
+#   "ppt":  {"enable": true}   # PPT 模式
+# image_dir 里放 .pdf 会自动逐页渲染（一批要么全图要么全 PDF）
+
+# 下载 zip 结果（默认含 document.md + 裁剪插图）
+curl -O -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8000/api/v1/tasks/{task_id}/download
+
+# 额外导出多格式（打进同一个 zip）
+curl -O -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/v1/tasks/{task_id}/download?formats=docx,pdf,xlsx,pptx"
 ```
 
 > `model` 名前缀建议保留 `openai/`：本地服务都走 OpenAI schema，加上前缀避免 litellm 因不识别厂商而报 `LLM Provider NOT provided`。后端 `_normalize_model_id` 在 `api_base` 非空时也会自动兜底。
@@ -212,7 +276,7 @@ output_dir/
 └── {stem}_OCR/             # 各照片 OCR 中间结果（原始文本 + grounding 裁剪图）
 ```
 
-无法自动补全的内容缺口会在 Markdown 中插入 GAP 标记，附带原图文件名。
+无法自动补全的内容缺口会在 Markdown 中插入 GAP 标记，附带原图文件名。多格式导出（docx / pdf / xlsx / pptx）在下载时按需从 `document.md` 生成，缓存在各文档目录的 `.exports/` 下。
 
 ## 开发与测试
 
@@ -247,6 +311,8 @@ docrestore/
 - [后端文档](docs/zh/backend/README.md) | [Backend](docs/en/backend/README.md)
 - [前端文档](docs/zh/frontend/README.md) | [Frontend](docs/en/frontend/README.md)
 - [开发进度](docs/zh/progress.md)
+
+**功能专题（中文）**：[PDF 输入](docs/zh/pdf-mode.md) · [PPT 还原](docs/zh/ppt-mode.md) · [PPT 版面导出](docs/zh/ppt-layout-export.md) · [多格式导出](docs/zh/export-mode.md) · [光标↔bbox 高亮](docs/zh/cursor-bbox-highlight.md) · [代码源图放大镜](docs/zh/code-source-magnifier.md) · [正文区裁剪](docs/zh/doc-content-crop.md)
 
 ## License
 

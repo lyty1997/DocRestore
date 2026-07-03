@@ -1,8 +1,16 @@
 # DocRestore
 
-Restore a set of document screen-capture photos into Markdown documents in the original format.
+Restore a set of document screen-capture photos (or PDFs) into Markdown documents in the original format, with optional export to docx / pdf / xlsx / pptx.
 
-**Processing Pipeline**: Photos -> OCR -> Cleaning -> Deduplication & Merging -> PII Redaction (optional) -> LLM Refinement -> Gap Filling -> Markdown Output
+**Processing Pipeline**: Photos / PDF page rendering -> OCR -> Cleaning -> Deduplication & Merging -> PII Redaction (optional) -> LLM Refinement -> Gap Filling -> Markdown Output
+
+**Three restoration modes** (mutually exclusive, pick one):
+
+| Mode | Input | Output |
+|------|-------|--------|
+| Document (default) | Screen-capture photos or PDFs of books / papers / web docs | `document.md` (with cropped illustrations, formulas, tables) |
+| Code | IDE code screenshots | Restored source files + `files-index.json` + syntax diagnostics |
+| PPT | Slide screen-capture photos | Order-preserving merged `document.md` (perspective rectification + chemical-structure cropping) |
 
 ## Requirements
 
@@ -46,7 +54,9 @@ bash scripts/start.sh all
 bash scripts/start.sh --help
 ```
 
-Visit the frontend at http://localhost:5173 (backend API at http://0.0.0.0:8000/api/v1).
+Visit the frontend at http://localhost:5173 (backend API at http://127.0.0.1:8000/api/v1).
+
+> The backend is **fail-closed** by default: on first visit, paste the device token into the frontend "Token Settings" (see [Authentication](#authentication-token) below).
 
 ### Modes
 
@@ -64,12 +74,14 @@ Export before the command to override defaults:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BACKEND_HOST` | `0.0.0.0` | Backend bind address |
+| `BACKEND_HOST` | `127.0.0.1` | Backend bind address (loopback-only by default; for phone/LAN access set `0.0.0.0` and configure `DOCRESTORE_API_TOKEN`) |
 | `BACKEND_PORT` | `8000` | Backend port |
 | `FRONTEND_PORT` | `5173` | Vite dev server port |
 | `PPOCR_GPU_ID` | empty | Pin GPU id; if empty, `CUDA_VISIBLE_DEVICES` is left unset and vLLM enumerates all GPUs while `gpu_detect.pick_best_gpu` picks the one with most free VRAM |
 | `PPOCR_PORT` | `8119` | PaddleOCR `genai_server` port |
-| `PPOCR_MODEL` | `PaddleOCR-VL-1.5-0.9B` | PaddleOCR model name |
+| `PPOCR_MODEL` | `PaddleOCR-VL-1.6-0.9B` | PaddleOCR model name |
+
+See [Authentication](#authentication-token) below for auth-related environment variables.
 
 Examples:
 
@@ -86,6 +98,37 @@ FRONTEND_PORT=3000 bash scripts/start.sh frontend     # frontend on 3000
 OCR engines are managed on demand by `EngineManager`: after the user selects an engine and submits a task in the frontend, the backend automatically starts the corresponding worker (including ppocr-server). When switching engines, the old engine's GPU resources are released automatically.
 
 > If `http_proxy` is set on the system, accessing localhost requires `export no_proxy="localhost,127.0.0.1"` first.
+
+## Authentication (Token)
+
+The backend is **fail-closed** by default: the service is never reachable unauthenticated. The token is resolved in priority order (`backend/docrestore/api/auth.py`):
+
+1. **Explicit token**: set `DOCRESTORE_API_TOKEN=<your-token>` — best for LAN / phone-pairing access.
+2. **Insecure escape hatch**: set `DOCRESTORE_ALLOW_INSECURE=1` — local debugging only, and the bind guard **only allows loopback addresses** (`127.0.0.1`/`::1`).
+3. **Default**: a strong random **device token** is generated and persisted to `~/.config/docrestore/device_token` (POSIX, mode 0600; `%APPDATA%\docrestore\device_token` on Windows) and reused across restarts.
+
+### Getting the token on first visit
+
+```bash
+# Read the default device token (the startup log also prints this path, never the token value)
+cat ~/.config/docrestore/device_token
+```
+
+Paste it into the frontend "Token Settings" to pair (phones use the same token). The frontend can first call the unauthenticated `GET /api/v1/auth/info` to learn whether a token is required and its source (`token_source`; the token value is **never** returned).
+
+### How to pass the token
+
+| Context | How |
+|---------|-----|
+| HTTP (REST API / download) | `Authorization: Bearer <token>`, or `?token=<token>` query (when Headers can't be set, e.g. `<img>`/`<a>`) |
+| WebSocket (live progress) | `?token=<token>` only (the browser WebSocket API doesn't support custom Headers) |
+| Liveness probe `GET /api/v1/healthz` | unauthenticated (for startup scripts / monitoring) |
+
+| Auth env var | Description |
+|--------------|-------------|
+| `DOCRESTORE_API_TOKEN` | Explicit static token (non-empty enables it; highest priority) |
+| `DOCRESTORE_ALLOW_INSECURE` | `1/true/yes/on` enables no-auth mode (loopback bind only, otherwise refuses to start) |
+| `DOCRESTORE_BIND_HOST` | Actual bind address passed to the bind guard; `start.sh` injects it from `BACKEND_HOST` automatically |
 
 ## Configuration
 
@@ -133,8 +176,12 @@ Controlled via `PipelineConfig` (`backend/docrestore/pipeline/config.py`, pydant
 
 - `OCRConfig` -- Engine selection, GPU ID, image preprocessing, sidebar filtering
 - `DedupConfig` -- Line-level fuzzy matching threshold, overlap context lines
-- `LLMConfig` -- Provider (cloud/local), model, API endpoint, segment size, truncation detection, global concurrency cap (`max_concurrent_requests`)
+- `LLMConfig` -- Provider (cloud/local), model, API endpoint, segment size, truncation detection, global concurrency cap (`max_concurrent_requests`), unified refine switch (`enable_refine`, shared by document / code / PPT modes)
 - `OutputConfig` / `PIIConfig` -- Output format, PII redaction
+- `CodeRestoreConfig` -- Code mode toggle, secondary-column OCR, context root
+- `PowerPointRestoreConfig` -- PPT mode toggle, perspective rectification
+- `PdfRenderConfig` -- PDF per-page render DPI, page cap (default 500), downscale long side
+- `ContentCropConfig` -- Document-mode content-area auto crop (strips left/right sidebars / top UI; document mode only)
 
 See [docs/en/backend/data-models.md](docs/en/backend/data-models.md) for field descriptions.
 
@@ -143,9 +190,11 @@ See [docs/en/backend/data-models.md](docs/en/backend/data-models.md) for field d
 ### Web Frontend
 
 After starting, visit http://localhost:5173:
-- Upload images or select a server path to create a task
+- Upload images / PDFs or select a server path to create a task; pick document / code / PPT mode in the form
 - WebSocket real-time progress (OCR / cleaning / refinement / output)
-- Markdown preview (multi-document sub-document switching) + manual editing + zip download
+- Markdown preview (multi-document sub-document switching) + Tiptap WYSIWYG editor for manual editing + export download (zip / docx / pdf / xlsx / pptx)
+- Cursor ↔ source-image bbox highlight linking, layout-overview overlay (colored category boxes + reading-order badges), manual figure re-crop in edit mode (rectangle / four-corner perspective correction)
+- Code-mode tasks: view `files-index.json`, source files, source images, live diagnostics, and a source-image magnifier
 - Task history: pagination, status filtering, cancel / retry / delete
 
 ### Command Line (End-to-End)
@@ -163,13 +212,18 @@ python scripts/run_e2e.py \
 See [docs/en/backend/api.md](docs/en/backend/api.md) for the full API contract. Examples:
 
 ```bash
+# Default device-token auth: every REST / download request needs the token (omit in no-auth mode)
+TOKEN=$(cat ~/.config/docrestore/device_token)
+
 # Minimal create-task (uses LLM defaults from .env / yaml)
 curl -X POST http://localhost:8000/api/v1/tasks \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"image_dir": "/path/to/images", "output_dir": "/path/to/output"}'
 
 # Pin a cloud LLM
 curl -X POST http://localhost:8000/api/v1/tasks \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "image_dir": "/path/to/images",
@@ -184,6 +238,7 @@ curl -X POST http://localhost:8000/api/v1/tasks \
 
 # Switch to a local LLM (ollama example: API key may be omitted)
 curl -X POST http://localhost:8000/api/v1/tasks \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "image_dir": "/path/to/images",
@@ -195,8 +250,18 @@ curl -X POST http://localhost:8000/api/v1/tasks \
     }
   }'
 
-# Download zip results
-curl -O http://localhost:8000/api/v1/tasks/{task_id}/download
+# Switch restoration mode: document is default; pass code.enable / ppt.enable for the others (pick one)
+#   "code": {"enable": true}   # code mode
+#   "ppt":  {"enable": true}   # PPT mode
+# Dropping .pdf files into image_dir renders them page-by-page (a batch is all-images XOR all-PDFs)
+
+# Download zip results (contains document.md + cropped illustrations by default)
+curl -O -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8000/api/v1/tasks/{task_id}/download
+
+# Additionally export multiple formats (bundled into the same zip)
+curl -O -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/v1/tasks/{task_id}/download?formats=docx,pdf,xlsx,pptx"
 ```
 
 > Keep the `openai/` prefix in `model`: local services all speak the OpenAI schema, and the prefix prevents litellm from raising `LLM Provider NOT provided`. The backend's `_normalize_model_id` also adds it automatically when `api_base` is non-empty.
@@ -211,7 +276,7 @@ output_dir/
 └── {stem}_OCR/                 # Per-photo OCR intermediate results (raw text + grounding-cropped images)
 ```
 
-Content gaps that cannot be automatically filled are marked with GAP markers in the Markdown, along with the source photo filename.
+Content gaps that cannot be automatically filled are marked with GAP markers in the Markdown, along with the source photo filename. Multi-format exports (docx / pdf / xlsx / pptx) are generated on demand from `document.md` at download time and cached under each document's `.exports/` directory.
 
 ## Development & Testing
 
@@ -244,7 +309,9 @@ docrestore/
 - [Deployment Guide](docs/en/deployment.md)
 - [Backend Documentation](docs/en/backend/README.md)
 - [Frontend Documentation](docs/en/frontend/README.md)
-- [Development Progress](docs/en/progress.md)
+- [Development Progress](docs/zh/progress.md) (Chinese)
+
+**Feature deep-dives (Chinese only)**: [PDF input](docs/zh/pdf-mode.md) · [PPT restoration](docs/zh/ppt-mode.md) · [PPT layout export](docs/zh/ppt-layout-export.md) · [Multi-format export](docs/zh/export-mode.md) · [Cursor↔bbox highlight](docs/zh/cursor-bbox-highlight.md) · [Code source magnifier](docs/zh/code-source-magnifier.md) · [Content-area crop](docs/zh/doc-content-crop.md)
 
 ## License
 
